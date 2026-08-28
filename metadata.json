@@ -1,0 +1,7 @@
+{
+  "name": "AI-V0 Ultimate",
+  "description": "Native Android Autonomous Multi-Agent Smart Workspace with Room DB, Local RAG, CBR-MDP Decision Engine, Code Execution, Terminal, and Provider Abstraction",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
