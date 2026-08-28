@@ -3,14 +3,21 @@ package com.example.presentation.di
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import com.example.application.extension.ExtensionManager
 import com.example.application.orchestration.AgentOrchestrator
 import com.example.application.orchestration.WorkflowEngine
+import com.example.application.provider.ProviderRegistryService
+import com.example.application.radar.IntelligenceRadarPipeline
+import com.example.application.rag.RagPipelineService
 import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
 import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
 import com.example.application.usecases.ManageMemoryUseCase
 import com.example.application.usecases.ManageWorkspaceFilesUseCase
+import com.example.domain.core.decision.CbrMdpEngine
+import com.example.infrastructure.llm.discovery.GeminiModelDiscoveryAdapter
+import com.example.infrastructure.llm.discovery.OpenAiCompatibleDiscoveryAdapter
 import com.example.infrastructure.llm.gemini.GeminiLlmAdapter
 import com.example.infrastructure.memory.RoomVectorStoreAdapter
 import com.example.infrastructure.persistence.AppDatabase
@@ -25,7 +32,7 @@ import java.io.File
  * Dependency Injection Container / Composition Root for the Clean Architecture Orchestrator.
  */
 class AppContainer(context: Context) {
-    private val appContext = context.applicationContext
+    val appContext = context.applicationContext
 
     // Persistence Layer
     val database: AppDatabase by lazy { AppDatabase.getInstance(appContext) }
@@ -52,7 +59,7 @@ class AppContainer(context: Context) {
 
     val tavilySearchAdapter: TavilySearchAdapter by lazy {
         TavilySearchAdapter(
-            apiKeyProvider = { null } // Or configured securely via Secrets/BuildConfig
+            apiKeyProvider = { null }
         )
     }
 
@@ -73,19 +80,40 @@ class AppContainer(context: Context) {
     // Component & Tools Registry
     val componentRegistry: ComponentRegistry by lazy {
         ComponentRegistry().apply {
-            // Register LLM Provider as default
             registerLlmProvider(geminiLlmAdapter, isDefault = true)
-
-            // Register Search Provider
             registerSearchProvider(tavilySearchAdapter, isDefault = true)
-
-            // Register Memory Repository for RAG Context
             registerMemoryRepository(memoryVectorStore)
-
-            // Register Real Tools
             registerTool(fileSystemTool)
             registerTool(safeDiagnosticsTool)
         }
+    }
+
+    // CBR-MDP Decision Intelligence Engine
+    val cbrMdpEngine: CbrMdpEngine by lazy {
+        CbrMdpEngine()
+    }
+
+    // Provider & Model Registry Service with Discovery Adapters
+    val providerRegistryService: ProviderRegistryService by lazy {
+        ProviderRegistryService().apply {
+            registerDiscoveryAdapter(GeminiModelDiscoveryAdapter())
+            registerDiscoveryAdapter(OpenAiCompatibleDiscoveryAdapter("local_ollama", "http://127.0.0.1:11434"))
+        }
+    }
+
+    // Extensibility Engine (Skills, Plugins, MCP, Integrations)
+    val extensionManager: ExtensionManager by lazy {
+        ExtensionManager(componentRegistry = componentRegistry)
+    }
+
+    // Intelligence Radar & Capability Evolution Pipeline
+    val intelligenceRadarPipeline: IntelligenceRadarPipeline by lazy {
+        IntelligenceRadarPipeline()
+    }
+
+    // Knowledge & RAG Subsystem
+    val ragPipelineService: RagPipelineService by lazy {
+        RagPipelineService(embeddingPort = null)
     }
 
     // Orchestrator Engine
@@ -131,7 +159,12 @@ class MainViewModelFactory(
                 manageMemoryUseCase = appContainer.manageMemoryUseCase,
                 manageWorkspaceFilesUseCase = appContainer.manageWorkspaceFilesUseCase,
                 sessionRepository = appContainer.workspaceStorage,
-                componentRegistry = appContainer.componentRegistry
+                componentRegistry = appContainer.componentRegistry,
+                cbrMdpEngine = appContainer.cbrMdpEngine,
+                providerRegistryService = appContainer.providerRegistryService,
+                extensionManager = appContainer.extensionManager,
+                intelligenceRadarPipeline = appContainer.intelligenceRadarPipeline,
+                ragPipelineService = appContainer.ragPipelineService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

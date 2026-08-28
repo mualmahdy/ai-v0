@@ -1,5 +1,6 @@
 package com.example.domain.core.task
 
+import com.example.domain.core.Outcome
 import com.example.domain.core.agent.AgentId
 
 /**
@@ -19,15 +20,29 @@ enum class TaskPriority {
 }
 
 /**
- * Lifecycle states of an atomic task.
+ * Lifecycle states of an autonomous task as mandated by the Master Directive:
+ * CREATED, READY, PLANNING, RUNNING, WAITING, BLOCKED, REPLANNING, COMPLETED, FAILED, CANCELLED
  */
 enum class TaskLifecycleState {
-    PENDING,
+    CREATED,
+    READY,
+    PLANNING,
     RUNNING,
+    WAITING,
+    BLOCKED,
+    REPLANNING,
     COMPLETED,
-    DEGRADED,
     FAILED,
     CANCELLED
+}
+
+/**
+ * Autonomy policies governing agent execution permission boundaries.
+ */
+enum class AutonomyPolicy(val code: String, val displayName: String) {
+    ASSISTED("assisted", "مساعد (Assisted - يتطلب موافقة لكل إجراء)"),
+    SUPERVISED("supervised", "مُشرف عليه (Supervised - موافقة فقط للإجراءات الحساسة)"),
+    AUTONOMOUS("autonomous", "مستقل تماماً (Autonomous - تنفيذ تلقائي كامل ضمن الميزانية)")
 }
 
 /**
@@ -43,9 +58,10 @@ data class TaskInput(
  * Execution constraints for a task.
  */
 data class TaskConstraints(
-    val timeoutMs: Long = 30000L,
-    val maxRetries: Int = 2,
+    val timeoutMs: Long = 60000L,
+    val maxRetries: Int = 3,
     val allowDegradedExecution: Boolean = true,
+    val autonomyPolicy: AutonomyPolicy = AutonomyPolicy.SUPERVISED,
     val requireHumanConsentForSensitiveTools: Boolean = true
 )
 
@@ -53,8 +69,9 @@ data class TaskConstraints(
  * Dedicated budget allocated specifically for a task.
  */
 data class TaskBudget(
-    val tokenLimit: Int = 8000,
-    val maxCostEstimatedUsd: Double = 0.05
+    val tokenLimit: Int = 30000,
+    val maxCostEstimatedUsd: Double = 0.10,
+    val consumedTokens: Int = 0
 )
 
 /**
@@ -71,11 +88,18 @@ data class TaskSuccessCriteria(
 data class TaskDefinition(
     val id: TaskId,
     val assignedAgentId: AgentId,
+    val goal: String = "",
     val priority: TaskPriority = TaskPriority.MEDIUM,
     val input: TaskInput,
     val constraints: TaskConstraints = TaskConstraints(),
     val budget: TaskBudget = TaskBudget(),
     val successCriteria: TaskSuccessCriteria = TaskSuccessCriteria(),
-    val state: TaskLifecycleState = TaskLifecycleState.PENDING,
-    val createdAtTimestampMs: Long = System.currentTimeMillis()
+    val state: TaskLifecycleState = TaskLifecycleState.CREATED,
+    val assignedModelId: String? = null,
+    val activeTools: List<String> = emptyList(),
+    val currentStepIndex: Int = 0,
+    val executionLog: List<String> = emptyList(),
+    val outcomeSummary: String? = null,
+    val createdAtTimestampMs: Long = System.currentTimeMillis(),
+    val lastUpdatedTimestampMs: Long = System.currentTimeMillis()
 )

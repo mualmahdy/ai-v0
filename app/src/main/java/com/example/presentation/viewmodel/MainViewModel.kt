@@ -2,6 +2,10 @@ package com.example.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.application.extension.ExtensionManager
+import com.example.application.provider.ProviderRegistryService
+import com.example.application.radar.IntelligenceRadarPipeline
+import com.example.application.rag.RagPipelineService
 import com.example.application.registry.ComponentRegistry
 import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
@@ -15,11 +19,31 @@ import com.example.domain.core.agent.AgentIdentity
 import com.example.domain.core.agent.AgentRole
 import com.example.domain.core.capability.CapabilityDescriptor
 import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.decision.CaseBase
+import com.example.domain.core.decision.CbrMdpEngine
+import com.example.domain.core.decision.DecisionAction
+import com.example.domain.core.decision.DecisionActionType
+import com.example.domain.core.decision.DecisionResult
+import com.example.domain.core.decision.DecisionState
+import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.events.ExecutionEvent
+import com.example.domain.core.evolution.EvolutionStage
 import com.example.domain.core.memory.MemoryEntry
 import com.example.domain.core.memory.MemoryProvenance
 import com.example.domain.core.memory.MemoryType
+import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.task.AutonomyPolicy
+import com.example.domain.core.task.TaskConstraints
+import com.example.domain.core.task.TaskDefinition
+import com.example.domain.core.task.TaskId
+import com.example.domain.core.task.TaskInput
+import com.example.domain.core.task.TaskLifecycleState
 import com.example.domain.core.workflow.WorkflowPlan
+import com.example.domain.core.workspace.ResourceEdge
+import com.example.domain.core.workspace.ResourceEdgeType
+import com.example.domain.core.workspace.ResourceGraph
+import com.example.domain.core.workspace.ResourceNode
+import com.example.domain.core.workspace.ResourceType
 import com.example.domain.ports.storage.SessionRepositoryPort
 import com.example.presentation.state.ActiveNavigationTab
 import com.example.presentation.state.UiState
@@ -37,7 +61,12 @@ class MainViewModel(
     private val manageMemoryUseCase: ManageMemoryUseCase,
     private val manageWorkspaceFilesUseCase: ManageWorkspaceFilesUseCase,
     private val sessionRepository: SessionRepositoryPort,
-    private val componentRegistry: ComponentRegistry
+    private val componentRegistry: ComponentRegistry,
+    private val cbrMdpEngine: CbrMdpEngine,
+    private val providerRegistryService: ProviderRegistryService,
+    private val extensionManager: ExtensionManager,
+    private val intelligenceRadarPipeline: IntelligenceRadarPipeline,
+    private val ragPipelineService: RagPipelineService
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UiState())
@@ -47,7 +76,56 @@ class MainViewModel(
 
     init {
         initializeAgents()
+        observeSubsystems()
         loadInitialData()
+    }
+
+    private fun observeSubsystems() {
+        viewModelScope.launch {
+            providerRegistryService.registeredProviders.collect { providers ->
+                _uiState.update { it.copy(providers = providers) }
+            }
+        }
+        viewModelScope.launch {
+            providerRegistryService.discoveredModels.collect { models ->
+                _uiState.update { it.copy(discoveredModels = models) }
+            }
+        }
+        viewModelScope.launch {
+            extensionManager.skills.collect { skills ->
+                _uiState.update { it.copy(skills = skills) }
+            }
+        }
+        viewModelScope.launch {
+            extensionManager.plugins.collect { plugins ->
+                _uiState.update { it.copy(plugins = plugins) }
+            }
+        }
+        viewModelScope.launch {
+            extensionManager.mcpServers.collect { servers ->
+                _uiState.update { it.copy(mcpServers = servers) }
+            }
+        }
+        viewModelScope.launch {
+            extensionManager.integrations.collect { integ ->
+                _uiState.update { it.copy(integrations = integ) }
+            }
+        }
+        viewModelScope.launch {
+            intelligenceRadarPipeline.radarItems.collect { items ->
+                _uiState.update { it.copy(radarItems = items) }
+            }
+        }
+        viewModelScope.launch {
+            intelligenceRadarPipeline.evolutionCandidates.collect { cand ->
+                _uiState.update { it.copy(evolutionCandidates = cand) }
+            }
+        }
+        viewModelScope.launch {
+            ragPipelineService.documents.collect { docs ->
+                _uiState.update { it.copy(knowledgeDocuments = docs) }
+            }
+        }
     }
 
     private fun initializeAgents() {
@@ -90,9 +168,29 @@ class MainViewModel(
         _uiState.update {
             it.copy(
                 availableAgents = defaultAgents,
-                activeAgent = defaultAgents.first()
+                activeAgent = defaultAgents.first(),
+                caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
             )
         }
+        buildInitialResourceGraph()
+    }
+
+    private fun buildInitialResourceGraph() {
+        var graph = ResourceGraph()
+        val projectNode = ResourceNode("proj_1", ResourceType.PROJECT, "AI-V0 Core Project")
+        val agentNode = ResourceNode("agent_planner", ResourceType.AGENT, "Strategic Planner")
+        val modelNode = ResourceNode("model_gemini_flash", ResourceType.MODEL, "Gemini 2.5 Flash")
+        val toolNode = ResourceNode("tool_fs", ResourceType.TOOL, "Workspace FS")
+
+        graph = graph.addNode(projectNode)
+            .addNode(agentNode)
+            .addNode(modelNode)
+            .addNode(toolNode)
+            .addEdge(ResourceEdge("proj_1", "agent_planner", ResourceEdgeType.CONTAINS))
+            .addEdge(ResourceEdge("agent_planner", "model_gemini_flash", ResourceEdgeType.DEPENDS_ON))
+            .addEdge(ResourceEdge("agent_planner", "tool_fs", ResourceEdgeType.USES_TOOL))
+
+        _uiState.update { it.copy(resourceGraph = graph) }
     }
 
     fun loadInitialData() {
@@ -106,6 +204,7 @@ class MainViewModel(
             refreshCapabilities()
             refreshFiles()
             refreshMemories()
+            discoverModels()
         }
     }
 
@@ -113,10 +212,19 @@ class MainViewModel(
         _uiState.update { it.copy(activeTab = tab) }
         when (tab) {
             ActiveNavigationTab.FILES -> refreshFiles()
-            ActiveNavigationTab.MEMORY_RAG -> refreshMemories()
-            ActiveNavigationTab.CAPABILITIES -> refreshCapabilities()
+            ActiveNavigationTab.KNOWLEDGE_RAG -> refreshMemories()
+            ActiveNavigationTab.MODELS_CAPABILITIES -> discoverModels()
+            ActiveNavigationTab.DECISION_INTELLIGENCE -> simulateDecision()
             else -> Unit
         }
+    }
+
+    fun setNetworkPolicy(policy: NetworkPolicy) {
+        _uiState.update { it.copy(networkPolicy = policy) }
+    }
+
+    fun setAutonomyPolicy(policy: AutonomyPolicy) {
+        _uiState.update { it.copy(autonomyPolicy = policy) }
     }
 
     fun selectAgent(agent: AgentDefinition) {
@@ -144,6 +252,27 @@ class MainViewModel(
         val agent = current.activeAgent ?: return
         if (prompt.isEmpty() || current.isExecuting) return
 
+        // 1. Evaluate with CBR-MDP Decision Engine
+        val decisionState = DecisionState(
+            taskId = TaskId(UUID.randomUUID().toString()),
+            taskComplexity = current.decisionTaskComplexity,
+            requiresVision = prompt.contains("صورة", ignoreCase = true) || prompt.contains("vision", ignoreCase = true),
+            requiresToolCalling = prompt.contains("ملف", ignoreCase = true) || prompt.contains("بحث", ignoreCase = true),
+            requiresWebSearch = prompt.contains("بحث", ignoreCase = true) || prompt.contains("search", ignoreCase = true),
+            requiresCoding = prompt.contains("كود", ignoreCase = true) || prompt.contains("برمج", ignoreCase = true),
+            networkPolicy = current.networkPolicy,
+            uncertaintyScore = current.decisionUncertainty
+        )
+
+        val candidateActions = listOf(
+            DecisionAction(DecisionActionType.SELECT_AGENT, targetId = agent.identity.id.value),
+            DecisionAction(DecisionActionType.SELECT_MODEL, targetId = "gemini-2.5-flash"),
+            DecisionAction(DecisionActionType.EXECUTE_STEP, targetId = "execute_prompt"),
+            DecisionAction(DecisionActionType.RETRIEVE_KNOWLEDGE, targetId = "rag_context")
+        )
+
+        val decision = cbrMdpEngine.evaluateAndSelectAction(decisionState, candidateActions)
+
         _uiState.update {
             it.copy(
                 isExecuting = true,
@@ -152,11 +281,13 @@ class MainViewModel(
                 isDegraded = false,
                 degradedReason = null,
                 diagnosticBanner = null,
-                errorMessage = null
+                errorMessage = null,
+                latestDecision = decision
             )
         }
 
         currentExecutionJob = viewModelScope.launch {
+            val startTime = System.currentTimeMillis()
             try {
                 executeAgentTaskUseCase(
                     agent = agent,
@@ -205,6 +336,19 @@ class MainViewModel(
                         }
                     }
                 }
+
+                // Feed back observation to CBR-MDP Engine
+                val latency = System.currentTimeMillis() - startTime
+                val obs = EnvironmentObservation(
+                    action = decision.chosenAction,
+                    isSuccess = true,
+                    actualLatencyMs = latency,
+                    tokensConsumed = _uiState.value.currentTokensConsumed,
+                    outputSummary = _uiState.value.streamText.take(100)
+                )
+                cbrMdpEngine.processObservationAndUpdateBelief(decisionState, obs)
+                _uiState.update { it.copy(caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()) }
+
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -216,33 +360,127 @@ class MainViewModel(
         }
     }
 
-    fun executeWorkflow(plan: WorkflowPlan) {
-        if (_uiState.value.isExecutingWorkflow) return
+    // --- Decision Intelligence (CBR-MDP) ---
+    fun updateDecisionComplexity(value: Float) {
+        _uiState.update { it.copy(decisionTaskComplexity = value) }
+        simulateDecision()
+    }
 
+    fun updateDecisionUncertainty(value: Float) {
+        _uiState.update { it.copy(decisionUncertainty = value) }
+        simulateDecision()
+    }
+
+    fun simulateDecision() {
+        val current = _uiState.value
+        val state = DecisionState(
+            taskId = TaskId(UUID.randomUUID().toString()),
+            taskComplexity = current.decisionTaskComplexity,
+            requiresVision = false,
+            requiresToolCalling = true,
+            requiresWebSearch = current.decisionTaskComplexity > 0.7f,
+            requiresCoding = true,
+            networkPolicy = current.networkPolicy,
+            uncertaintyScore = current.decisionUncertainty
+        )
+
+        val candidateActions = listOf(
+            DecisionAction(DecisionActionType.SELECT_AGENT, targetId = "code_craftsman"),
+            DecisionAction(DecisionActionType.SELECT_MODEL, targetId = "gemini-2.5-flash", estimatedCost = 0.001),
+            DecisionAction(DecisionActionType.SELECT_PROVIDER, targetId = if (current.networkPolicy == NetworkPolicy.OFFLINE) "local_ollama" else "gemini_google"),
+            DecisionAction(DecisionActionType.SEARCH, targetId = "tavily_search", estimatedCost = 0.005),
+            DecisionAction(DecisionActionType.RETRIEVE_KNOWLEDGE, targetId = "rag_knowledge_base"),
+            DecisionAction(DecisionActionType.CREATE_PLAN, targetId = "dag_workflow_engine"),
+            DecisionAction(DecisionActionType.STOP)
+        )
+
+        val result = cbrMdpEngine.evaluateAndSelectAction(state, candidateActions)
         _uiState.update {
             it.copy(
-                isExecutingWorkflow = true,
-                workflowReport = null,
-                errorMessage = null
+                latestDecision = result,
+                caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
             )
         }
+    }
 
+    // --- Model Discovery ---
+    fun discoverModels() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isDiscoveringModels = true) }
+            try {
+                providerRegistryService.discoverAllProvidersAndModels()
+            } finally {
+                _uiState.update { it.copy(isDiscoveringModels = false) }
+            }
+        }
+    }
+
+    // --- Extensibility Management ---
+    fun toggleSkill(skillId: String) {
+        extensionManager.toggleSkill(skillId)
+    }
+
+    fun togglePlugin(pluginId: String) {
+        extensionManager.togglePlugin(pluginId)
+    }
+
+    fun toggleMcpServer(serverId: String) {
+        extensionManager.toggleMcpServer(serverId)
+    }
+
+    fun registerMcpServer(name: String, endpointUri: String) {
+        extensionManager.registerNewMcpServer(name, endpointUri)
+    }
+
+    // --- Intelligence Radar & Evolution ---
+    fun refreshRadar() {
+        viewModelScope.launch {
+            intelligenceRadarPipeline.refreshRadarFeed()
+        }
+    }
+
+    fun advanceCandidateStage(candidateId: String, nextStage: EvolutionStage) {
+        intelligenceRadarPipeline.advanceEvolutionStage(candidateId, nextStage)
+    }
+
+    // --- Knowledge & RAG Operations ---
+    fun updateDocTitle(title: String) {
+        _uiState.update { it.copy(newDocTitle = title) }
+    }
+
+    fun updateDocContent(content: String) {
+        _uiState.update { it.copy(newDocContent = content) }
+    }
+
+    fun ingestNewDocument() {
+        val title = _uiState.value.newDocTitle.trim()
+        val content = _uiState.value.newDocContent.trim()
+        if (title.isEmpty() || content.isEmpty()) return
+
+        viewModelScope.launch {
+            ragPipelineService.ingestDocument(title, content, "workspace://docs/$title.md")
+            _uiState.update { it.copy(newDocTitle = "", newDocContent = "") }
+        }
+    }
+
+    fun queryKnowledgeRag(query: String) {
+        if (query.isBlank()) return
+        viewModelScope.launch {
+            val assembled = ragPipelineService.retrieveRelevantContext(query)
+            _uiState.update { it.copy(assembledRagContext = assembled) }
+        }
+    }
+
+    // --- Workflow & Task ---
+    fun executeWorkflow(plan: WorkflowPlan) {
+        if (_uiState.value.isExecutingWorkflow) return
+        _uiState.update { it.copy(isExecutingWorkflow = true, workflowReport = null, errorMessage = null) }
         viewModelScope.launch {
             try {
                 val report = executeWorkflowUseCase(plan)
-                _uiState.update {
-                    it.copy(
-                        isExecutingWorkflow = false,
-                        workflowReport = report
-                    )
-                }
+                _uiState.update { it.copy(isExecutingWorkflow = false, workflowReport = report) }
             } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isExecutingWorkflow = false,
-                        errorMessage = "فشل تنفيذ سير العمل: ${e.localizedMessage}"
-                    )
-                }
+                _uiState.update { it.copy(isExecutingWorkflow = false, errorMessage = "فشل تنفيذ خطة العمل: ${e.localizedMessage}") }
             }
         }
     }
@@ -294,7 +532,6 @@ class MainViewModel(
     fun searchMemory() {
         val q = _uiState.value.memoryQuery.trim()
         if (q.isEmpty()) return
-
         viewModelScope.launch {
             _uiState.update { it.copy(isSearchingMemory = true) }
             when (val outcome = manageMemoryUseCase.retrieveContext(q)) {
@@ -312,7 +549,6 @@ class MainViewModel(
     fun addNewMemory() {
         val content = _uiState.value.newMemoryContent.trim()
         if (content.isEmpty()) return
-
         viewModelScope.launch {
             val entry = MemoryEntry(
                 id = UUID.randomUUID().toString(),
@@ -343,7 +579,6 @@ class MainViewModel(
         }
     }
 
-    // --- Capabilities ---
     fun refreshCapabilities() {
         val caps = componentRegistry.getCapabilityDescriptors()
         _uiState.update { it.copy(capabilities = caps) }
