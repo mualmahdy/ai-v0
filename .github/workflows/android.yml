@@ -30,43 +30,28 @@ jobs:
         [ -f "./gradlew" ] && echo "gradlew: present" || echo "gradlew: missing"
         [ -f "./debug.keystore" ] && echo "debug.keystore: present" || echo "debug.keystore: missing"
 
-    - name: Ensure Gradle (wrapper or system)
+    - name: Ensure Gradle Wrapper and Keystore
       run: |
-        if [ -f "./gradlew" ]; then
-          echo "Found gradlew wrapper, will use it.";
-        else
-          echo "gradlew wrapper not found. Installing Gradle CLI via apt-get as a fallback.";
-          sudo apt-get update && sudo apt-get install -y gradle;
+        chmod +x ./gradlew || true
+        mkdir -p gradle/wrapper
+        if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+          echo "Downloading gradle-wrapper.jar..."
+          curl -fsSL https://raw.githubusercontent.com/gradle/gradle/master/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar || true
         fi
-
-    - name: Grant execute permission for gradlew (if exists)
-      run: |
-        if [ -f "./gradlew" ]; then
-          chmod +x ./gradlew;
-        else
-          echo "No gradlew to chmod; skipping.";
-        fi
-
-    - name: Ensure debug keystore exists (for signing)
-      run: |
-        if [ -f "${{ github.workspace }}/debug.keystore" ]; then
-          echo "debug.keystore already present"
-        else
-          echo "Generating debug.keystore for CI"
-          keytool -genkeypair -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-            -keystore debug.keystore -storepass android -keypass android \
-            -dname "CN=Android Debug, O=Android, C=US"
+        if [ ! -f "debug.keystore" ]; then
+          if [ -f "debug.keystore.base64" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          else
+            echo "Generating debug.keystore for CI"
+            keytool -genkeypair -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -keystore debug.keystore -storepass android -keypass android \
+              -dname "CN=Android Debug, O=Android, C=US"
+          fi
         fi
 
     - name: Build APK (assemble app module)
       run: |
-        if [ -f "./gradlew" ]; then
-          echo "Building with gradlew wrapper (module-specified)";
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace;
-        else
-          echo "Building with system gradle (module-specified)";
-          gradle :app:assembleDebug --no-daemon --stacktrace;
-        fi
+        ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
     - name: Upload APK artifacts
       uses: actions/upload-artifact@v4

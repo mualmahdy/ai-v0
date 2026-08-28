@@ -35,8 +35,17 @@ jobs:
           # Ensure debug.keystore is decoded from base64 if not already present
           if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
             base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f debug.keystore ]; then
+            keytool -genkeypair -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -keystore debug.keystore -storepass android -keypass android \
+              -dname "CN=Android Debug, O=Android, C=US"
           fi
           chmod +x ./gradlew || true
+          mkdir -p gradle/wrapper
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "Downloading gradle-wrapper.jar..."
+            curl -fsSL https://raw.githubusercontent.com/gradle/gradle/master/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar || true
+          fi
 
       - name: Build Debug APK with Gradle
         run: ./gradlew assembleDebug --no-daemon --stacktrace
