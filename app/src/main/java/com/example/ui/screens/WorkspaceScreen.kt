@@ -55,17 +55,17 @@ fun WorkspaceScreen(
                     .weight(1f)
             ) {
                 when (activeTab) {
-                    "chat_panel" -> ChatPanel(viewModel)
-                    "agent_panel" -> AgentsPanel(viewModel)
-                    "code_panel" -> CodeEditorPanel(viewModel)
-                    "terminal_panel" -> TerminalPanel(viewModel)
-                    "workflow_panel" -> WorkflowPanel(viewModel)
-                    "knowledge_panel" -> KnowledgePanel(viewModel)
-                    "memory_panel" -> MemoryPanel(viewModel)
-                    "providers_panel" -> ProvidersPanel(viewModel)
-                    "diagnostics_panel" -> DiagnosticsPanel(viewModel)
-                    "layout_panel" -> LayoutEditorPanel(viewModel)
-                    "settings_panel" -> SettingsPanel(viewModel)
+                    "chat_panel", "chat" -> ChatPanel(viewModel)
+                    "agents_panel", "agent_panel", "agent", "agents" -> AgentsPanel(viewModel)
+                    "code_editor", "code_panel", "code" -> CodeEditorPanel(viewModel)
+                    "terminal_panel", "terminal" -> TerminalPanel(viewModel)
+                    "workflow_panel", "workflow" -> WorkflowPanel(viewModel)
+                    "knowledge_panel", "knowledge" -> KnowledgePanel(viewModel)
+                    "memory_panel", "memory" -> MemoryPanel(viewModel)
+                    "providers_panel", "providers" -> ProvidersPanel(viewModel)
+                    "diagnostics_panel", "diagnostics" -> DiagnosticsPanel(viewModel)
+                    "layout_panel", "layout" -> LayoutEditorPanel(viewModel)
+                    "settings_panel", "settings" -> SettingsPanel(viewModel)
                     else -> ChatPanel(viewModel)
                 }
             }

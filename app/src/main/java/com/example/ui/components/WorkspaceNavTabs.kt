@@ -21,14 +21,15 @@ import com.example.data.local.db.entities.WorkspaceComponentEntity
 fun getIconForComponent(iconName: String): ImageVector {
     return when (iconName) {
         "chat" -> Icons.Default.ChatBubbleOutline
-        "agent" -> Icons.Default.SupportAgent
-        "code" -> Icons.Default.Code
+        "agent", "agents" -> Icons.Default.SupportAgent
+        "code", "code_editor" -> Icons.Default.Code
         "terminal" -> Icons.Default.Terminal
         "workflow" -> Icons.Default.AccountTree
         "knowledge" -> Icons.Default.LibraryBooks
         "memory" -> Icons.Default.Psychology
         "providers" -> Icons.Default.Dns
         "diagnostics" -> Icons.Default.Analytics
+        "layout" -> Icons.Outlined.DashboardCustomize
         "settings" -> Icons.Default.Settings
         else -> Icons.Default.Widgets
     }

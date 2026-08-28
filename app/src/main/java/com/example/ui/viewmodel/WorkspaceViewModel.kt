@@ -265,7 +265,34 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
     // --- Workspace Files & Code Editor ---
     fun refreshFiles() {
         viewModelScope.launch(Dispatchers.IO) {
-            workspaceFiles.value = storageManager.listFiles(activeProjectId.value)
+            val files = storageManager.listFiles(activeProjectId.value)
+            workspaceFiles.value = files
+            if (currentOpenFile.value == null && files.isNotEmpty()) {
+                val firstFile = files.firstOrNull { !it.isDirectory }?.relativePath ?: files.first().relativePath
+                loadFileContent(firstFile)
+            }
+        }
+    }
+
+    fun createFile(fileName: String, initialContent: String = "") {
+        if (fileName.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            storageManager.writeFile(activeProjectId.value, fileName.trim(), initialContent)
+            refreshFiles()
+            loadFileContent(fileName.trim())
+            EventBus.publish("file.created", "تم إنشاء الملف: $fileName")
+        }
+    }
+
+    fun deleteFileFromWorkspace(relativePath: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            storageManager.deleteFile(activeProjectId.value, relativePath)
+            refreshFiles()
+            if (currentOpenFile.value == relativePath) {
+                currentOpenFile.value = null
+                fileContent.value = ""
+            }
+            EventBus.publish("file.deleted", "تم حذف الملف: $relativePath")
         }
     }
 

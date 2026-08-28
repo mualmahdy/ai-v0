@@ -42,6 +42,8 @@ fun CodeEditorPanel(
     var executionResult by remember { mutableStateOf<String?>(null) }
     var isExecuting by remember { mutableStateOf(false) }
     var showDiffDialog by remember { mutableStateOf(false) }
+    var showNewFileDialog by remember { mutableStateOf(false) }
+    var newFileName by remember { mutableStateOf("") }
     val coroutineScope = rememberCoroutineScope()
 
     Column(
@@ -62,6 +64,13 @@ fun CodeEditorPanel(
                 modifier = Modifier.size(32.dp)
             ) {
                 Icon(Icons.Default.Refresh, contentDescription = "تحديث الملفات", modifier = Modifier.size(16.dp))
+            }
+
+            IconButton(
+                onClick = { showNewFileDialog = true },
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "إنشاء ملف جديد", modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
             }
 
             files.forEach { file ->
@@ -96,12 +105,22 @@ fun CodeEditorPanel(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "الملف: ${activeFile ?: "لا يوجد"}",
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "الملف: ${activeFile ?: "لا يوجد"}",
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (activeFile != null) {
+                    IconButton(
+                        onClick = { viewModel.deleteFileFromWorkspace(activeFile!!) },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = "حذف الملف", modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 // Diff Button
@@ -212,6 +231,39 @@ fun CodeEditorPanel(
                 }
             }
         }
+    }
+
+    if (showNewFileDialog) {
+        AlertDialog(
+            onDismissRequest = { showNewFileDialog = false },
+            title = { Text("إنشاء ملف جديد") },
+            text = {
+                OutlinedTextField(
+                    value = newFileName,
+                    onValueChange = { newFileName = it },
+                    label = { Text("اسم الملف (مثال: App.kt أو test.py)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (newFileName.isNotBlank()) {
+                            viewModel.createFile(newFileName)
+                            newFileName = ""
+                            showNewFileDialog = false
+                        }
+                    },
+                    enabled = newFileName.isNotBlank()
+                ) {
+                    Text("إنشاء")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNewFileDialog = false }) { Text("إلغاء") }
+            }
+        )
     }
 
     if (showDiffDialog) {

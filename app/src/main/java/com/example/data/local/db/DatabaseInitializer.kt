@@ -265,7 +265,8 @@ object DatabaseInitializer {
             WorkspaceComponentEntity("memory_panel", "الذاكرة طويلة المدى", "memory", true, 6, 1.0f),
             WorkspaceComponentEntity("providers_panel", "مزودو النماذج والبحث", "providers", true, 7, 1.0f),
             WorkspaceComponentEntity("diagnostics_panel", "الموارد والتشخيص الحي", "diagnostics", true, 8, 1.0f),
-            WorkspaceComponentEntity("settings_panel", "إعدادات المنظومة", "settings", true, 9, 1.0f)
+            WorkspaceComponentEntity("layout_panel", "تخصيص الواجهة", "layout", true, 9, 1.0f),
+            WorkspaceComponentEntity("settings_panel", "إعدادات المنظومة", "settings", true, 10, 1.0f)
         )
         db.workspaceComponentDao().insertComponents(defaultComponents)
 
