@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.application.registry.ComponentRegistry
 import com.example.application.usecases.ExecuteAgentTaskUseCase
+import com.example.application.usecases.ExecuteWorkflowUseCase
 import com.example.application.usecases.ManageMemoryUseCase
 import com.example.application.usecases.ManageWorkspaceFilesUseCase
 import com.example.domain.core.Outcome
@@ -18,9 +19,11 @@ import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.memory.MemoryEntry
 import com.example.domain.core.memory.MemoryProvenance
 import com.example.domain.core.memory.MemoryType
+import com.example.domain.core.workflow.WorkflowPlan
 import com.example.domain.ports.storage.SessionRepositoryPort
 import com.example.presentation.state.ActiveNavigationTab
 import com.example.presentation.state.UiState
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,6 +33,7 @@ import java.util.UUID
 
 class MainViewModel(
     private val executeAgentTaskUseCase: ExecuteAgentTaskUseCase,
+    private val executeWorkflowUseCase: ExecuteWorkflowUseCase,
     private val manageMemoryUseCase: ManageMemoryUseCase,
     private val manageWorkspaceFilesUseCase: ManageWorkspaceFilesUseCase,
     private val sessionRepository: SessionRepositoryPort,
@@ -38,6 +42,8 @@ class MainViewModel(
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    private var currentExecutionJob: Job? = null
 
     init {
         initializeAgents()
@@ -91,7 +97,6 @@ class MainViewModel(
 
     fun loadInitialData() {
         viewModelScope.launch {
-            // Load Active Project
             when (val projectOutcome = sessionRepository.getActiveProject()) {
                 is Outcome.Success -> _uiState.update { it.copy(activeProject = projectOutcome.value) }
                 is Outcome.Degraded -> _uiState.update { it.copy(activeProject = projectOutcome.partialValue) }
@@ -122,6 +127,17 @@ class MainViewModel(
         _uiState.update { it.copy(promptInput = text) }
     }
 
+    fun cancelExecution() {
+        currentExecutionJob?.cancel()
+        _uiState.update {
+            it.copy(
+                isExecuting = false,
+                isExecutingWorkflow = false,
+                diagnosticBanner = "تم إلغاء العملية بواسطة المستخدم."
+            )
+        }
+    }
+
     fun executePrompt() {
         val current = _uiState.value
         val prompt = current.promptInput.trim()
@@ -140,7 +156,7 @@ class MainViewModel(
             )
         }
 
-        viewModelScope.launch {
+        currentExecutionJob = viewModelScope.launch {
             try {
                 executeAgentTaskUseCase(
                     agent = agent,
@@ -200,6 +216,37 @@ class MainViewModel(
         }
     }
 
+    fun executeWorkflow(plan: WorkflowPlan) {
+        if (_uiState.value.isExecutingWorkflow) return
+
+        _uiState.update {
+            it.copy(
+                isExecutingWorkflow = true,
+                workflowReport = null,
+                errorMessage = null
+            )
+        }
+
+        viewModelScope.launch {
+            try {
+                val report = executeWorkflowUseCase(plan)
+                _uiState.update {
+                    it.copy(
+                        isExecutingWorkflow = false,
+                        workflowReport = report
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isExecutingWorkflow = false,
+                        errorMessage = "فشل تنفيذ سير العمل: ${e.localizedMessage}"
+                    )
+                }
+            }
+        }
+    }
+
     // --- Files Operations ---
     fun refreshFiles() {
         val projectId = _uiState.value.activeProject?.id ?: 1L
@@ -252,8 +299,8 @@ class MainViewModel(
             _uiState.update { it.copy(isSearchingMemory = true) }
             when (val outcome = manageMemoryUseCase.retrieveContext(q)) {
                 is Outcome.Success -> _uiState.update { it.copy(retrievedMemories = outcome.value, isSearchingMemory = false) }
+                is Outcome.Degraded -> _uiState.update { it.copy(retrievedMemories = outcome.partialValue ?: emptyList(), isSearchingMemory = false) }
                 is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage, isSearchingMemory = false) }
-                else -> _uiState.update { it.copy(isSearchingMemory = false) }
             }
         }
     }

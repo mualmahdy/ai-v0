@@ -83,6 +83,15 @@ class ComponentRegistry {
 
     fun listTools(): List<ToolPort> = tools.values.toList()
 
+    // --- Memory Repository ---
+    private var memoryRepository: com.example.domain.ports.memory.MemoryRepositoryPort? = null
+
+    fun registerMemoryRepository(repository: com.example.domain.ports.memory.MemoryRepositoryPort) {
+        memoryRepository = repository
+    }
+
+    fun getMemoryRepository(): com.example.domain.ports.memory.MemoryRepositoryPort? = memoryRepository
+
     // --- Capability Descriptors ---
     fun getCapabilityDescriptors(): List<CapabilityDescriptor> {
         val descriptors = mutableListOf<CapabilityDescriptor>()

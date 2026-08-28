@@ -55,6 +55,9 @@ data class UiState(
     val isFileLoading: Boolean = false,
     // Capabilities Tab State
     val capabilities: List<CapabilityDescriptor> = emptyList(),
+    // Workflow State
+    val workflowReport: com.example.domain.core.workflow.WorkflowExecutionReport? = null,
+    val isExecutingWorkflow: Boolean = false,
     // Error notification
     val errorMessage: String? = null
 )

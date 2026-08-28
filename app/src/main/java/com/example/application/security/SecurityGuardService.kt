@@ -83,11 +83,39 @@ class SecurityGuardService(
     }
 
     override fun sanitizeUntrustedOutput(rawOutput: String): String {
-        // Prevents indirect prompt injection by escaping system instruction triggers
-        var sanitized = rawOutput
+        // 1. Redact any sensitive tokens/secrets to prevent leakage
+        val redacted = redactSensitiveSecrets(rawOutput)
+        
+        // 2. Escape prompt injection markers
+        val escapedDirectives = filterDangerousDirectives(redacted)
+        
+        // 3. Structured security framing without losing original payload
+        return buildString {
+            appendLine("<tool_output untrusted=\"true\">")
+            appendLine(escapedDirectives)
+            append("</tool_output>")
+        }
+    }
+
+    fun redactSensitiveSecrets(text: String): String {
+        var result = text
+        // Redact Google / Gemini API keys (AIza...)
+        result = result.replace(Regex("AIza[0-9A-Za-z-_]{35}"), "[REDACTED_GEMINI_KEY]")
+        // Redact Tavily API keys (tvly-...)
+        result = result.replace(Regex("tvly-[0-9A-Za-z-_]{20,}"), "[REDACTED_TAVILY_KEY]")
+        // Redact generic sk- keys
+        result = result.replace(Regex("sk-[a-zA-Z0-9]{32,}"), "[REDACTED_API_KEY]")
+        // Redact Authorization Bearer tokens
+        result = result.replace(Regex("Bearer\\s+[A-Za-z0-9_\\-\\.~+/]+=*", RegexOption.IGNORE_CASE), "Bearer [REDACTED_TOKEN]")
+        return result
+    }
+
+    private fun filterDangerousDirectives(text: String): String {
+        var sanitized = text
         val dangerousPhrases = listOf(
             "System Prompt:", "Ignore previous instructions", "SYSTEM INSTRUCTION",
-            "You are now in debug mode", "Developer Mode Enabled", "Override policy"
+            "You are now in debug mode", "Developer Mode Enabled", "Override policy",
+            "<system_instruction>", "</system_instruction>"
         )
         for (phrase in dangerousPhrases) {
             if (sanitized.contains(phrase, ignoreCase = true)) {

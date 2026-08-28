@@ -4,12 +4,16 @@ import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
 import com.example.domain.core.DegradedReason
 import com.example.domain.core.Outcome
+import com.example.domain.core.OutcomeMetadata
 import com.example.domain.core.agent.AgentDefinition
 import com.example.domain.core.agent.AgentId
 import com.example.domain.core.events.ExecutionEvent
+import com.example.domain.core.llm.LlmFailure
 import com.example.domain.core.llm.LlmMessage
 import com.example.domain.core.llm.LlmRequest
+import com.example.domain.core.llm.LlmResponse
 import com.example.domain.core.llm.MessageRole
+import com.example.domain.core.llm.TokenUsage
 import com.example.domain.core.security.SecurityDecision
 import com.example.domain.core.security.SecurityPolicy
 import com.example.domain.core.task.TaskDefinition
@@ -22,7 +26,7 @@ import java.util.UUID
 
 /**
  * Core Orchestrator coordinating Agent Execution, LLM Calls, Tool Invocations,
- * Security Gateways, and Operational Event Streams.
+ * Security Gateways, Memory/RAG Augmentation, and Operational Event Streams.
  */
 class AgentOrchestrator(
     private val registry: ComponentRegistry,
@@ -61,13 +65,60 @@ class AgentOrchestrator(
             )
         )
 
-        // 1. Prepare Messages
+        var isDegraded = false
+        var degradedReason: DegradedReason? = null
+
+        // 1. Prepare Messages and inject System Prompt
         val messages = mutableListOf<LlmMessage>()
         messages.add(LlmMessage(role = MessageRole.SYSTEM, content = agent.identity.systemPrompt))
+
+        // 2. Memory / RAG Context Augmentation
+        val memoryRepo = registry.getMemoryRepository()
+        if (memoryRepo != null) {
+            when (val memResult = memoryRepo.retrieveMemories(task.input.rawPrompt, topK = 3)) {
+                is Outcome.Success -> {
+                    if (memResult.value.isNotEmpty()) {
+                        val context = memResult.value.joinToString("\n") { "- ${it.entry.content}" }
+                        messages.add(
+                            LlmMessage(
+                                role = MessageRole.SYSTEM,
+                                content = "<retrieved_memory>\n$context\n</retrieved_memory>"
+                            )
+                        )
+                    }
+                }
+                is Outcome.Degraded -> {
+                    isDegraded = true
+                    degradedReason = memResult.reason
+                    if (!memResult.partialValue.isNullOrEmpty()) {
+                        val context = memResult.partialValue.joinToString("\n") { "- ${it.entry.content}" }
+                        messages.add(
+                            LlmMessage(
+                                role = MessageRole.SYSTEM,
+                                content = "<retrieved_memory degraded=\"true\">\n$context\n</retrieved_memory>"
+                            )
+                        )
+                    }
+                    emit(
+                        ExecutionEvent.Degraded(
+                            executionId = executionId,
+                            reason = memResult.reason,
+                            message = memResult.diagnosticMessage
+                        )
+                    )
+                }
+                is Outcome.Error -> {
+                    // Non-fatal, continue with degradation warning
+                    isDegraded = true
+                    degradedReason = DegradedReason.UNKNOWN_DEGRADATION
+                }
+            }
+        }
+
         messages.addAll(conversationHistory)
         messages.add(LlmMessage(role = MessageRole.USER, content = task.input.rawPrompt))
 
-        // 2. Prepare Tools
+        // 3. Prepare Tools
         val availableTools = registry.listTools().map { it.declaration }
 
         val request = LlmRequest(
@@ -76,10 +127,8 @@ class AgentOrchestrator(
             streamEvents = true
         )
 
-        // 3. Delegate to Provider Stream
+        // 4. Delegate to Provider Stream
         val textAccumulator = StringBuilder()
-        var isDegraded = false
-        var degradedReason: DegradedReason? = null
 
         try {
             provider.stream(request, executionId).collect { event ->
@@ -133,6 +182,77 @@ class AgentOrchestrator(
         }
     }
 
+    /**
+     * Executes a standard non-streaming agent task with complete security and memory guarantees.
+     */
+    suspend fun executeTask(
+        agent: AgentDefinition,
+        task: TaskDefinition,
+        conversationHistory: List<LlmMessage> = emptyList(),
+        preferredProviderId: String? = null
+    ): Outcome<LlmResponse, LlmFailure> {
+        val provider = registry.getLlmProvider(preferredProviderId)
+            ?: return Outcome.Error(
+                failure = LlmFailure.ProviderUnavailable(preferredProviderId ?: "default", "لا يوجد مزود ذكاء اصطناعي متاح."),
+                diagnosticMessage = "المزود غير مسجل."
+            )
+
+        val messages = mutableListOf<LlmMessage>()
+        messages.add(LlmMessage(role = MessageRole.SYSTEM, content = agent.identity.systemPrompt))
+
+        // Memory RAG
+        val memoryRepo = registry.getMemoryRepository()
+        var isDegraded = false
+        var degradedReason: DegradedReason? = null
+        if (memoryRepo != null) {
+            when (val memResult = memoryRepo.retrieveMemories(task.input.rawPrompt, topK = 3)) {
+                is Outcome.Success -> {
+                    if (memResult.value.isNotEmpty()) {
+                        val context = memResult.value.joinToString("\n") { "- ${it.entry.content}" }
+                        messages.add(LlmMessage(role = MessageRole.SYSTEM, content = "<retrieved_memory>\n$context\n</retrieved_memory>"))
+                    }
+                }
+                is Outcome.Degraded -> {
+                    isDegraded = true
+                    degradedReason = memResult.reason
+                    if (!memResult.partialValue.isNullOrEmpty()) {
+                        val context = memResult.partialValue.joinToString("\n") { "- ${it.entry.content}" }
+                        messages.add(LlmMessage(role = MessageRole.SYSTEM, content = "<retrieved_memory degraded=\"true\">\n$context\n</retrieved_memory>"))
+                    }
+                }
+                is Outcome.Error -> {
+                    isDegraded = true
+                    degradedReason = DegradedReason.UNKNOWN_DEGRADATION
+                }
+            }
+        }
+
+        messages.addAll(conversationHistory)
+        messages.add(LlmMessage(role = MessageRole.USER, content = task.input.rawPrompt))
+
+        val request = LlmRequest(
+            messages = messages,
+            availableTools = registry.listTools().map { it.declaration }
+        )
+
+        return when (val outcome = provider.generate(request)) {
+            is Outcome.Success -> {
+                if (isDegraded) {
+                    Outcome.Degraded(
+                        partialValue = outcome.value,
+                        reason = degradedReason ?: DegradedReason.UNKNOWN_DEGRADATION,
+                        diagnosticMessage = "تم التنفيذ مع تراجع في استرجاع الذاكرة.",
+                        metadata = outcome.metadata
+                    )
+                } else {
+                    outcome
+                }
+            }
+            is Outcome.Degraded -> outcome
+            is Outcome.Error -> outcome
+        }
+    }
+
     private suspend fun handleToolExecution(
         executionId: String,
         callId: String,
@@ -176,14 +296,14 @@ class AgentOrchestrator(
         // 2. Execute Tool
         val executionOutcome = tool.execute(toolInput)
 
-        // 3. Sanitize Output if required
+        // 3. Sanitize and Frame Untrusted Output
         val finalOutcome = when (executionOutcome) {
             is Outcome.Success -> {
                 val sanitized = securityGuard.sanitizeUntrustedOutput(executionOutcome.value.content)
                 Outcome.Success(sanitized, executionOutcome.metadata)
             }
             is Outcome.Degraded -> {
-                val sanitized = executionOutcome.partialValue?.content?.let { securityGuard.sanitizeUntrustedOutput(it) }
+                val sanitized = executionOutcome.partialValue?.content?.let { securityGuard.sanitizeUntrustedOutput(it) } ?: ""
                 Outcome.Degraded(
                     partialValue = sanitized,
                     reason = executionOutcome.reason,
@@ -204,7 +324,6 @@ class AgentOrchestrator(
     }
 
     private fun parseSimpleArguments(json: String): Map<String, Any?> {
-        // Safe key-value argument mapping for basic primitives
         val result = mutableMapOf<String, Any?>()
         val clean = json.trim().removeSurrounding("{", "}").trim()
         if (clean.isEmpty()) return result

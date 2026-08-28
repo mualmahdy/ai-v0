@@ -179,7 +179,15 @@ class RoomVectorStoreAdapter(
             }
 
             val sorted = scoredRecords.sortedByDescending { it.similarityScore }.take(topK)
-            Outcome.Success(sorted)
+            if (embeddingProvider == null) {
+                Outcome.Degraded(
+                    partialValue = sorted,
+                    reason = com.example.domain.core.DegradedReason.LEXICAL_FALLBACK,
+                    diagnosticMessage = "تم استرجاع الذاكرة باستخدام المطابقة المعجمية البديلة."
+                )
+            } else {
+                Outcome.Success(sorted)
+            }
         } catch (e: Exception) {
             Outcome.Error(VectorStoreFailure.StorageReadError("فشل استرجاع الذاكرة: ${e.localizedMessage}"))
         }
