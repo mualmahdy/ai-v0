@@ -188,7 +188,7 @@ class ExtensionManager(
                         override suspend fun execute(input: ToolInput): Outcome<ToolOutput, ToolFailure> {
                             return Outcome.Success(
                                 ToolOutput(
-                                    content = "تم استدعاء أداة MCP بنجاح: ${mcpTool.name} عبر خادم ${server.name} بالمدخلات: ${input.rawArgumentsJson}"
+                                    content = "تم استدعاء أداة MCP بنجاح: ${mcpTool.name} عبر خادم ${server.name} بالمدخلات: ${input.arguments}"
                                 )
                             )
                         }

@@ -1,5 +1,6 @@
 package com.example.infrastructure.llm.discovery
 
+import com.example.domain.core.DegradedReason
 import com.example.domain.core.Outcome
 import com.example.domain.core.model.Modality
 import com.example.domain.core.model.ModelDescriptor
@@ -16,7 +17,15 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class GeminiModelDiscoveryAdapter(
-    private val apiKeyProvider: () -> String? = { com.example.BuildConfig.GEMINI_API_KEY.ifBlank { null } }
+    private val apiKeyProvider: () -> String? = {
+        System.getenv("GEMINI_API_KEY")?.ifBlank { null }
+            ?: try {
+                val field = com.example.BuildConfig::class.java.getField("GEMINI_API_KEY")
+                (field.get(null) as? String)?.ifBlank { null }
+            } catch (e: Exception) {
+                null
+            }
+    }
 ) : ModelDiscoveryPort {
 
     override val providerId: String = "gemini_google"
@@ -87,13 +96,15 @@ class GeminiModelDiscoveryAdapter(
             } else {
                 Outcome.Degraded(
                     partialValue = getDefaultKnownModels(),
-                    reason = "HTTP ${connection.responseCode}: Using verified model matrix cache"
+                    reason = DegradedReason.CACHE_FALLBACK,
+                    diagnosticMessage = "HTTP ${connection.responseCode}: Using verified model matrix cache"
                 )
             }
         } catch (e: Exception) {
             Outcome.Degraded(
                 partialValue = getDefaultKnownModels(),
-                reason = "Network discovery unreachable (${e.localizedMessage}): Using verified matrix cache"
+                reason = DegradedReason.CACHE_FALLBACK,
+                diagnosticMessage = "Network discovery unreachable (${e.localizedMessage}): Using verified matrix cache"
             )
         }
     }

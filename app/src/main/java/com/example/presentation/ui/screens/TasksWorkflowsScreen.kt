@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -37,12 +38,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.example.domain.core.agent.AgentId
+import com.example.domain.core.Outcome
+import com.example.domain.core.agent.AgentRole
 import com.example.domain.core.task.TaskId
-import com.example.domain.core.task.TaskInput
-import com.example.domain.core.workflow.WorkflowExecutionStatus
+import com.example.domain.core.workflow.ExecutionMode
+import com.example.domain.core.workflow.StepNode
+import com.example.domain.core.workflow.StepStatus
+import com.example.domain.core.workflow.WorkflowId
 import com.example.domain.core.workflow.WorkflowPlan
-import com.example.domain.core.workflow.WorkflowStep
 import com.example.presentation.state.UiState
 import com.example.presentation.viewmodel.MainViewModel
 
@@ -53,28 +56,29 @@ fun TasksWorkflowsScreen(
     modifier: Modifier = Modifier
 ) {
     val sampleWorkflowPlan = WorkflowPlan(
-        id = "wf_scaffold_feature",
-        name = "بناء ونشر وحدة معمارية متكاملة (Full Feature Scaffold DAG)",
+        id = WorkflowId("wf_scaffold_feature"),
+        goal = "بناء ونشر وحدة معمارية متكاملة (Full Feature Scaffold DAG)",
+        executionMode = ExecutionMode.DIRECTED_ACYCLIC_GRAPH,
         steps = listOf(
-            WorkflowStep(
+            StepNode(
                 id = "step_1_plan",
-                name = "1. تحليل المتطلبات والتخطيط المعماري",
-                assignedAgentId = AgentId("architect_orchestrator"),
-                taskInput = TaskInput(rawPrompt = "حلل متطلبات بناء وحدة إدارة المهام المعمارية النظيفة.")
+                taskId = TaskId("task_plan_1"),
+                agentRole = AgentRole.PLANNER,
+                description = "1. تحليل المتطلبات والتخطيط المعماري للوحدة النمطية"
             ),
-            WorkflowStep(
+            StepNode(
                 id = "step_2_code",
-                name = "2. كتابة الشيفرات ونماذج النطاق",
-                assignedAgentId = AgentId("code_craftsman"),
+                taskId = TaskId("task_code_2"),
+                agentRole = AgentRole.CODER,
                 dependencies = setOf("step_1_plan"),
-                taskInput = TaskInput(rawPrompt = "اكتب ملفات Kotlin Domain Models ومنافذ Ports للوحدة.")
+                description = "2. كتابة الشيفرات ونماذج النطاق ومنافذ Ports"
             ),
-            WorkflowStep(
+            StepNode(
                 id = "step_3_security",
-                name = "3. التدقيق الأمني وفحص السياسات",
-                assignedAgentId = AgentId("security_auditor"),
+                taskId = TaskId("task_sec_3"),
+                agentRole = AgentRole.SECURITY_GUARD,
                 dependencies = setOf("step_2_code"),
-                taskInput = TaskInput(rawPrompt = "افحص الشيفرات المنتجة وتأكد من تنقيح المفاتيح السرية.")
+                description = "3. التدقيق الأمني وفحص تنقيح البيانات والسياسات"
             )
         )
     )
@@ -138,7 +142,7 @@ fun TasksWorkflowsScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = sampleWorkflowPlan.name,
+                        text = sampleWorkflowPlan.goal,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -164,7 +168,11 @@ fun TasksWorkflowsScreen(
                                 tint = MaterialTheme.colorScheme.primary
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(text = step.name, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                text = step.description,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f)
+                            )
                             if (step.dependencies.isNotEmpty()) {
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Surface(shape = RoundedCornerShape(4.dp), color = MaterialTheme.colorScheme.surface) {
@@ -178,14 +186,20 @@ fun TasksWorkflowsScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
                     Button(
                         onClick = { viewModel.executeWorkflow(sampleWorkflowPlan) },
                         enabled = !state.isExecutingWorkflow,
-                        modifier = Modifier.fillMaxWidth().testTag("btn_execute_workflow_dag")
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("btn_execute_workflow_dag")
                     ) {
                         if (state.isExecutingWorkflow) {
-                            CircularProgressIndicator(modifier = Modifier.size(18.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                strokeWidth = 2.dp
+                            )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("جاري تنفيذ مسار العمل...")
                         } else {
@@ -201,6 +215,14 @@ fun TasksWorkflowsScreen(
         // Workflow Execution Report
         state.workflowReport?.let { report ->
             item {
+                val isSuccess = report.overallOutcome is Outcome.Success
+                val isDegraded = report.overallOutcome is Outcome.Degraded
+                val statusText = when (report.overallOutcome) {
+                    is Outcome.Success -> "اكتمل بنجاح كامل"
+                    is Outcome.Degraded -> "اكتمل مع تدهور تشغيلي"
+                    is Outcome.Error -> "فشل في تنفيذ المخطط"
+                }
+
                 ElevatedCard(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp)
@@ -212,10 +234,14 @@ fun TasksWorkflowsScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "تقرير التنفيذ: ${if (report.overallStatus == WorkflowExecutionStatus.SUCCESS) "اكتمل بنجاح" else "فشل أو تدهور"}",
+                                text = "تقرير التنفيذ: $statusText",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = if (report.overallStatus == WorkflowExecutionStatus.SUCCESS) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                                color = when {
+                                    isSuccess -> MaterialTheme.colorScheme.primary
+                                    isDegraded -> MaterialTheme.colorScheme.tertiary
+                                    else -> MaterialTheme.colorScheme.error
+                                }
                             )
                             Text(
                                 text = "المدة: ${report.totalDurationMs}ms | الرموز: ${report.totalTokensConsumed}",
@@ -224,7 +250,7 @@ fun TasksWorkflowsScreen(
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))
-                        report.stepResults.forEach { (stepId, result) ->
+                        report.stepStatuses.forEach { (stepId, status) ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -233,16 +259,38 @@ fun TasksWorkflowsScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                    val icon = when (status) {
+                                        StepStatus.COMPLETED -> Icons.Default.CheckCircle
+                                        StepStatus.DEGRADED -> Icons.Default.Warning
+                                        StepStatus.FAILED -> Icons.Default.Error
+                                        else -> Icons.Default.Schedule
+                                    }
+                                    val tint = when (status) {
+                                        StepStatus.COMPLETED -> MaterialTheme.colorScheme.primary
+                                        StepStatus.DEGRADED -> MaterialTheme.colorScheme.tertiary
+                                        StepStatus.FAILED -> MaterialTheme.colorScheme.error
+                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
+
                                     Icon(
-                                        imageVector = if (result.status == WorkflowExecutionStatus.SUCCESS) Icons.Default.CheckCircle else Icons.Default.Error,
+                                        imageVector = icon,
                                         contentDescription = null,
-                                        tint = if (result.status == WorkflowExecutionStatus.SUCCESS) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                        tint = tint,
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(text = stepId, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                                 }
-                                Text(text = "${result.durationMs}ms", style = MaterialTheme.typography.labelSmall)
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant
+                                ) {
+                                    Text(
+                                        text = status.name,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
                             }
                         }
                     }

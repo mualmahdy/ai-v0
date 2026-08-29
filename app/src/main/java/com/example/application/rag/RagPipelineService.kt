@@ -7,7 +7,7 @@ import com.example.domain.core.rag.AssembledRagContext
 import com.example.domain.core.rag.DocumentChunk
 import com.example.domain.core.rag.KnowledgeDocument
 import com.example.domain.core.rag.RetrievedContextChunk
-import com.example.domain.ports.memory.EmbeddingPort
+import com.example.domain.ports.memory.EmbeddingProviderPort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,7 +21,7 @@ import kotlin.math.sqrt
  * Real RAG & Knowledge Subsystem for document ingestion, semantic chunking, and context assembly.
  */
 class RagPipelineService(
-    private val embeddingPort: EmbeddingPort? = null
+    private val embeddingPort: EmbeddingProviderPort? = null
 ) {
     private val _documents = MutableStateFlow<List<KnowledgeDocument>>(emptyList())
     val documents: StateFlow<List<KnowledgeDocument>> = _documents.asStateFlow()
@@ -92,9 +92,9 @@ class RagPipelineService(
         for (chunk in splitChunks) {
             var vector: EmbeddingVector? = null
             if (embeddingPort != null) {
-                val embOutcome = embeddingPort.generateEmbedding(chunk.text)
+                val embOutcome = embeddingPort.generateEmbeddings(listOf(chunk.text))
                 if (embOutcome is Outcome.Success) {
-                    vector = embOutcome.value
+                    vector = embOutcome.value.firstOrNull()
                 }
             }
             // Generate lexical fallback vector if embedding not available
@@ -143,8 +143,8 @@ class RagPipelineService(
      */
     suspend fun retrieveRelevantContext(query: String, topK: Int = 4, maxTokenBudget: Int = 2000): AssembledRagContext = withContext(Dispatchers.Default) {
         val queryVector = if (embeddingPort != null) {
-            val outcome = embeddingPort.generateEmbedding(query)
-            if (outcome is Outcome.Success) outcome.value else generateLexicalVector(query)
+            val outcome = embeddingPort.generateEmbeddings(listOf(query))
+            if (outcome is Outcome.Success) (outcome.value.firstOrNull() ?: generateLexicalVector(query)) else generateLexicalVector(query)
         } else {
             generateLexicalVector(query)
         }
