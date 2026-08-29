@@ -1,19 +1,50 @@
 package com.example.domain.core.decision
 
+import com.example.infrastructure.persistence.dao.DecisionCaseDao
+import com.example.infrastructure.persistence.entities.DecisionCaseEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import org.json.JSONArray
 import kotlin.math.sqrt
 
 /**
  * Case Base storing historical decision experiences with similarity retrieval.
+ * Supports asynchronous Room Database persistence to maintain learned experiences across app restarts.
  */
-class CaseBase(initialCases: List<DecisionCase> = emptyList()) {
+class CaseBase(
+    private val decisionCaseDao: DecisionCaseDao? = null,
+    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+) {
 
     private val cases = mutableListOf<DecisionCase>()
 
     init {
-        if (initialCases.isNotEmpty()) {
-            cases.addAll(initialCases)
-        } else {
-            bootstrapDefaultCases()
+        // Load initial bootstrap cases first
+        bootstrapDefaultCases()
+        // Load persisted cases from Room DB if DAO is provided
+        if (decisionCaseDao != null) {
+            coroutineScope.launch {
+                try {
+                    val persistedEntities = decisionCaseDao.getAllCases()
+                    if (persistedEntities.isNotEmpty()) {
+                        val mappedCases = persistedEntities.map { entity ->
+                            entity.toDomain()
+                        }
+                        synchronized(this@CaseBase) {
+                            // Merge avoiding ID duplication
+                            val existingIds = cases.map { it.id }.toSet()
+                            for (c in mappedCases) {
+                                if (c.id !in existingIds) {
+                                    cases.add(c)
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Fallback to in-memory bootstrap cases
+                }
+            }
         }
     }
 
@@ -25,6 +56,17 @@ class CaseBase(initialCases: List<DecisionCase> = emptyList()) {
             cases.removeAt(0)
         }
         cases.add(case)
+
+        // Persist to Room asynchronously
+        decisionCaseDao?.let { dao ->
+            coroutineScope.launch {
+                try {
+                    dao.insertCase(case.toEntity())
+                } catch (_: Exception) {
+                    // Non-fatal logging
+                }
+            }
+        }
     }
 
     @Synchronized
@@ -34,7 +76,7 @@ class CaseBase(initialCases: List<DecisionCase> = emptyList()) {
      * Finds the k-nearest historical cases using weighted cosine similarity over state feature vectors.
      */
     @Synchronized
-    fun findSimilarCases(queryFeatures: FloatArray, k: Int = 5, minSimilarity: Float = 0.5f): List<Pair<DecisionCase, Float>> {
+    fun findSimilarCases(queryFeatures: FloatArray, k: Int = 5, minSimilarity: Float = 0.4f): List<Pair<DecisionCase, Float>> {
         if (cases.isEmpty()) return emptyList()
 
         return cases.map { case ->
@@ -118,6 +160,41 @@ class CaseBase(initialCases: List<DecisionCase> = emptyList()) {
                 outcomeReward = 0.92f,
                 taskType = "OFFLINE_TASK"
             )
+        )
+    }
+
+    private fun DecisionCase.toEntity(): DecisionCaseEntity {
+        val arr = JSONArray()
+        problemFeatures.forEach { arr.put(it.toDouble()) }
+        return DecisionCaseEntity(
+            id = id,
+            featuresJson = arr.toString(),
+            actionType = chosenAction.type.name,
+            targetId = chosenAction.targetId,
+            outcomeReward = outcomeReward,
+            taskType = taskType,
+            timestampEpochMs = timestampMs
+        )
+    }
+
+    private fun DecisionCaseEntity.toDomain(): DecisionCase {
+        val arr = JSONArray(featuresJson)
+        val floats = FloatArray(arr.length())
+        for (i in 0 until arr.length()) {
+            floats[i] = arr.getDouble(i).toFloat()
+        }
+        val type = try {
+            DecisionActionType.valueOf(actionType)
+        } catch (_: Exception) {
+            DecisionActionType.EXECUTE_STEP
+        }
+        return DecisionCase(
+            id = id,
+            problemFeatures = floats,
+            chosenAction = DecisionAction(type, targetId),
+            outcomeReward = outcomeReward,
+            timestampMs = timestampEpochMs,
+            taskType = taskType
         )
     }
 }

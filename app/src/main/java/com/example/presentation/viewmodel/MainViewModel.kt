@@ -150,93 +150,74 @@ class MainViewModel(
                     systemPrompt = "أنت مهندس برمجيات محترف ومختص في هندسة النظم النظيفة وتطوير الأدوات."
                 ),
                 allowedCapabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.TOOL_EXECUTION, CapabilityType.FILE_STORAGE),
-                budget = AgentBudget(maxTokens = 30000)
+                budget = AgentBudget(maxTokens = 40000)
             ),
             AgentDefinition(
                 identity = AgentIdentity(
-                    id = AgentId("security_auditor"),
-                    name = "حارس الأمان (Security Guard)",
-                    description = "فحص السياسات الأمنية، تطهير المدخلات، وحماية العزل.",
+                    id = AgentId("security_guardian"),
+                    name = "حارس الحوكمة والأمان (Security Auditor)",
+                    description = "يدقق في مدخلات ومخرجات الأدوات، ويتحقق من سلامة الأوامر.",
                     role = AgentRole.SECURITY_GUARD,
-                    systemPrompt = "أنت حارس الأمان والسياسات لمنصة الوكلاء الذكية. تفحص الأذونات وتضمن سلامة البيئة المعزولة."
+                    systemPrompt = "أنت مدقق أمني مستقل وحارس لسياسات الأمان والحوكمة."
                 ),
                 allowedCapabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.TOOL_EXECUTION),
-                budget = AgentBudget(maxTokens = 30000)
+                budget = AgentBudget(maxTokens = 20000)
             )
         )
 
         _uiState.update {
             it.copy(
                 availableAgents = defaultAgents,
-                activeAgent = defaultAgents.first(),
-                caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
+                activeAgent = defaultAgents.first()
             )
         }
-        buildInitialResourceGraph()
     }
 
-    private fun buildInitialResourceGraph() {
-        var graph = ResourceGraph()
-        val projectNode = ResourceNode("proj_1", ResourceType.PROJECT, "AI-V0 Core Project")
-        val agentNode = ResourceNode("agent_planner", ResourceType.AGENT, "Strategic Planner")
-        val modelNode = ResourceNode("model_gemini_flash", ResourceType.MODEL, "Gemini 2.5 Flash")
-        val toolNode = ResourceNode("tool_fs", ResourceType.TOOL, "Workspace FS")
-
-        graph = graph.addNode(projectNode)
-            .addNode(agentNode)
-            .addNode(modelNode)
-            .addNode(toolNode)
-            .addEdge(ResourceEdge("proj_1", "agent_planner", ResourceEdgeType.CONTAINS))
-            .addEdge(ResourceEdge("agent_planner", "model_gemini_flash", ResourceEdgeType.DEPENDS_ON))
-            .addEdge(ResourceEdge("agent_planner", "tool_fs", ResourceEdgeType.USES_TOOL))
-
-        _uiState.update { it.copy(resourceGraph = graph) }
-    }
-
-    fun loadInitialData() {
+    private fun loadInitialData() {
         viewModelScope.launch {
-            when (val projectOutcome = sessionRepository.getActiveProject()) {
-                is Outcome.Success -> _uiState.update { it.copy(activeProject = projectOutcome.value) }
-                is Outcome.Degraded -> _uiState.update { it.copy(activeProject = projectOutcome.partialValue) }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = projectOutcome.diagnosticMessage) }
-            }
-
-            refreshCapabilities()
-            refreshFiles()
             refreshMemories()
-            discoverModels()
+            refreshFiles()
+            refreshCapabilities()
+            simulateDecision()
         }
+    }
+
+    // --- Navigation ---
+    fun selectNavigationTab(tab: ActiveNavigationTab) {
+        _uiState.update { it.copy(activeTab = tab) }
     }
 
     fun selectTab(tab: ActiveNavigationTab) {
-        _uiState.update { it.copy(activeTab = tab) }
-        when (tab) {
-            ActiveNavigationTab.FILES -> refreshFiles()
-            ActiveNavigationTab.KNOWLEDGE_RAG -> refreshMemories()
-            ActiveNavigationTab.MODELS_CAPABILITIES -> discoverModels()
-            ActiveNavigationTab.DECISION_INTELLIGENCE -> simulateDecision()
-            else -> Unit
-        }
+        selectNavigationTab(tab)
     }
 
+    // --- Agent Selection ---
+    fun selectAgent(agent: AgentDefinition) {
+        _uiState.update { it.copy(activeAgent = agent) }
+    }
+
+    // --- Network & Autonomy Policy ---
     fun setNetworkPolicy(policy: NetworkPolicy) {
         _uiState.update { it.copy(networkPolicy = policy) }
+        simulateDecision()
     }
 
     fun setAutonomyPolicy(policy: AutonomyPolicy) {
         _uiState.update { it.copy(autonomyPolicy = policy) }
     }
 
-    fun selectAgent(agent: AgentDefinition) {
-        _uiState.update { it.copy(activeAgent = agent) }
+    // --- Prompt & Task Execution ---
+    fun updatePromptInput(input: String) {
+        _uiState.update { it.copy(promptInput = input) }
     }
 
-    fun updatePromptInput(text: String) {
-        _uiState.update { it.copy(promptInput = text) }
+    fun clearPromptInput() {
+        _uiState.update { it.copy(promptInput = "") }
     }
 
     fun cancelExecution() {
         currentExecutionJob?.cancel()
+        currentExecutionJob = null
         _uiState.update {
             it.copy(
                 isExecuting = false,
@@ -267,6 +248,7 @@ class MainViewModel(
         val candidateActions = listOf(
             DecisionAction(DecisionActionType.SELECT_AGENT, targetId = agent.identity.id.value),
             DecisionAction(DecisionActionType.SELECT_MODEL, targetId = "gemini-2.5-flash"),
+            DecisionAction(DecisionActionType.SEARCH, targetId = "multi_source_search"),
             DecisionAction(DecisionActionType.EXECUTE_STEP, targetId = "execute_prompt"),
             DecisionAction(DecisionActionType.RETRIEVE_KNOWLEDGE, targetId = "rag_context")
         )
@@ -289,9 +271,14 @@ class MainViewModel(
         currentExecutionJob = viewModelScope.launch {
             val startTime = System.currentTimeMillis()
             try {
+                val shouldSearch = decision.chosenAction.type == DecisionActionType.SEARCH ||
+                        prompt.contains("بحث", ignoreCase = true) ||
+                        prompt.contains("search", ignoreCase = true)
+
                 executeAgentTaskUseCase(
                     agent = agent,
-                    prompt = prompt
+                    prompt = prompt,
+                    includeWebSearch = shouldSearch
                 ).collect { event ->
                     _uiState.update { state ->
                         val updatedLogs = state.executionLog + event
@@ -337,7 +324,7 @@ class MainViewModel(
                     }
                 }
 
-                // Feed back observation to CBR-MDP Engine
+                // Feed back real observation to CBR-MDP Engine
                 val latency = System.currentTimeMillis() - startTime
                 val obs = EnvironmentObservation(
                     action = decision.chosenAction,
@@ -388,7 +375,7 @@ class MainViewModel(
             DecisionAction(DecisionActionType.SELECT_AGENT, targetId = "code_craftsman"),
             DecisionAction(DecisionActionType.SELECT_MODEL, targetId = "gemini-2.5-flash", estimatedCost = 0.001),
             DecisionAction(DecisionActionType.SELECT_PROVIDER, targetId = if (current.networkPolicy == NetworkPolicy.OFFLINE) "local_ollama" else "gemini_google"),
-            DecisionAction(DecisionActionType.SEARCH, targetId = "tavily_search", estimatedCost = 0.005),
+            DecisionAction(DecisionActionType.SEARCH, targetId = "multi_source_search", estimatedCost = 0.005),
             DecisionAction(DecisionActionType.RETRIEVE_KNOWLEDGE, targetId = "rag_knowledge_base"),
             DecisionAction(DecisionActionType.CREATE_PLAN, targetId = "dag_workflow_engine"),
             DecisionAction(DecisionActionType.STOP)
@@ -420,6 +407,19 @@ class MainViewModel(
         extensionManager.toggleSkill(skillId)
     }
 
+    fun executeSkillDirectly(skillId: String, parameters: Map<String, Any?>) {
+        viewModelScope.launch {
+            when (val outcome = extensionManager.executeSkill(skillId, parameters)) {
+                is Outcome.Success -> {
+                    _uiState.update { it.copy(diagnosticBanner = outcome.value) }
+                    refreshFiles()
+                }
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> Unit
+            }
+        }
+    }
+
     fun togglePlugin(pluginId: String) {
         extensionManager.togglePlugin(pluginId)
     }
@@ -428,8 +428,20 @@ class MainViewModel(
         extensionManager.toggleMcpServer(serverId)
     }
 
+    fun pingMcpServer(serverId: String) {
+        viewModelScope.launch {
+            extensionManager.pingAndDiscoverMcpServer(serverId)
+        }
+    }
+
     fun registerMcpServer(name: String, endpointUri: String) {
         extensionManager.registerNewMcpServer(name, endpointUri)
+    }
+
+    fun connectIntegration(integrationId: String, token: String) {
+        viewModelScope.launch {
+            extensionManager.verifyAndConnectIntegration(integrationId, token)
+        }
     }
 
     // --- Intelligence Radar & Evolution ---

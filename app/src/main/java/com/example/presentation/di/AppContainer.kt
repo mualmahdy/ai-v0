@@ -15,13 +15,20 @@ import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
 import com.example.application.usecases.ManageMemoryUseCase
 import com.example.application.usecases.ManageWorkspaceFilesUseCase
+import com.example.domain.core.decision.CaseBase
 import com.example.domain.core.decision.CbrMdpEngine
+import com.example.infrastructure.integration.IntegrationGateway
 import com.example.infrastructure.llm.discovery.GeminiModelDiscoveryAdapter
 import com.example.infrastructure.llm.discovery.OpenAiCompatibleDiscoveryAdapter
 import com.example.infrastructure.llm.gemini.GeminiLlmAdapter
+import com.example.infrastructure.mcp.McpClient
 import com.example.infrastructure.memory.RoomVectorStoreAdapter
 import com.example.infrastructure.persistence.AppDatabase
-import com.example.infrastructure.search.TavilySearchAdapter
+import com.example.infrastructure.radar.GitHubReleasesRadarSource
+import com.example.infrastructure.radar.RssFeedRadarSource
+import com.example.infrastructure.search.MultiSourceSearchAdapter
+import com.example.infrastructure.skills.CleanArchitectureScaffolderSkill
+import com.example.infrastructure.skills.SecurityAuditorSkill
 import com.example.infrastructure.storage.SandboxWorkspaceStorageAdapter
 import com.example.infrastructure.tools.FileSystemTool
 import com.example.infrastructure.tools.SafeDiagnosticsTool
@@ -30,11 +37,13 @@ import java.io.File
 
 /**
  * Dependency Injection Container / Composition Root for the Clean Architecture Orchestrator.
+ * Connects real Room persistence, genuine MCP protocols, live integrations, multi-source search,
+ * executable skills, and CBR-MDP decision intelligence.
  */
 class AppContainer(context: Context) {
     val appContext = context.applicationContext
 
-    // Persistence Layer
+    // Persistence Layer (Room Database)
     val database: AppDatabase by lazy { AppDatabase.getInstance(appContext) }
 
     // Infrastructure Adapters
@@ -57,9 +66,11 @@ class AppContainer(context: Context) {
         GeminiLlmAdapter()
     }
 
-    val tavilySearchAdapter: TavilySearchAdapter by lazy {
-        TavilySearchAdapter(
-            apiKeyProvider = { null }
+    val searchAdapter: MultiSourceSearchAdapter by lazy {
+        MultiSourceSearchAdapter(
+            tavilyApiKeyProvider = { null },
+            workspaceStoragePort = workspaceStorage,
+            defaultProjectId = 1L
         )
     }
 
@@ -77,20 +88,30 @@ class AppContainer(context: Context) {
         SafeDiagnosticsTool(sandboxDir = sandboxDir)
     }
 
+    // Executable Skills
+    val cleanArchitectureSkill by lazy {
+        CleanArchitectureScaffolderSkill(storagePort = workspaceStorage, defaultProjectId = 1L)
+    }
+
+    val securityAuditorSkill by lazy {
+        SecurityAuditorSkill()
+    }
+
     // Component & Tools Registry
     val componentRegistry: ComponentRegistry by lazy {
         ComponentRegistry().apply {
             registerLlmProvider(geminiLlmAdapter, isDefault = true)
-            registerSearchProvider(tavilySearchAdapter, isDefault = true)
+            registerSearchProvider(searchAdapter, isDefault = true)
             registerMemoryRepository(memoryVectorStore)
             registerTool(fileSystemTool)
             registerTool(safeDiagnosticsTool)
         }
     }
 
-    // CBR-MDP Decision Intelligence Engine
+    // CBR-MDP Decision Intelligence Engine with persistent CaseBase
     val cbrMdpEngine: CbrMdpEngine by lazy {
-        CbrMdpEngine()
+        val persistentCaseBase = CaseBase(decisionCaseDao = database.decisionCaseDao())
+        CbrMdpEngine(caseBase = persistentCaseBase)
     }
 
     // Provider & Model Registry Service with Discovery Adapters
@@ -103,12 +124,25 @@ class AppContainer(context: Context) {
 
     // Extensibility Engine (Skills, Plugins, MCP, Integrations)
     val extensionManager: ExtensionManager by lazy {
-        ExtensionManager(componentRegistry = componentRegistry)
+        ExtensionManager(
+            componentRegistry = componentRegistry,
+            mcpClient = McpClient(),
+            integrationGateway = IntegrationGateway(),
+            extensionConfigDao = database.extensionConfigDao(),
+            executableSkills = listOf(cleanArchitectureSkill, securityAuditorSkill)
+        )
     }
 
     // Intelligence Radar & Capability Evolution Pipeline
     val intelligenceRadarPipeline: IntelligenceRadarPipeline by lazy {
-        IntelligenceRadarPipeline()
+        IntelligenceRadarPipeline(
+            radarSources = listOf(
+                GitHubReleasesRadarSource(),
+                RssFeedRadarSource()
+            ),
+            radarItemDao = database.radarItemDao(),
+            evolutionCandidateDao = database.evolutionCandidateDao()
+        )
     }
 
     // Knowledge & RAG Subsystem
@@ -116,11 +150,12 @@ class AppContainer(context: Context) {
         RagPipelineService(embeddingPort = null)
     }
 
-    // Orchestrator Engine
+    // Orchestrator Engine with Task Lifecycle Persistence
     val agentOrchestrator: AgentOrchestrator by lazy {
         AgentOrchestrator(
             registry = componentRegistry,
-            securityGuard = securityGuardService
+            securityGuard = securityGuardService,
+            taskDao = database.taskDao()
         )
     }
 

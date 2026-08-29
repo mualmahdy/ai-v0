@@ -5,10 +5,15 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import com.example.infrastructure.persistence.entities.DecisionCaseEntity
+import com.example.infrastructure.persistence.entities.EvolutionCandidateEntity
 import com.example.infrastructure.persistence.entities.ExecutionLogEntity
+import com.example.infrastructure.persistence.entities.ExtensionConfigEntity
 import com.example.infrastructure.persistence.entities.MemoryEntity
 import com.example.infrastructure.persistence.entities.ProjectEntity
+import com.example.infrastructure.persistence.entities.RadarItemEntity
 import com.example.infrastructure.persistence.entities.SessionEntity
+import com.example.infrastructure.persistence.entities.TaskEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -75,4 +80,101 @@ interface ExecutionLogDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLog(log: ExecutionLogEntity): Long
+}
+
+@Dao
+interface TaskDao {
+    @Query("SELECT * FROM tasks ORDER BY createdAtEpochMs DESC")
+    fun getAllTasksFlow(): Flow<List<TaskEntity>>
+
+    @Query("SELECT * FROM tasks ORDER BY createdAtEpochMs DESC")
+    suspend fun getAllTasks(): List<TaskEntity>
+
+    @Query("SELECT * FROM tasks WHERE id = :id LIMIT 1")
+    suspend fun getTaskById(id: String): TaskEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateTask(task: TaskEntity)
+
+    @Query("UPDATE tasks SET lifecycleState = :state, resultSummary = :summary, totalTokensConsumed = :tokens, durationMs = :duration, isDegraded = :isDegraded, degradedReason = :degradedReason, errorMessage = :errorMsg, updatedAtEpochMs = :now WHERE id = :id")
+    suspend fun updateTaskStatus(
+        id: String,
+        state: String,
+        summary: String?,
+        tokens: Int,
+        duration: Long,
+        isDegraded: Boolean,
+        degradedReason: String?,
+        errorMsg: String?,
+        now: Long
+    )
+}
+
+@Dao
+interface DecisionCaseDao {
+    @Query("SELECT * FROM decision_cases ORDER BY timestampEpochMs DESC")
+    suspend fun getAllCases(): List<DecisionCaseEntity>
+
+    @Query("SELECT * FROM decision_cases ORDER BY timestampEpochMs DESC LIMIT :limit")
+    suspend fun getRecentCases(limit: Int): List<DecisionCaseEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCase(caseEntity: DecisionCaseEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(cases: List<DecisionCaseEntity>)
+}
+
+@Dao
+interface RadarItemDao {
+    @Query("SELECT * FROM radar_items ORDER BY relevanceScore DESC, discoveredTimestampEpochMs DESC")
+    fun getAllRadarItemsFlow(): Flow<List<RadarItemEntity>>
+
+    @Query("SELECT * FROM radar_items ORDER BY relevanceScore DESC, discoveredTimestampEpochMs DESC")
+    suspend fun getAllRadarItems(): List<RadarItemEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(items: List<RadarItemEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertItem(item: RadarItemEntity)
+
+    @Query("DELETE FROM radar_items WHERE id = :id")
+    suspend fun deleteItem(id: String)
+}
+
+@Dao
+interface EvolutionCandidateDao {
+    @Query("SELECT * FROM evolution_candidates ORDER BY updatedAtEpochMs DESC")
+    fun getAllCandidatesFlow(): Flow<List<EvolutionCandidateEntity>>
+
+    @Query("SELECT * FROM evolution_candidates ORDER BY updatedAtEpochMs DESC")
+    suspend fun getAllCandidates(): List<EvolutionCandidateEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(candidates: List<EvolutionCandidateEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCandidate(candidate: EvolutionCandidateEntity)
+
+    @Query("UPDATE evolution_candidates SET stage = :stage, governanceApproved = :governanceApproved, updatedAtEpochMs = :now WHERE id = :id")
+    suspend fun updateStage(id: String, stage: String, governanceApproved: Boolean, now: Long)
+}
+
+@Dao
+interface ExtensionConfigDao {
+    @Query("SELECT * FROM extension_configs ORDER BY id ASC")
+    fun getAllExtensionConfigsFlow(): Flow<List<ExtensionConfigEntity>>
+
+    @Query("SELECT * FROM extension_configs WHERE type = :type")
+    suspend fun getConfigsByType(type: String): List<ExtensionConfigEntity>
+
+    @Query("SELECT * FROM extension_configs WHERE id = :id LIMIT 1")
+    suspend fun getConfigById(id: String): ExtensionConfigEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdateConfig(config: ExtensionConfigEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(configs: List<ExtensionConfigEntity>)
 }

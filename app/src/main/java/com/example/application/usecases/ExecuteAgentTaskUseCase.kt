@@ -21,7 +21,8 @@ class ExecuteAgentTaskUseCase(
         agent: AgentDefinition,
         prompt: String,
         history: List<LlmMessage> = emptyList(),
-        preferredProviderId: String? = null
+        preferredProviderId: String? = null,
+        includeWebSearch: Boolean = false
     ): Flow<ExecutionEvent> {
         val task = TaskDefinition(
             id = TaskId(UUID.randomUUID().toString()),
@@ -33,7 +34,8 @@ class ExecuteAgentTaskUseCase(
             agent = agent,
             task = task,
             conversationHistory = history,
-            preferredProviderId = preferredProviderId
+            preferredProviderId = preferredProviderId,
+            includeWebSearch = includeWebSearch
         )
     }
 }

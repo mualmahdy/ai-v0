@@ -14,24 +14,33 @@ import com.example.domain.core.llm.LlmRequest
 import com.example.domain.core.llm.LlmResponse
 import com.example.domain.core.llm.MessageRole
 import com.example.domain.core.llm.TokenUsage
+import com.example.domain.core.search.SearchQuery
 import com.example.domain.core.security.SecurityDecision
 import com.example.domain.core.security.SecurityPolicy
 import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.task.TaskId
+import com.example.domain.core.task.TaskLifecycleState
 import com.example.domain.core.tools.ToolFailure
 import com.example.domain.core.tools.ToolInput
+import com.example.infrastructure.persistence.dao.TaskDao
+import com.example.infrastructure.persistence.entities.TaskEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import java.util.UUID
 
 /**
  * Core Orchestrator coordinating Agent Execution, LLM Calls, Tool Invocations,
- * Security Gateways, Memory/RAG Augmentation, and Operational Event Streams.
+ * Security Gateways, Memory/RAG Augmentation, Web Search, and Room Persistence.
  */
 class AgentOrchestrator(
     private val registry: ComponentRegistry,
     private val securityGuard: SecurityGuardService,
-    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy()
+    private val taskDao: TaskDao? = null,
+    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
+    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 ) {
 
     /**
@@ -41,17 +50,24 @@ class AgentOrchestrator(
         agent: AgentDefinition,
         task: TaskDefinition,
         conversationHistory: List<LlmMessage> = emptyList(),
-        preferredProviderId: String? = null
+        preferredProviderId: String? = null,
+        includeWebSearch: Boolean = false
     ): Flow<ExecutionEvent> = flow {
         val executionId = UUID.randomUUID().toString()
         val provider = registry.getLlmProvider(preferredProviderId)
+        val startTime = System.currentTimeMillis()
+
+        // 0. Persist Initial Task State in Room DB
+        persistTaskInitial(task, agent)
 
         if (provider == null) {
+            val errorMsg = "لا يوجد مزود ذكاء اصطناعي متاح حالياً لتنفيذ المهمة."
+            persistTaskFinal(task.id.value, "FAILED", null, 0, 0L, false, null, errorMsg)
             emit(
                 ExecutionEvent.Error(
                     executionId = executionId,
                     failureCode = "PROVIDER_NOT_FOUND",
-                    message = "لا يوجد مزود ذكاء اصطناعي متاح حالياً لتنفيذ المهمة."
+                    message = errorMsg
                 )
             )
             return@flow
@@ -72,7 +88,50 @@ class AgentOrchestrator(
         val messages = mutableListOf<LlmMessage>()
         messages.add(LlmMessage(role = MessageRole.SYSTEM, content = agent.identity.systemPrompt))
 
-        // 2. Memory / RAG Context Augmentation
+        // 2. Web Search Ingestion if requested
+        if (includeWebSearch || task.input.rawPrompt.contains("بحث", ignoreCase = true) || task.input.rawPrompt.contains("search", ignoreCase = true)) {
+            val searchProvider = registry.getSearchProvider()
+            if (searchProvider != null) {
+                when (val searchResult = searchProvider.search(SearchQuery(query = task.input.rawPrompt.take(100)))) {
+                    is Outcome.Success -> {
+                        if (searchResult.value.items.isNotEmpty()) {
+                            val searchContext = searchResult.value.items.take(3).joinToString("\n") {
+                                "- [${it.title}] (${it.url}): ${it.snippet}"
+                            }
+                            messages.add(
+                                LlmMessage(
+                                    role = MessageRole.SYSTEM,
+                                    content = "<web_search_results>\n$searchContext\n</web_search_results>"
+                                )
+                            )
+                        }
+                    }
+                    is Outcome.Degraded -> {
+                        isDegraded = true
+                        degradedReason = searchResult.reason
+                        val partialContext = searchResult.partialValue?.items?.joinToString("\n") { "- ${it.title}: ${it.snippet}" } ?: ""
+                        if (partialContext.isNotBlank()) {
+                            messages.add(
+                                LlmMessage(
+                                    role = MessageRole.SYSTEM,
+                                    content = "<web_search_results degraded=\"true\">\n$partialContext\n</web_search_results>"
+                                )
+                            )
+                        }
+                        emit(
+                            ExecutionEvent.Degraded(
+                                executionId = executionId,
+                                reason = searchResult.reason,
+                                message = searchResult.diagnosticMessage
+                            )
+                        )
+                    }
+                    else -> Unit
+                }
+            }
+        }
+
+        // 3. Memory / RAG Context Augmentation
         val memoryRepo = registry.getMemoryRepository()
         if (memoryRepo != null) {
             when (val memResult = memoryRepo.retrieveMemories(task.input.rawPrompt, topK = 3)) {
@@ -108,7 +167,6 @@ class AgentOrchestrator(
                     )
                 }
                 is Outcome.Error -> {
-                    // Non-fatal, continue with degradation warning
                     isDegraded = true
                     degradedReason = DegradedReason.UNKNOWN_DEGRADATION
                 }
@@ -118,7 +176,7 @@ class AgentOrchestrator(
         messages.addAll(conversationHistory)
         messages.add(LlmMessage(role = MessageRole.USER, content = task.input.rawPrompt))
 
-        // 3. Prepare Tools
+        // 4. Prepare Tools
         val availableTools = registry.listTools().map { it.declaration }
 
         val request = LlmRequest(
@@ -127,8 +185,10 @@ class AgentOrchestrator(
             streamEvents = true
         )
 
-        // 4. Delegate to Provider Stream
+        // 5. Delegate to Provider Stream
         val textAccumulator = StringBuilder()
+        var totalPromptTokens = 0
+        var totalCompletionTokens = 0
 
         try {
             provider.stream(request, executionId).collect { event ->
@@ -154,15 +214,23 @@ class AgentOrchestrator(
                         emit(event)
                     }
                     is ExecutionEvent.UsageBudgetUpdate -> {
+                        totalPromptTokens = event.promptTokens
+                        totalCompletionTokens = event.completionTokens
                         emit(event)
                     }
                     is ExecutionEvent.Error -> {
+                        val duration = System.currentTimeMillis() - startTime
+                        persistTaskFinal(task.id.value, "FAILED", null, totalPromptTokens + totalCompletionTokens, duration, isDegraded, degradedReason?.name, event.message)
                         emit(event)
                     }
                     is ExecutionEvent.Completed -> {
+                        val duration = System.currentTimeMillis() - startTime
+                        val finalText = if (event.finalText.isNotEmpty()) event.finalText else textAccumulator.toString()
+                        val stateStr = if (isDegraded) "DEGRADED" else "COMPLETED"
+                        persistTaskFinal(task.id.value, stateStr, finalText.take(200), totalPromptTokens + totalCompletionTokens, duration, isDegraded, degradedReason?.name, null)
                         emit(
                             event.copy(
-                                finalText = if (event.finalText.isNotEmpty()) event.finalText else textAccumulator.toString(),
+                                finalText = finalText,
                                 isDegraded = isDegraded,
                                 degradedReason = degradedReason
                             )
@@ -172,11 +240,14 @@ class AgentOrchestrator(
                 }
             }
         } catch (e: Exception) {
+            val duration = System.currentTimeMillis() - startTime
+            val msg = e.localizedMessage ?: "حدث خطأ غير متوقع أثناء تنسيق تنفيذ الوكيل."
+            persistTaskFinal(task.id.value, "FAILED", null, totalPromptTokens + totalCompletionTokens, duration, isDegraded, degradedReason?.name, msg)
             emit(
                 ExecutionEvent.Error(
                     executionId = executionId,
                     failureCode = "ORCHESTRATION_EXCEPTION",
-                    message = e.localizedMessage ?: "حدث خطأ غير متوقع أثناء تنسيق تنفيذ الوكيل."
+                    message = msg
                 )
             )
         }
@@ -321,6 +392,59 @@ class AgentOrchestrator(
             toolName = toolName,
             outcome = finalOutcome
         )
+    }
+
+    private fun persistTaskInitial(task: TaskDefinition, agent: AgentDefinition) {
+        if (taskDao == null) return
+        coroutineScope.launch {
+            try {
+                taskDao.insertOrUpdateTask(
+                    TaskEntity(
+                        id = task.id.value,
+                        assignedAgentId = agent.identity.id.value,
+                        rawPrompt = task.input.rawPrompt,
+                        lifecycleState = "RUNNING",
+                        autonomyPolicy = "SUPERVISED",
+                        resultSummary = null,
+                        totalTokensConsumed = 0,
+                        durationMs = 0L,
+                        isDegraded = false,
+                        degradedReason = null,
+                        errorMessage = null,
+                        createdAtEpochMs = System.currentTimeMillis(),
+                        updatedAtEpochMs = System.currentTimeMillis()
+                    )
+                )
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun persistTaskFinal(
+        taskId: String,
+        state: String,
+        summary: String?,
+        tokens: Int,
+        duration: Long,
+        isDegraded: Boolean,
+        degradedReason: String?,
+        errorMsg: String?
+    ) {
+        if (taskDao == null) return
+        coroutineScope.launch {
+            try {
+                taskDao.updateTaskStatus(
+                    id = taskId,
+                    state = state,
+                    summary = summary,
+                    tokens = tokens,
+                    duration = duration,
+                    isDegraded = isDegraded,
+                    degradedReason = degradedReason,
+                    errorMsg = errorMsg,
+                    now = System.currentTimeMillis()
+                )
+            } catch (_: Exception) {}
+        }
     }
 
     private fun parseSimpleArguments(json: String): Map<String, Any?> {
