@@ -169,6 +169,22 @@ fun ExecutionEventTimelineItem(
     modifier: Modifier = Modifier
 ) {
     val (icon: ImageVector, iconTint: Color, title: String, subtitle: String) = when (event) {
+        is ExecutionEvent.DecisionMade -> {
+            Quadruple(
+                Icons.Default.Psychology,
+                MaterialTheme.colorScheme.tertiary,
+                "قرار المحرك الذكي: ${event.decision.chosenAction.type.displayName}",
+                "${event.decision.rationale.take(60)} (ثقة: ${"%.0f".format(event.decision.confidence * 100)}%)"
+            )
+        }
+        is ExecutionEvent.ObservationRecorded -> {
+            Quadruple(
+                Icons.Default.CheckCircle,
+                Color(0xFF00897B),
+                "تغذية راجعة للمحرك (Observation)",
+                "زمن: ${event.observation.actualLatencyMs}ms | توكنز: ${event.observation.tokensConsumed} | عدم يقين: ${"%.2f".format(event.updatedUncertainty)}"
+            )
+        }
         is ExecutionEvent.Started -> {
             Quadruple(
                 Icons.Default.Psychology,

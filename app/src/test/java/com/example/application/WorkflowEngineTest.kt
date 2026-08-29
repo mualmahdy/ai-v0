@@ -47,7 +47,9 @@ class WorkflowEngineTest {
     fun setup() {
         registry = ComponentRegistry()
         securityGuard = SecurityGuardService()
-        orchestrator = AgentOrchestrator(registry, securityGuard)
+        val cbrMdpEngine = com.example.domain.core.decision.CbrMdpEngine()
+        val decisionService = com.example.application.decision.DecisionService(cbrMdpEngine, registry, securityGuard)
+        orchestrator = AgentOrchestrator(registry, securityGuard, decisionService)
         workflowEngine = WorkflowEngine(orchestrator)
     }
 

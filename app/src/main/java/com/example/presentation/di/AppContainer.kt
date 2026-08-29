@@ -150,11 +150,21 @@ class AppContainer(context: Context) {
         RagPipelineService(embeddingPort = null)
     }
 
-    // Orchestrator Engine with Task Lifecycle Persistence
+    // Dedicated Decision Service Boundary (CBR-MDP Decision Intelligence)
+    val decisionService: com.example.application.decision.DecisionService by lazy {
+        com.example.application.decision.DecisionService(
+            cbrMdpEngine = cbrMdpEngine,
+            componentRegistry = componentRegistry,
+            securityGuard = securityGuardService
+        )
+    }
+
+    // Orchestrator Engine with Task Lifecycle Persistence & CBR-MDP Integration
     val agentOrchestrator: AgentOrchestrator by lazy {
         AgentOrchestrator(
             registry = componentRegistry,
             securityGuard = securityGuardService,
+            decisionService = decisionService,
             taskDao = database.taskDao()
         )
     }

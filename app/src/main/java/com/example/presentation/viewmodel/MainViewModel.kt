@@ -233,28 +233,6 @@ class MainViewModel(
         val agent = current.activeAgent ?: return
         if (prompt.isEmpty() || current.isExecuting) return
 
-        // 1. Evaluate with CBR-MDP Decision Engine
-        val decisionState = DecisionState(
-            taskId = TaskId(UUID.randomUUID().toString()),
-            taskComplexity = current.decisionTaskComplexity,
-            requiresVision = prompt.contains("صورة", ignoreCase = true) || prompt.contains("vision", ignoreCase = true),
-            requiresToolCalling = prompt.contains("ملف", ignoreCase = true) || prompt.contains("بحث", ignoreCase = true),
-            requiresWebSearch = prompt.contains("بحث", ignoreCase = true) || prompt.contains("search", ignoreCase = true),
-            requiresCoding = prompt.contains("كود", ignoreCase = true) || prompt.contains("برمج", ignoreCase = true),
-            networkPolicy = current.networkPolicy,
-            uncertaintyScore = current.decisionUncertainty
-        )
-
-        val candidateActions = listOf(
-            DecisionAction(DecisionActionType.SELECT_AGENT, targetId = agent.identity.id.value),
-            DecisionAction(DecisionActionType.SELECT_MODEL, targetId = "gemini-2.5-flash"),
-            DecisionAction(DecisionActionType.SEARCH, targetId = "multi_source_search"),
-            DecisionAction(DecisionActionType.EXECUTE_STEP, targetId = "execute_prompt"),
-            DecisionAction(DecisionActionType.RETRIEVE_KNOWLEDGE, targetId = "rag_context")
-        )
-
-        val decision = cbrMdpEngine.evaluateAndSelectAction(decisionState, candidateActions)
-
         _uiState.update {
             it.copy(
                 isExecuting = true,
@@ -263,26 +241,35 @@ class MainViewModel(
                 isDegraded = false,
                 degradedReason = null,
                 diagnosticBanner = null,
-                errorMessage = null,
-                latestDecision = decision
+                errorMessage = null
             )
         }
 
         currentExecutionJob = viewModelScope.launch {
-            val startTime = System.currentTimeMillis()
             try {
-                val shouldSearch = decision.chosenAction.type == DecisionActionType.SEARCH ||
-                        prompt.contains("بحث", ignoreCase = true) ||
-                        prompt.contains("search", ignoreCase = true)
-
                 executeAgentTaskUseCase(
                     agent = agent,
                     prompt = prompt,
-                    includeWebSearch = shouldSearch
+                    networkPolicy = current.networkPolicy,
+                    isNetworkAvailable = true,
+                    includeWebSearch = false
                 ).collect { event ->
                     _uiState.update { state ->
                         val updatedLogs = state.executionLog + event
                         when (event) {
+                            is ExecutionEvent.DecisionMade -> {
+                                state.copy(
+                                    latestDecision = event.decision,
+                                    executionLog = updatedLogs
+                                )
+                            }
+                            is ExecutionEvent.ObservationRecorded -> {
+                                state.copy(
+                                    decisionUncertainty = event.updatedUncertainty,
+                                    caseBaseList = cbrMdpEngine.getCaseBase().getAllCases(),
+                                    executionLog = updatedLogs
+                                )
+                            }
                             is ExecutionEvent.ContentChunk -> {
                                 state.copy(
                                     streamText = state.streamText + event.deltaText,
@@ -309,33 +296,22 @@ class MainViewModel(
                                 state.copy(
                                     isExecuting = false,
                                     streamText = if (event.finalText.isNotBlank()) event.finalText else state.streamText,
-                                    executionLog = updatedLogs
+                                    executionLog = updatedLogs,
+                                    caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
                                 )
                             }
                             is ExecutionEvent.Error -> {
                                 state.copy(
                                     isExecuting = false,
                                     errorMessage = event.message,
-                                    executionLog = updatedLogs
+                                    executionLog = updatedLogs,
+                                    caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
                                 )
                             }
                             else -> state.copy(executionLog = updatedLogs)
                         }
                     }
                 }
-
-                // Feed back real observation to CBR-MDP Engine
-                val latency = System.currentTimeMillis() - startTime
-                val obs = EnvironmentObservation(
-                    action = decision.chosenAction,
-                    isSuccess = true,
-                    actualLatencyMs = latency,
-                    tokensConsumed = _uiState.value.currentTokensConsumed,
-                    outputSummary = _uiState.value.streamText.take(100)
-                )
-                cbrMdpEngine.processObservationAndUpdateBelief(decisionState, obs)
-                _uiState.update { it.copy(caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()) }
-
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
