@@ -12,17 +12,22 @@ enum class DecisionActionType(val code: String, val displayName: String) {
     SELECT_PROVIDER("select_provider", "اختيار المزود (سحابي/محلي)"),
     SELECT_AGENT("select_agent", "تعيين الوكيل المتخصص"),
     SELECT_TOOL("select_tool", "اختيار الأداة البرمجية"),
+    EXECUTE_TOOL("execute_tool", "تنفيذ أداة برمجية مباشرة"),
+    EXECUTE_MCP("execute_mcp", "تنفيذ أداة عبر بروتوكول MCP"),
+    EXECUTE_SKILL("execute_skill", "تنفيذ مهارة متخصصة"),
+    USE_INTEGRATION("use_integration", "استخدام خدمة تكامل خارجية"),
     SEARCH("search", "استعلام شبكي موثوق"),
     RETRIEVE_MEMORY("retrieve_memory", "استرجاع الذاكرة الذكية"),
     RETRIEVE_KNOWLEDGE("retrieve_knowledge", "استرجاع المعرفة والوثائق (RAG)"),
     CREATE_PLAN("create_plan", "إنشاء خطة تنفيذية (Workflow DAG)"),
-    EXECUTE_STEP("execute_step", "تنفيذ خطوة برمجية"),
+    EXECUTE_STEP("execute_step", "تنفيذ خطوة برمجية / توليد ذكي"),
     RETRY("retry", "إعادة المحاولة مع التعديل"),
     REPLAN("replan", "إعادة التخطيط واستدراك الفشل"),
     DELEGATE("delegate", "تفويض مهمة لوكيل آخر"),
     ASK_USER("ask_user", "طلب توضيح أو موافقة من المستخدم"),
     WAIT("wait", "انتظار اكتمال مهمة خلفية"),
-    STOP("stop", "إنهاء التنفيذ بنجاح أو توقف آمن")
+    STOP("stop", "إنهاء التنفيذ بنجاح أو توقف آمن"),
+    COMPLETE("complete", "إكمال المهمة وتحقيق الهدف النهائي")
 }
 
 /**
@@ -43,6 +48,11 @@ data class DecisionState(
     val remainingTokenBudget: Int = 30000,
     val consecutiveFailures: Int = 0,
     val uncertaintyScore: Float = 0.2f, // 0.0 (certain) to 1.0 (highly uncertain)
+    val hasSearchEvidence: Boolean = false,
+    val hasMemoryEvidence: Boolean = false,
+    val hasToolExecutionEvidence: Boolean = false,
+    val lastActionType: DecisionActionType? = null,
+    val lastActionSuccess: Boolean? = null,
     val contextFeatures: Map<String, Float> = emptyMap()
 ) {
     /**
@@ -60,7 +70,11 @@ data class DecisionState(
             if (isNetworkAvailable) 1.0f else 0.0f,
             (remainingTokenBudget.toFloat() / 30000.0f).coerceIn(0.0f, 1.0f),
             (consecutiveFailures.toFloat() / 5.0f).coerceIn(0.0f, 1.0f),
-            uncertaintyScore
+            uncertaintyScore,
+            if (hasSearchEvidence) 1.0f else 0.0f,
+            if (hasMemoryEvidence) 1.0f else 0.0f,
+            if (hasToolExecutionEvidence) 1.0f else 0.0f,
+            if (lastActionSuccess == true) 1.0f else if (lastActionSuccess == false) -1.0f else 0.0f
         )
     }
 }
@@ -132,5 +146,8 @@ data class EnvironmentObservation(
     val tokensConsumed: Int = 0,
     val errorDescription: String? = null,
     val outputSummary: String = "",
-    val feedbackReward: Float = if (isSuccess) 1.0f else -0.5f
+    val outputData: Map<String, Any?> = emptyMap(),
+    val stepIndex: Int = 0,
+    val feedbackReward: Float = if (isSuccess) 1.0f else -0.5f,
+    val timestampMs: Long = System.currentTimeMillis()
 )

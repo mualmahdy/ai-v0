@@ -35,12 +35,54 @@ sealed interface ExecutionEvent {
     ) : ExecutionEvent
 
     /**
+     * Emitted when an action execution begins within the closed-loop task lifecycle.
+     */
+    data class ActionStarted(
+        override val executionId: String,
+        val action: com.example.domain.core.decision.DecisionAction,
+        val stepIndex: Int,
+        override val timestampMs: Long = System.currentTimeMillis()
+    ) : ExecutionEvent
+
+    /**
+     * Emitted when an action finishes execution with success.
+     */
+    data class ActionCompleted(
+        override val executionId: String,
+        val action: com.example.domain.core.decision.DecisionAction,
+        val outputSummary: String,
+        val observation: com.example.domain.core.decision.EnvironmentObservation,
+        override val timestampMs: Long = System.currentTimeMillis()
+    ) : ExecutionEvent
+
+    /**
+     * Emitted when an action execution fails, feeding into the replanning/retry feedback loop.
+     */
+    data class ActionFailed(
+        override val executionId: String,
+        val action: com.example.domain.core.decision.DecisionAction,
+        val errorDescription: String,
+        val observation: com.example.domain.core.decision.EnvironmentObservation,
+        override val timestampMs: Long = System.currentTimeMillis()
+    ) : ExecutionEvent
+
+    /**
      * Emitted when an observation is fed back to the decision engine.
      */
     data class ObservationRecorded(
         override val executionId: String,
         val observation: com.example.domain.core.decision.EnvironmentObservation,
         val updatedUncertainty: Float,
+        override val timestampMs: Long = System.currentTimeMillis()
+    ) : ExecutionEvent
+
+    /**
+     * Emitted when the closed-loop orchestrator initiates a replan following degradation or failure.
+     */
+    data class Replanned(
+        override val executionId: String,
+        val reason: String,
+        val stepIndex: Int,
         override val timestampMs: Long = System.currentTimeMillis()
     ) : ExecutionEvent
 

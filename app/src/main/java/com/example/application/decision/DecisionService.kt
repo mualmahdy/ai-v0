@@ -42,7 +42,11 @@ class DecisionService(
         uncertaintyScore: Float = 0.2f,
         historyCount: Int = 0,
         memoriesCount: Int = 0,
-        complexity: Float = 0.5f
+        complexity: Float = 0.5f,
+        accumulatedEvidence: Map<String, Any?> = emptyMap(),
+        lastAction: DecisionAction? = null,
+        lastObservation: EnvironmentObservation? = null,
+        decisionHistory: List<DecisionResult> = emptyList()
     ): DecisionContext {
         val capabilities = componentRegistry.getCapabilityDescriptors()
         val availableTools = componentRegistry.listTools().map { it.declaration.name }
@@ -60,73 +64,65 @@ class DecisionService(
             uncertaintyScore = uncertaintyScore,
             conversationHistoryCount = historyCount,
             retrievedMemoriesCount = memoriesCount,
-            taskComplexity = complexity
+            taskComplexity = complexity,
+            accumulatedEvidence = accumulatedEvidence,
+            lastAction = lastAction,
+            lastObservation = lastObservation,
+            decisionHistory = decisionHistory
         )
     }
 
     /**
      * Dynamically generates the candidate action space based on active system capabilities,
-     * tool registries, network policies, and task requirements.
+     * tool registries, network policies, task requirements, and closed-loop progress.
      */
     fun generateCandidateActions(context: DecisionContext): List<DecisionAction> {
         val candidates = mutableListOf<DecisionAction>()
         val prompt = context.task.input.rawPrompt
+        val currentStep = context.task.currentStepIndex
+        val isOffline = context.networkPolicy == NetworkPolicy.OFFLINE || !context.isNetworkAvailable
 
-        // 1. Agent Selection candidates
-        candidates.add(
-            DecisionAction(
-                type = DecisionActionType.SELECT_AGENT,
-                targetId = "code_craftsman",
-                payload = mapOf("role" to "CODER")
-            )
-        )
-        candidates.add(
-            DecisionAction(
-                type = DecisionActionType.SELECT_AGENT,
-                targetId = "architect_orchestrator",
-                payload = mapOf("role" to "PLANNER")
-            )
-        )
-        candidates.add(
-            DecisionAction(
-                type = DecisionActionType.SELECT_AGENT,
-                targetId = "security_guardian",
-                payload = mapOf("role" to "SECURITY_GUARD")
-            )
-        )
-
-        // 2. Model & Provider candidates
+        // 1. Model & Provider candidates
         val llmProviders = componentRegistry.listLlmProviders()
         for (provider in llmProviders) {
-            val isOnline = provider.metadata.isOnline
             val isLocal = provider.metadata.isLocal
-            if (context.networkPolicy == NetworkPolicy.OFFLINE && !isLocal) continue
+            if (isOffline && !isLocal) continue
 
             val modelId = provider.metadata.defaultModel ?: "default"
             candidates.add(
                 DecisionAction(
                     type = DecisionActionType.SELECT_MODEL,
                     targetId = modelId,
-                    payload = mapOf("providerId" to provider.providerId, "isLocal" to isLocal.toString()),
+                    payload = mapOf(
+                        "providerId" to provider.providerId,
+                        "isLocal" to isLocal.toString(),
+                        "step" to currentStep.toString()
+                    ),
                     estimatedLatencyMs = if (isLocal) 200L else 700L
                 )
             )
         }
 
-        // 3. Web & Knowledge Search candidate
-        if (componentRegistry.getSearchProvider() != null &&
-            (context.networkPolicy != NetworkPolicy.OFFLINE || context.isNetworkAvailable)) {
-            candidates.add(
-                DecisionAction(
-                    type = DecisionActionType.SEARCH,
-                    targetId = "multi_source_search",
-                    payload = mapOf("query" to prompt.take(80)),
-                    estimatedLatencyMs = 600L
+        // 2. Web & Multi-Source Search candidates (only if online and needed/initial step)
+        if (!isOffline && componentRegistry.getSearchProvider() != null) {
+            val isSearchWanted = prompt.contains("بحث", ignoreCase = true) ||
+                    prompt.contains("search", ignoreCase = true) ||
+                    prompt.contains("أحدث", ignoreCase = true) ||
+                    prompt.contains("latest", ignoreCase = true) ||
+                    currentStep == 0
+            if (isSearchWanted) {
+                candidates.add(
+                    DecisionAction(
+                        type = DecisionActionType.SEARCH,
+                        targetId = "multi_source_search",
+                        payload = mapOf("query" to prompt.take(80)),
+                        estimatedLatencyMs = 600L
+                    )
                 )
-            )
+            }
         }
 
-        // 4. Memory & RAG Retrieval candidate
+        // 3. Memory & RAG Retrieval candidate
         if (componentRegistry.getMemoryRepository() != null) {
             candidates.add(
                 DecisionAction(
@@ -138,12 +134,12 @@ class DecisionService(
             )
         }
 
-        // 5. Tool Selection candidates from unified registry (Built-in, MCP, Skills, Plugins)
+        // 4. Concrete Tools from unified registry (Built-in, MCP, Skills, Plugins)
         for (tool in componentRegistry.listTools()) {
             val toolName = tool.declaration.name
             candidates.add(
                 DecisionAction(
-                    type = DecisionActionType.SELECT_TOOL,
+                    type = DecisionActionType.EXECUTE_TOOL,
                     targetId = toolName,
                     payload = mapOf("description" to tool.declaration.description),
                     estimatedLatencyMs = 300L
@@ -151,8 +147,18 @@ class DecisionService(
             )
         }
 
+        // 5. Synthesis / Execution step
+        candidates.add(
+            DecisionAction(
+                type = DecisionActionType.EXECUTE_STEP,
+                targetId = "standard_llm_stream",
+                payload = mapOf("prompt" to prompt, "step" to currentStep.toString()),
+                estimatedLatencyMs = 800L
+            )
+        )
+
         // 6. Workflow / Plan Creation candidate for multi-step goals
-        if (context.taskComplexity > 0.6f || prompt.contains("خطة", ignoreCase = true) || prompt.contains("plan", ignoreCase = true)) {
+        if (currentStep == 0 && (context.taskComplexity > 0.6f || prompt.contains("خطة", ignoreCase = true) || prompt.contains("plan", ignoreCase = true))) {
             candidates.add(
                 DecisionAction(
                     type = DecisionActionType.CREATE_PLAN,
@@ -163,29 +169,39 @@ class DecisionService(
             )
         }
 
-        // 7. General Step Execution
-        candidates.add(
-            DecisionAction(
-                type = DecisionActionType.EXECUTE_STEP,
-                targetId = "standard_llm_stream",
-                payload = mapOf("prompt" to prompt),
-                estimatedLatencyMs = 1000L
+        // 7. Multi-step Completion candidate if evidence has been gathered and synthesized
+        if (currentStep >= 1 && (context.accumulatedEvidence.isNotEmpty() || context.lastObservation?.isSuccess == true)) {
+            candidates.add(
+                DecisionAction(
+                    type = DecisionActionType.COMPLETE,
+                    targetId = "terminal_complete",
+                    payload = mapOf("summary" to "تم استيفاء متطلبات المهمة وتوليد النتيجة النهائية.")
+                )
             )
-        )
+        }
 
         // 8. Replan or Retry if previous failures occurred
         if (context.consecutiveFailures in 1..2) {
             candidates.add(
                 DecisionAction(
                     type = DecisionActionType.RETRY,
-                    targetId = "retry_with_backoff"
+                    targetId = "retry_with_backoff",
+                    payload = mapOf("failureCount" to context.consecutiveFailures.toString())
                 )
             )
         } else if (context.consecutiveFailures > 2) {
             candidates.add(
                 DecisionAction(
                     type = DecisionActionType.REPLAN,
-                    targetId = "degraded_fallback_replan"
+                    targetId = "degraded_fallback_replan",
+                    payload = mapOf("failureCount" to context.consecutiveFailures.toString())
+                )
+            )
+            candidates.add(
+                DecisionAction(
+                    type = DecisionActionType.ASK_USER,
+                    targetId = "user_intervention",
+                    payload = mapOf("reason" to "تكرر فشل تنفيذ الإجراء، مطلوب إرشاد المستخدم.")
                 )
             )
         }

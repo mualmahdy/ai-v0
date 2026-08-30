@@ -159,12 +159,32 @@ class AppContainer(context: Context) {
         )
     }
 
+    // Autonomous Closed-Loop Execution, Observation & Outcome Services
+    val executionService: com.example.application.execution.ExecutionService by lazy {
+        com.example.application.execution.ExecutionService(
+            componentRegistry = componentRegistry,
+            securityGuard = securityGuardService,
+            extensionManager = extensionManager
+        )
+    }
+
+    val observationService: com.example.application.observation.ObservationService by lazy {
+        com.example.application.observation.ObservationService()
+    }
+
+    val outcomeService: com.example.application.outcome.OutcomeService by lazy {
+        com.example.application.outcome.OutcomeService()
+    }
+
     // Orchestrator Engine with Task Lifecycle Persistence & CBR-MDP Integration
     val agentOrchestrator: AgentOrchestrator by lazy {
         AgentOrchestrator(
             registry = componentRegistry,
             securityGuard = securityGuardService,
             decisionService = decisionService,
+            executionService = executionService,
+            observationService = observationService,
+            outcomeService = outcomeService,
             taskDao = database.taskDao()
         )
     }

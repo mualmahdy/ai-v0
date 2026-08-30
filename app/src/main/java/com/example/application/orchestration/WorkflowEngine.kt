@@ -122,21 +122,21 @@ class WorkflowEngine(
             when (executionOutcome) {
                 is Outcome.Success -> {
                     stepStatuses[step.id] = StepStatus.COMPLETED
-                    outputs[step.id] = executionOutcome.value.text
-                    totalTokens += executionOutcome.value.usage.totalTokens
+                    outputs[step.id] = executionOutcome.value
+                    totalTokens += executionOutcome.value.length / 4
                 }
                 is Outcome.Degraded -> {
                     stepStatuses[step.id] = StepStatus.DEGRADED
                     hasDegradedStep = true
                     executionOutcome.partialValue?.let {
-                        outputs[step.id] = it.text
-                        totalTokens += it.usage.totalTokens
+                        outputs[step.id] = it
+                        totalTokens += it.length / 4
                     }
                 }
                 is Outcome.Error -> {
                     stepStatuses[step.id] = StepStatus.FAILED
                     hasFailedStep = true
-                    failureReason = executionOutcome.diagnosticMessage
+                    failureReason = executionOutcome.diagnosticMessage.ifBlank { executionOutcome.failure }
                 }
             }
         }

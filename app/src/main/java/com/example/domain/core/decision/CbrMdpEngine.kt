@@ -74,34 +74,77 @@ class CbrMdpEngine(
         var latencyPenalty = (action.estimatedLatencyMs.toFloat() / 5000.0f).coerceIn(0.0f, 0.3f)
 
         // Offline / Network constraints
-        if (state.networkPolicy == NetworkPolicy.OFFLINE && !state.isNetworkAvailable) {
-            if (action.type == DecisionActionType.SEARCH || (action.type == DecisionActionType.SELECT_PROVIDER && action.targetId?.contains("cloud", ignoreCase = true) == true)) {
+        if (state.networkPolicy == NetworkPolicy.OFFLINE || !state.isNetworkAvailable) {
+            val isRemoteAction = action.type == DecisionActionType.SEARCH ||
+                    (action.type == DecisionActionType.SELECT_PROVIDER && action.targetId?.contains("cloud", ignoreCase = true) == true) ||
+                    (action.type == DecisionActionType.SELECT_MODEL && action.payload["isLocal"] == "false") ||
+                    (action.type == DecisionActionType.EXECUTE_MCP && action.payload["isLocal"] == "false") ||
+                    (action.type == DecisionActionType.USE_INTEGRATION)
+            if (isRemoteAction) {
                 immediateReward = -1.0f
                 costPenalty = 1.0f
             }
         }
 
-        // Action-specific heuristics
+        // Action-specific heuristics and closed-loop state transitions
         when (action.type) {
-            DecisionActionType.SELECT_MODEL -> {
+            DecisionActionType.SELECT_MODEL, DecisionActionType.EXECUTE_STEP -> {
                 if (state.requiresVision) immediateReward += 0.2f
                 if (state.requiresToolCalling) immediateReward += 0.2f
+                // When search or memory evidence has already been gathered in previous step, prioritize model synthesis
+                if ((state.hasSearchEvidence || state.hasMemoryEvidence || state.hasToolExecutionEvidence) && state.currentStep > 0) {
+                    immediateReward += 0.45f
+                }
             }
             DecisionActionType.SELECT_AGENT -> {
                 if (state.requiresCoding && action.targetId == "code_craftsman") immediateReward += 0.3f
                 if (state.taskComplexity > 0.7f && action.targetId == "architect_orchestrator") immediateReward += 0.25f
             }
             DecisionActionType.SEARCH -> {
-                if (state.requiresWebSearch) immediateReward += 0.35f else immediateReward -= 0.2f
+                if (state.requiresWebSearch && !state.hasSearchEvidence) {
+                    immediateReward += 0.4f
+                } else if (state.hasSearchEvidence) {
+                    // Already searched, lower immediate reward unless replanning
+                    immediateReward -= 0.3f
+                } else {
+                    immediateReward -= 0.2f
+                }
+            }
+            DecisionActionType.RETRIEVE_MEMORY, DecisionActionType.RETRIEVE_KNOWLEDGE -> {
+                if (!state.hasMemoryEvidence) {
+                    immediateReward += 0.35f
+                } else {
+                    immediateReward -= 0.2f
+                }
+            }
+            DecisionActionType.EXECUTE_TOOL, DecisionActionType.SELECT_TOOL -> {
+                if (state.requiresToolCalling) immediateReward += 0.35f
+            }
+            DecisionActionType.EXECUTE_MCP -> {
+                immediateReward += 0.3f
+            }
+            DecisionActionType.EXECUTE_SKILL -> {
+                immediateReward += 0.35f
+            }
+            DecisionActionType.USE_INTEGRATION -> {
+                immediateReward += 0.3f
             }
             DecisionActionType.RETRY -> {
-                if (state.consecutiveFailures in 1..2) immediateReward += 0.1f else immediateReward -= 0.4f
+                if (state.consecutiveFailures in 1..2) immediateReward += 0.25f else immediateReward -= 0.5f
             }
             DecisionActionType.REPLAN -> {
-                if (state.consecutiveFailures >= 2) immediateReward += 0.4f
+                if (state.consecutiveFailures >= 2) immediateReward += 0.5f else immediateReward -= 0.3f
             }
             DecisionActionType.CREATE_PLAN -> {
                 if (state.taskComplexity > 0.6f && state.currentStep == 0) immediateReward += 0.3f
+            }
+            DecisionActionType.COMPLETE, DecisionActionType.STOP -> {
+                if ((state.hasSearchEvidence || state.hasMemoryEvidence || state.hasToolExecutionEvidence) && state.currentStep >= 2) {
+                    immediateReward += 0.6f
+                }
+            }
+            DecisionActionType.ASK_USER -> {
+                if (state.consecutiveFailures > 2) immediateReward += 0.4f
             }
             else -> Unit
         }
@@ -165,10 +208,21 @@ class CbrMdpEngine(
             (state.uncertaintyScore * 1.3f).coerceAtMost(0.95f)
         }
 
+        // Update evidence flags based on action type and outcome
+        val hasSearch = state.hasSearchEvidence || (observation.action.type == DecisionActionType.SEARCH && observation.isSuccess)
+        val hasMemory = state.hasMemoryEvidence || ((observation.action.type == DecisionActionType.RETRIEVE_MEMORY || observation.action.type == DecisionActionType.RETRIEVE_KNOWLEDGE) && observation.isSuccess)
+        val hasTool = state.hasToolExecutionEvidence || ((observation.action.type == DecisionActionType.EXECUTE_TOOL || observation.action.type == DecisionActionType.SELECT_TOOL || observation.action.type == DecisionActionType.EXECUTE_MCP || observation.action.type == DecisionActionType.EXECUTE_SKILL) && observation.isSuccess)
+
         return state.copy(
             consecutiveFailures = updatedFailures,
             uncertaintyScore = updatedUncertainty,
-            remainingTokenBudget = (state.remainingTokenBudget - observation.tokensConsumed).coerceAtLeast(0)
+            remainingTokenBudget = (state.remainingTokenBudget - observation.tokensConsumed).coerceAtLeast(0),
+            hasSearchEvidence = hasSearch,
+            hasMemoryEvidence = hasMemory,
+            hasToolExecutionEvidence = hasTool,
+            lastActionType = observation.action.type,
+            lastActionSuccess = observation.isSuccess,
+            currentStep = state.currentStep + 1
         )
     }
 

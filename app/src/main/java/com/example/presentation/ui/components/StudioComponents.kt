@@ -177,6 +177,38 @@ fun ExecutionEventTimelineItem(
                 "${event.decision.rationale.take(60)} (ثقة: ${"%.0f".format(event.decision.confidence * 100)}%)"
             )
         }
+        is ExecutionEvent.ActionStarted -> {
+            Quadruple(
+                Icons.Default.Bolt,
+                MaterialTheme.colorScheme.primary,
+                "بدء تنفيذ خطوة ${event.stepIndex + 1}: ${event.action.type.displayName}",
+                "الهدف: ${event.action.targetId ?: "عام"}"
+            )
+        }
+        is ExecutionEvent.ActionCompleted -> {
+            Quadruple(
+                Icons.Default.CheckCircle,
+                Color(0xFF2E7D32),
+                "نجاح تنفيذ: ${event.action.type.displayName}",
+                event.outputSummary.take(60)
+            )
+        }
+        is ExecutionEvent.ActionFailed -> {
+            Quadruple(
+                Icons.Default.WarningAmber,
+                MaterialTheme.colorScheme.error,
+                "فشل خطوة: ${event.action.type.displayName}",
+                event.errorDescription.take(60)
+            )
+        }
+        is ExecutionEvent.Replanned -> {
+            Quadruple(
+                Icons.Default.Psychology,
+                MaterialTheme.colorScheme.secondary,
+                "إعادة تخطيط المهمة",
+                event.reason.take(60)
+            )
+        }
         is ExecutionEvent.ObservationRecorded -> {
             Quadruple(
                 Icons.Default.CheckCircle,

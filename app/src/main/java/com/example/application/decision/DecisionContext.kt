@@ -1,7 +1,11 @@
 package com.example.application.decision
 
 import com.example.domain.core.capability.CapabilityDescriptor
+import com.example.domain.core.decision.DecisionAction
+import com.example.domain.core.decision.DecisionActionType
+import com.example.domain.core.decision.DecisionResult
 import com.example.domain.core.decision.DecisionState
+import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.workspace.ResourceGraph
@@ -25,6 +29,10 @@ data class DecisionContext(
     val conversationHistoryCount: Int = 0,
     val retrievedMemoriesCount: Int = 0,
     val taskComplexity: Float = 0.5f,
+    val accumulatedEvidence: Map<String, Any?> = emptyMap(),
+    val lastAction: DecisionAction? = null,
+    val lastObservation: EnvironmentObservation? = null,
+    val decisionHistory: List<DecisionResult> = emptyList(),
     val metadata: Map<String, String> = emptyMap()
 ) {
     /**
@@ -52,6 +60,10 @@ data class DecisionContext(
                 prompt.contains("code", ignoreCase = true) ||
                 prompt.contains("function", ignoreCase = true)
 
+        val hasSearch = accumulatedEvidence.containsKey("searchResults") || (lastAction?.type == DecisionActionType.SEARCH && lastObservation?.isSuccess == true)
+        val hasMemory = accumulatedEvidence.containsKey("memorySnippets") || ((lastAction?.type == DecisionActionType.RETRIEVE_MEMORY || lastAction?.type == DecisionActionType.RETRIEVE_KNOWLEDGE) && lastObservation?.isSuccess == true)
+        val hasTool = accumulatedEvidence.containsKey("toolOutput") || ((lastAction?.type == DecisionActionType.EXECUTE_TOOL || lastAction?.type == DecisionActionType.SELECT_TOOL || lastAction?.type == DecisionActionType.EXECUTE_MCP || lastAction?.type == DecisionActionType.EXECUTE_SKILL) && lastObservation?.isSuccess == true)
+
         return DecisionState(
             taskId = task.id,
             taskComplexity = taskComplexity,
@@ -67,10 +79,16 @@ data class DecisionContext(
             remainingTokenBudget = remainingTokenBudget,
             consecutiveFailures = consecutiveFailures,
             uncertaintyScore = uncertaintyScore,
+            hasSearchEvidence = hasSearch,
+            hasMemoryEvidence = hasMemory,
+            hasToolExecutionEvidence = hasTool,
+            lastActionType = lastAction?.type,
+            lastActionSuccess = lastObservation?.isSuccess,
             contextFeatures = mapOf(
                 "memoriesCount" to retrievedMemoriesCount.toFloat(),
                 "historyCount" to conversationHistoryCount.toFloat(),
-                "availableToolsCount" to availableTools.size.toFloat()
+                "availableToolsCount" to availableTools.size.toFloat(),
+                "evidenceKeysCount" to accumulatedEvidence.size.toFloat()
             )
         )
     }
