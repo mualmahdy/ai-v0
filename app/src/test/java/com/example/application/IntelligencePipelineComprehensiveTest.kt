@@ -30,7 +30,9 @@ import com.example.domain.core.llm.TokenUsage
 import com.example.domain.core.memory.MemoryEntry
 import com.example.domain.core.memory.MemoryProvenance
 import com.example.domain.core.memory.MemoryType
+import com.example.domain.core.memory.RetrievalMode
 import com.example.domain.core.memory.ScoredMemoryRecord
+import com.example.domain.ports.memory.MemoryRepositoryPort
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.search.SearchFailure
 import com.example.domain.core.search.SearchQuery
@@ -202,24 +204,23 @@ class IntelligencePipelineComprehensiveTest {
     // 3. Memory Retrieval Test
     @Test
     fun `3 - test memory retrieval injects context into execution`() = runBlocking {
-        val mockVectorStore = object : VectorStorePort {
-            override suspend fun saveMemory(entry: MemoryEntry, vector: FloatArray): Outcome<Unit, String> = Outcome.Success(Unit)
+        val mockVectorStore = object : MemoryRepositoryPort {
+            override suspend fun storeMemory(entry: MemoryEntry): Outcome<Unit, com.example.domain.core.memory.VectorStoreFailure> = Outcome.Success(Unit)
 
-            override suspend fun retrieveMemories(query: String, topK: Int): Outcome<List<ScoredMemoryRecord>, String> {
+            override suspend fun retrieveMemories(query: String, topK: Int, minConfidence: Float): Outcome<List<ScoredMemoryRecord>, com.example.domain.core.memory.VectorStoreFailure> {
                 val entry = MemoryEntry(
                     id = "mem-1",
                     content = "Project uses Room 2.6 and Jetpack Compose 1.7",
                     type = MemoryType.FACTUAL_INSIGHT,
                     confidence = 0.95f,
-                    provenance = MemoryProvenance("test", System.currentTimeMillis()),
+                    provenance = MemoryProvenance(sourceTaskId = "test", createdAtTimestampMs = System.currentTimeMillis()),
                     isActive = true
                 )
-                return Outcome.Success(listOf(ScoredMemoryRecord(entry, 0.95f)))
+                return Outcome.Success(listOf(ScoredMemoryRecord(entry = entry, similarityScore = 0.95f, retrievalMode = RetrievalMode.SEMANTIC)))
             }
 
-            override suspend fun getAllActive(): Outcome<List<MemoryEntry>, String> = Outcome.Success(emptyList())
-            override suspend fun deleteMemory(id: String): Outcome<Unit, String> = Outcome.Success(Unit)
-            override suspend fun clearAll(): Outcome<Unit, String> = Outcome.Success(Unit)
+            override suspend fun getAllActiveMemories(): Outcome<List<MemoryEntry>, com.example.domain.core.memory.VectorStoreFailure> = Outcome.Success(emptyList())
+            override suspend fun deleteMemory(id: String): Outcome<Unit, com.example.domain.core.memory.VectorStoreFailure> = Outcome.Success(Unit)
         }
 
         registry.registerMemoryRepository(mockVectorStore)
@@ -275,7 +276,8 @@ class IntelligencePipelineComprehensiveTest {
                 name = "Failing Search",
                 providerType = "MOCK",
                 isConfigured = true,
-                isEnabled = true
+                isEnabled = true,
+                priority = 1
             )
 
             override suspend fun search(query: SearchQuery): Outcome<SearchResultSet, SearchFailure> {
@@ -344,7 +346,7 @@ class IntelligencePipelineComprehensiveTest {
             id = TaskId("task-comp-9"),
             assignedAgentId = testAgent.identity.id,
             input = TaskInput("بحث عن تاريخ الأندلس"),
-            successCriteria = com.example.domain.core.task.SuccessCriteria(minOutputLengthChars = 20)
+            successCriteria = com.example.domain.core.task.TaskSuccessCriteria(minOutputLengthChars = 20)
         )
 
         // Without evidence or synthesized text, objective is NOT satisfied

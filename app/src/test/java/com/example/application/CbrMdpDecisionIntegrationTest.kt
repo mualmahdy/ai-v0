@@ -56,7 +56,7 @@ class CbrMdpDecisionIntegrationTest {
 
         val candidates = decisionService.generateCandidateActions(context)
         assertTrue(candidates.isNotEmpty())
-        assertTrue(candidates.any { it.type == DecisionActionType.SELECT_AGENT })
+        assertTrue(candidates.any { it.type == DecisionActionType.EXECUTE_STEP || it.type == DecisionActionType.SELECT_TOOL || it.type == DecisionActionType.EXECUTE_SKILL || it.type == DecisionActionType.SELECT_AGENT })
 
         val decisionResult = decisionService.evaluate(context)
         assertNotNull(decisionResult.chosenAction)

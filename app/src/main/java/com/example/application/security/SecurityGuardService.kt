@@ -21,6 +21,35 @@ class SecurityGuardService(
     override fun evaluateToolExecution(input: ToolInput, policy: SecurityPolicy): SecurityEvaluation {
         val toolName = input.toolName.lowercase()
 
+        // 0. Explicit Prohibited Tool Patterns check
+        for (pattern in policy.prohibitedToolPatterns) {
+            if (pattern.isNotBlank() && (toolName.matches(Regex(pattern)) || toolName.contains(pattern, ignoreCase = true) || input.toolName.matches(Regex(pattern)))) {
+                return SecurityEvaluation(
+                    decision = SecurityDecision.DENY,
+                    riskLevel = RiskLevel.CRITICAL,
+                    matchedRule = "PROHIBITED_TOOL_PATTERN",
+                    explanation = "الأداة ${input.toolName} محظورة وفقاً لسياسة الأمان (المطابقة: $pattern)."
+                )
+            }
+        }
+
+        // 0.1 Explicit Prohibited Parameters check
+        for (prohibitedParam in policy.prohibitedParameters) {
+            if (prohibitedParam.isNotBlank()) {
+                val foundInArgs = input.arguments.values.any { arg ->
+                    arg?.toString()?.contains(prohibitedParam, ignoreCase = true) == true
+                }
+                if (foundInArgs) {
+                    return SecurityEvaluation(
+                        decision = SecurityDecision.DENY,
+                        riskLevel = RiskLevel.CRITICAL,
+                        matchedRule = "PROHIBITED_PARAMETER_PATTERN",
+                        explanation = "المدخلات تحتوي على وسيط محظور أمنياً: $prohibitedParam"
+                    )
+                }
+            }
+        }
+
         // 1. Check Shell / Terminal execution policy
         if (toolName == "shell" || toolName == "terminal" || toolName == "safeshell") {
             if (!policy.allowShellCommands) {

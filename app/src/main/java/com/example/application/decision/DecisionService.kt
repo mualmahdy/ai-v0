@@ -82,25 +82,27 @@ class DecisionService(
         val currentStep = context.task.currentStepIndex
         val isOffline = context.networkPolicy == NetworkPolicy.OFFLINE || !context.isNetworkAvailable
 
-        // 1. Model & Provider candidates
-        val llmProviders = componentRegistry.listLlmProviders()
-        for (provider in llmProviders) {
-            val isLocal = provider.metadata.isLocal
-            if (isOffline && !isLocal) continue
+        // 1. Model & Provider candidates (at initial step)
+        if (currentStep == 0) {
+            val llmProviders = componentRegistry.listLlmProviders()
+            for (provider in llmProviders) {
+                val isLocal = provider.metadata.isLocal
+                if (isOffline && !isLocal) continue
 
-            val modelId = provider.metadata.defaultModel ?: "default"
-            candidates.add(
-                DecisionAction(
-                    type = DecisionActionType.SELECT_MODEL,
-                    targetId = modelId,
-                    payload = mapOf(
-                        "providerId" to provider.providerId,
-                        "isLocal" to isLocal.toString(),
-                        "step" to currentStep.toString()
-                    ),
-                    estimatedLatencyMs = if (isLocal) 200L else 700L
+                val modelId = provider.metadata.defaultModel ?: "default"
+                candidates.add(
+                    DecisionAction(
+                        type = DecisionActionType.SELECT_MODEL,
+                        targetId = modelId,
+                        payload = mapOf(
+                            "providerId" to provider.providerId,
+                            "isLocal" to isLocal.toString(),
+                            "step" to currentStep.toString()
+                        ),
+                        estimatedLatencyMs = if (isLocal) 200L else 700L
+                    )
                 )
-            )
+            }
         }
 
         // 2. Web & Multi-Source Search candidates (only if online and needed/initial step)
@@ -135,16 +137,50 @@ class DecisionService(
         }
 
         // 4. Concrete Tools from unified registry (Built-in, MCP, Skills, Plugins)
+        val isFileTask = prompt.contains("ملف", ignoreCase = true) || prompt.contains("file", ignoreCase = true) ||
+                prompt.contains("مجلد", ignoreCase = true) || prompt.contains("directory", ignoreCase = true) ||
+                prompt.contains("workspace", ignoreCase = true) || prompt.contains("حفظ", ignoreCase = true) ||
+                prompt.contains("قراءة", ignoreCase = true) || prompt.contains("read", ignoreCase = true) || prompt.contains("write", ignoreCase = true)
+        val isDiagTask = prompt.contains("تشخيص", ignoreCase = true) || prompt.contains("diagnostic", ignoreCase = true) ||
+                prompt.contains("أداء", ignoreCase = true) || prompt.contains("ذاكرة", ignoreCase = true) ||
+                prompt.contains("health", ignoreCase = true) || prompt.contains("sandbox", ignoreCase = true)
+        val isSkillTask = prompt.contains("arch", ignoreCase = true) || prompt.contains("معمار", ignoreCase = true) ||
+                prompt.contains("أمان", ignoreCase = true) || prompt.contains("audit", ignoreCase = true)
+
         for (tool in componentRegistry.listTools()) {
             val toolName = tool.declaration.name
-            candidates.add(
-                DecisionAction(
-                    type = DecisionActionType.EXECUTE_TOOL,
-                    targetId = toolName,
-                    payload = mapOf("description" to tool.declaration.description),
-                    estimatedLatencyMs = 300L
+            val toolDesc = tool.declaration.description
+
+            // Capability & Suitability Filter
+            val isRelevant = when {
+                toolName.contains("file", ignoreCase = true) || toolName.contains("storage", ignoreCase = true) -> isFileTask
+                toolName.contains("diagnostic", ignoreCase = true) || toolName.contains("health", ignoreCase = true) -> isDiagTask
+                toolName.contains("skill", ignoreCase = true) || toolName.contains("scaffold", ignoreCase = true) || toolName.contains("audit", ignoreCase = true) -> isSkillTask
+                else -> prompt.contains(toolName, ignoreCase = true) || isFileTask || isDiagTask
+            }
+
+            if (!isRelevant && currentStep > 0 && context.accumulatedEvidence.containsKey("toolOutput")) {
+                continue
+            }
+
+            if (isRelevant || currentStep == 0) {
+                val toolInput = ToolInput(
+                    toolName = toolName,
+                    arguments = mapOf("description" to toolDesc),
+                    executionId = context.task.id.value
                 )
-            )
+                val secEvaluation = securityGuard.evaluateToolExecution(toolInput, defaultSecurityPolicy)
+                if (secEvaluation.decision != SecurityDecision.DENY) {
+                    candidates.add(
+                        DecisionAction(
+                            type = DecisionActionType.EXECUTE_TOOL,
+                            targetId = toolName,
+                            payload = mapOf("description" to toolDesc),
+                            estimatedLatencyMs = 300L
+                        )
+                    )
+                }
+            }
         }
 
         // 5. Synthesis / Execution step
@@ -250,7 +286,7 @@ class DecisionService(
         }
 
         // Check tool actions with SecurityGuardService
-        if (action.type == DecisionActionType.SELECT_TOOL && action.targetId != null) {
+        if ((action.type == DecisionActionType.SELECT_TOOL || action.type == DecisionActionType.EXECUTE_TOOL) && action.targetId != null) {
             val toolInput = ToolInput(
                 toolName = action.targetId,
                 arguments = action.payload,
@@ -267,6 +303,33 @@ class DecisionService(
         }
 
         return action
+    }
+
+    /**
+     * Dynamically selects the most suitable agent definition from registered candidates.
+     */
+    fun selectSuitableAgent(
+        task: TaskDefinition,
+        availableAgents: List<com.example.domain.core.agent.AgentDefinition>
+    ): com.example.domain.core.agent.AgentDefinition? {
+        if (availableAgents.isEmpty()) return null
+
+        val prompt = task.input.rawPrompt.lowercase()
+        val isCoding = prompt.contains("code") || prompt.contains("برمج") || prompt.contains("kotlin") || prompt.contains("class") || prompt.contains("function")
+        val isResearch = prompt.contains("search") || prompt.contains("بحث") || prompt.contains("latest") || prompt.contains("أحدث")
+        val isAudit = prompt.contains("security") || prompt.contains("أمان") || prompt.contains("audit") || prompt.contains("فحص")
+        val isPlanning = prompt.contains("plan") || prompt.contains("خطة") || prompt.contains("workflow")
+
+        return availableAgents.firstOrNull { agent ->
+            when (agent.identity.role) {
+                com.example.domain.core.agent.AgentRole.CODER -> isCoding
+                com.example.domain.core.agent.AgentRole.RESEARCHER -> isResearch
+                com.example.domain.core.agent.AgentRole.SECURITY_GUARD -> isAudit
+                com.example.domain.core.agent.AgentRole.PLANNER -> isPlanning
+                else -> false
+            }
+        } ?: availableAgents.firstOrNull { it.identity.role == com.example.domain.core.agent.AgentRole.GENERAL_ASSISTANT }
+        ?: availableAgents.firstOrNull()
     }
 
     /**

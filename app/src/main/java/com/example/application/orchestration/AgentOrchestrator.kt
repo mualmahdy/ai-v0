@@ -18,7 +18,10 @@ import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.llm.LlmMessage
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.security.SecurityPolicy
+import com.example.domain.core.agent.AgentId
 import com.example.domain.core.task.TaskDefinition
+import com.example.domain.core.task.TaskId
+import com.example.domain.core.task.TaskInput
 import com.example.domain.core.task.TaskLifecycleState
 import com.example.infrastructure.persistence.dao.TaskDao
 import com.example.infrastructure.persistence.entities.TaskEntity
@@ -183,12 +186,24 @@ class AgentOrchestrator(
 
             // Handle early pause / termination actions
             if (chosenAction.type == DecisionActionType.COMPLETE || chosenAction.type == DecisionActionType.STOP) {
-                val summaryText = accumulatedOutputText.toString().ifBlank { chosenAction.payload["summary"] ?: "تم إكمال المهمة بنجاح." }
-                finalResultText = summaryText
-                isTerminal = true
-                break
+                val verification = outcomeService.verifyTaskCompletion(
+                    task = currentTask,
+                    accumulatedEvidence = accumulatedEvidence,
+                    finalOutputText = accumulatedOutputText.toString(),
+                    lastAction = chosenAction
+                )
+                if (verification.isSatisfied) {
+                    val summaryText = accumulatedOutputText.toString().ifBlank { chosenAction.payload["summary"] ?: "تم إكمال المهمة بنجاح." }
+                    finalResultText = summaryText
+                    isTerminal = true
+                    break
+                } else {
+                    consecutiveFailures++
+                    accumulatedOutputText.append("\n[حوكمة]: لم تُستوفَ معايير الاكتمال: ${verification.missingCriteria.joinToString(", ")}")
+                }
             } else if (chosenAction.type == DecisionActionType.ASK_USER) {
-                val reason = chosenAction.payload["reason"] ?: "مطلوب تأكيد من المستخدم."
+                val reason = chosenAction.payload["reason"] ?: "مطلوب تأكيد أو مدخلات من المستخدم."
+                persistTaskFinal(currentTask.id.value, "WAITING", reason, accumulatedTokens, System.currentTimeMillis() - startTime, isDegraded, degradedReason?.name, null)
                 emit(
                     ExecutionEvent.Degraded(
                         executionId = executionId,
@@ -197,7 +212,7 @@ class AgentOrchestrator(
                     )
                 )
                 isTerminal = true
-                break
+                return@flow
             }
 
             emit(
@@ -326,10 +341,33 @@ class AgentOrchestrator(
             }
         }
 
-        // 9. Emit Final Completed Event and Persist Terminal State
+        // 9. Final Objective Verification before emitting Completed Event
+        val isFinalObjectiveMet = outcomeService.isTaskObjectiveSatisfied(
+            task = currentTask,
+            accumulatedEvidence = accumulatedEvidence,
+            finalOutputText = accumulatedOutputText.toString(),
+            lastAction = decisionHistory.lastOrNull()?.chosenAction ?: DecisionAction(DecisionActionType.STOP)
+        )
+
         val totalDuration = System.currentTimeMillis() - startTime
-        val stateStr = if (isDegraded) "DEGRADED" else "COMPLETED"
-        val finalOutput = if (finalResultText.isNotBlank()) finalResultText else accumulatedOutputText.toString().ifBlank { "تم تنفيذ المهمة بنجاح." }
+        val finalOutput = if (finalResultText.isNotBlank()) finalResultText else accumulatedOutputText.toString().ifBlank { "اكتملت معالجة المهمة." }
+
+        if (!isFinalObjectiveMet && !task.constraints.allowDegradedExecution) {
+            val failureMsg = "فشلت المهمة في استيفاء معايير القبول المحددة بعد $stepIndex خطوات."
+            persistTaskFinal(currentTask.id.value, "FAILED", finalOutput.take(200), accumulatedTokens, totalDuration, isDegraded, degradedReason?.name, failureMsg)
+            emit(
+                ExecutionEvent.Error(
+                    executionId = executionId,
+                    failureCode = "OBJECTIVE_NOT_SATISFIED",
+                    message = failureMsg,
+                    isFatal = true
+                )
+            )
+            return@flow
+        }
+
+        val stateStr = if (isDegraded || !isFinalObjectiveMet) "DEGRADED" else "COMPLETED"
+        val effectiveDegradedReason = if (!isFinalObjectiveMet) DegradedReason.PARTIAL_EVIDENCE else degradedReason
 
         persistTaskFinal(
             taskId = currentTask.id.value,
@@ -337,8 +375,8 @@ class AgentOrchestrator(
             outcomeSummary = finalOutput.take(200),
             tokensConsumed = accumulatedTokens,
             durationMs = totalDuration,
-            isDegraded = isDegraded,
-            degradedReason = degradedReason?.name,
+            isDegraded = isDegraded || !isFinalObjectiveMet,
+            degradedReason = effectiveDegradedReason?.name,
             errorMsg = null
         )
 
@@ -347,40 +385,73 @@ class AgentOrchestrator(
                 executionId = executionId,
                 finalText = finalOutput,
                 totalDurationMs = totalDuration,
-                isDegraded = isDegraded,
-                degradedReason = degradedReason
+                isDegraded = isDegraded || !isFinalObjectiveMet,
+                degradedReason = effectiveDegradedReason
             )
         )
     }
 
-    private fun persistTaskInitial(task: TaskDefinition, agent: AgentDefinition) {
+    /**
+     * Resumes execution of a previously persisted task from Room database.
+     */
+    fun resumeTask(taskId: String): Flow<ExecutionEvent> = flow {
+        val dao = taskDao
+        if (dao == null) {
+            emit(ExecutionEvent.Error("resume_err", "NO_PERSISTENCE", "قاعدة البيانات غير متاحة لاستئناف المهمة."))
+            return@flow
+        }
+        val taskEntity = dao.getTaskById(taskId)
+        if (taskEntity == null) {
+            emit(ExecutionEvent.Error("resume_err", "TASK_NOT_FOUND", "المهمة ذات المعرف $taskId غير موجودة."))
+            return@flow
+        }
+
+        val taskDef = TaskDefinition(
+            id = TaskId(taskEntity.id),
+            assignedAgentId = AgentId(taskEntity.assignedAgentId),
+            goal = taskEntity.rawPrompt,
+            input = TaskInput(rawPrompt = taskEntity.rawPrompt),
+            state = TaskLifecycleState.valueOf(taskEntity.lifecycleState)
+        )
+
+        val assignedAgent = registry.listAgents().firstOrNull { it.identity.id.value == taskEntity.assignedAgentId }
+            ?: decisionService.selectSuitableAgent(taskDef, registry.listAgents())
+            ?: registry.listAgents().firstOrNull()
+
+        if (assignedAgent == null) {
+            emit(ExecutionEvent.Error("resume_err", "NO_AGENT_FOUND", "لا يوجد عميل متاح لاستئناف المهمة."))
+            return@flow
+        }
+
+        executeTaskStream(assignedAgent, taskDef).collect { emit(it) }
+    }
+
+    private suspend fun persistTaskInitial(task: TaskDefinition, agent: AgentDefinition) {
         val dao = taskDao ?: return
-        coroutineScope.launch {
-            try {
-                dao.insertOrUpdateTask(
-                    TaskEntity(
-                        id = task.id.value,
-                        assignedAgentId = agent.identity.id.value,
-                        rawPrompt = task.input.rawPrompt,
-                        lifecycleState = "INITIALIZED",
-                        autonomyPolicy = task.constraints.autonomyPolicy.name,
-                        resultSummary = null,
-                        totalTokensConsumed = 0,
-                        durationMs = 0L,
-                        isDegraded = false,
-                        degradedReason = null,
-                        errorMessage = null,
-                        createdAtEpochMs = System.currentTimeMillis(),
-                        updatedAtEpochMs = System.currentTimeMillis()
-                    )
+        try {
+            dao.insertOrUpdateTask(
+                TaskEntity(
+                    id = task.id.value,
+                    assignedAgentId = agent.identity.id.value,
+                    rawPrompt = task.input.rawPrompt,
+                    lifecycleState = "INITIALIZED",
+                    autonomyPolicy = task.constraints.autonomyPolicy.name,
+                    resultSummary = null,
+                    totalTokensConsumed = 0,
+                    durationMs = 0L,
+                    isDegraded = false,
+                    degradedReason = null,
+                    errorMessage = null,
+                    createdAtEpochMs = System.currentTimeMillis(),
+                    updatedAtEpochMs = System.currentTimeMillis()
                 )
-            } catch (_: Exception) {
-                // Room persistence non-blocking on failure
-            }
+            )
+        } catch (_: Exception) {
+            // Safe fallback
         }
     }
 
-    private fun persistTaskUpdate(
+    private suspend fun persistTaskUpdate(
         taskId: String,
         stateStr: String,
         outcomeSummary: String?,
@@ -391,26 +462,24 @@ class AgentOrchestrator(
         errorMsg: String?
     ) {
         val dao = taskDao ?: return
-        coroutineScope.launch {
-            try {
-                dao.updateTaskStatus(
-                    id = taskId,
-                    state = stateStr,
-                    summary = outcomeSummary,
-                    tokens = tokensConsumed,
-                    duration = durationMs,
-                    isDegraded = isDegraded,
-                    degradedReason = degradedReason,
-                    errorMsg = errorMsg,
-                    now = System.currentTimeMillis()
-                )
-            } catch (_: Exception) {
-                // Ignore DB logging exceptions
-            }
+        try {
+            dao.updateTaskStatus(
+                id = taskId,
+                state = stateStr,
+                summary = outcomeSummary,
+                tokens = tokensConsumed,
+                duration = durationMs,
+                isDegraded = isDegraded,
+                degradedReason = degradedReason,
+                errorMsg = errorMsg,
+                now = System.currentTimeMillis()
+            )
+        } catch (_: Exception) {
+            // Safe fallback
         }
     }
 
-    private fun persistTaskFinal(
+    private suspend fun persistTaskFinal(
         taskId: String,
         stateStr: String,
         outcomeSummary: String?,
@@ -421,22 +490,20 @@ class AgentOrchestrator(
         errorMsg: String?
     ) {
         val dao = taskDao ?: return
-        coroutineScope.launch {
-            try {
-                dao.updateTaskStatus(
-                    id = taskId,
-                    state = stateStr,
-                    summary = outcomeSummary,
-                    tokens = tokensConsumed,
-                    duration = durationMs,
-                    isDegraded = isDegraded,
-                    degradedReason = degradedReason,
-                    errorMsg = errorMsg,
-                    now = System.currentTimeMillis()
-                )
-            } catch (_: Exception) {
-                // Ignore DB logging exceptions
-            }
+        try {
+            dao.updateTaskStatus(
+                id = taskId,
+                state = stateStr,
+                summary = outcomeSummary,
+                tokens = tokensConsumed,
+                duration = durationMs,
+                isDegraded = isDegraded,
+                degradedReason = degradedReason,
+                errorMsg = errorMsg,
+                now = System.currentTimeMillis()
+            )
+        } catch (_: Exception) {
+            // Safe fallback
         }
     }
 }

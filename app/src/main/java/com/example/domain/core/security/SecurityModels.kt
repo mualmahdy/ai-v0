@@ -28,7 +28,9 @@ data class SecurityPolicy(
     val allowExternalNetwork: Boolean = true,
     val restrictedPaths: Set<String> = setOf("/system", "/data", "/proc", "/sys", ".."),
     val maxSingleTaskTokenBudget: Int = 16000,
-    val sanitizeUntrustedToolOutputs: Boolean = true
+    val sanitizeUntrustedToolOutputs: Boolean = true,
+    val prohibitedToolPatterns: List<String> = emptyList(),
+    val prohibitedParameters: List<String> = emptyList()
 )
 
 /**

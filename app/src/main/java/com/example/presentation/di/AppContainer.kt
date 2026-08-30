@@ -105,6 +105,61 @@ class AppContainer(context: Context) {
             registerMemoryRepository(memoryVectorStore)
             registerTool(fileSystemTool)
             registerTool(safeDiagnosticsTool)
+
+            // Register standard agents
+            registerAgent(
+                com.example.domain.core.agent.AgentDefinition(
+                    identity = com.example.domain.core.agent.AgentIdentity(
+                        id = com.example.domain.core.agent.AgentId("agent_general"),
+                        name = "المساعد الشامل",
+                        role = com.example.domain.core.agent.AgentRole.GENERAL_ASSISTANT,
+                        description = "المساعد العام للنظام",
+                        systemPrompt = com.example.domain.core.agent.AgentRole.GENERAL_ASSISTANT.defaultSystemPrompt
+                    ),
+                    allowedCapabilities = setOf(
+                        com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
+                        com.example.domain.core.capability.CapabilityType.STREAMING,
+                        com.example.domain.core.capability.CapabilityType.SEARCH,
+                        com.example.domain.core.capability.CapabilityType.MEMORY_RETRIEVAL
+                    ),
+                    budget = com.example.domain.core.agent.AgentBudget()
+                )
+            )
+            registerAgent(
+                com.example.domain.core.agent.AgentDefinition(
+                    identity = com.example.domain.core.agent.AgentIdentity(
+                        id = com.example.domain.core.agent.AgentId("agent_coder"),
+                        name = "مهندس البرمجيات",
+                        role = com.example.domain.core.agent.AgentRole.CODER,
+                        description = "متخصص في بناء وتطوير وهندسة الكود",
+                        systemPrompt = com.example.domain.core.agent.AgentRole.CODER.defaultSystemPrompt
+                    ),
+                    allowedCapabilities = setOf(
+                        com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
+                        com.example.domain.core.capability.CapabilityType.TOOL_EXECUTION,
+                        com.example.domain.core.capability.CapabilityType.FILE_STORAGE,
+                        com.example.domain.core.capability.CapabilityType.MEMORY_RETRIEVAL
+                    ),
+                    budget = com.example.domain.core.agent.AgentBudget()
+                )
+            )
+            registerAgent(
+                com.example.domain.core.agent.AgentDefinition(
+                    identity = com.example.domain.core.agent.AgentIdentity(
+                        id = com.example.domain.core.agent.AgentId("agent_researcher"),
+                        name = "الباحث المعرفي",
+                        role = com.example.domain.core.agent.AgentRole.RESEARCHER,
+                        description = "متخصص في استرجاع المعرفة والبحث الموثوق",
+                        systemPrompt = com.example.domain.core.agent.AgentRole.RESEARCHER.defaultSystemPrompt
+                    ),
+                    allowedCapabilities = setOf(
+                        com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
+                        com.example.domain.core.capability.CapabilityType.SEARCH,
+                        com.example.domain.core.capability.CapabilityType.MEMORY_RETRIEVAL
+                    ),
+                    budget = com.example.domain.core.agent.AgentBudget()
+                )
+            )
         }
     }
 

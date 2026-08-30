@@ -83,6 +83,17 @@ class ComponentRegistry {
 
     fun listTools(): List<ToolPort> = tools.values.toList()
 
+    // --- Agents ---
+    private val agents = ConcurrentHashMap<String, com.example.domain.core.agent.AgentDefinition>()
+
+    fun registerAgent(agent: com.example.domain.core.agent.AgentDefinition) {
+        agents[agent.identity.id.value.lowercase()] = agent
+    }
+
+    fun getAgent(agentId: String): com.example.domain.core.agent.AgentDefinition? = agents[agentId.lowercase()]
+
+    fun listAgents(): List<com.example.domain.core.agent.AgentDefinition> = agents.values.toList()
+
     // --- Memory Repository ---
     private var memoryRepository: com.example.domain.ports.memory.MemoryRepositoryPort? = null
 

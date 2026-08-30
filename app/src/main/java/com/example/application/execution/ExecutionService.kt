@@ -7,6 +7,7 @@ import com.example.application.security.SecurityGuardService
 import com.example.domain.core.DegradedReason
 import com.example.domain.core.Outcome
 import com.example.domain.core.OutcomeMetadata
+import com.example.domain.core.map
 import com.example.domain.core.agent.AgentDefinition
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
@@ -116,8 +117,8 @@ class ExecutionService(
             }
             else -> {
                 ExecutionResult(
-                    isSuccess = true,
-                    outputText = "تم تنفيذ الإجراء ${action.type.displayName}",
+                    isSuccess = false,
+                    errorDescription = "نوع الإجراء غير مدعوم أو غير معرّف في المحرك: ${action.type.code}",
                     latencyMs = System.currentTimeMillis() - startTime
                 )
             }
@@ -420,7 +421,27 @@ class ExecutionService(
             )
         }
 
-        return when (val outcome = tool.execute(toolInput)) {
+        val callId = "call_${System.currentTimeMillis()}"
+        onEvent(
+            ExecutionEvent.ToolRequested(
+                executionId = executionId,
+                callId = callId,
+                toolName = toolName,
+                argumentsJson = action.payload.toString()
+            )
+        )
+
+        val outcome = tool.execute(toolInput)
+        onEvent(
+            ExecutionEvent.ToolResult(
+                executionId = executionId,
+                callId = callId,
+                toolName = toolName,
+                outcome = outcome.map { it.content }
+            )
+        )
+
+        return when (outcome) {
             is Outcome.Success -> {
                 ExecutionResult(
                     isSuccess = true,
@@ -499,8 +520,8 @@ class ExecutionService(
         }
 
         return ExecutionResult(
-            isSuccess = true,
-            outputText = "تم تنفيذ أداة MCP: $toolName",
+            isSuccess = false,
+            errorDescription = "أداة MCP غير مسجلة أو غير متاحة: $toolName",
             latencyMs = System.currentTimeMillis() - startTime
         )
     }
@@ -535,8 +556,8 @@ class ExecutionService(
         }
 
         return ExecutionResult(
-            isSuccess = true,
-            outputText = "تم تنفيذ المهارة $skillId بنجاح.",
+            isSuccess = false,
+            errorDescription = "مدير المهارات والإضافات غير مهيأ لتنفيذ المهارة $skillId",
             latencyMs = System.currentTimeMillis() - startTime
         )
     }
@@ -547,12 +568,19 @@ class ExecutionService(
     ): ExecutionResult {
         val serviceName = action.targetId ?: "integration"
         val descriptor = extensionManager?.integrations?.value?.firstOrNull { it.id == serviceName || it.serviceType == serviceName }
-        val status = descriptor?.health?.name ?: "HEALTHY"
-
+        if (descriptor == null) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "خدمة التكامل $serviceName غير متوفرة أو غير مهيأة في النظام.",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+        val isHealthy = descriptor.health == com.example.domain.core.provider.HealthStatus.HEALTHY
         return ExecutionResult(
-            isSuccess = true,
-            outputText = "حالة خدمة التكامل $serviceName: $status",
-            outputData = mapOf("serviceStatus" to status),
+            isSuccess = isHealthy,
+            outputText = "حالة خدمة التكامل ${descriptor.name}: ${descriptor.health.name}",
+            outputData = mapOf("serviceStatus" to descriptor.health.name, "serviceId" to descriptor.id),
+            errorDescription = if (!isHealthy) "خدمة التكامل في حالة غير صالحة للتشغيل: ${descriptor.health.name}" else null,
             latencyMs = System.currentTimeMillis() - startTime
         )
     }
