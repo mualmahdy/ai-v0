@@ -103,15 +103,43 @@ class ComponentRegistry {
 
     fun getMemoryRepository(): com.example.domain.ports.memory.MemoryRepositoryPort? = memoryRepository
 
+    // --- Resource Health & Failure Tracking ---
+    private val failureCounts = ConcurrentHashMap<String, Int>()
+    private val lastErrors = ConcurrentHashMap<String, String>()
+
+    fun recordFailure(resourceId: String, error: String) {
+        val key = resourceId.lowercase()
+        failureCounts[key] = (failureCounts[key] ?: 0) + 1
+        lastErrors[key] = error
+    }
+
+    fun recordSuccess(resourceId: String) {
+        val key = resourceId.lowercase()
+        failureCounts[key] = 0
+        lastErrors.remove(key)
+    }
+
+    fun getFailureCount(resourceId: String): Int = failureCounts[resourceId.lowercase()] ?: 0
+
+    fun getLastError(resourceId: String): String? = lastErrors[resourceId.lowercase()]
+
+    fun isResourceAvailable(resourceId: String): Boolean = getFailureCount(resourceId) < 3
+
     // --- Capability Descriptors ---
     fun getCapabilityDescriptors(): List<CapabilityDescriptor> {
         val descriptors = mutableListOf<CapabilityDescriptor>()
 
         llmProviders.values.forEach { provider ->
+            val failures = getFailureCount(provider.providerId)
+            val state = when {
+                !provider.metadata.isOnline || failures >= 3 -> CapabilityState.UNAVAILABLE
+                failures > 0 -> CapabilityState.DEGRADED
+                else -> CapabilityState.AVAILABLE
+            }
             descriptors.add(
                 CapabilityDescriptor(
                     type = CapabilityType.LLM_GENERATION,
-                    state = if (provider.metadata.isOnline) CapabilityState.AVAILABLE else CapabilityState.DEGRADED,
+                    state = state,
                     providerId = provider.providerId,
                     isLocal = provider.metadata.isLocal
                 )
@@ -119,10 +147,16 @@ class ComponentRegistry {
         }
 
         searchProviders.values.forEach { provider ->
+            val failures = getFailureCount(provider.providerId)
+            val state = when {
+                !provider.metadata.isConfigured || failures >= 3 -> CapabilityState.UNAVAILABLE
+                failures > 0 -> CapabilityState.DEGRADED
+                else -> CapabilityState.AVAILABLE
+            }
             descriptors.add(
                 CapabilityDescriptor(
                     type = CapabilityType.SEARCH,
-                    state = if (provider.metadata.isConfigured) CapabilityState.AVAILABLE else CapabilityState.DEGRADED,
+                    state = state,
                     providerId = provider.providerId,
                     isLocal = false
                 )
@@ -130,10 +164,16 @@ class ComponentRegistry {
         }
 
         embeddingProviders.values.forEach { provider ->
+            val failures = getFailureCount(provider.providerId)
+            val state = when {
+                !provider.metadata.isEnabled || failures >= 3 -> CapabilityState.UNAVAILABLE
+                failures > 0 -> CapabilityState.DEGRADED
+                else -> CapabilityState.AVAILABLE
+            }
             descriptors.add(
                 CapabilityDescriptor(
                     type = CapabilityType.EMBEDDING,
-                    state = if (provider.metadata.isEnabled) CapabilityState.AVAILABLE else CapabilityState.DEGRADED,
+                    state = state,
                     providerId = provider.providerId,
                     isLocal = provider.metadata.isLocal
                 )
@@ -141,10 +181,16 @@ class ComponentRegistry {
         }
 
         tools.values.forEach { tool ->
+            val failures = getFailureCount(tool.declaration.name)
+            val state = when {
+                failures >= 3 -> CapabilityState.UNAVAILABLE
+                failures > 0 -> CapabilityState.DEGRADED
+                else -> CapabilityState.AVAILABLE
+            }
             descriptors.add(
                 CapabilityDescriptor(
                     type = CapabilityType.TOOL_EXECUTION,
-                    state = CapabilityState.AVAILABLE,
+                    state = state,
                     providerId = tool.declaration.name,
                     isLocal = true,
                     attributes = mapOf("description" to tool.declaration.description)

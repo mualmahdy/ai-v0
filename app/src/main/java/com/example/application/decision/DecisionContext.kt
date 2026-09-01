@@ -35,6 +35,15 @@ data class DecisionContext(
     val decisionHistory: List<DecisionResult> = emptyList(),
     val metadata: Map<String, String> = emptyMap()
 ) {
+    val hasSearchEvidence: Boolean
+        get() = accumulatedEvidence.containsKey("searchResults") || (lastAction?.type == DecisionActionType.SEARCH && lastObservation?.isSuccess == true)
+
+    val hasMemoryEvidence: Boolean
+        get() = accumulatedEvidence.containsKey("memorySnippets") || ((lastAction?.type == DecisionActionType.RETRIEVE_MEMORY || lastAction?.type == DecisionActionType.RETRIEVE_KNOWLEDGE) && lastObservation?.isSuccess == true)
+
+    val hasToolExecutionEvidence: Boolean
+        get() = accumulatedEvidence.containsKey("toolOutput") || ((lastAction?.type == DecisionActionType.EXECUTE_TOOL || lastAction?.type == DecisionActionType.SELECT_TOOL || lastAction?.type == DecisionActionType.EXECUTE_MCP || lastAction?.type == DecisionActionType.EXECUTE_SKILL) && lastObservation?.isSuccess == true)
+
     /**
      * Projects this rich context into the normalized mathematical DecisionState vector
      * required by the CBR-MDP Decision Engine.

@@ -2,6 +2,8 @@ package com.example.domain.core.task
 
 import com.example.domain.core.Outcome
 import com.example.domain.core.agent.AgentId
+import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.network.NetworkPolicy
 
 /**
  * Unique identifier for a task.
@@ -35,6 +37,47 @@ enum class TaskLifecycleState {
     FAILED,
     CANCELLED
 }
+
+/**
+ * Verification strategies for evaluating task completion.
+ */
+enum class VerificationStrategy {
+    STRICT,
+    PERMISSIVE,
+    EVIDENCE_BASED,
+    CRITERIA_MATCH
+}
+
+/**
+ * Single acceptance criterion defining verifiable condition.
+ */
+data class AcceptanceCriterion(
+    val id: String,
+    val description: String,
+    val requiredKey: String? = null,
+    val validatorType: String = "EXISTS", // EXISTS, NOT_BLANK, MIN_LENGTH, REGEX, NUMERIC_RANGE
+    val minValue: Double? = null,
+    val maxValue: Double? = null,
+    val regexPattern: String? = null
+)
+
+/**
+ * First-class domain representation of all capabilities, constraints, and requirements for a task.
+ */
+data class TaskCapabilityRequirements(
+    val requiredCapabilities: Set<CapabilityType> = emptySet(),
+    val optionalCapabilities: Set<CapabilityType> = emptySet(),
+    val prohibitedCapabilities: Set<CapabilityType> = emptySet(),
+    val requiredResourceTypes: List<String> = emptyList(),
+    val requiredModelCapabilities: List<String> = emptyList(),
+    val requiredAgentCapabilities: Set<CapabilityType> = emptySet(),
+    val networkRequirement: NetworkPolicy = NetworkPolicy.HYBRID,
+    val requiresLocalInference: Boolean = false,
+    val securityRequirements: List<String> = emptyList(),
+    val requiredEvidenceKeys: List<String> = emptyList(),
+    val expectedOutputType: String = "TEXT",
+    val acceptanceCriteria: List<AcceptanceCriterion> = emptyList()
+)
 
 /**
  * Autonomy policies governing agent execution permission boundaries.
@@ -79,7 +122,10 @@ data class TaskBudget(
  */
 data class TaskSuccessCriteria(
     val requiredOutputKeys: List<String> = emptyList(),
-    val minOutputLengthChars: Int = 1
+    val minOutputLengthChars: Int = 1,
+    val acceptanceCriteria: List<AcceptanceCriterion> = emptyList(),
+    val requiredEvidenceKeys: List<String> = emptyList(),
+    val verificationStrategy: VerificationStrategy = VerificationStrategy.STRICT
 )
 
 /**
@@ -91,6 +137,7 @@ data class TaskDefinition(
     val goal: String = "",
     val priority: TaskPriority = TaskPriority.MEDIUM,
     val input: TaskInput,
+    val requirements: TaskCapabilityRequirements = TaskCapabilityRequirements(),
     val constraints: TaskConstraints = TaskConstraints(),
     val budget: TaskBudget = TaskBudget(),
     val successCriteria: TaskSuccessCriteria = TaskSuccessCriteria(),

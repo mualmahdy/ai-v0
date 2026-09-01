@@ -2,6 +2,8 @@ package com.example.application.decision
 
 import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
+import com.example.domain.core.agent.AgentDefinition
+import com.example.domain.core.agent.AgentRole
 import com.example.domain.core.capability.CapabilityState
 import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.decision.CbrMdpEngine
@@ -13,6 +15,7 @@ import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.security.SecurityDecision
 import com.example.domain.core.security.SecurityPolicy
+import com.example.domain.core.task.TaskCapabilityRequirements
 import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.tools.ToolInput
 import com.example.domain.core.workspace.Workspace
@@ -73,101 +76,99 @@ class DecisionService(
     }
 
     /**
-     * Dynamically generates the candidate action space based on active system capabilities,
-     * tool registries, network policies, task requirements, and closed-loop progress.
+     * Dynamically generates the candidate action space based on capability matching,
+     * resource availability, agent authorization, network policies, task requirements,
+     * and closed-loop progress.
      */
     fun generateCandidateActions(context: DecisionContext): List<DecisionAction> {
         val candidates = mutableListOf<DecisionAction>()
-        val prompt = context.task.input.rawPrompt
-        val currentStep = context.task.currentStepIndex
+        val task = context.task
+        val currentStep = task.currentStepIndex
         val isOffline = context.networkPolicy == NetworkPolicy.OFFLINE || !context.isNetworkAvailable
+        val effectiveRequirements = resolveTaskRequirements(task)
 
-        // 1. Model & Provider candidates (at initial step)
-        if (currentStep == 0) {
-            val llmProviders = componentRegistry.listLlmProviders()
-            for (provider in llmProviders) {
-                val isLocal = provider.metadata.isLocal
-                if (isOffline && !isLocal) continue
+        // 1. LLM Model / Provider Candidates
+        val llmProviders = componentRegistry.listLlmProviders()
+        for (provider in llmProviders) {
+            val isAvailable = componentRegistry.isResourceAvailable(provider.providerId)
+            val isLocal = provider.metadata.isLocal
+            if (isOffline && !isLocal) continue
+            if (!isAvailable && llmProviders.size > 1) continue
 
-                val modelId = provider.metadata.defaultModel ?: "default"
-                candidates.add(
-                    DecisionAction(
-                        type = DecisionActionType.SELECT_MODEL,
-                        targetId = modelId,
-                        payload = mapOf(
-                            "providerId" to provider.providerId,
-                            "isLocal" to isLocal.toString(),
-                            "step" to currentStep.toString()
-                        ),
-                        estimatedLatencyMs = if (isLocal) 200L else 700L
-                    )
+            val modelId = provider.metadata.defaultModel ?: "default"
+            candidates.add(
+                DecisionAction(
+                    type = DecisionActionType.SELECT_MODEL,
+                    targetId = modelId,
+                    payload = mapOf(
+                        "providerId" to provider.providerId,
+                        "isLocal" to isLocal.toString(),
+                        "step" to currentStep.toString()
+                    ),
+                    estimatedLatencyMs = if (isLocal) 200L else 650L
                 )
-            }
+            )
         }
 
-        // 2. Web & Multi-Source Search candidates (only if online and needed/initial step)
-        if (!isOffline && componentRegistry.getSearchProvider() != null) {
-            val isSearchWanted = prompt.contains("بحث", ignoreCase = true) ||
-                    prompt.contains("search", ignoreCase = true) ||
-                    prompt.contains("أحدث", ignoreCase = true) ||
-                    prompt.contains("latest", ignoreCase = true) ||
-                    currentStep == 0
-            if (isSearchWanted) {
-                candidates.add(
-                    DecisionAction(
-                        type = DecisionActionType.SEARCH,
-                        targetId = "multi_source_search",
-                        payload = mapOf("query" to prompt.take(80)),
-                        estimatedLatencyMs = 600L
-                    )
+        // If no provider candidates added (e.g. empty registry), add candidate so execution service can evaluate and report error
+        if (candidates.isEmpty() && !isOffline) {
+            candidates.add(
+                DecisionAction(
+                    type = DecisionActionType.SELECT_MODEL,
+                    targetId = "default",
+                    payload = mapOf("providerId" to "default", "step" to currentStep.toString()),
+                    estimatedLatencyMs = 700L
                 )
-            }
+            )
         }
 
-        // 3. Memory & RAG Retrieval candidate
-        if (componentRegistry.getMemoryRepository() != null) {
+        // 2. Search Candidates (only if search capability is required or helpful, online, and not already gathered)
+        val needsSearch = effectiveRequirements.requiredCapabilities.contains(CapabilityType.SEARCH) ||
+                effectiveRequirements.optionalCapabilities.contains(CapabilityType.SEARCH)
+        val searchAvailable = !isOffline && componentRegistry.getSearchProvider() != null &&
+                componentRegistry.isResourceAvailable(componentRegistry.getSearchProvider()?.providerId ?: "")
+
+        if (needsSearch && searchAvailable && !context.hasSearchEvidence) {
+            candidates.add(
+                DecisionAction(
+                    type = DecisionActionType.SEARCH,
+                    targetId = "multi_source_search",
+                    payload = mapOf("query" to task.input.rawPrompt.take(100)),
+                    estimatedLatencyMs = 600L
+                )
+            )
+        }
+
+        // 3. Memory & Knowledge Retrieval (if required/optional or memory repo available)
+        val memoryRepo = componentRegistry.getMemoryRepository()
+        val needsMemory = effectiveRequirements.requiredCapabilities.contains(CapabilityType.MEMORY_RETRIEVAL) ||
+                effectiveRequirements.requiredCapabilities.contains(CapabilityType.EMBEDDING) ||
+                effectiveRequirements.optionalCapabilities.contains(CapabilityType.MEMORY_RETRIEVAL)
+        if (memoryRepo != null && (needsMemory || (!context.hasMemoryEvidence && currentStep == 0))) {
             candidates.add(
                 DecisionAction(
                     type = DecisionActionType.RETRIEVE_KNOWLEDGE,
                     targetId = "rag_vector_store",
-                    payload = mapOf("query" to prompt.take(80)),
+                    payload = mapOf("query" to task.input.rawPrompt.take(100)),
                     estimatedLatencyMs = 150L
                 )
             )
         }
 
-        // 4. Concrete Tools from unified registry (Built-in, MCP, Skills, Plugins)
-        val isFileTask = prompt.contains("ملف", ignoreCase = true) || prompt.contains("file", ignoreCase = true) ||
-                prompt.contains("مجلد", ignoreCase = true) || prompt.contains("directory", ignoreCase = true) ||
-                prompt.contains("workspace", ignoreCase = true) || prompt.contains("حفظ", ignoreCase = true) ||
-                prompt.contains("قراءة", ignoreCase = true) || prompt.contains("read", ignoreCase = true) || prompt.contains("write", ignoreCase = true)
-        val isDiagTask = prompt.contains("تشخيص", ignoreCase = true) || prompt.contains("diagnostic", ignoreCase = true) ||
-                prompt.contains("أداء", ignoreCase = true) || prompt.contains("ذاكرة", ignoreCase = true) ||
-                prompt.contains("health", ignoreCase = true) || prompt.contains("sandbox", ignoreCase = true)
-        val isSkillTask = prompt.contains("arch", ignoreCase = true) || prompt.contains("معمار", ignoreCase = true) ||
-                prompt.contains("أمان", ignoreCase = true) || prompt.contains("audit", ignoreCase = true)
-
-        for (tool in componentRegistry.listTools()) {
+        // 4. Governed Capability-Driven Tools from Unified Registry
+        val tools = componentRegistry.listTools()
+        for (tool in tools) {
             val toolName = tool.declaration.name
-            val toolDesc = tool.declaration.description
+            if (!componentRegistry.isResourceAvailable(toolName)) continue
 
-            // Capability & Suitability Filter
-            val isRelevant = when {
-                toolName.contains("file", ignoreCase = true) || toolName.contains("storage", ignoreCase = true) -> isFileTask
-                toolName.contains("diagnostic", ignoreCase = true) || toolName.contains("health", ignoreCase = true) -> isDiagTask
-                toolName.contains("skill", ignoreCase = true) || toolName.contains("scaffold", ignoreCase = true) || toolName.contains("audit", ignoreCase = true) -> isSkillTask
-                else -> prompt.contains(toolName, ignoreCase = true) || isFileTask || isDiagTask
-            }
+            // Determine tool's capability suitability for the task
+            val isMatchingCapability = isToolMatchingRequirements(toolName, tool.declaration.description, effectiveRequirements)
 
-            if (!isRelevant && currentStep > 0 && context.accumulatedEvidence.containsKey("toolOutput")) {
-                continue
-            }
-
-            if (isRelevant || currentStep == 0) {
+            if (isMatchingCapability) {
                 val toolInput = ToolInput(
                     toolName = toolName,
-                    arguments = mapOf("description" to toolDesc),
-                    executionId = context.task.id.value
+                    arguments = mapOf("description" to tool.declaration.description),
+                    executionId = task.id.value
                 )
                 val secEvaluation = securityGuard.evaluateToolExecution(toolInput, defaultSecurityPolicy)
                 if (secEvaluation.decision != SecurityDecision.DENY) {
@@ -175,7 +176,7 @@ class DecisionService(
                         DecisionAction(
                             type = DecisionActionType.EXECUTE_TOOL,
                             targetId = toolName,
-                            payload = mapOf("description" to toolDesc),
+                            payload = mapOf("description" to tool.declaration.description),
                             estimatedLatencyMs = 300L
                         )
                     )
@@ -183,30 +184,30 @@ class DecisionService(
             }
         }
 
-        // 5. Synthesis / Execution step
+        // 5. LLM Synthesis / Direct Execution step candidate
         candidates.add(
             DecisionAction(
                 type = DecisionActionType.EXECUTE_STEP,
                 targetId = "standard_llm_stream",
-                payload = mapOf("prompt" to prompt, "step" to currentStep.toString()),
-                estimatedLatencyMs = 800L
+                payload = mapOf("prompt" to task.input.rawPrompt, "step" to currentStep.toString()),
+                estimatedLatencyMs = 750L
             )
         )
 
-        // 6. Workflow / Plan Creation candidate for multi-step goals
-        if (currentStep == 0 && (context.taskComplexity > 0.6f || prompt.contains("خطة", ignoreCase = true) || prompt.contains("plan", ignoreCase = true))) {
+        // 6. Workflow / Plan Creation candidate for explicit high-complexity multi-step goals
+        if (currentStep == 0 && context.taskComplexity >= 0.85f && task.constraints.maxRetries > 2) {
             candidates.add(
                 DecisionAction(
                     type = DecisionActionType.CREATE_PLAN,
                     targetId = "dag_workflow_planner",
-                    payload = mapOf("goal" to prompt),
+                    payload = mapOf("goal" to task.input.rawPrompt),
                     estimatedLatencyMs = 800L
                 )
             )
         }
 
-        // 7. Multi-step Completion candidate if evidence has been gathered and synthesized
-        if (currentStep >= 1 && (context.accumulatedEvidence.isNotEmpty() || context.lastObservation?.isSuccess == true)) {
+        // 7. Multi-step Completion Proposal (if evidence gathered or step executed)
+        if (currentStep >= 1 && (context.hasSearchEvidence || context.hasMemoryEvidence || context.hasToolExecutionEvidence || context.accumulatedEvidence.containsKey("synthesizedText"))) {
             candidates.add(
                 DecisionAction(
                     type = DecisionActionType.COMPLETE,
@@ -216,7 +217,7 @@ class DecisionService(
             )
         }
 
-        // 8. Replan or Retry if previous failures occurred
+        // 8. Replan or Retry upon consecutive failures
         if (context.consecutiveFailures in 1..2) {
             candidates.add(
                 DecisionAction(
@@ -306,30 +307,120 @@ class DecisionService(
     }
 
     /**
-     * Dynamically selects the most suitable agent definition from registered candidates.
+     * Dynamically selects the most suitable agent using multi-attribute capability matching.
      */
     fun selectSuitableAgent(
         task: TaskDefinition,
-        availableAgents: List<com.example.domain.core.agent.AgentDefinition>
-    ): com.example.domain.core.agent.AgentDefinition? {
+        availableAgents: List<AgentDefinition>
+    ): AgentDefinition? {
         if (availableAgents.isEmpty()) return null
 
-        val prompt = task.input.rawPrompt.lowercase()
-        val isCoding = prompt.contains("code") || prompt.contains("برمج") || prompt.contains("kotlin") || prompt.contains("class") || prompt.contains("function")
-        val isResearch = prompt.contains("search") || prompt.contains("بحث") || prompt.contains("latest") || prompt.contains("أحدث")
-        val isAudit = prompt.contains("security") || prompt.contains("أمان") || prompt.contains("audit") || prompt.contains("فحص")
-        val isPlanning = prompt.contains("plan") || prompt.contains("خطة") || prompt.contains("workflow")
+        val requirements = resolveTaskRequirements(task)
+        val requiredCaps = requirements.requiredCapabilities
+        val prohibitedCaps = requirements.prohibitedCapabilities
 
-        return availableAgents.firstOrNull { agent ->
-            when (agent.identity.role) {
-                com.example.domain.core.agent.AgentRole.CODER -> isCoding
-                com.example.domain.core.agent.AgentRole.RESEARCHER -> isResearch
-                com.example.domain.core.agent.AgentRole.SECURITY_GUARD -> isAudit
-                com.example.domain.core.agent.AgentRole.PLANNER -> isPlanning
-                else -> false
-            }
-        } ?: availableAgents.firstOrNull { it.identity.role == com.example.domain.core.agent.AgentRole.GENERAL_ASSISTANT }
-        ?: availableAgents.firstOrNull()
+        // Filter: Agent must have budget and must not have prohibited capabilities
+        val eligibleAgents = availableAgents.filter { agent ->
+            val hasBudget = agent.budget.maxTokens > 0
+            val noProhibited = prohibitedCaps.none { agent.allowedCapabilities.contains(it) }
+            hasBudget && noProhibited
+        }
+
+        if (eligibleAgents.isEmpty()) return null
+
+        // Score agents based on capability overlap, role alignment, and budget
+        val scoredAgents = eligibleAgents.map { agent ->
+            var score = 0.0
+
+            // Required capability overlap
+            val matchedRequired = requiredCaps.count { agent.allowedCapabilities.contains(it) }
+            score += matchedRequired * 3.0
+
+            // Optional capability overlap
+            val matchedOptional = requirements.optionalCapabilities.count { agent.allowedCapabilities.contains(it) }
+            score += matchedOptional * 1.0
+
+            // Role alignment
+            if (requiredCaps.contains(CapabilityType.TOOL_EXECUTION) && agent.identity.role == AgentRole.CODER) score += 2.0
+            if (requiredCaps.contains(CapabilityType.SEARCH) && agent.identity.role == AgentRole.RESEARCHER) score += 2.0
+            if (requiredCaps.contains(CapabilityType.SHELL_EXECUTION) && agent.identity.role == AgentRole.SECURITY_GUARD) score += 2.0
+            if (requiredCaps.contains(CapabilityType.LLM_GENERATION) && agent.identity.role == AgentRole.PLANNER) score += 1.5
+
+            // Fallback general suitability
+            if (agent.identity.role == AgentRole.GENERAL_ASSISTANT) score += 0.5
+
+            Pair(agent, score)
+        }.sortedByDescending { it.second }
+
+        return scoredAgents.firstOrNull()?.first ?: availableAgents.firstOrNull()
+    }
+
+    /**
+     * Resolves task requirements either from explicit structured TaskCapabilityRequirements
+     * or by inferring them from task metadata and input parameters.
+     */
+    fun resolveTaskRequirements(task: TaskDefinition): TaskCapabilityRequirements {
+        val existing = task.requirements
+        if (existing.requiredCapabilities.isNotEmpty() || existing.optionalCapabilities.isNotEmpty()) {
+            return existing
+        }
+
+        // Infer requirements from task definition properties and prompt semantics
+        val reqCaps = mutableSetOf<CapabilityType>()
+        val optCaps = mutableSetOf<CapabilityType>()
+        val prompt = task.input.rawPrompt.lowercase()
+
+        // Core capability types based on task content
+        if (prompt.contains("code") || prompt.contains("برمج") || prompt.contains("kotlin") || prompt.contains("class") || prompt.contains("function")) {
+            reqCaps.add(CapabilityType.TOOL_EXECUTION)
+            optCaps.add(CapabilityType.SHELL_EXECUTION)
+        }
+        if (prompt.contains("search") || prompt.contains("بحث") || prompt.contains("latest") || prompt.contains("أحدث") || prompt.contains("internet") || prompt.contains("ويب")) {
+            reqCaps.add(CapabilityType.SEARCH)
+        }
+        if (prompt.contains("file") || prompt.contains("ملف") || prompt.contains("مجلد") || prompt.contains("directory") || prompt.contains("storage")) {
+            reqCaps.add(CapabilityType.TOOL_EXECUTION)
+            reqCaps.add(CapabilityType.FILE_STORAGE)
+        }
+        if (prompt.contains("memory") || prompt.contains("ذاكرة") || prompt.contains("rag") || prompt.contains("وثيقة") || prompt.contains("document")) {
+            reqCaps.add(CapabilityType.MEMORY_RETRIEVAL)
+            reqCaps.add(CapabilityType.EMBEDDING)
+        }
+        if (prompt.contains("security") || prompt.contains("أمان") || prompt.contains("audit") || prompt.contains("فحص")) {
+            reqCaps.add(CapabilityType.SHELL_EXECUTION)
+        }
+
+        // Always requires LLM generation by default for synthesis
+        reqCaps.add(CapabilityType.LLM_GENERATION)
+
+        return TaskCapabilityRequirements(
+            requiredCapabilities = reqCaps,
+            optionalCapabilities = optCaps,
+            networkRequirement = if (prompt.contains("offline") || prompt.contains("دون اتصال")) NetworkPolicy.OFFLINE else NetworkPolicy.HYBRID
+        )
+    }
+
+    private fun isToolMatchingRequirements(
+        toolName: String,
+        toolDescription: String,
+        requirements: TaskCapabilityRequirements
+    ): Boolean {
+        val lowerName = toolName.lowercase()
+        val lowerDesc = toolDescription.lowercase()
+
+        val reqCaps = requirements.requiredCapabilities + requirements.optionalCapabilities
+
+        if (reqCaps.contains(CapabilityType.FILE_STORAGE) && (lowerName.contains("file") || lowerName.contains("storage") || lowerDesc.contains("file"))) {
+            return true
+        }
+        if (reqCaps.contains(CapabilityType.TOOL_EXECUTION)) {
+            return true
+        }
+        if (reqCaps.contains(CapabilityType.SHELL_EXECUTION) && (lowerName.contains("shell") || lowerName.contains("exec") || lowerName.contains("security"))) {
+            return true
+        }
+
+        return false
     }
 
     /**

@@ -140,23 +140,18 @@ class IntelligenceRadarPipeline(
 
         _radarItems.value = initialItems
 
-        // Feed initial items to Evolution Candidates
-        _evolutionCandidates.value = initialItems.mapIndexed { idx, item ->
+        // Feed initial items to Evolution Candidates starting at DISCOVERED stage requiring real governance
+        _evolutionCandidates.value = initialItems.map { item ->
             EvolutionCandidate(
                 id = "evol_${item.id}",
                 radarItemId = item.id,
                 title = item.title,
                 description = item.summary,
-                stage = when (idx) {
-                    0 -> EvolutionStage.REGISTERED
-                    1 -> EvolutionStage.INTEGRATED
-                    2 -> EvolutionStage.VERIFIED
-                    else -> EvolutionStage.CANDIDATE
-                },
+                stage = EvolutionStage.DISCOVERED,
                 targetType = item.extractedCapability?.suggestedIntegrationTarget ?: "TOOL",
-                evaluationNotes = "توافق معايير الأمان والتوافق بنسبة ${"%.0f".format((item.extractedCapability?.compatibilityScore ?: 0.8f) * 100)}%",
-                securityAuditPassed = true,
-                governanceApproved = idx < 3,
+                evaluationNotes = "تم اكتشاف القدرة مبدئياً وتتطلب مراجعة الأمان والحوكمة قبل التثبيت.",
+                securityAuditPassed = false,
+                governanceApproved = false,
                 confidence = item.confidence,
                 provenanceUrl = item.sourceUrl
             )
@@ -263,11 +258,19 @@ class IntelligenceRadarPipeline(
         _evolutionCandidates.update { list ->
             list.map { candidate ->
                 if (candidate.id == candidateId) {
-                    val approved = if (nextStage == EvolutionStage.INTEGRATED || nextStage == EvolutionStage.REGISTERED) true else candidate.governanceApproved
+                    val auditPassed = when (nextStage) {
+                        EvolutionStage.DISCOVERED, EvolutionStage.CANDIDATE -> candidate.securityAuditPassed
+                        else -> true
+                    }
+                    val governanceApproved = when (nextStage) {
+                        EvolutionStage.INTEGRATED, EvolutionStage.VERIFIED, EvolutionStage.REGISTERED -> true
+                        else -> candidate.governanceApproved
+                    }
                     val updated = candidate.copy(
                         stage = nextStage,
-                        governanceApproved = approved,
-                        securityAuditPassed = if (nextStage != EvolutionStage.DISCOVERED) true else candidate.securityAuditPassed
+                        governanceApproved = governanceApproved,
+                        securityAuditPassed = auditPassed,
+                        evaluationNotes = "تم تحديث مرحلة التطور إلى ${nextStage.name} وفقاً لمعايير التدقيق الأمني والحوكمة."
                     )
                     evolutionCandidateDao?.let { dao ->
                         coroutineScope.launch {

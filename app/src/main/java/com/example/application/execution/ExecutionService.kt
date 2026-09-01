@@ -7,14 +7,16 @@ import com.example.application.security.SecurityGuardService
 import com.example.domain.core.DegradedReason
 import com.example.domain.core.Outcome
 import com.example.domain.core.OutcomeMetadata
-import com.example.domain.core.map
 import com.example.domain.core.agent.AgentDefinition
+import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
 import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.llm.LlmMessage
 import com.example.domain.core.llm.LlmRequest
 import com.example.domain.core.llm.MessageRole
+import com.example.domain.core.map
+import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.search.SearchFailure
 import com.example.domain.core.search.SearchQuery
 import com.example.domain.core.security.SecurityDecision
@@ -73,13 +75,13 @@ class ExecutionService(
                 executeMemoryRetrieval(action, context, startTime, onEvent, executionId)
             }
             DecisionActionType.EXECUTE_TOOL, DecisionActionType.SELECT_TOOL -> {
-                executeTool(action, context, startTime, onEvent, executionId)
+                executeTool(action, context, agent, startTime, onEvent, executionId)
             }
             DecisionActionType.EXECUTE_MCP -> {
-                executeMcpAction(action, startTime)
+                executeMcpAction(action, agent, executionId, startTime, onEvent)
             }
             DecisionActionType.EXECUTE_SKILL -> {
-                executeSkillAction(action, startTime)
+                executeSkillAction(action, agent, startTime)
             }
             DecisionActionType.USE_INTEGRATION -> {
                 executeIntegrationAction(action, startTime)
@@ -139,6 +141,24 @@ class ExecutionService(
 
         if (provider == null) {
             val errorMsg = "لا يوجد مزود ذكاء اصطناعي متاح حالياً."
+            onEvent(
+                ExecutionEvent.Error(
+                    executionId = executionId,
+                    failureCode = "PROVIDER_NOT_FOUND",
+                    message = errorMsg,
+                    isFatal = true
+                )
+            )
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = errorMsg,
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        // Strict Offline Policy Check
+        if (context.networkPolicy == NetworkPolicy.OFFLINE && !provider.metadata.isLocal) {
+            val errorMsg = "الوضع غير المتصل (OFFLINE) مفعل ولا يوجد مزود محلي (Local Provider) متاح لتشغيل النماذج دون اتصال."
             return ExecutionResult(
                 isSuccess = false,
                 errorDescription = errorMsg,
@@ -188,7 +208,13 @@ class ExecutionService(
         messages.addAll(conversationHistory)
         messages.add(LlmMessage(role = MessageRole.USER, content = context.task.input.rawPrompt))
 
-        val availableTools = componentRegistry.listTools().map { it.declaration }
+        // Filter available tools by agent capability authorization
+        val availableTools = if (agent.allowedCapabilities.contains(CapabilityType.TOOL_EXECUTION)) {
+            componentRegistry.listTools().map { it.declaration }
+        } else {
+            emptyList()
+        }
+
         val request = LlmRequest(
             messages = messages,
             availableTools = availableTools,
@@ -212,7 +238,7 @@ class ExecutionService(
                     }
                     is ExecutionEvent.ToolRequested -> {
                         onEvent(event)
-                        val toolResult = handleToolExecution(executionId, event.callId, event.toolName, event.argumentsJson)
+                        val toolResult = handleToolExecution(executionId, event.callId, event.toolName, event.argumentsJson, agent)
                         onEvent(toolResult)
                     }
                     is ExecutionEvent.Degraded -> {
@@ -235,13 +261,43 @@ class ExecutionService(
                             isDegraded = true
                             degradedReason = event.degradedReason
                         }
+                        if (textAccumulator.isEmpty() && event.finalText.isNotEmpty()) {
+                            textAccumulator.append(event.finalText)
+                        }
                     }
                     else -> onEvent(event)
                 }
             }
+
+            // Fallback to generate() if stream yielded no text and succeeded
+            if (textAccumulator.isEmpty() && isSuccess) {
+                when (val genOutcome = provider.generate(request)) {
+                    is Outcome.Success -> {
+                        textAccumulator.append(genOutcome.value.text)
+                        promptTokens = genOutcome.value.usage.promptTokens
+                        completionTokens = genOutcome.value.usage.completionTokens
+                    }
+                    is Outcome.Degraded -> {
+                        isDegraded = true
+                        degradedReason = genOutcome.reason
+                        genOutcome.partialValue?.text?.let { textAccumulator.append(it) }
+                    }
+                    is Outcome.Error -> {
+                        isSuccess = false
+                        errorMessage = genOutcome.diagnosticMessage
+                    }
+                }
+            }
+
+            if (isSuccess) {
+                componentRegistry.recordSuccess(provider.providerId)
+            } else {
+                componentRegistry.recordFailure(provider.providerId, errorMessage ?: "Provider execution error")
+            }
         } catch (e: Exception) {
             isSuccess = false
             errorMessage = e.localizedMessage ?: "حدث استثناء غير متوقع أثناء استدعاء المزود."
+            componentRegistry.recordFailure(provider.providerId, errorMessage ?: "Exception")
         }
 
         val totalTokens = promptTokens + completionTokens
@@ -266,6 +322,14 @@ class ExecutionService(
         onEvent: suspend (ExecutionEvent) -> Unit,
         executionId: String
     ): ExecutionResult {
+        if (context.networkPolicy == NetworkPolicy.OFFLINE) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "لا يمكن تنفيذ استعلامات البحث الشبكي في الوضع غير المتصل (OFFLINE).",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
         val searchProvider = componentRegistry.getSearchProvider()
         if (searchProvider == null) {
             return ExecutionResult(
@@ -278,6 +342,7 @@ class ExecutionService(
         val query = action.payload["query"] ?: context.task.input.rawPrompt.take(100)
         return when (val outcome = searchProvider.search(SearchQuery(query = query))) {
             is Outcome.Success -> {
+                componentRegistry.recordSuccess(searchProvider.providerId)
                 val items = outcome.value.items
                 val formattedItems = items.map { "[${it.title}] (${it.url}): ${it.snippet}" }
                 val summary = "تم استرجاع ${items.size} نتيجة بحث من ${outcome.value.providerId}."
@@ -292,6 +357,7 @@ class ExecutionService(
                 )
             }
             is Outcome.Degraded -> {
+                componentRegistry.recordSuccess(searchProvider.providerId)
                 val partialItems = outcome.partialValue?.items ?: emptyList()
                 val formatted = partialItems.map { "[${it.title}] (${it.url}): ${it.snippet}" }
                 onEvent(
@@ -312,13 +378,13 @@ class ExecutionService(
             }
             is Outcome.Error -> {
                 val errorMsg = when (val failure = outcome.failure) {
-                    is SearchFailure.ProviderUnavailable -> failure.message
-                    is SearchFailure.RateLimited -> "تم تجاوز معدل الطلبات لمزود البحث"
-                    is SearchFailure.AuthenticationFailed -> failure.message
-                    is SearchFailure.QueryInvalid -> failure.reason
-                    is SearchFailure.NetworkError -> failure.message
-                    else -> outcome.diagnosticMessage.ifBlank { "فشل في تنفيذ البحث" }
+                    is SearchFailure.NetworkError -> "خطأ في الاتصال بالشبكة: ${failure.message}"
+                    is SearchFailure.RateLimited -> "تم تجاوز حد استعلامات البحث. يرجى المحاولة لاحقاً."
+                    is SearchFailure.AuthenticationFailed -> "فشل التحقق من مفتاح مزود البحث: ${failure.message}"
+                    is SearchFailure.ProviderUnavailable -> "مزود البحث ${failure.providerId} غير متاح: ${failure.message}"
+                    is SearchFailure.QueryInvalid -> "استعلام البحث غير صالح: ${failure.reason}"
                 }
+                componentRegistry.recordFailure(searchProvider.providerId, errorMsg)
                 ExecutionResult(
                     isSuccess = false,
                     errorDescription = errorMsg,
@@ -386,6 +452,7 @@ class ExecutionService(
     private suspend fun executeTool(
         action: DecisionAction,
         context: DecisionContext,
+        agent: AgentDefinition,
         startTime: Long,
         onEvent: suspend (ExecutionEvent) -> Unit,
         executionId: String
@@ -405,13 +472,24 @@ class ExecutionService(
             )
         }
 
+        // Check Agent Authority
+        if (!agent.allowedCapabilities.contains(CapabilityType.TOOL_EXECUTION) &&
+            !agent.allowedCapabilities.contains(CapabilityType.FILE_STORAGE) &&
+            !agent.allowedCapabilities.contains(CapabilityType.SHELL_EXECUTION)) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "الوكيل ${agent.identity.name} غير مخول بتنفيذ الأدوات البرمجية.",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
         val toolInput = ToolInput(
             toolName = toolName,
             arguments = action.payload,
             executionId = executionId
         )
 
-        // Security check
+        // Security Guard check
         val secEval = securityGuard.evaluateToolExecution(toolInput, defaultSecurityPolicy)
         if (secEval.decision == SecurityDecision.DENY) {
             return ExecutionResult(
@@ -443,6 +521,7 @@ class ExecutionService(
 
         return when (outcome) {
             is Outcome.Success -> {
+                componentRegistry.recordSuccess(toolName)
                 ExecutionResult(
                     isSuccess = true,
                     outputText = outcome.value.content,
@@ -454,6 +533,7 @@ class ExecutionService(
                 )
             }
             is Outcome.Degraded -> {
+                componentRegistry.recordSuccess(toolName)
                 val partialText = outcome.partialValue?.content ?: ""
                 onEvent(
                     ExecutionEvent.Degraded(
@@ -480,6 +560,7 @@ class ExecutionService(
                     is ToolFailure.InvalidParameters -> f.reason
                     is ToolFailure.ExecutionTimeout -> "تجاوزت الأداة المهلة الزمنية (${f.timeoutMs}ms)"
                 }
+                componentRegistry.recordFailure(toolName, errorMsg)
                 ExecutionResult(
                     isSuccess = false,
                     errorDescription = errorMsg,
@@ -491,43 +572,57 @@ class ExecutionService(
 
     private suspend fun executeMcpAction(
         action: DecisionAction,
-        startTime: Long
+        agent: AgentDefinition,
+        executionId: String,
+        startTime: Long,
+        onEvent: suspend (ExecutionEvent) -> Unit
     ): ExecutionResult {
         val toolName = action.targetId ?: "mcp_tool"
         val tool = componentRegistry.getTool(toolName)
-        if (tool != null) {
-            val outcome = tool.execute(ToolInput(toolName = toolName, arguments = action.payload))
-            return when (outcome) {
-                is Outcome.Success -> ExecutionResult(
-                    isSuccess = true,
-                    outputText = outcome.value.content,
-                    outputData = mapOf("mcpOutput" to outcome.value.content),
-                    latencyMs = System.currentTimeMillis() - startTime
-                )
-                is Outcome.Degraded -> ExecutionResult(
-                    isSuccess = true,
-                    outputText = outcome.partialValue?.content ?: "",
-                    latencyMs = System.currentTimeMillis() - startTime,
-                    isDegraded = true,
-                    degradedReason = outcome.reason
-                )
-                is Outcome.Error -> ExecutionResult(
-                    isSuccess = false,
-                    errorDescription = outcome.diagnosticMessage,
-                    latencyMs = System.currentTimeMillis() - startTime
-                )
-            }
+        if (tool == null) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "أداة MCP غير مسجلة أو غير متاحة: $toolName",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
         }
 
-        return ExecutionResult(
-            isSuccess = false,
-            errorDescription = "أداة MCP غير مسجلة أو غير متاحة: $toolName",
-            latencyMs = System.currentTimeMillis() - startTime
-        )
+        val toolInput = ToolInput(toolName = toolName, arguments = action.payload, executionId = executionId)
+        val secEval = securityGuard.evaluateToolExecution(toolInput, defaultSecurityPolicy)
+        if (secEval.decision == SecurityDecision.DENY) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "تم حظر استدعاء أداة MCP أمنياً: ${secEval.explanation}",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        val outcome = tool.execute(toolInput)
+        return when (outcome) {
+            is Outcome.Success -> ExecutionResult(
+                isSuccess = true,
+                outputText = outcome.value.content,
+                outputData = mapOf("mcpOutput" to outcome.value.content),
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+            is Outcome.Degraded -> ExecutionResult(
+                isSuccess = true,
+                outputText = outcome.partialValue?.content ?: "",
+                latencyMs = System.currentTimeMillis() - startTime,
+                isDegraded = true,
+                degradedReason = outcome.reason
+            )
+            is Outcome.Error -> ExecutionResult(
+                isSuccess = false,
+                errorDescription = outcome.diagnosticMessage,
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
     }
 
     private suspend fun executeSkillAction(
         action: DecisionAction,
+        agent: AgentDefinition,
         startTime: Long
     ): ExecutionResult {
         val skillId = action.targetId ?: "skill"
@@ -604,7 +699,7 @@ class ExecutionService(
         return ExecutionResult(
             isSuccess = true,
             outputText = planSummary,
-            outputData = mapOf("executionPlan" to planSummary),
+            outputData = mapOf("planGoal" to goal, "planStepsCount" to 3),
             latencyMs = System.currentTimeMillis() - startTime
         )
     }
@@ -634,7 +729,8 @@ class ExecutionService(
         executionId: String,
         callId: String,
         toolName: String,
-        argumentsJson: String
+        argumentsJson: String,
+        agent: AgentDefinition
     ): ExecutionEvent.ToolResult {
         val tool = componentRegistry.getTool(toolName)
         if (tool == null) {
@@ -674,36 +770,45 @@ class ExecutionService(
         }
 
         return when (val result = tool.execute(toolInput)) {
-            is Outcome.Success -> ExecutionEvent.ToolResult(
-                executionId = executionId,
-                callId = callId,
-                toolName = toolName,
-                outcome = Outcome.Success(
-                    value = result.value.content,
-                    metadata = result.metadata
+            is Outcome.Success -> {
+                componentRegistry.recordSuccess(toolName)
+                ExecutionEvent.ToolResult(
+                    executionId = executionId,
+                    callId = callId,
+                    toolName = toolName,
+                    outcome = Outcome.Success(
+                        value = result.value.content,
+                        metadata = result.metadata
+                    )
                 )
-            )
-            is Outcome.Degraded -> ExecutionEvent.ToolResult(
-                executionId = executionId,
-                callId = callId,
-                toolName = toolName,
-                outcome = Outcome.Degraded(
-                    partialValue = result.partialValue?.content,
-                    reason = result.reason,
-                    diagnosticMessage = result.diagnosticMessage,
-                    metadata = result.metadata
+            }
+            is Outcome.Degraded -> {
+                componentRegistry.recordSuccess(toolName)
+                ExecutionEvent.ToolResult(
+                    executionId = executionId,
+                    callId = callId,
+                    toolName = toolName,
+                    outcome = Outcome.Degraded(
+                        partialValue = result.partialValue?.content,
+                        reason = result.reason,
+                        diagnosticMessage = result.diagnosticMessage,
+                        metadata = result.metadata
+                    )
                 )
-            )
-            is Outcome.Error -> ExecutionEvent.ToolResult(
-                executionId = executionId,
-                callId = callId,
-                toolName = toolName,
-                outcome = Outcome.Error(
-                    failure = result.failure,
-                    diagnosticMessage = result.diagnosticMessage,
-                    metadata = result.metadata
+            }
+            is Outcome.Error -> {
+                componentRegistry.recordFailure(toolName, result.diagnosticMessage)
+                ExecutionEvent.ToolResult(
+                    executionId = executionId,
+                    callId = callId,
+                    toolName = toolName,
+                    outcome = Outcome.Error(
+                        failure = result.failure,
+                        diagnosticMessage = result.diagnosticMessage,
+                        metadata = result.metadata
+                    )
                 )
-            )
+            }
         }
     }
 }
