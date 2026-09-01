@@ -125,10 +125,11 @@ class ComponentRegistry {
 
     fun isResourceAvailable(resourceId: String): Boolean = getFailureCount(resourceId) < 3
 
-    // --- Capability Descriptors ---
+    // --- Capability Descriptors & Graph ---
     fun getCapabilityDescriptors(): List<CapabilityDescriptor> {
         val descriptors = mutableListOf<CapabilityDescriptor>()
 
+        // 1. LLM Providers
         llmProviders.values.forEach { provider ->
             val failures = getFailureCount(provider.providerId)
             val state = when {
@@ -141,11 +142,37 @@ class ComponentRegistry {
                     type = CapabilityType.LLM_GENERATION,
                     state = state,
                     providerId = provider.providerId,
-                    isLocal = provider.metadata.isLocal
+                    resourceType = "MODEL",
+                    isLocal = provider.metadata.isLocal,
+                    attributes = mapOf("modelName" to (provider.metadata.defaultModel ?: "default"), "providerType" to provider.metadata.providerType)
                 )
             )
+            if (provider.metadata.supportedCapabilities.contains("streaming")) {
+                descriptors.add(
+                    CapabilityDescriptor(
+                        type = CapabilityType.STREAMING,
+                        state = state,
+                        providerId = provider.providerId,
+                        resourceType = "MODEL",
+                        isLocal = provider.metadata.isLocal
+                    )
+                )
+            }
+            if (provider.metadata.supportedCapabilities.contains("vision")) {
+                descriptors.add(
+                    CapabilityDescriptor(
+                        type = CapabilityType.VISION,
+                        state = state,
+                        providerId = provider.providerId,
+                        resourceType = "MODEL",
+                        isLocal = provider.metadata.isLocal
+                    )
+                )
+            }
         }
 
+
+        // 2. Search Providers
         searchProviders.values.forEach { provider ->
             val failures = getFailureCount(provider.providerId)
             val state = when {
@@ -158,11 +185,13 @@ class ComponentRegistry {
                     type = CapabilityType.SEARCH,
                     state = state,
                     providerId = provider.providerId,
+                    resourceType = "SEARCH_PROVIDER",
                     isLocal = false
                 )
             )
         }
 
+        // 3. Embedding Providers
         embeddingProviders.values.forEach { provider ->
             val failures = getFailureCount(provider.providerId)
             val state = when {
@@ -175,29 +204,89 @@ class ComponentRegistry {
                     type = CapabilityType.EMBEDDING,
                     state = state,
                     providerId = provider.providerId,
+                    resourceType = "EMBEDDING_PROVIDER",
+                    isLocal = provider.metadata.isLocal
+                )
+            )
+            descriptors.add(
+                CapabilityDescriptor(
+                    type = CapabilityType.VECTOR_STORE,
+                    state = state,
+                    providerId = provider.providerId,
+                    resourceType = "EMBEDDING_PROVIDER",
                     isLocal = provider.metadata.isLocal
                 )
             )
         }
 
+        // 4. Memory Repository
+        memoryRepository?.let {
+            descriptors.add(
+                CapabilityDescriptor(
+                    type = CapabilityType.MEMORY_RETRIEVAL,
+                    state = CapabilityState.AVAILABLE,
+                    providerId = "memory_repository",
+                    resourceType = "STORAGE",
+                    isLocal = true
+                )
+            )
+        }
+
+        // 5. Tools (extracting all structured provided capabilities!)
         tools.values.forEach { tool ->
-            val failures = getFailureCount(tool.declaration.name)
+            val decl = tool.declaration
+            val failures = getFailureCount(decl.name)
             val state = when {
                 failures >= 3 -> CapabilityState.UNAVAILABLE
                 failures > 0 -> CapabilityState.DEGRADED
                 else -> CapabilityState.AVAILABLE
             }
-            descriptors.add(
-                CapabilityDescriptor(
-                    type = CapabilityType.TOOL_EXECUTION,
-                    state = state,
-                    providerId = tool.declaration.name,
-                    isLocal = true,
-                    attributes = mapOf("description" to tool.declaration.description)
+            val isLocal = decl.locality == com.example.domain.core.capability.Locality.LOCAL_ON_DEVICE
+
+            for (capType in decl.providedCapabilities) {
+                descriptors.add(
+                    CapabilityDescriptor(
+                        type = capType,
+                        state = state,
+                        providerId = decl.name,
+                        resourceType = "TOOL",
+                        isLocal = isLocal,
+                        attributes = mapOf(
+                            "description" to decl.description,
+                            "networkRequirement" to decl.networkRequirement.name,
+                            "sideEffects" to decl.sideEffects.name
+                        )
+                    )
                 )
-            )
+            }
+        }
+
+        // 6. Agents
+        agents.values.forEach { agent ->
+            if (agent.enabled) {
+                for (capType in agent.allowedCapabilities) {
+                    descriptors.add(
+                        CapabilityDescriptor(
+                            type = capType,
+                            state = CapabilityState.AVAILABLE,
+                            providerId = agent.identity.id.value,
+                            resourceType = "AGENT",
+                            isLocal = agent.locality == com.example.domain.core.capability.Locality.LOCAL_ON_DEVICE,
+                            attributes = mapOf("role" to agent.identity.role.name)
+                        )
+                    )
+                }
+            }
         }
 
         return descriptors
     }
+
+    /**
+     * Builds and returns a live snapshot of the CapabilityResourceGraph.
+     */
+    fun getCapabilityResourceGraph(): com.example.domain.core.capability.CapabilityResourceGraph {
+        return com.example.domain.core.capability.CapabilityResourceGraph(getCapabilityDescriptors())
+    }
 }
+

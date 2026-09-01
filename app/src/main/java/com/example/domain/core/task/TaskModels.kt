@@ -3,6 +3,8 @@ package com.example.domain.core.task
 import com.example.domain.core.Outcome
 import com.example.domain.core.agent.AgentId
 import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.capability.Locality
+import com.example.domain.core.capability.SideEffectClassification
 import com.example.domain.core.network.NetworkPolicy
 
 /**
@@ -76,8 +78,11 @@ data class TaskCapabilityRequirements(
     val securityRequirements: List<String> = emptyList(),
     val requiredEvidenceKeys: List<String> = emptyList(),
     val expectedOutputType: String = "TEXT",
-    val acceptanceCriteria: List<AcceptanceCriterion> = emptyList()
+    val acceptanceCriteria: List<AcceptanceCriterion> = emptyList(),
+    val localityConstraint: Locality? = null,
+    val maxAllowedSideEffect: SideEffectClassification? = null
 )
+
 
 /**
  * Autonomy policies governing agent execution permission boundaries.

@@ -1,6 +1,7 @@
 package com.example.infrastructure.skills
 
 import com.example.domain.core.Outcome
+import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.storage.StorageFailure
 import com.example.domain.core.tools.ToolFailure
 import com.example.domain.core.tools.ToolInput
@@ -15,6 +16,7 @@ import kotlinx.coroutines.withContext
  */
 interface ExecutableSkill {
     val skillId: String
+    val providedCapabilities: Set<CapabilityType> get() = setOf(CapabilityType.TOOL_EXECUTION)
     suspend fun execute(parameters: Map<String, Any?>): Outcome<String, String>
 }
 
@@ -26,8 +28,15 @@ class CleanArchitectureScaffolderSkill(
     private val defaultProjectId: Long = 1L
 ) : ExecutableSkill {
     override val skillId: String = "skill_clean_arch_scaffold"
+    override val providedCapabilities: Set<CapabilityType> = setOf(
+        CapabilityType.CODE_ENGINEERING,
+        CapabilityType.FILE_STORAGE,
+        CapabilityType.FILE_WRITE,
+        CapabilityType.TOOL_EXECUTION
+    )
 
     override suspend fun execute(parameters: Map<String, Any?>): Outcome<String, String> = withContext(Dispatchers.IO) {
+
         val moduleName = parameters["moduleName"]?.toString()?.ifBlank { "feature_module" } ?: "feature_module"
         val basePath = "src/main/java/com/example/$moduleName"
 
@@ -83,8 +92,14 @@ class CleanArchitectureScaffolderSkill(
  */
 class SecurityAuditorSkill : ExecutableSkill {
     override val skillId: String = "skill_code_review_security"
+    override val providedCapabilities: Set<CapabilityType> = setOf(
+        CapabilityType.SECURITY_AUDIT,
+        CapabilityType.CODE_ANALYSIS,
+        CapabilityType.TOOL_EXECUTION
+    )
 
     override suspend fun execute(parameters: Map<String, Any?>): Outcome<String, String> = withContext(Dispatchers.Default) {
+
         val codeOrText = parameters["content"]?.toString() ?: ""
         if (codeOrText.isBlank()) {
             return@withContext Outcome.Error("المحتوى المراد تدقيقه أمنياً فارغ.")

@@ -229,10 +229,19 @@ class ExtensionManager(
         for (server in _mcpServers.value) {
             if (server.isEnabled) {
                 for (mcpTool in server.exposedTools) {
+                    val inferredCaps = when {
+                        mcpTool.name.contains("read") || mcpTool.name.contains("list") -> setOf(CapabilityType.FILE_STORAGE, CapabilityType.FILE_READ, CapabilityType.MCP_INVOCATION, CapabilityType.TOOL_EXECUTION)
+                        mcpTool.name.contains("diag") || mcpTool.name.contains("system") -> setOf(CapabilityType.SYSTEM_EXECUTION, CapabilityType.MCP_INVOCATION, CapabilityType.TOOL_EXECUTION)
+                        mcpTool.name.contains("search") || mcpTool.name.contains("repo") -> setOf(CapabilityType.SEARCH, CapabilityType.CODE_ANALYSIS, CapabilityType.MCP_INVOCATION, CapabilityType.TOOL_EXECUTION)
+                        else -> setOf(CapabilityType.MCP_INVOCATION, CapabilityType.TOOL_EXECUTION)
+                    }
                     val toolAdapter = object : ToolPort {
                         override val declaration: ToolDeclaration = ToolDeclaration(
                             name = "${server.id}__${mcpTool.name}",
-                            description = "[MCP: ${server.name}] ${mcpTool.description}"
+                            description = "[MCP: ${server.name}] ${mcpTool.description}",
+                            providedCapabilities = inferredCaps,
+                            networkRequirement = if (server.endpointUri.startsWith("inprocess://")) com.example.domain.core.capability.NetworkRequirement.LOCAL_ONLY else com.example.domain.core.capability.NetworkRequirement.ONLINE_ONLY,
+                            locality = if (server.endpointUri.startsWith("inprocess://")) com.example.domain.core.capability.Locality.LOCAL_ON_DEVICE else com.example.domain.core.capability.Locality.REMOTE_CLOUD
                         )
                         override suspend fun execute(input: ToolInput): Outcome<ToolOutput, ToolFailure> {
                             return mcpClient.callTool(server, mcpTool.name, input.arguments)
@@ -252,7 +261,10 @@ class ExtensionManager(
             val toolAdapter = object : ToolPort {
                 override val declaration: ToolDeclaration = ToolDeclaration(
                     name = skill.skillId,
-                    description = "تنفيذ مهارة مدمجة: ${skill.skillId}"
+                    description = "تنفيذ مهارة مدمجة: ${skill.skillId}",
+                    providedCapabilities = skill.providedCapabilities,
+                    networkRequirement = com.example.domain.core.capability.NetworkRequirement.LOCAL_ONLY,
+                    locality = com.example.domain.core.capability.Locality.LOCAL_ON_DEVICE
                 )
                 override suspend fun execute(input: ToolInput): Outcome<ToolOutput, ToolFailure> {
                     return when (val res = skill.execute(input.arguments)) {
@@ -272,6 +284,7 @@ class ExtensionManager(
             componentRegistry.registerTool(toolAdapter)
         }
     }
+
 
     suspend fun executeSkill(skillId: String, parameters: Map<String, Any?>): Outcome<String, String> {
         val skill = executableSkills.firstOrNull { it.skillId == skillId }

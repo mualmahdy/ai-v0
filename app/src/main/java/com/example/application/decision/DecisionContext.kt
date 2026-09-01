@@ -1,6 +1,9 @@
 package com.example.application.decision
 
 import com.example.domain.core.capability.CapabilityDescriptor
+import com.example.domain.core.capability.CapabilityGapAnalysis
+import com.example.domain.core.capability.CapabilityResourceGraph
+import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
 import com.example.domain.core.decision.DecisionResult
@@ -20,6 +23,15 @@ data class DecisionContext(
     val workspace: Workspace? = null,
     val resourceGraph: ResourceGraph = ResourceGraph(),
     val capabilities: List<CapabilityDescriptor> = emptyList(),
+    val capabilityGraph: CapabilityResourceGraph = CapabilityResourceGraph(capabilities),
+    val capabilityGap: CapabilityGapAnalysis = CapabilityGapAnalysis(
+        targetTaskId = task.id.value,
+        requiredCapabilities = task.requirements.requiredCapabilities,
+        optionalCapabilities = task.requirements.optionalCapabilities,
+        prohibitedCapabilities = task.requirements.prohibitedCapabilities
+    ),
+    val satisfiedCapabilities: Set<CapabilityType> = emptySet(),
+    val missingCapabilities: Set<CapabilityType> = emptySet(),
     val availableTools: List<String> = emptyList(),
     val networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
     val isNetworkAvailable: Boolean = true,
@@ -47,31 +59,67 @@ data class DecisionContext(
     /**
      * Projects this rich context into the normalized mathematical DecisionState vector
      * required by the CBR-MDP Decision Engine.
+     * Uses structured capability requirements as the primary source of truth.
      */
     fun toDecisionState(): DecisionState {
+        val reqs = task.requirements
+        val allTargetCaps = reqs.requiredCapabilities + reqs.optionalCapabilities
         val prompt = task.input.rawPrompt
-        val requiresVision = prompt.contains("صورة", ignoreCase = true) ||
-                prompt.contains("vision", ignoreCase = true) ||
-                prompt.contains("image", ignoreCase = true)
-        val requiresToolCalling = prompt.contains("ملف", ignoreCase = true) ||
-                prompt.contains("بحث", ignoreCase = true) ||
-                prompt.contains("أداة", ignoreCase = true) ||
-                prompt.contains("file", ignoreCase = true) ||
-                prompt.contains("tool", ignoreCase = true)
-        val requiresLargeContext = prompt.length > 500 || conversationHistoryCount > 5
-        val requiresWebSearch = prompt.contains("بحث", ignoreCase = true) ||
-                prompt.contains("search", ignoreCase = true) ||
-                prompt.contains("أحدث", ignoreCase = true) ||
-                prompt.contains("latest", ignoreCase = true)
-        val requiresCoding = prompt.contains("كود", ignoreCase = true) ||
-                prompt.contains("برمج", ignoreCase = true) ||
-                prompt.contains("kotlin", ignoreCase = true) ||
-                prompt.contains("code", ignoreCase = true) ||
-                prompt.contains("function", ignoreCase = true)
 
-        val hasSearch = accumulatedEvidence.containsKey("searchResults") || (lastAction?.type == DecisionActionType.SEARCH && lastObservation?.isSuccess == true)
-        val hasMemory = accumulatedEvidence.containsKey("memorySnippets") || ((lastAction?.type == DecisionActionType.RETRIEVE_MEMORY || lastAction?.type == DecisionActionType.RETRIEVE_KNOWLEDGE) && lastObservation?.isSuccess == true)
-        val hasTool = accumulatedEvidence.containsKey("toolOutput") || ((lastAction?.type == DecisionActionType.EXECUTE_TOOL || lastAction?.type == DecisionActionType.SELECT_TOOL || lastAction?.type == DecisionActionType.EXECUTE_MCP || lastAction?.type == DecisionActionType.EXECUTE_SKILL) && lastObservation?.isSuccess == true)
+        val requiresVision = if (allTargetCaps.isNotEmpty()) {
+            allTargetCaps.contains(CapabilityType.VISION)
+        } else {
+            prompt.contains("صورة", ignoreCase = true) ||
+                    prompt.contains("vision", ignoreCase = true) ||
+                    prompt.contains("image", ignoreCase = true)
+        }
+
+        val requiresToolCalling = if (allTargetCaps.isNotEmpty()) {
+            allTargetCaps.contains(CapabilityType.TOOL_EXECUTION) ||
+                    allTargetCaps.contains(CapabilityType.FILE_STORAGE) ||
+                    allTargetCaps.contains(CapabilityType.FILE_READ) ||
+                    allTargetCaps.contains(CapabilityType.FILE_WRITE) ||
+                    allTargetCaps.contains(CapabilityType.SHELL_EXECUTION) ||
+                    allTargetCaps.contains(CapabilityType.SYSTEM_EXECUTION) ||
+                    allTargetCaps.contains(CapabilityType.CODE_ENGINEERING) ||
+                    allTargetCaps.contains(CapabilityType.MCP_INVOCATION)
+        } else {
+            prompt.contains("ملف", ignoreCase = true) ||
+                    prompt.contains("بحث", ignoreCase = true) ||
+                    prompt.contains("أداة", ignoreCase = true) ||
+                    prompt.contains("file", ignoreCase = true) ||
+                    prompt.contains("tool", ignoreCase = true)
+        }
+
+        val requiresLargeContext = prompt.length > 500 || conversationHistoryCount > 5
+
+        val requiresWebSearch = if (allTargetCaps.isNotEmpty()) {
+            allTargetCaps.contains(CapabilityType.SEARCH)
+        } else {
+            prompt.contains("بحث", ignoreCase = true) ||
+                    prompt.contains("search", ignoreCase = true) ||
+                    prompt.contains("أحدث", ignoreCase = true) ||
+                    prompt.contains("latest", ignoreCase = true)
+        }
+
+        val requiresCoding = if (allTargetCaps.isNotEmpty()) {
+            allTargetCaps.contains(CapabilityType.CODE_ANALYSIS) ||
+                    allTargetCaps.contains(CapabilityType.CODE_ENGINEERING)
+        } else {
+            prompt.contains("كود", ignoreCase = true) ||
+                    prompt.contains("برمج", ignoreCase = true) ||
+                    prompt.contains("kotlin", ignoreCase = true) ||
+                    prompt.contains("code", ignoreCase = true) ||
+                    prompt.contains("function", ignoreCase = true)
+        }
+
+        val hasSearch = hasSearchEvidence
+        val hasMemory = hasMemoryEvidence
+        val hasTool = hasToolExecutionEvidence
+
+        val coverageRatio = if (reqs.requiredCapabilities.isEmpty()) 1.0f else {
+            satisfiedCapabilities.intersect(reqs.requiredCapabilities).size.toFloat() / reqs.requiredCapabilities.size.toFloat()
+        }
 
         return DecisionState(
             taskId = task.id,
@@ -97,8 +145,13 @@ data class DecisionContext(
                 "memoriesCount" to retrievedMemoriesCount.toFloat(),
                 "historyCount" to conversationHistoryCount.toFloat(),
                 "availableToolsCount" to availableTools.size.toFloat(),
-                "evidenceKeysCount" to accumulatedEvidence.size.toFloat()
+                "evidenceKeysCount" to accumulatedEvidence.size.toFloat(),
+                "capabilityCoverageRatio" to coverageRatio,
+                "missingCapabilitiesCount" to missingCapabilities.size.toFloat(),
+                "satisfiedCapabilitiesCount" to satisfiedCapabilities.size.toFloat(),
+                "capabilityStatusOrdinal" to capabilityGap.status.ordinal.toFloat()
             )
         )
     }
 }
+

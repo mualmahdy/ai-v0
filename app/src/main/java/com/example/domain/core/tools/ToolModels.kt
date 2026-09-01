@@ -1,5 +1,10 @@
 package com.example.domain.core.tools
 
+import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.capability.Locality
+import com.example.domain.core.capability.NetworkRequirement
+import com.example.domain.core.capability.SideEffectClassification
+
 /**
  * Definition of a parameter accepted by a tool.
  */
@@ -12,15 +17,21 @@ data class ToolParameter(
 )
 
 /**
- * Metadata and schema declaration of a callable tool.
+ * Metadata, schema declaration, and structured capability descriptors of a callable tool.
  */
 data class ToolDeclaration(
     val name: String,
     val description: String,
     val parameters: List<ToolParameter> = emptyList(),
     val isSensitive: Boolean = false,
-    val requiresHumanConsent: Boolean = false
+    val requiresHumanConsent: Boolean = false,
+    val providedCapabilities: Set<CapabilityType> = setOf(CapabilityType.TOOL_EXECUTION),
+    val networkRequirement: NetworkRequirement = NetworkRequirement.LOCAL_ONLY,
+    val sideEffects: SideEffectClassification = SideEffectClassification.READ_ONLY,
+    val requiredPermissions: List<String> = emptyList(),
+    val locality: Locality = Locality.LOCAL_ON_DEVICE
 )
+
 
 /**
  * Input payload sent to a tool for execution.

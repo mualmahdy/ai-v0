@@ -81,8 +81,9 @@ class AgentOrchestratorTest {
         )
 
         val events = orchestrator.executeTaskStream(testAgent, task).toList()
-        assertTrue(events.any { it is ExecutionEvent.ActionFailed || (it is ExecutionEvent.Error && (it as ExecutionEvent.Error).failureCode == "PROVIDER_NOT_FOUND") })
+        assertTrue(events.any { it is ExecutionEvent.Degraded || it is ExecutionEvent.ActionFailed || (it is ExecutionEvent.Error && (it as ExecutionEvent.Error).failureCode == "PROVIDER_NOT_FOUND") })
     }
+
 
     @Test
     fun `test executeTaskStream streams content and completes`() = runBlocking {

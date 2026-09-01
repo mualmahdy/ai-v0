@@ -1,6 +1,8 @@
 package com.example.domain.core.agent
 
 import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.capability.Locality
+import com.example.domain.core.capability.NetworkRequirement
 
 /**
  * Unique identifier for an agent.
@@ -81,5 +83,10 @@ data class AgentDefinition(
     val allowedCapabilities: Set<CapabilityType>,
     val budget: AgentBudget,
     val goals: List<AgentGoal> = emptyList(),
-    val enabled: Boolean = true
+    val enabled: Boolean = true,
+    val networkRequirement: NetworkRequirement = NetworkRequirement.HYBRID,
+    val locality: Locality = Locality.LOCAL_ON_DEVICE,
+    val authorityLevel: String = "STANDARD",
+    val workspaceScope: List<String> = listOf("default")
 )
+

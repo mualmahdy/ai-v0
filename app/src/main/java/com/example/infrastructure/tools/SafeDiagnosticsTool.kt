@@ -1,6 +1,10 @@
 package com.example.infrastructure.tools
 
 import com.example.domain.core.Outcome
+import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.capability.Locality
+import com.example.domain.core.capability.NetworkRequirement
+import com.example.domain.core.capability.SideEffectClassification
 import com.example.domain.core.tools.ToolDeclaration
 import com.example.domain.core.tools.ToolFailure
 import com.example.domain.core.tools.ToolInput
@@ -41,8 +45,17 @@ class SafeDiagnosticsTool(
             )
         ),
         isSensitive = false,
-        requiresHumanConsent = false
+        requiresHumanConsent = false,
+        providedCapabilities = setOf(
+            CapabilityType.SYSTEM_EXECUTION,
+            CapabilityType.SHELL_EXECUTION,
+            CapabilityType.TOOL_EXECUTION
+        ),
+        networkRequirement = NetworkRequirement.LOCAL_ONLY,
+        sideEffects = SideEffectClassification.READ_ONLY,
+        locality = Locality.LOCAL_ON_DEVICE
     )
+
 
     override suspend fun execute(input: ToolInput): Outcome<ToolOutput, ToolFailure> {
         val command = input.arguments["command"]?.toString()?.lowercase() ?: "sysinfo"

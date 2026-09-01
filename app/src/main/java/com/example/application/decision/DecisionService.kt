@@ -4,8 +4,16 @@ import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
 import com.example.domain.core.agent.AgentDefinition
 import com.example.domain.core.agent.AgentRole
+import com.example.domain.core.capability.CapabilityGapAnalysis
+import com.example.domain.core.capability.CapabilityRequirement
+import com.example.domain.core.capability.CapabilityResourceGraph
 import com.example.domain.core.capability.CapabilityState
+import com.example.domain.core.capability.CapabilityStatus
 import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.capability.Locality
+import com.example.domain.core.capability.NetworkRequirement
+
+import com.example.domain.core.capability.SideEffectClassification
 import com.example.domain.core.decision.CbrMdpEngine
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
@@ -51,14 +59,24 @@ class DecisionService(
         lastObservation: EnvironmentObservation? = null,
         decisionHistory: List<DecisionResult> = emptyList()
     ): DecisionContext {
+        val effectiveRequirements = resolveTaskRequirements(task)
+        val taskWithRequirements = if (task.requirements == effectiveRequirements) task else task.copy(requirements = effectiveRequirements)
+
         val capabilities = componentRegistry.getCapabilityDescriptors()
+        val graph = CapabilityResourceGraph(capabilities)
+        val gapAnalysis = graph.analyzeGaps(taskWithRequirements.id.value, effectiveRequirements)
+
         val availableTools = componentRegistry.listTools().map { it.declaration.name }
 
         return DecisionContext(
-            task = task,
+            task = taskWithRequirements,
             workspace = workspace,
             resourceGraph = workspace?.resourceGraph ?: com.example.domain.core.workspace.ResourceGraph(),
             capabilities = capabilities,
+            capabilityGraph = graph,
+            capabilityGap = gapAnalysis,
+            satisfiedCapabilities = gapAnalysis.satisfiedCapabilities,
+            missingCapabilities = gapAnalysis.missingCapabilities,
             availableTools = availableTools,
             networkPolicy = networkPolicy,
             isNetworkAvailable = isNetworkAvailable,
@@ -85,7 +103,8 @@ class DecisionService(
         val task = context.task
         val currentStep = task.currentStepIndex
         val isOffline = context.networkPolicy == NetworkPolicy.OFFLINE || !context.isNetworkAvailable
-        val effectiveRequirements = resolveTaskRequirements(task)
+        val effectiveRequirements = task.requirements
+        val graph = context.capabilityGraph
 
         // 1. LLM Model / Provider Candidates
         val llmProviders = componentRegistry.listLlmProviders()
@@ -94,6 +113,17 @@ class DecisionService(
             val isLocal = provider.metadata.isLocal
             if (isOffline && !isLocal) continue
             if (!isAvailable && llmProviders.size > 1) continue
+
+            // If task explicitly requires vision, check model capabilities
+            if (effectiveRequirements.requiredCapabilities.contains(CapabilityType.VISION) && !provider.metadata.supportedCapabilities.contains("vision")) {
+                continue
+            }
+
+
+            // If task requires local inference, filter cloud models
+            if (effectiveRequirements.requiresLocalInference && !isLocal) {
+                continue
+            }
 
             val modelId = provider.metadata.defaultModel ?: "default"
             candidates.add(
@@ -158,16 +188,17 @@ class DecisionService(
         // 4. Governed Capability-Driven Tools from Unified Registry
         val tools = componentRegistry.listTools()
         for (tool in tools) {
-            val toolName = tool.declaration.name
+            val decl = tool.declaration
+            val toolName = decl.name
             if (!componentRegistry.isResourceAvailable(toolName)) continue
 
-            // Determine tool's capability suitability for the task
-            val isMatchingCapability = isToolMatchingRequirements(toolName, tool.declaration.description, effectiveRequirements)
+            // Strict Capability-Driven Filtering
+            val isMatchingCapability = isToolMatchingRequirements(decl, effectiveRequirements, isOffline)
 
             if (isMatchingCapability) {
                 val toolInput = ToolInput(
                     toolName = toolName,
-                    arguments = mapOf("description" to tool.declaration.description),
+                    arguments = mapOf("description" to decl.description),
                     executionId = task.id.value
                 )
                 val secEvaluation = securityGuard.evaluateToolExecution(toolInput, defaultSecurityPolicy)
@@ -176,7 +207,7 @@ class DecisionService(
                         DecisionAction(
                             type = DecisionActionType.EXECUTE_TOOL,
                             targetId = toolName,
-                            payload = mapOf("description" to tool.declaration.description),
+                            payload = mapOf("description" to decl.description),
                             estimatedLatencyMs = 300L
                         )
                     )
@@ -217,7 +248,25 @@ class DecisionService(
             )
         }
 
-        // 8. Replan or Retry upon consecutive failures
+        // 8. Replan, User Intervention, or Blocking Fallbacks
+        if (context.capabilityGap.status == CapabilityStatus.BLOCKED ||
+            context.capabilityGap.status == CapabilityStatus.NO_CAPABLE_RESOURCE ||
+            (context.capabilityGap.status == CapabilityStatus.CAPABILITY_MISSING && context.missingCapabilities.isNotEmpty())
+        ) {
+            candidates.add(
+                DecisionAction(
+                    type = DecisionActionType.ASK_USER,
+                    targetId = "capability_gap_resolution",
+                    payload = mapOf(
+                        "missingCapabilities" to context.missingCapabilities.joinToString { it.name },
+                        "status" to context.capabilityGap.status.name,
+                        "reason" to "توجد قدرات إلزامية غير متوفرة أو محجوبة في النظام: ${context.missingCapabilities.joinToString { it.name }}"
+                    )
+                )
+            )
+        }
+
+
         if (context.consecutiveFailures in 1..2) {
             candidates.add(
                 DecisionAction(
@@ -319,11 +368,12 @@ class DecisionService(
         val requiredCaps = requirements.requiredCapabilities
         val prohibitedCaps = requirements.prohibitedCapabilities
 
-        // Filter: Agent must have budget and must not have prohibited capabilities
+        // Filter: Agent must have budget, not have prohibited capabilities, and respect locality constraints
         val eligibleAgents = availableAgents.filter { agent ->
             val hasBudget = agent.budget.maxTokens > 0
             val noProhibited = prohibitedCaps.none { agent.allowedCapabilities.contains(it) }
-            hasBudget && noProhibited
+            val localityOk = requirements.localityConstraint == null || agent.locality == requirements.localityConstraint
+            hasBudget && noProhibited && localityOk
         }
 
         if (eligibleAgents.isEmpty()) return null
@@ -373,6 +423,7 @@ class DecisionService(
         // Core capability types based on task content
         if (prompt.contains("code") || prompt.contains("برمج") || prompt.contains("kotlin") || prompt.contains("class") || prompt.contains("function")) {
             reqCaps.add(CapabilityType.TOOL_EXECUTION)
+            reqCaps.add(CapabilityType.CODE_ENGINEERING)
             optCaps.add(CapabilityType.SHELL_EXECUTION)
         }
         if (prompt.contains("search") || prompt.contains("بحث") || prompt.contains("latest") || prompt.contains("أحدث") || prompt.contains("internet") || prompt.contains("ويب")) {
@@ -387,10 +438,11 @@ class DecisionService(
             reqCaps.add(CapabilityType.EMBEDDING)
         }
         if (prompt.contains("security") || prompt.contains("أمان") || prompt.contains("audit") || prompt.contains("فحص")) {
-            reqCaps.add(CapabilityType.SHELL_EXECUTION)
+            reqCaps.add(CapabilityType.SECURITY_AUDIT)
+            optCaps.add(CapabilityType.SHELL_EXECUTION)
         }
 
-        // Always requires LLM generation by default for synthesis
+        // LLM generation is required for standard generative synthesis
         reqCaps.add(CapabilityType.LLM_GENERATION)
 
         return TaskCapabilityRequirements(
@@ -400,27 +452,42 @@ class DecisionService(
         )
     }
 
+    /**
+     * Checks if a tool's declared capabilities satisfy any of the task requirements.
+     */
     private fun isToolMatchingRequirements(
-        toolName: String,
-        toolDescription: String,
-        requirements: TaskCapabilityRequirements
+        decl: com.example.domain.core.tools.ToolDeclaration,
+        requirements: TaskCapabilityRequirements,
+        isOffline: Boolean
     ): Boolean {
-        val lowerName = toolName.lowercase()
-        val lowerDesc = toolDescription.lowercase()
-
-        val reqCaps = requirements.requiredCapabilities + requirements.optionalCapabilities
-
-        if (reqCaps.contains(CapabilityType.FILE_STORAGE) && (lowerName.contains("file") || lowerName.contains("storage") || lowerDesc.contains("file"))) {
-            return true
-        }
-        if (reqCaps.contains(CapabilityType.TOOL_EXECUTION)) {
-            return true
-        }
-        if (reqCaps.contains(CapabilityType.SHELL_EXECUTION) && (lowerName.contains("shell") || lowerName.contains("exec") || lowerName.contains("security"))) {
-            return true
+        // 1. Prohibited capability check
+        if (requirements.prohibitedCapabilities.any { decl.providedCapabilities.contains(it) }) {
+            return false
         }
 
-        return false
+        // 2. Offline / Network policy check
+        if (isOffline && decl.networkRequirement == NetworkRequirement.ONLINE_ONLY) {
+            return false
+        }
+
+        // 3. Locality constraint check
+        if (requirements.localityConstraint != null && decl.locality != requirements.localityConstraint) {
+            return false
+        }
+
+        // 4. Side effect check
+        if (requirements.maxAllowedSideEffect != null && decl.sideEffects > requirements.maxAllowedSideEffect) {
+            return false
+        }
+
+        // 5. Capability intersection
+        val targetCaps = requirements.requiredCapabilities + requirements.optionalCapabilities
+        if (targetCaps.isEmpty()) {
+            return true
+        }
+
+        val providesMatchingCap = decl.providedCapabilities.any { targetCaps.contains(it) }
+        return providesMatchingCap
     }
 
     /**
@@ -435,3 +502,4 @@ class DecisionService(
 
     fun getCbrMdpEngine(): CbrMdpEngine = cbrMdpEngine
 }
+

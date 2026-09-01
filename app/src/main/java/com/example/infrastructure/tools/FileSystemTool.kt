@@ -1,6 +1,10 @@
 package com.example.infrastructure.tools
 
 import com.example.domain.core.Outcome
+import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.capability.Locality
+import com.example.domain.core.capability.NetworkRequirement
+import com.example.domain.core.capability.SideEffectClassification
 import com.example.domain.core.storage.StorageFailure
 import com.example.domain.core.storage.WorkspaceFileEntry
 import com.example.domain.core.tools.ToolDeclaration
@@ -44,8 +48,18 @@ class FileSystemTool(
             )
         ),
         isSensitive = false,
-        requiresHumanConsent = false
+        requiresHumanConsent = false,
+        providedCapabilities = setOf(
+            CapabilityType.FILE_STORAGE,
+            CapabilityType.FILE_READ,
+            CapabilityType.FILE_WRITE,
+            CapabilityType.TOOL_EXECUTION
+        ),
+        networkRequirement = NetworkRequirement.LOCAL_ONLY,
+        sideEffects = SideEffectClassification.STATE_MUTATION,
+        locality = Locality.LOCAL_ON_DEVICE
     )
+
 
     override suspend fun execute(input: ToolInput): Outcome<ToolOutput, ToolFailure> {
         val action = input.arguments["action"]?.toString()?.lowercase() ?: "list"
