@@ -40,7 +40,7 @@ data class TaskVerificationReport(
 class OutcomeService {
 
     /**
-     * Maps an execution result and action into an ActionOutcomeType.
+     * Maps an execution result and action into an ActionOutcomeType based on structured execution properties.
      */
     fun evaluateActionOutcome(
         action: DecisionAction,
@@ -48,16 +48,19 @@ class OutcomeService {
     ): ActionOutcomeType {
         return when {
             !result.isSuccess -> {
-                if (result.errorDescription?.contains("غير متاح", ignoreCase = true) == true ||
-                    result.errorDescription?.contains("unavailable", ignoreCase = true) == true) {
-                    ActionOutcomeType.UNAVAILABLE
-                } else if (result.errorDescription?.contains("حظر", ignoreCase = true) == true ||
-                    result.errorDescription?.contains("blocked", ignoreCase = true) == true ||
-                    result.errorDescription?.contains("refused", ignoreCase = true) == true ||
-                    result.errorDescription?.contains("رفض", ignoreCase = true) == true) {
-                    ActionOutcomeType.BLOCKED
-                } else {
-                    ActionOutcomeType.FAILURE
+                when (result.degradedReason) {
+                    com.example.domain.core.DegradedReason.PLATFORM_CAPABILITY_RESTRICTED,
+                    com.example.domain.core.DegradedReason.CACHE_FALLBACK -> ActionOutcomeType.BLOCKED
+                    com.example.domain.core.DegradedReason.EMBEDDING_UNAVAILABLE,
+                    com.example.domain.core.DegradedReason.RATE_LIMIT_BACKOFF -> ActionOutcomeType.UNAVAILABLE
+                    else -> {
+                        val err = result.errorDescription?.lowercase() ?: ""
+                        when {
+                            err.contains("unavailable") || err.contains("غير متاح") -> ActionOutcomeType.UNAVAILABLE
+                            err.contains("blocked") || err.contains("حظر") || err.contains("refused") || err.contains("رفض") || err.contains("denied") -> ActionOutcomeType.BLOCKED
+                            else -> ActionOutcomeType.FAILURE
+                        }
+                    }
                 }
             }
             result.isDegraded -> ActionOutcomeType.PARTIAL_SUCCESS

@@ -71,7 +71,7 @@ class CapabilityResourceGraph(
     }
 
     /**
-     * Evaluates deterministic matching between requirements and candidate capabilities.
+     * Evaluates deterministic matching between requirements and candidate capabilities as mandated by Rule 2 and Rule 3.
      */
     fun matchCapabilities(
         required: Set<CapabilityType>,
@@ -80,9 +80,23 @@ class CapabilityResourceGraph(
         candidateCapabilities: Set<CapabilityType>,
         networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
         isNetworkAvailable: Boolean = true,
-        isCandidateLocal: Boolean = true
+        isCandidateLocal: Boolean = true,
+        candidateHealthState: CapabilityState = CapabilityState.AVAILABLE
     ): CapabilityMatchResult {
-        // 1. Prohibited Check
+        // 1. Availability check
+        if (candidateHealthState == CapabilityState.UNAVAILABLE) {
+            val unavailableCaps = candidateCapabilities.intersect(required)
+            return CapabilityMatchResult(
+                matchLevel = CapabilityMatchLevel.UNAVAILABLE,
+                satisfiedCapabilities = emptySet(),
+                missingCapabilities = required,
+                unavailableCapabilities = if (unavailableCaps.isNotEmpty()) unavailableCaps else required,
+                coverageRatio = 0.0f,
+                matchRationale = "Candidate resource is currently UNAVAILABLE"
+            )
+        }
+
+        // 2. Prohibited Check (CONFLICT)
         val prohibitedViolations = candidateCapabilities.intersect(prohibited)
         if (prohibitedViolations.isNotEmpty()) {
             return CapabilityMatchResult(
@@ -91,11 +105,12 @@ class CapabilityResourceGraph(
                 missingCapabilities = required,
                 conflictingCapabilities = prohibitedViolations,
                 prohibitedViolations = prohibitedViolations,
-                coverageRatio = 0.0f
+                coverageRatio = 0.0f,
+                matchRationale = "Candidate possesses PROHIBITED capabilities: ${prohibitedViolations.joinToString()}"
             )
         }
 
-        // 2. Network Compatibility Check
+        // 3. Network Compatibility Check
         val conflictingNetwork = mutableSetOf<CapabilityType>()
         if (networkPolicy == NetworkPolicy.OFFLINE || !isNetworkAvailable) {
             for (cap in candidateCapabilities) {
@@ -117,11 +132,19 @@ class CapabilityResourceGraph(
         }
 
         val matchLevel = when {
-            conflictingNetwork.isNotEmpty() && satisfied.isEmpty() -> CapabilityMatchLevel.CONFLICT
+            conflictingNetwork.isNotEmpty() && satisfied.isEmpty() && required.isNotEmpty() -> CapabilityMatchLevel.CONFLICT
             required.isEmpty() -> CapabilityMatchLevel.FULL_MATCH
             missing.isEmpty() -> CapabilityMatchLevel.FULL_MATCH
             satisfied.isNotEmpty() -> CapabilityMatchLevel.PARTIAL_MATCH
             else -> CapabilityMatchLevel.NO_MATCH
+        }
+
+        val rationale = when (matchLevel) {
+            CapabilityMatchLevel.FULL_MATCH -> "All ${required.size} required capabilities fully satisfied."
+            CapabilityMatchLevel.PARTIAL_MATCH -> "Partial match: satisfied ${satisfied.size}/${required.size} (missing: ${missing.joinToString()})."
+            CapabilityMatchLevel.NO_MATCH -> "No required capabilities satisfied."
+            CapabilityMatchLevel.CONFLICT -> "Network or policy conflict: ${conflictingNetwork.joinToString()}."
+            CapabilityMatchLevel.UNAVAILABLE -> "Resource unavailable."
         }
 
         return CapabilityMatchResult(
@@ -131,12 +154,14 @@ class CapabilityResourceGraph(
             partiallySatisfiedCapabilities = partiallySatisfied,
             conflictingCapabilities = conflictingNetwork,
             prohibitedViolations = prohibitedViolations,
-            coverageRatio = coverageRatio
+            coverageRatio = coverageRatio,
+            matchRationale = rationale
         )
     }
 
     /**
      * Conducts comprehensive Capability Gap Analysis for a task.
+     * Respects evidence-based satisfaction (Rule 14).
      */
     fun analyzeGap(
         taskId: String = "task_adhoc",
@@ -150,17 +175,18 @@ class CapabilityResourceGraph(
         val optional = requirements.optionalCapabilities
         val prohibited = requirements.prohibitedCapabilities
 
-        val satisfied = mutableSetOf<CapabilityType>()
-        satisfied.addAll(currentlySatisfied.intersect(required))
+        // Only mark capabilities as satisfied if verified by evidence / currentlySatisfied
+        val satisfied = currentlySatisfied.intersect(required).toMutableSet()
+        val pending = (required - satisfied).toMutableSet()
 
         val missing = mutableSetOf<CapabilityType>()
         val conflicting = mutableSetOf<CapabilityType>()
+        val unavailable = mutableSetOf<CapabilityType>()
         val candidateMap = mutableMapOf<CapabilityType, MutableList<CapabilityDescriptor>>()
 
-        for (cap in required) {
-            if (satisfied.contains(cap)) continue
-
-            val candidateDescriptors = getResourcesProviding(cap).filter { desc ->
+        for (cap in pending) {
+            val allProviders = getResourcesProviding(cap)
+            val healthyProviders = allProviders.filter { desc ->
                 val failCount = failureCounts[desc.providerId] ?: 0
                 val isHealthy = desc.state != CapabilityState.UNAVAILABLE && failCount < 3
                 val isNetworkOk = when {
@@ -171,33 +197,48 @@ class CapabilityResourceGraph(
                 isHealthy && isNetworkOk
             }
 
-            if (candidateDescriptors.isNotEmpty()) {
-                satisfied.add(cap)
-                candidateMap[cap] = candidateDescriptors.toMutableList()
+            if (healthyProviders.isNotEmpty()) {
+                candidateMap[cap] = healthyProviders.toMutableList()
             } else {
-                // Check if missing due to offline / network conflict
-                val offlineDescriptors = getResourcesProviding(cap).filter { !it.isLocal }
-                if (offlineDescriptors.isNotEmpty() && (networkPolicy == NetworkPolicy.OFFLINE || !isNetworkAvailable)) {
+                // Determine root cause
+                val offlineProviders = allProviders.filter { !it.isLocal }
+                val failedProviders = allProviders.filter { desc ->
+                    desc.state == CapabilityState.UNAVAILABLE || (failureCounts[desc.providerId] ?: 0) >= 3
+                }
+
+                if (offlineProviders.isNotEmpty() && (networkPolicy == NetworkPolicy.OFFLINE || !isNetworkAvailable)) {
                     conflicting.add(cap)
+                } else if (failedProviders.isNotEmpty() && failedProviders.size == allProviders.size) {
+                    unavailable.add(cap)
                 }
                 missing.add(cap)
             }
         }
 
         val status = when {
-            conflicting.isNotEmpty() && satisfied.isEmpty() -> CapabilityStatus.BLOCKED
-            missing.isEmpty() -> CapabilityStatus.CAPABILITY_SATISFIED
-            satisfied.isNotEmpty() -> CapabilityStatus.CAPABILITY_PARTIAL
-            else -> CapabilityStatus.NO_CAPABLE_RESOURCE
+            satisfied.containsAll(required) && required.isNotEmpty() -> CapabilityStatus.CAPABILITY_SATISFIED
+            required.isEmpty() -> CapabilityStatus.CAPABILITY_SATISFIED
+            conflicting.isNotEmpty() && satisfied.isEmpty() && candidateMap.isEmpty() -> CapabilityStatus.BLOCKED
+            unavailable.isNotEmpty() && satisfied.isEmpty() && candidateMap.isEmpty() -> CapabilityStatus.CAPABILITY_UNAVAILABLE
+            missing.isNotEmpty() && satisfied.isEmpty() && candidateMap.isEmpty() -> CapabilityStatus.NO_CAPABLE_RESOURCE
+            satisfied.isNotEmpty() || candidateMap.isNotEmpty() -> CapabilityStatus.CAPABILITY_PARTIAL
+            else -> CapabilityStatus.CAPABILITY_PARTIAL
         }
 
         val report = buildString {
             if (missing.isEmpty()) {
-                append("جميع القدرات المطلوبة (${required.size}) متوفرة ومستوفاة.")
+                if (satisfied.containsAll(required) && required.isNotEmpty()) {
+                    append("جميع القدرات المطلوبة (${required.size}) مكتملة ومحققة بالأدلة.")
+                } else {
+                    append("جميع القدرات المطلوبة (${required.size}) يتوفر لها موارد تنفيذ مؤهلة.")
+                }
             } else {
-                append("نقص في القدرات المطلوبة: ${missing.joinToString { it.displayName }}")
+                append("نقص في الموارد للقدرات المطلوبة: ${missing.joinToString { it.displayName }}")
                 if (conflicting.isNotEmpty()) {
-                    append(" (محجوبة بسبب سياسة الشبكة/عدم توفر الاتصال: ${conflicting.joinToString { it.displayName }})")
+                    append(" (محجوبة بسبب سياسة الشبكة: ${conflicting.joinToString { it.displayName }})")
+                }
+                if (unavailable.isNotEmpty()) {
+                    append(" (غير متاحة بسبب تكرار الفشل: ${unavailable.joinToString { it.displayName }})")
                 }
             }
         }
@@ -209,11 +250,13 @@ class CapabilityResourceGraph(
             prohibitedCapabilities = prohibited,
             satisfiedCapabilities = satisfied,
             missingCapabilities = missing,
+            pendingCapabilities = pending,
             conflictingCapabilities = conflicting,
-            candidateResourcesForMissing = candidateMap,
+            unavailableCapabilities = unavailable,
+            candidateResourcesForPending = candidateMap,
             status = status,
             gapReport = report,
-            isFullySatisfied = missing.isEmpty() && conflicting.isEmpty()
+            isFullySatisfied = required.isEmpty() || (satisfied.containsAll(required) && conflicting.isEmpty())
         )
     }
 
@@ -227,7 +270,7 @@ class CapabilityResourceGraph(
     ): CapabilityGapAnalysis = analyzeGap(taskId, requirements, networkPolicy, isNetworkAvailable, failureCounts, currentlySatisfied)
 
     /**
-     * Finds capable and authorized agents for a given set of task requirements.
+     * Finds capable and authorized agents for a given set of task requirements (Rule 8).
      */
     fun findCapableAgents(
         requirements: TaskCapabilityRequirements,
@@ -252,7 +295,12 @@ class CapabilityResourceGraph(
                 return@mapNotNull null
             }
 
-            // 3. Capability Match
+            // 3. Locality constraint
+            if (requirements.localityConstraint != null && agent.locality != requirements.localityConstraint) {
+                return@mapNotNull null
+            }
+
+            // 4. Capability Match
             val match = matchCapabilities(
                 required = required,
                 optional = optional,
@@ -265,16 +313,17 @@ class CapabilityResourceGraph(
 
             if (match.hasViolations) return@mapNotNull null
 
-            // If task specifies required capabilities, agent must satisfy at least one if required > 0
+            // If task specifies required capabilities, agent must satisfy at least one required capability
             if (required.isNotEmpty() && match.satisfiedCapabilities.isEmpty()) {
                 return@mapNotNull null
             }
 
-            // Scoring
-            val requiredScore = match.coverageRatio * 4.0f
+            // Scoring: strictly capability-grounded
+            val requiredScore = match.coverageRatio * 6.0f
             val optionalScore = (agent.allowedCapabilities.intersect(optional).size) * 1.5f
+            val fullMatchBonus = if (match.isFullMatch) 3.0f else 0.0f
             val budgetScore = if (agent.budget.maxTokens > 0) 0.5f else 0.0f
-            val totalScore = requiredScore + optionalScore + budgetScore
+            val totalScore = requiredScore + optionalScore + fullMatchBonus + budgetScore
 
             Pair(agent, totalScore)
         }
@@ -283,7 +332,7 @@ class CapabilityResourceGraph(
     }
 
     /**
-     * Finds capable, available, and policy-compliant tools for a given set of task requirements.
+     * Finds capable, available, and policy-compliant tools for a given set of task requirements (Rule 9).
      */
     fun findCapableTools(
         requirements: TaskCapabilityRequirements,
@@ -319,12 +368,44 @@ class CapabilityResourceGraph(
                 return@filter false
             }
 
-            // 5. Capability Match: Must satisfy at least one required or optional capability
+            // 5. Side-effects check
+            if (requirements.maxAllowedSideEffect != null && toolDecl.sideEffects > requirements.maxAllowedSideEffect) {
+                return@filter false
+            }
+
+            // 6. Capability Match: Must satisfy at least one required or optional capability
             if (required.isEmpty() && optional.isEmpty()) {
                 true
             } else {
                 toolCaps.intersect(required).isNotEmpty() || toolCaps.intersect(optional).isNotEmpty()
             }
+        }
+    }
+
+    /**
+     * Finds capable LLM descriptors matching task requirements (Rule 10).
+     */
+    fun findCapableModels(
+        requirements: TaskCapabilityRequirements,
+        networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
+        isNetworkAvailable: Boolean = true,
+        failureCounts: Map<String, Int> = emptyMap()
+    ): List<CapabilityDescriptor> {
+        val allModelDescriptors = getResourcesProviding(CapabilityType.LLM_GENERATION)
+        val isOffline = networkPolicy == NetworkPolicy.OFFLINE || !isNetworkAvailable
+
+        return allModelDescriptors.filter { desc ->
+            val failCount = failureCounts[desc.providerId] ?: 0
+            if (desc.state == CapabilityState.UNAVAILABLE || failCount >= 3) return@filter false
+            if (isOffline && !desc.isLocal) return@filter false
+            if (requirements.requiresLocalInference && !desc.isLocal) return@filter false
+
+            if (requirements.requiredCapabilities.contains(CapabilityType.VISION)) {
+                val hasVision = getCapabilitiesProvidedBy(desc.providerId).any { it.type == CapabilityType.VISION }
+                if (!hasVision) return@filter false
+            }
+
+            true
         }
     }
 

@@ -206,6 +206,7 @@ class CapabilityIntelligenceCoreTest {
         val gap = graph.analyzeGap(
             taskId = "task_001",
             requirements = requirements,
+            currentlySatisfied = setOf(CapabilityType.FILE_STORAGE),
             networkPolicy = NetworkPolicy.HYBRID,
             isNetworkAvailable = true
         )
@@ -325,5 +326,108 @@ class CapabilityIntelligenceCoreTest {
         val askUserAction = actions.firstOrNull { it.type == DecisionActionType.ASK_USER && it.targetId == "capability_gap_resolution" }
 
         assertNotNull("When required capabilities are blocked, DecisionService must offer user intervention candidate", askUserAction)
+    }
+
+    @Test
+    fun testAgentSelection_ReturnsNullWhenNoCapableAgent() {
+        val coderAgent = AgentDefinition(
+            identity = AgentIdentity(
+                id = AgentId("coder_agent"),
+                name = "Coder",
+                role = AgentRole.CODER,
+                description = "Writes clean code",
+                systemPrompt = ""
+            ),
+            allowedCapabilities = setOf(CapabilityType.CODE_ENGINEERING, CapabilityType.TOOL_EXECUTION),
+            budget = AgentBudget(maxTokens = 30000),
+            locality = Locality.LOCAL_ON_DEVICE
+        )
+
+        val taskVision = TaskDefinition(
+            id = TaskId("task_vision"),
+            assignedAgentId = AgentId("default"),
+            input = TaskInput("Inspect screenshot image"),
+            requirements = TaskCapabilityRequirements(
+                requiredCapabilities = setOf(CapabilityType.VISION)
+            )
+        )
+
+        val selected = decisionService.selectSuitableAgent(taskVision, listOf(coderAgent))
+        assertNull("Agent selection must return null when no candidate satisfies required capabilities (Rule 8)", selected)
+    }
+
+    @Test
+    fun testEvidenceBasedSatisfaction_PendingUntilEvidenceRecorded() {
+        val graph = CapabilityResourceGraph()
+        val desc = CapabilityDescriptor(
+            type = CapabilityType.SEARCH,
+            state = CapabilityState.AVAILABLE,
+            providerId = "search_engine",
+            resourceType = "PROVIDER",
+            isLocal = false
+        )
+        graph.registerDescriptor(desc)
+
+        val requirements = TaskCapabilityRequirements(
+            requiredCapabilities = setOf(CapabilityType.SEARCH)
+        )
+
+        // Before evidence
+        val gapBefore = graph.analyzeGap(
+            taskId = "task_search_01",
+            requirements = requirements,
+            currentlySatisfied = emptySet()
+        )
+        assertFalse("Cannot be marked satisfied before evidence exists (Rule 14)", gapBefore.isFullySatisfied)
+        assertTrue(gapBefore.pendingCapabilities.contains(CapabilityType.SEARCH))
+        assertTrue(gapBefore.candidateResourcesForPending.containsKey(CapabilityType.SEARCH))
+
+        // After evidence
+        val gapAfter = graph.analyzeGap(
+            taskId = "task_search_01",
+            requirements = requirements,
+            currentlySatisfied = setOf(CapabilityType.SEARCH)
+        )
+        assertTrue("Must be marked satisfied after evidence is recorded (Rule 14)", gapAfter.isFullySatisfied)
+        assertEquals(CapabilityStatus.CAPABILITY_SATISFIED, gapAfter.status)
+        assertTrue(gapAfter.satisfiedCapabilities.contains(CapabilityType.SEARCH))
+    }
+
+    @Test
+    fun testDegradedToolExclusion_WhenFailuresExceedThreshold() {
+        val failingTool = object : ToolPort {
+            override val declaration: ToolDeclaration = ToolDeclaration(
+                name = "flaky_tool",
+                description = "Frequently failing tool",
+                providedCapabilities = setOf(CapabilityType.SHELL_EXECUTION),
+                networkRequirement = NetworkRequirement.LOCAL_ONLY,
+                locality = Locality.LOCAL_ON_DEVICE
+            )
+
+            override suspend fun execute(input: ToolInput): Outcome<ToolOutput, ToolFailure> {
+                return Outcome.Error(ToolFailure.InternalExecutionError("Internal timeout"))
+            }
+        }
+
+        registry.registerTool(failingTool)
+        // Record 3 consecutive failures
+        registry.recordFailure("flaky_tool", "timeout")
+        registry.recordFailure("flaky_tool", "timeout")
+        registry.recordFailure("flaky_tool", "timeout")
+
+        val taskShell = TaskDefinition(
+            id = TaskId("task_shell"),
+            assignedAgentId = AgentId("default"),
+            input = TaskInput("Run local shell command"),
+            requirements = TaskCapabilityRequirements(
+                requiredCapabilities = setOf(CapabilityType.SHELL_EXECUTION)
+            )
+        )
+
+        val context = decisionService.buildDecisionContext(task = taskShell)
+        val actions = decisionService.generateCandidateActions(context)
+
+        val toolAction = actions.firstOrNull { it.type == DecisionActionType.EXECUTE_TOOL && it.targetId == "flaky_tool" }
+        assertNull("Tool with >= 3 consecutive failures must be excluded from candidate actions", toolAction)
     }
 }

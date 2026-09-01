@@ -165,7 +165,12 @@ class AgentOrchestrator(
                 uncertaintyScore = currentDecisionState.uncertaintyScore,
                 historyCount = conversationHistory.size,
                 memoriesCount = (accumulatedEvidence["memorySnippets"] as? List<*>)?.size ?: 0,
-                complexity = if (task.goal.contains("بحث") || task.goal.contains("search")) 0.7f else 0.5f,
+                complexity = when {
+                    currentTask.requirements.requiredCapabilities.size > 2 -> 0.8f
+                    currentTask.requirements.requiredCapabilities.isNotEmpty() -> 0.6f
+                    currentTask.goal.length > 200 -> 0.6f
+                    else -> 0.5f
+                },
                 accumulatedEvidence = accumulatedEvidence,
                 lastAction = decisionHistory.lastOrNull()?.chosenAction,
                 lastObservation = observationHistory.lastOrNull(),

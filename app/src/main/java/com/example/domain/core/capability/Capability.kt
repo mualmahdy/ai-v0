@@ -152,13 +152,14 @@ data class CapabilityRequirement(
 )
 
 /**
- * Level of capability match resulting from deterministic matching.
+ * Level of capability match resulting from deterministic matching as mandated by Rule 2.
  */
 enum class CapabilityMatchLevel {
     FULL_MATCH,
     PARTIAL_MATCH,
     NO_MATCH,
-    CONFLICT
+    CONFLICT,
+    UNAVAILABLE
 }
 
 /**
@@ -171,8 +172,10 @@ data class CapabilityMatchResult(
     val partiallySatisfiedCapabilities: Set<CapabilityType> = emptySet(),
     val conflictingCapabilities: Set<CapabilityType> = emptySet(),
     val prohibitedViolations: Set<CapabilityType> = emptySet(),
+    val unavailableCapabilities: Set<CapabilityType> = emptySet(),
     val coverageRatio: Float = 0.0f,
-    val satisfyingResources: Map<CapabilityType, List<String>> = emptyMap()
+    val satisfyingResources: Map<CapabilityType, List<String>> = emptyMap(),
+    val matchRationale: String = ""
 ) {
     val isFullMatch: Boolean get() = matchLevel == CapabilityMatchLevel.FULL_MATCH
     val hasViolations: Boolean get() = prohibitedViolations.isNotEmpty() || conflictingCapabilities.isNotEmpty()
@@ -188,11 +191,22 @@ data class CapabilityGapAnalysis(
     val prohibitedCapabilities: Set<CapabilityType> = emptySet(),
     val satisfiedCapabilities: Set<CapabilityType> = emptySet(),
     val missingCapabilities: Set<CapabilityType> = emptySet(),
+    val pendingCapabilities: Set<CapabilityType> = emptySet(),
     val partiallySatisfiedCapabilities: Set<CapabilityType> = emptySet(),
     val conflictingCapabilities: Set<CapabilityType> = emptySet(),
-    val candidateResourcesForMissing: Map<CapabilityType, List<CapabilityDescriptor>> = emptyMap(),
-    val status: CapabilityStatus = if (missingCapabilities.isEmpty()) CapabilityStatus.CAPABILITY_SATISFIED else CapabilityStatus.CAPABILITY_MISSING,
+    val unavailableCapabilities: Set<CapabilityType> = emptySet(),
+    val candidateResourcesForPending: Map<CapabilityType, List<CapabilityDescriptor>> = emptyMap(),
+    val candidateResourcesForMissing: Map<CapabilityType, List<CapabilityDescriptor>> = candidateResourcesForPending,
+    val status: CapabilityStatus = when {
+        conflictingCapabilities.isNotEmpty() && satisfiedCapabilities.isEmpty() -> CapabilityStatus.BLOCKED
+        unavailableCapabilities.isNotEmpty() && missingCapabilities.isNotEmpty() -> CapabilityStatus.CAPABILITY_UNAVAILABLE
+        missingCapabilities.isNotEmpty() -> CapabilityStatus.NO_CAPABLE_RESOURCE
+        satisfiedCapabilities.containsAll(requiredCapabilities) && requiredCapabilities.isNotEmpty() -> CapabilityStatus.CAPABILITY_SATISFIED
+        satisfiedCapabilities.isNotEmpty() -> CapabilityStatus.CAPABILITY_PARTIAL
+        requiredCapabilities.isEmpty() -> CapabilityStatus.CAPABILITY_SATISFIED
+        else -> CapabilityStatus.CAPABILITY_PARTIAL
+    },
     val gapReport: String = "",
-    val isFullySatisfied: Boolean = missingCapabilities.isEmpty() && conflictingCapabilities.isEmpty()
+    val isFullySatisfied: Boolean = requiredCapabilities.isEmpty() || (satisfiedCapabilities.containsAll(requiredCapabilities) && conflictingCapabilities.isEmpty())
 )
 

@@ -59,7 +59,7 @@ data class DecisionContext(
     /**
      * Projects this rich context into the normalized mathematical DecisionState vector
      * required by the CBR-MDP Decision Engine.
-     * Uses structured capability requirements as the primary source of truth.
+     * Uses structured capability requirements as the authoritative source of truth (Rule 4 & Rule 20).
      */
     fun toDecisionState(): DecisionState {
         val reqs = task.requirements
@@ -82,24 +82,23 @@ data class DecisionContext(
                     allTargetCaps.contains(CapabilityType.SHELL_EXECUTION) ||
                     allTargetCaps.contains(CapabilityType.SYSTEM_EXECUTION) ||
                     allTargetCaps.contains(CapabilityType.CODE_ENGINEERING) ||
+                    allTargetCaps.contains(CapabilityType.SECURITY_AUDIT) ||
+                    allTargetCaps.contains(CapabilityType.HASH_COMPUTATION) ||
                     allTargetCaps.contains(CapabilityType.MCP_INVOCATION)
         } else {
             prompt.contains("ملف", ignoreCase = true) ||
-                    prompt.contains("بحث", ignoreCase = true) ||
                     prompt.contains("أداة", ignoreCase = true) ||
                     prompt.contains("file", ignoreCase = true) ||
                     prompt.contains("tool", ignoreCase = true)
         }
 
-        val requiresLargeContext = prompt.length > 500 || conversationHistoryCount > 5
+        val requiresLargeContext = prompt.length > 1000 || conversationHistoryCount > 5
 
         val requiresWebSearch = if (allTargetCaps.isNotEmpty()) {
             allTargetCaps.contains(CapabilityType.SEARCH)
         } else {
             prompt.contains("بحث", ignoreCase = true) ||
-                    prompt.contains("search", ignoreCase = true) ||
-                    prompt.contains("أحدث", ignoreCase = true) ||
-                    prompt.contains("latest", ignoreCase = true)
+                    prompt.contains("search", ignoreCase = true)
         }
 
         val requiresCoding = if (allTargetCaps.isNotEmpty()) {
@@ -107,10 +106,7 @@ data class DecisionContext(
                     allTargetCaps.contains(CapabilityType.CODE_ENGINEERING)
         } else {
             prompt.contains("كود", ignoreCase = true) ||
-                    prompt.contains("برمج", ignoreCase = true) ||
-                    prompt.contains("kotlin", ignoreCase = true) ||
-                    prompt.contains("code", ignoreCase = true) ||
-                    prompt.contains("function", ignoreCase = true)
+                    prompt.contains("code", ignoreCase = true)
         }
 
         val hasSearch = hasSearchEvidence
