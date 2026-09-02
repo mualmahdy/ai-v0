@@ -4,7 +4,9 @@ import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
 import com.example.domain.core.agent.AgentDefinition
 import com.example.domain.core.agent.AgentRole
+import com.example.domain.core.capability.CapabilityEvidenceRegistry
 import com.example.domain.core.capability.CapabilityGapAnalysis
+import com.example.domain.core.capability.CapabilityPrerequisites
 import com.example.domain.core.capability.CapabilityRequirement
 import com.example.domain.core.capability.CapabilityResourceGraph
 import com.example.domain.core.capability.CapabilityState
@@ -12,7 +14,6 @@ import com.example.domain.core.capability.CapabilityStatus
 import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.capability.Locality
 import com.example.domain.core.capability.NetworkRequirement
-
 import com.example.domain.core.capability.SideEffectClassification
 import com.example.domain.core.decision.CbrMdpEngine
 import com.example.domain.core.decision.DecisionAction
@@ -25,6 +26,8 @@ import com.example.domain.core.security.SecurityDecision
 import com.example.domain.core.security.SecurityPolicy
 import com.example.domain.core.task.TaskCapabilityRequirements
 import com.example.domain.core.task.TaskDefinition
+import com.example.domain.core.task.TaskSpecification
+import com.example.domain.core.task.TaskSpecificationProvenance
 import com.example.domain.core.tools.ToolInput
 import com.example.domain.core.workspace.Workspace
 
@@ -62,27 +65,49 @@ class DecisionService(
         val effectiveRequirements = resolveTaskRequirements(task)
         val taskWithRequirements = if (task.requirements == effectiveRequirements) task else task.copy(requirements = effectiveRequirements)
 
-        // Derive evidence-based satisfied capabilities
+        // Derive evidence-based satisfied capabilities dynamically via Evidence Contracts (Rule 13, 14)
         val currentlySatisfied = mutableSetOf<CapabilityType>()
-        if (accumulatedEvidence.containsKey("searchResults") || (lastAction?.type == DecisionActionType.SEARCH && lastObservation?.isSuccess == true)) {
-            currentlySatisfied.add(CapabilityType.SEARCH)
-        }
-        if (accumulatedEvidence.containsKey("memorySnippets") || ((lastAction?.type == DecisionActionType.RETRIEVE_MEMORY || lastAction?.type == DecisionActionType.RETRIEVE_KNOWLEDGE) && lastObservation?.isSuccess == true)) {
-            currentlySatisfied.add(CapabilityType.MEMORY_RETRIEVAL)
-            currentlySatisfied.add(CapabilityType.EMBEDDING)
-        }
-        if (accumulatedEvidence.containsKey("synthesizedText") || ((lastAction?.type == DecisionActionType.EXECUTE_STEP || lastAction?.type == DecisionActionType.SELECT_MODEL) && lastObservation?.isSuccess == true)) {
-            currentlySatisfied.add(CapabilityType.LLM_GENERATION)
-            currentlySatisfied.add(CapabilityType.REASONING)
-        }
-        if (accumulatedEvidence.containsKey("toolOutput") || accumulatedEvidence.containsKey("toolAttributes") || (lastAction?.type == DecisionActionType.EXECUTE_TOOL && lastObservation?.isSuccess == true)) {
-            currentlySatisfied.add(CapabilityType.TOOL_EXECUTION)
-            val executedToolName = lastAction?.targetId
-            if (executedToolName != null) {
-                val executedTool = componentRegistry.getTool(executedToolName)
-                if (executedTool != null) {
-                    currentlySatisfied.addAll(executedTool.declaration.providedCapabilities)
+        for (cap in CapabilityType.values()) {
+            val contract = CapabilityEvidenceRegistry.getContract(cap)
+            val hasEvidence = contract.requiredEvidenceKeys.any { key ->
+                val value = accumulatedEvidence[key]
+                when (value) {
+                    null -> false
+                    is String -> value.isNotBlank()
+                    is Collection<*> -> value.isNotEmpty()
+                    is Map<*, *> -> value.isNotEmpty()
+                    is Boolean -> value
+                    else -> true
                 }
+            }
+            if (hasEvidence) {
+                currentlySatisfied.add(cap)
+            }
+        }
+
+        // Add dynamically satisfied capabilities from last successful action
+        if (lastObservation?.isSuccess == true && lastAction != null) {
+            when (lastAction.type) {
+                DecisionActionType.SEARCH -> currentlySatisfied.add(CapabilityType.SEARCH)
+                DecisionActionType.RETRIEVE_MEMORY,
+                DecisionActionType.RETRIEVE_KNOWLEDGE -> {
+                    currentlySatisfied.add(CapabilityType.MEMORY_RETRIEVAL)
+                    currentlySatisfied.add(CapabilityType.EMBEDDING)
+                }
+                DecisionActionType.EXECUTE_STEP,
+                DecisionActionType.SELECT_MODEL -> {
+                    currentlySatisfied.add(CapabilityType.LLM_GENERATION)
+                    currentlySatisfied.add(CapabilityType.REASONING)
+                }
+                DecisionActionType.EXECUTE_TOOL -> {
+                    currentlySatisfied.add(CapabilityType.TOOL_EXECUTION)
+                    lastAction.targetId?.let { toolName ->
+                        componentRegistry.getTool(toolName)?.declaration?.providedCapabilities?.let {
+                            currentlySatisfied.addAll(it)
+                        }
+                    }
+                }
+                else -> Unit
             }
         }
 
@@ -430,21 +455,39 @@ class DecisionService(
     }
 
     /**
-     * Resolves task requirements using structured TaskCapabilityRequirements as the authoritative source of truth (Rule 6, 7, 20).
+     * Resolves task requirements using structured TaskSpecification / TaskCapabilityRequirements
+     * as the authoritative source of truth, expanding transitive prerequisites (Rule 2, 3, 6, 7).
      */
     fun resolveTaskRequirements(task: TaskDefinition): TaskCapabilityRequirements {
+        // Tier 1: TaskSpecification
+        task.specification?.requirements?.let { specReqs ->
+            if (specReqs.requiredCapabilities.isNotEmpty() || specReqs.optionalCapabilities.isNotEmpty()) {
+                val expandedRequired = CapabilityPrerequisites.resolvePrerequisites(specReqs.requiredCapabilities).resolvedCapabilities
+                return specReqs.copy(requiredCapabilities = expandedRequired)
+            }
+        }
+
+        // Tier 2: Existing task requirements
         val existing = task.requirements
         if (existing.requiredCapabilities.isNotEmpty() || existing.optionalCapabilities.isNotEmpty()) {
-            return existing
+            val expandedRequired = CapabilityPrerequisites.resolvePrerequisites(existing.requiredCapabilities).resolvedCapabilities
+            return existing.copy(requiredCapabilities = expandedRequired)
         }
 
-        // Check if requirements are embedded in task parameters / context variables
+        // Tier 3: Parameters / context variables
+        val paramSpec = task.input.parameters["specification"]
+        if (paramSpec is TaskSpecification && (paramSpec.requirements.requiredCapabilities.isNotEmpty() || paramSpec.requirements.optionalCapabilities.isNotEmpty())) {
+            val expandedRequired = CapabilityPrerequisites.resolvePrerequisites(paramSpec.requirements.requiredCapabilities).resolvedCapabilities
+            return paramSpec.requirements.copy(requiredCapabilities = expandedRequired)
+        }
+
         val paramReqs = task.input.parameters["requirements"]
         if (paramReqs is TaskCapabilityRequirements && (paramReqs.requiredCapabilities.isNotEmpty() || paramReqs.optionalCapabilities.isNotEmpty())) {
-            return paramReqs
+            val expandedRequired = CapabilityPrerequisites.resolvePrerequisites(paramReqs.requiredCapabilities).resolvedCapabilities
+            return paramReqs.copy(requiredCapabilities = expandedRequired)
         }
 
-        // Infer requirements only as structured fallback
+        // Tier 4: Heuristic fallback with explicit provenance tracking (Rule 3)
         val reqCaps = mutableSetOf<CapabilityType>()
         val optCaps = mutableSetOf<CapabilityType>()
         val prompt = task.input.rawPrompt.lowercase()
@@ -481,14 +524,16 @@ class DecisionService(
             reqCaps.add(CapabilityType.HASH_COMPUTATION)
         }
 
-        // Deterministic tasks (e.g. pure hash/file without generative instructions) do NOT require LLM_GENERATION
+        // Deterministic tasks (e.g. pure hash/file without generative instructions) do NOT require LLM_GENERATION (Rule 20)
         val isPurelyDeterministic = isHashTask && !isCodeTask && !isSearchTask && !prompt.contains("explain") && !prompt.contains("اشرح")
         if (!isPurelyDeterministic) {
             reqCaps.add(CapabilityType.LLM_GENERATION)
         }
 
+        val expandedRequired = CapabilityPrerequisites.resolvePrerequisites(reqCaps).resolvedCapabilities
+
         return TaskCapabilityRequirements(
-            requiredCapabilities = reqCaps,
+            requiredCapabilities = expandedRequired,
             optionalCapabilities = optCaps,
             networkRequirement = if (prompt.contains("offline") || prompt.contains("دون اتصال")) NetworkPolicy.OFFLINE else NetworkPolicy.HYBRID
         )

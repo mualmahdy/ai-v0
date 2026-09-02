@@ -410,6 +410,54 @@ class CapabilityResourceGraph(
     }
 
     /**
+     * Resolves transitive prerequisites for the required capabilities in a task specification (Rule 6).
+     */
+    fun resolveRequiredWithDependencies(
+        requirements: TaskCapabilityRequirements
+    ): TaskCapabilityRequirements {
+        val dependencyResult = CapabilityPrerequisites.resolvePrerequisites(requirements.requiredCapabilities)
+        return requirements.copy(
+            requiredCapabilities = dependencyResult.resolvedCapabilities
+        )
+    }
+
+    /**
+     * Evaluates whether a required capability set is fully, partially, or unsatisfiable (Rule 7, 10).
+     */
+    fun evaluateSatisfiability(
+        requirements: TaskCapabilityRequirements,
+        networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
+        isNetworkAvailable: Boolean = true,
+        failureCounts: Map<String, Int> = emptyMap()
+    ): CapabilitySatisfiability {
+        val gap = analyzeGap(
+            taskId = "eval",
+            requirements = requirements,
+            networkPolicy = networkPolicy,
+            isNetworkAvailable = isNetworkAvailable,
+            failureCounts = failureCounts
+        )
+        return when (gap.status) {
+            CapabilityStatus.CAPABILITY_SATISFIED -> CapabilitySatisfiability.FULLY_SATISFIABLE
+            CapabilityStatus.BLOCKED -> CapabilitySatisfiability.BLOCKED
+            CapabilityStatus.CAPABILITY_PARTIAL -> {
+                if (gap.missingCapabilities.isEmpty()) CapabilitySatisfiability.FULLY_SATISFIABLE
+                else CapabilitySatisfiability.PARTIALLY_SATISFIABLE
+            }
+            CapabilityStatus.CAPABILITY_MISSING,
+            CapabilityStatus.NO_CAPABLE_RESOURCE,
+            CapabilityStatus.CAPABILITY_UNAVAILABLE -> {
+                if (gap.satisfiedCapabilities.isNotEmpty() || gap.candidateResourcesForPending.isNotEmpty()) {
+                    CapabilitySatisfiability.PARTIALLY_SATISFIABLE
+                } else {
+                    CapabilitySatisfiability.UNSATISFIABLE
+                }
+            }
+            else -> CapabilitySatisfiability.PARTIALLY_SATISFIABLE
+        }
+    }
+
+    /**
      * Evaluates if a set of required capabilities can be satisfied by existing registered descriptors.
      */
     fun canSatisfyByComposition(

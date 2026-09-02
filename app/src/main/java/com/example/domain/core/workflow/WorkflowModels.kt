@@ -2,6 +2,8 @@ package com.example.domain.core.workflow
 
 import com.example.domain.core.Outcome
 import com.example.domain.core.agent.AgentRole
+import com.example.domain.core.task.AcceptanceCriterion
+import com.example.domain.core.task.TaskCapabilityRequirements
 import com.example.domain.core.task.TaskId
 
 /**
@@ -32,13 +34,17 @@ enum class StepStatus {
 }
 
 /**
- * Directed node in a workflow plan.
+ * Directed node in a workflow plan with dynamic step-level capability requirements (Rule 8).
  */
 data class StepNode(
     val id: String,
     val taskId: TaskId,
     val agentRole: AgentRole,
     val description: String,
+    val requirements: TaskCapabilityRequirements = TaskCapabilityRequirements(),
+    val expectedOutputs: List<String> = emptyList(),
+    val evidenceRequirements: List<String> = emptyList(),
+    val acceptanceCriteria: List<AcceptanceCriterion> = emptyList(),
     val dependencies: Set<String> = emptySet(),
     val status: StepStatus = StepStatus.PENDING,
     val outputSummary: String? = null,

@@ -8,6 +8,7 @@ import com.example.domain.core.agent.AgentIdentity
 import com.example.domain.core.agent.AgentRole
 import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.task.TaskInput
+import com.example.domain.core.task.TaskSpecification
 import com.example.domain.core.workflow.ExecutionMode
 import com.example.domain.core.workflow.StepNode
 import com.example.domain.core.workflow.StepStatus
@@ -114,7 +115,16 @@ class WorkflowEngine(
             val stepTask = TaskDefinition(
                 id = step.taskId,
                 assignedAgentId = stepAgent.identity.id,
-                input = TaskInput(rawPrompt = combinedPrompt)
+                input = TaskInput(rawPrompt = combinedPrompt),
+                specification = TaskSpecification(
+                    objective = step.description,
+                    requirements = step.requirements,
+                    expectedOutputs = step.expectedOutputs,
+                    evidenceRequirements = step.evidenceRequirements,
+                    acceptanceCriteria = step.acceptanceCriteria,
+                    provenance = com.example.domain.core.task.TaskSpecificationProvenance.PLANNER_DECOMPOSITION
+                ),
+                requirements = step.requirements
             )
 
             val executionOutcome = orchestrator.executeTask(stepAgent, stepTask)

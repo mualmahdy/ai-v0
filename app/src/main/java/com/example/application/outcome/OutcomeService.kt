@@ -1,6 +1,7 @@
 package com.example.application.outcome
 
 import com.example.application.execution.ExecutionResult
+import com.example.domain.core.capability.CapabilityEvidenceRegistry
 import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
@@ -22,10 +23,21 @@ enum class ActionOutcomeType {
 }
 
 /**
- * Structured verification report for objective evaluation.
+ * High-level Task Verification Outcome classifications (Rule 14).
+ */
+enum class VerificationOutcomeStatus {
+    VERIFIED,
+    PARTIALLY_VERIFIED,
+    FAILED,
+    INCONCLUSIVE
+}
+
+/**
+ * Structured verification report for objective evaluation (Rule 14, 15).
  */
 data class TaskVerificationReport(
     val isSatisfied: Boolean,
+    val status: VerificationOutcomeStatus = if (isSatisfied) VerificationOutcomeStatus.VERIFIED else VerificationOutcomeStatus.FAILED,
     val isDegradedAcceptable: Boolean = false,
     val missingCriteria: List<String> = emptyList(),
     val satisfiedCriteria: List<String> = emptyList(),
@@ -71,7 +83,7 @@ class OutcomeService {
     }
 
     /**
-     * Performs strict, objective verification of task criteria against gathered evidence and outputs.
+     * Performs strict, objective verification of task criteria against gathered evidence and outputs (Rule 13, 14, 15).
      */
     fun verifyTaskCompletion(
         task: TaskDefinition,
@@ -99,9 +111,10 @@ class OutcomeService {
             missing.add("Final output indicates an unrecovered execution error.")
         }
 
-        // 3. Minimum output length check
+        // 3. Minimum output length check (if applicable)
         val minChars = successCriteria.minOutputLengthChars.coerceAtLeast(1)
-        if (finalOutputText.trim().length < minChars && !accumulatedEvidence.containsKey("toolOutput")) {
+        val hasEvidence = accumulatedEvidence.isNotEmpty()
+        if (finalOutputText.trim().length < minChars && !hasEvidence) {
             missing.add("Output length (${finalOutputText.length}) is below required minimum ($minChars).")
         } else {
             satisfied.add("Output length meets minimum constraint.")
@@ -127,30 +140,30 @@ class OutcomeService {
             }
         }
 
-        // 6. Verify Capability Requirements Evidence
-        if (requirements.requiredCapabilities.contains(CapabilityType.SEARCH)) {
-            if (accumulatedEvidence.containsKey("searchResults")) {
-                satisfied.add("Capability SEARCH evidence confirmed.")
+        // 6. Generic Evidence Contract Verification for ALL Required Capabilities (Rule 13, 15)
+        for (requiredCap in requirements.requiredCapabilities) {
+            val contract = CapabilityEvidenceRegistry.getContract(requiredCap)
+            val hasContractEvidence = contract.requiredEvidenceKeys.any { key ->
+                val value = accumulatedEvidence[key]
+                when (value) {
+                    null -> false
+                    is String -> value.isNotBlank()
+                    is Collection<*> -> value.isNotEmpty()
+                    is Map<*, *> -> value.isNotEmpty()
+                    is Boolean -> value
+                    else -> true
+                }
+            }
+
+            if (hasContractEvidence) {
+                satisfied.add("Capability ${requiredCap.name} evidence confirmed (${contract.description}).")
             } else {
-                missing.add("Task required SEARCH capability but no search results were gathered.")
-            }
-        }
-
-        if (requirements.requiredCapabilities.contains(CapabilityType.MEMORY_RETRIEVAL) ||
-            requirements.requiredCapabilities.contains(CapabilityType.EMBEDDING)) {
-            if (accumulatedEvidence.containsKey("memorySnippets")) {
-                satisfied.add("Capability MEMORY evidence confirmed.")
-            } else if (strategy == VerificationStrategy.STRICT) {
-                missing.add("Task required MEMORY capability but no memory records were retrieved.")
-            }
-        }
-
-        if (requirements.requiredCapabilities.contains(CapabilityType.TOOL_EXECUTION) ||
-            requirements.requiredCapabilities.contains(CapabilityType.FILE_STORAGE)) {
-            if (accumulatedEvidence.containsKey("toolOutput") || accumulatedEvidence.containsKey("toolAttributes")) {
-                satisfied.add("Capability TOOL_EXECUTION evidence confirmed.")
-            } else if (strategy == VerificationStrategy.STRICT) {
-                missing.add("Task required TOOL_EXECUTION capability but no tool output was captured.")
+                // If it is LLM_GENERATION and finalOutputText is present, LLM evidence is satisfied
+                if (requiredCap == CapabilityType.LLM_GENERATION && finalOutputText.isNotBlank()) {
+                    satisfied.add("Capability LLM_GENERATION text output verified.")
+                } else if (strategy == VerificationStrategy.STRICT || requirements.requiredCapabilities.size > 1) {
+                    missing.add("Task required capability ${requiredCap.name} but missing evidence keys: ${contract.requiredEvidenceKeys.joinToString()}")
+                }
             }
         }
 
@@ -168,9 +181,16 @@ class OutcomeService {
         // 8. Strategy Evaluation
         val isSatisfied = when (strategy) {
             VerificationStrategy.STRICT -> missing.isEmpty()
-            VerificationStrategy.PERMISSIVE -> missing.isEmpty() || finalOutputText.isNotBlank()
-            VerificationStrategy.EVIDENCE_BASED -> missing.none { it.contains("Evidence", ignoreCase = true) }
+            VerificationStrategy.PERMISSIVE -> missing.isEmpty() || (finalOutputText.isNotBlank() && requirements.requiredCapabilities.isEmpty())
+            VerificationStrategy.EVIDENCE_BASED -> missing.none { it.contains("evidence", ignoreCase = true) || it.contains("Capability", ignoreCase = true) }
             VerificationStrategy.CRITERIA_MATCH -> missing.none { it.contains("Criterion", ignoreCase = true) }
+        }
+
+        val verificationStatus = when {
+            isSatisfied -> VerificationOutcomeStatus.VERIFIED
+            satisfied.isNotEmpty() && missing.isNotEmpty() -> VerificationOutcomeStatus.PARTIALLY_VERIFIED
+            missing.isNotEmpty() -> VerificationOutcomeStatus.FAILED
+            else -> VerificationOutcomeStatus.INCONCLUSIVE
         }
 
         val confidence = if (isSatisfied) 1.0f else (1.0f - (missing.size * 0.25f)).coerceAtLeast(0.0f)
@@ -185,6 +205,7 @@ class OutcomeService {
 
         return TaskVerificationReport(
             isSatisfied = isSatisfied,
+            status = verificationStatus,
             isDegradedAcceptable = isDegradedAcceptable,
             missingCriteria = missing,
             satisfiedCriteria = satisfied,

@@ -84,6 +84,218 @@ enum class CapabilityType(
 }
 
 /**
+ * Standard prerequisites mapping for domain capabilities (Rule 6).
+ */
+object CapabilityPrerequisites {
+    private val standardPrerequisites = mapOf(
+        CapabilityType.CODE_ENGINEERING to listOf(CapabilityType.CODE_ANALYSIS, CapabilityType.TOOL_EXECUTION),
+        CapabilityType.MEMORY_RETRIEVAL to listOf(CapabilityType.EMBEDDING),
+        CapabilityType.VECTOR_STORE to listOf(CapabilityType.EMBEDDING),
+        CapabilityType.MCP_INVOCATION to listOf(CapabilityType.TOOL_EXECUTION),
+        CapabilityType.FILE_WRITE to listOf(CapabilityType.FILE_STORAGE),
+        CapabilityType.FILE_READ to listOf(CapabilityType.FILE_STORAGE),
+        CapabilityType.SECURITY_AUDIT to listOf(CapabilityType.CODE_ANALYSIS)
+    )
+
+    fun getPrerequisites(type: CapabilityType): List<CapabilityType> {
+        return standardPrerequisites[type] ?: emptyList()
+    }
+
+    /**
+     * Transitively resolves all capability prerequisites with cycle detection (Rule 6).
+     */
+    fun resolvePrerequisites(
+        initialCapabilities: Set<CapabilityType>,
+        customDefinitions: Map<CapabilityType, List<CapabilityType>> = emptyMap()
+    ): CapabilityDependencyResult {
+        val resolved = mutableSetOf<CapabilityType>()
+        val order = mutableListOf<CapabilityType>()
+        val visited = mutableSetOf<CapabilityType>()
+        val recursionStack = mutableSetOf<CapabilityType>()
+        val cycles = mutableListOf<CapabilityType>()
+
+        fun dfs(cap: CapabilityType) {
+            if (recursionStack.contains(cap)) {
+                cycles.add(cap)
+                return
+            }
+            if (visited.contains(cap)) return
+
+            visited.add(cap)
+            recursionStack.add(cap)
+
+            val prereqs = customDefinitions[cap] ?: getPrerequisites(cap)
+            for (prereq in prereqs) {
+                dfs(prereq)
+            }
+
+            recursionStack.remove(cap)
+            if (!resolved.contains(cap)) {
+                resolved.add(cap)
+                order.add(cap)
+            }
+        }
+
+        for (cap in initialCapabilities) {
+            dfs(cap)
+        }
+
+        return CapabilityDependencyResult(
+            resolvedCapabilities = resolved,
+            resolutionOrder = order,
+            hasCycles = cycles.isNotEmpty(),
+            cycleNodes = cycles
+        )
+    }
+}
+
+/**
+ * Result of capability dependency resolution (Rule 6).
+ */
+data class CapabilityDependencyResult(
+    val resolvedCapabilities: Set<CapabilityType>,
+    val resolutionOrder: List<CapabilityType>,
+    val hasCycles: Boolean = false,
+    val cycleNodes: List<CapabilityType> = emptyList()
+)
+
+/**
+ * Satisfiability classification of a task or plan as mandated by Rule 10.
+ */
+enum class CapabilitySatisfiability {
+    FULLY_SATISFIABLE,
+    PARTIALLY_SATISFIABLE,
+    UNSATISFIABLE,
+    BLOCKED
+}
+
+/**
+ * Structured Evidence Contract defining expectations for verifiable capability execution (Rule 13).
+ */
+data class EvidenceContract(
+    val capability: CapabilityType,
+    val requiredEvidenceKeys: List<String>,
+    val description: String,
+    val primaryKey: String = requiredEvidenceKeys.firstOrNull() ?: "output"
+)
+
+/**
+ * Central registry of standard Evidence Contracts for all core capabilities (Rule 13).
+ */
+object CapabilityEvidenceRegistry {
+    private val contracts = mapOf(
+        CapabilityType.SEARCH to EvidenceContract(
+            capability = CapabilityType.SEARCH,
+            requiredEvidenceKeys = listOf("searchResults", "search_results", "searchOutput"),
+            description = "Search query execution and retrieved web items"
+        ),
+        CapabilityType.MEMORY_RETRIEVAL to EvidenceContract(
+            capability = CapabilityType.MEMORY_RETRIEVAL,
+            requiredEvidenceKeys = listOf("memorySnippets", "retrieved_memories", "memoryRecords"),
+            description = "Semantic memory query records from persistent memory store"
+        ),
+        CapabilityType.EMBEDDING to EvidenceContract(
+            capability = CapabilityType.EMBEDDING,
+            requiredEvidenceKeys = listOf("embeddingVector", "embeddings", "vectorData"),
+            description = "Normalized float vector embedding of input text"
+        ),
+        CapabilityType.VECTOR_STORE to EvidenceContract(
+            capability = CapabilityType.VECTOR_STORE,
+            requiredEvidenceKeys = listOf("vectorMatchResults", "storedVectorId", "vectorData"),
+            description = "Vector storage confirmation or nearest-neighbor matches"
+        ),
+        CapabilityType.TOOL_EXECUTION to EvidenceContract(
+            capability = CapabilityType.TOOL_EXECUTION,
+            requiredEvidenceKeys = listOf("toolOutput", "toolAttributes", "executionResult"),
+            description = "Programmatic tool invocation output payload"
+        ),
+        CapabilityType.FILE_STORAGE to EvidenceContract(
+            capability = CapabilityType.FILE_STORAGE,
+            requiredEvidenceKeys = listOf("fileOutput", "filePath", "fileContent", "toolOutput"),
+            description = "File system read/write operation artifact"
+        ),
+        CapabilityType.FILE_READ to EvidenceContract(
+            capability = CapabilityType.FILE_READ,
+            requiredEvidenceKeys = listOf("fileContent", "fileOutput", "toolOutput"),
+            description = "Read file textual or binary stream content"
+        ),
+        CapabilityType.FILE_WRITE to EvidenceContract(
+            capability = CapabilityType.FILE_WRITE,
+            requiredEvidenceKeys = listOf("fileOutput", "filePath", "toolOutput"),
+            description = "Written file persistence confirmation"
+        ),
+        CapabilityType.HASH_COMPUTATION to EvidenceContract(
+            capability = CapabilityType.HASH_COMPUTATION,
+            requiredEvidenceKeys = listOf("hashDigest", "digest", "hashValue", "toolOutput"),
+            description = "Cryptographic digest computation evidence"
+        ),
+        CapabilityType.CODE_ANALYSIS to EvidenceContract(
+            capability = CapabilityType.CODE_ANALYSIS,
+            requiredEvidenceKeys = listOf("codeAnalysis", "analysisResult", "toolOutput"),
+            description = "Static code analysis or diagnostic report"
+        ),
+        CapabilityType.CODE_ENGINEERING to EvidenceContract(
+            capability = CapabilityType.CODE_ENGINEERING,
+            requiredEvidenceKeys = listOf("codeOutput", "sourceCode", "synthesizedCode", "toolOutput"),
+            description = "Constructed or modified software code"
+        ),
+        CapabilityType.SECURITY_AUDIT to EvidenceContract(
+            capability = CapabilityType.SECURITY_AUDIT,
+            requiredEvidenceKeys = listOf("securityReport", "auditResults", "toolOutput"),
+            description = "Security policy and vulnerability audit evaluation"
+        ),
+        CapabilityType.LLM_GENERATION to EvidenceContract(
+            capability = CapabilityType.LLM_GENERATION,
+            requiredEvidenceKeys = listOf("synthesizedText", "llmResponse", "generatedText"),
+            description = "Synthesized language model response text"
+        ),
+        CapabilityType.REASONING to EvidenceContract(
+            capability = CapabilityType.REASONING,
+            requiredEvidenceKeys = listOf("synthesizedText", "reasoningTrace", "llmResponse"),
+            description = "Step-by-step reasoning or thought trace"
+        ),
+        CapabilityType.VISION to EvidenceContract(
+            capability = CapabilityType.VISION,
+            requiredEvidenceKeys = listOf("visionAnalysis", "imageDescription", "synthesizedText"),
+            description = "Visual understanding and feature extraction"
+        ),
+        CapabilityType.MCP_INVOCATION to EvidenceContract(
+            capability = CapabilityType.MCP_INVOCATION,
+            requiredEvidenceKeys = listOf("mcpResult", "toolOutput", "executionResult"),
+            description = "MCP protocol tool invocation response"
+        ),
+        CapabilityType.INTEGRATION_SYNC to EvidenceContract(
+            capability = CapabilityType.INTEGRATION_SYNC,
+            requiredEvidenceKeys = listOf("integrationResult", "syncStatus", "toolOutput"),
+            description = "External service synchronization response"
+        ),
+        CapabilityType.SHELL_EXECUTION to EvidenceContract(
+            capability = CapabilityType.SHELL_EXECUTION,
+            requiredEvidenceKeys = listOf("shellOutput", "exitCode", "toolOutput"),
+            description = "Isolated shell process execution output and exit status"
+        ),
+        CapabilityType.SYSTEM_EXECUTION to EvidenceContract(
+            capability = CapabilityType.SYSTEM_EXECUTION,
+            requiredEvidenceKeys = listOf("systemMetrics", "diagnosticOutput", "toolOutput"),
+            description = "System resource and hardware telemetry diagnostic"
+        ),
+        CapabilityType.STREAMING to EvidenceContract(
+            capability = CapabilityType.STREAMING,
+            requiredEvidenceKeys = listOf("streamChunks", "synthesizedText"),
+            description = "Streaming event sequence tokens"
+        )
+    )
+
+    fun getContract(type: CapabilityType): EvidenceContract {
+        return contracts[type] ?: EvidenceContract(
+            capability = type,
+            requiredEvidenceKeys = listOf("output", "toolOutput", "${type.code}_evidence"),
+            description = "Standard execution evidence for ${type.displayName}"
+        )
+    }
+}
+
+/**
  * Complete immutable semantic specification of a Capability.
  */
 data class CapabilityDefinition(
@@ -92,7 +304,7 @@ data class CapabilityDefinition(
     val description: String = type.displayName,
     val inputRequirements: List<String> = emptyList(),
     val outputGuarantees: List<String> = emptyList(),
-    val prerequisites: List<CapabilityType> = emptyList(),
+    val prerequisites: List<CapabilityType> = CapabilityPrerequisites.getPrerequisites(type),
     val networkRequirement: NetworkRequirement = type.defaultNetworkRequirement,
     val locality: Locality = type.defaultLocality,
     val sideEffects: SideEffectClassification = type.defaultSideEffect,

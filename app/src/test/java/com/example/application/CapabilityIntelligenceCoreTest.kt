@@ -430,4 +430,142 @@ class CapabilityIntelligenceCoreTest {
         val toolAction = actions.firstOrNull { it.type == DecisionActionType.EXECUTE_TOOL && it.targetId == "flaky_tool" }
         assertNull("Tool with >= 3 consecutive failures must be excluded from candidate actions", toolAction)
     }
+
+    @Test
+    fun testStructuredTaskProducesStructuredRequirements_WithProvenance() {
+        val spec = com.example.domain.core.task.TaskSpecification(
+            objective = "Analyze repository vulnerabilities",
+            requirements = TaskCapabilityRequirements(
+                requiredCapabilities = setOf(CapabilityType.SECURITY_AUDIT)
+            ),
+            provenance = com.example.domain.core.task.TaskSpecificationProvenance.STRUCTURED_EXPLICIT
+        )
+        val task = TaskDefinition(
+            id = TaskId("spec_task_1"),
+            assignedAgentId = AgentId("default"),
+            input = TaskInput("Audit this codebase"),
+            specification = spec
+        )
+
+        val resolved = decisionService.resolveTaskRequirements(task)
+        // SECURITY_AUDIT requires CODE_ANALYSIS prerequisite
+        assertTrue(resolved.requiredCapabilities.contains(CapabilityType.SECURITY_AUDIT))
+        assertTrue(resolved.requiredCapabilities.contains(CapabilityType.CODE_ANALYSIS))
+        assertEquals(com.example.domain.core.task.TaskSpecificationProvenance.STRUCTURED_EXPLICIT, task.specification?.provenance)
+    }
+
+    @Test
+    fun testCapabilityPrerequisitesTransitiveResolution_AndCycleSafety() {
+        // CODE_ENGINEERING requires CODE_ANALYSIS and TOOL_EXECUTION
+        val direct = setOf(CapabilityType.CODE_ENGINEERING)
+        val resolved = com.example.domain.core.capability.CapabilityPrerequisites.resolvePrerequisites(direct)
+        assertTrue(resolved.resolvedCapabilities.contains(CapabilityType.CODE_ENGINEERING))
+        assertTrue(resolved.resolvedCapabilities.contains(CapabilityType.CODE_ANALYSIS))
+        assertTrue(resolved.resolvedCapabilities.contains(CapabilityType.TOOL_EXECUTION))
+        assertFalse(resolved.hasCycles)
+
+        // Test cycle safety with custom definition
+        val cyclicMap = mapOf(
+            CapabilityType.SEARCH to listOf(CapabilityType.MEMORY_RETRIEVAL),
+            CapabilityType.MEMORY_RETRIEVAL to listOf(CapabilityType.SEARCH)
+        )
+        val cyclicResult = com.example.domain.core.capability.CapabilityPrerequisites.resolvePrerequisites(
+            setOf(CapabilityType.SEARCH),
+            customDefinitions = cyclicMap
+        )
+        assertTrue(cyclicResult.hasCycles)
+        assertTrue(cyclicResult.cycleNodes.isNotEmpty())
+    }
+
+    @Test
+    fun testRequiredAndOptionalCapabilitiesRemainDistinct() {
+        val reqs = TaskCapabilityRequirements(
+            requiredCapabilities = setOf(CapabilityType.FILE_READ),
+            optionalCapabilities = setOf(CapabilityType.SEARCH)
+        )
+        val graph = CapabilityResourceGraph()
+        val gap = graph.analyzeGap(
+            taskId = "gap_opt",
+            requirements = reqs,
+            currentlySatisfied = setOf(CapabilityType.FILE_READ)
+        )
+        assertTrue("Task is satisfied when all REQUIRED are met, optional missing does not block", gap.isFullySatisfied)
+        assertEquals(CapabilityStatus.CAPABILITY_SATISFIED, gap.status)
+        assertFalse(gap.satisfiedCapabilities.contains(CapabilityType.SEARCH))
+    }
+
+    @Test
+    fun testPartialPlan_DoesNotClaimSatisfaction() {
+        val reqs = TaskCapabilityRequirements(
+            requiredCapabilities = setOf(CapabilityType.FILE_READ, CapabilityType.SEARCH, CapabilityType.HASH_COMPUTATION)
+        )
+        val graph = CapabilityResourceGraph()
+        val gap = graph.analyzeGap(
+            taskId = "partial_gap",
+            requirements = reqs,
+            currentlySatisfied = setOf(CapabilityType.FILE_READ, CapabilityType.SEARCH)
+        )
+        assertFalse("A+B satisfied when A+B+C required must NOT be fully satisfied (Rule 7, 10)", gap.isFullySatisfied)
+        assertEquals(setOf(CapabilityType.HASH_COMPUTATION), gap.missingCapabilities)
+    }
+
+    @Test
+    fun testOutcomeVerification_EvidenceContractEnforcement() {
+        val outcomeService = com.example.application.outcome.OutcomeService()
+        val task = TaskDefinition(
+            id = TaskId("task_eval_1"),
+            assignedAgentId = AgentId("default"),
+            input = TaskInput("Search for recent papers"),
+            requirements = TaskCapabilityRequirements(
+                requiredCapabilities = setOf(CapabilityType.SEARCH)
+            )
+        )
+
+        // 1. LLM output alone without searchResults evidence -> Fails verification (Rule 14, 24)
+        val reportWithoutEvidence = outcomeService.verifyTaskCompletion(
+            task = task,
+            accumulatedEvidence = emptyMap(),
+            finalOutputText = "Here are the papers that I found online.",
+            lastAction = com.example.domain.core.decision.DecisionAction(DecisionActionType.COMPLETE)
+        )
+        assertFalse("LLM output alone without evidence contract fulfillment must NOT verify (Rule 24)", reportWithoutEvidence.isSatisfied)
+
+        // 2. With structured searchResults evidence -> Passes verification
+        val reportWithEvidence = outcomeService.verifyTaskCompletion(
+            task = task,
+            accumulatedEvidence = mapOf("searchResults" to listOf("Paper 1", "Paper 2")),
+            finalOutputText = "Here are the papers: Paper 1, Paper 2",
+            lastAction = com.example.domain.core.decision.DecisionAction(DecisionActionType.COMPLETE)
+        )
+        assertTrue("Evidence satisfying the capability contract must verify successfully", reportWithEvidence.isSatisfied)
+    }
+
+    @Test
+    fun testStepLevelRequirements_InWorkflowEngine() {
+        val step1 = com.example.domain.core.workflow.StepNode(
+            id = "s1",
+            taskId = TaskId("task_s1"),
+            agentRole = AgentRole.RESEARCHER,
+            description = "Gather sources",
+            requirements = TaskCapabilityRequirements(requiredCapabilities = setOf(CapabilityType.SEARCH))
+        )
+        val step2 = com.example.domain.core.workflow.StepNode(
+            id = "s2",
+            taskId = TaskId("task_s2"),
+            agentRole = AgentRole.SECURITY_GUARD,
+            description = "Audit sources",
+            requirements = TaskCapabilityRequirements(requiredCapabilities = setOf(CapabilityType.SECURITY_AUDIT)),
+            dependencies = setOf("s1")
+        )
+
+        val plan = com.example.domain.core.workflow.WorkflowPlan(
+            id = com.example.domain.core.workflow.WorkflowId("workflow_test"),
+            goal = "Test Workflow Goal",
+            steps = listOf(step1, step2)
+        )
+
+        assertEquals(setOf(CapabilityType.SEARCH), plan.steps[0].requirements.requiredCapabilities)
+        assertEquals(setOf(CapabilityType.SECURITY_AUDIT), plan.steps[1].requirements.requiredCapabilities)
+        assertTrue(plan.steps[1].dependencies.contains("s1"))
+    }
 }
