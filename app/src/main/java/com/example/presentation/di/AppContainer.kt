@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.example.application.extension.ExtensionManager
 import com.example.application.orchestration.AgentOrchestrator
 import com.example.application.orchestration.WorkflowEngine
+import com.example.application.provider.ProviderControlPlaneService
 import com.example.application.provider.ProviderRegistryService
 import com.example.application.radar.IntelligenceRadarPipeline
 import com.example.application.rag.RagPipelineService
@@ -17,16 +18,22 @@ import com.example.application.usecases.ManageMemoryUseCase
 import com.example.application.usecases.ManageWorkspaceFilesUseCase
 import com.example.domain.core.decision.CaseBase
 import com.example.domain.core.decision.CbrMdpEngine
+import com.example.domain.ports.provider.ProviderRepositoryPort
+import com.example.domain.ports.provider.SecureCredentialStoragePort
 import com.example.infrastructure.integration.IntegrationGateway
 import com.example.infrastructure.llm.discovery.GeminiModelDiscoveryAdapter
 import com.example.infrastructure.llm.discovery.OpenAiCompatibleDiscoveryAdapter
 import com.example.infrastructure.llm.gemini.GeminiLlmAdapter
 import com.example.infrastructure.mcp.McpClient
+import com.example.infrastructure.memory.LocalDeterministicEmbeddingAdapter
 import com.example.infrastructure.memory.RoomVectorStoreAdapter
 import com.example.infrastructure.persistence.AppDatabase
+import com.example.infrastructure.provider.ProviderAdapterFactory
+import com.example.infrastructure.provider.RoomProviderRepositoryAdapter
 import com.example.infrastructure.radar.GitHubReleasesRadarSource
 import com.example.infrastructure.radar.RssFeedRadarSource
 import com.example.infrastructure.search.MultiSourceSearchAdapter
+import com.example.infrastructure.security.EncryptedSecretStorageAdapter
 import com.example.infrastructure.skills.CleanArchitectureScaffolderSkill
 import com.example.infrastructure.skills.SecurityAuditorSkill
 import com.example.infrastructure.storage.SandboxWorkspaceStorageAdapter
@@ -38,13 +45,26 @@ import java.io.File
 /**
  * Dependency Injection Container / Composition Root for the Clean Architecture Orchestrator.
  * Connects real Room persistence, genuine MCP protocols, live integrations, multi-source search,
- * executable skills, and CBR-MDP decision intelligence.
+ * executable skills, CBR-MDP decision intelligence, and the dynamic Provider Control Plane.
  */
 class AppContainer(context: Context) {
     val appContext = context.applicationContext
 
     // Persistence Layer (Room Database)
     val database: AppDatabase by lazy { AppDatabase.getInstance(appContext) }
+
+    // Secure Credential Storage
+    val secureCredentialStorage: SecureCredentialStoragePort by lazy {
+        EncryptedSecretStorageAdapter(appContext)
+    }
+
+    // Persistent Provider Repository
+    val providerRepository: ProviderRepositoryPort by lazy {
+        RoomProviderRepositoryAdapter(
+            providerDao = database.providerConfigDao(),
+            secureCredentialStorage = secureCredentialStorage
+        )
+    }
 
     // Infrastructure Adapters
     val workspaceStorage: SandboxWorkspaceStorageAdapter by lazy {
@@ -55,10 +75,14 @@ class AppContainer(context: Context) {
         )
     }
 
+    val defaultEmbeddingAdapter: LocalDeterministicEmbeddingAdapter by lazy {
+        LocalDeterministicEmbeddingAdapter(providerId = "local_embedding_engine", dimension = 128)
+    }
+
     val memoryVectorStore: RoomVectorStoreAdapter by lazy {
         RoomVectorStoreAdapter(
             memoryDao = database.memoryDao(),
-            embeddingProvider = null
+            embeddingProvider = defaultEmbeddingAdapter
         )
     }
 
@@ -68,7 +92,9 @@ class AppContainer(context: Context) {
 
     val searchAdapter: MultiSourceSearchAdapter by lazy {
         MultiSourceSearchAdapter(
-            tavilyApiKeyProvider = { null },
+            tavilyApiKeyProvider = {
+                kotlinx.coroutines.runBlocking { providerRepository.getSecretForProvider("tavily_search") }
+            },
             workspaceStoragePort = workspaceStorage,
             defaultProjectId = 1L
         )
@@ -102,6 +128,7 @@ class AppContainer(context: Context) {
         ComponentRegistry().apply {
             registerLlmProvider(geminiLlmAdapter, isDefault = true)
             registerSearchProvider(searchAdapter, isDefault = true)
+            registerEmbeddingProvider(defaultEmbeddingAdapter, isDefault = true)
             registerMemoryRepository(memoryVectorStore)
             registerTool(fileSystemTool)
             registerTool(safeDiagnosticsTool)
@@ -163,6 +190,21 @@ class AppContainer(context: Context) {
         }
     }
 
+    // Provider Adapter Factory & Control Plane Service
+    val providerAdapterFactory: ProviderAdapterFactory by lazy {
+        ProviderAdapterFactory(workspaceStoragePort = workspaceStorage, defaultProjectId = 1L)
+    }
+
+    val providerControlPlaneService: ProviderControlPlaneService by lazy {
+        ProviderControlPlaneService(
+            providerRepository = providerRepository,
+            adapterFactory = providerAdapterFactory,
+            componentRegistry = componentRegistry
+        ).apply {
+            initialize()
+        }
+    }
+
     // CBR-MDP Decision Intelligence Engine with persistent CaseBase
     val cbrMdpEngine: CbrMdpEngine by lazy {
         val persistentCaseBase = CaseBase(decisionCaseDao = database.decisionCaseDao())
@@ -202,7 +244,7 @@ class AppContainer(context: Context) {
 
     // Knowledge & RAG Subsystem
     val ragPipelineService: RagPipelineService by lazy {
-        RagPipelineService(embeddingPort = null)
+        RagPipelineService(embeddingPort = defaultEmbeddingAdapter)
     }
 
     // Dedicated Decision Service Boundary (CBR-MDP Decision Intelligence)
@@ -284,9 +326,11 @@ class MainViewModelFactory(
                 providerRegistryService = appContainer.providerRegistryService,
                 extensionManager = appContainer.extensionManager,
                 intelligenceRadarPipeline = appContainer.intelligenceRadarPipeline,
-                ragPipelineService = appContainer.ragPipelineService
+                ragPipelineService = appContainer.ragPipelineService,
+                providerControlPlaneService = appContainer.providerControlPlaneService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
     }
 }
+

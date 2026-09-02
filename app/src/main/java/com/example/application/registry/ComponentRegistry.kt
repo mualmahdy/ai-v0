@@ -35,6 +35,18 @@ class ComponentRegistry {
         }
     }
 
+    fun unregisterLlmProvider(providerId: String) {
+        val key = providerId.lowercase()
+        llmProviders.remove(key)
+        if (defaultLlmProviderId == key) {
+            defaultLlmProviderId = llmProviders.keys.firstOrNull()
+        }
+    }
+
+    fun setDefaultLlmProvider(providerId: String) {
+        defaultLlmProviderId = providerId.lowercase()
+    }
+
     fun getLlmProvider(providerId: String? = null): LlmProviderPort? {
         val targetId = providerId?.lowercase() ?: defaultLlmProviderId
         return targetId?.let { llmProviders[it] }
@@ -49,6 +61,18 @@ class ComponentRegistry {
         if (isDefault || defaultSearchProviderId == null) {
             defaultSearchProviderId = key
         }
+    }
+
+    fun unregisterSearchProvider(providerId: String) {
+        val key = providerId.lowercase()
+        searchProviders.remove(key)
+        if (defaultSearchProviderId == key) {
+            defaultSearchProviderId = searchProviders.keys.firstOrNull()
+        }
+    }
+
+    fun setDefaultSearchProvider(providerId: String) {
+        defaultSearchProviderId = providerId.lowercase()
     }
 
     fun getSearchProvider(providerId: String? = null): SearchProviderPort? {
@@ -67,12 +91,25 @@ class ComponentRegistry {
         }
     }
 
+    fun unregisterEmbeddingProvider(providerId: String) {
+        val key = providerId.lowercase()
+        embeddingProviders.remove(key)
+        if (defaultEmbeddingProviderId == key) {
+            defaultEmbeddingProviderId = embeddingProviders.keys.firstOrNull()
+        }
+    }
+
+    fun setDefaultEmbeddingProvider(providerId: String) {
+        defaultEmbeddingProviderId = providerId.lowercase()
+    }
+
     fun getEmbeddingProvider(providerId: String? = null): EmbeddingProviderPort? {
         val targetId = providerId?.lowercase() ?: defaultEmbeddingProviderId
         return targetId?.let { embeddingProviders[it] }
     }
 
     fun listEmbeddingProviders(): List<EmbeddingProviderPort> = embeddingProviders.values.toList()
+
 
     // --- Tools ---
     fun registerTool(tool: ToolPort) {

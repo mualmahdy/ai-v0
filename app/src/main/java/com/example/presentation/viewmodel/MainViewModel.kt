@@ -3,6 +3,7 @@ package com.example.presentation.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.application.extension.ExtensionManager
+import com.example.application.provider.ProviderControlPlaneService
 import com.example.application.provider.ProviderRegistryService
 import com.example.application.radar.IntelligenceRadarPipeline
 import com.example.application.rag.RagPipelineService
@@ -32,6 +33,9 @@ import com.example.domain.core.memory.MemoryEntry
 import com.example.domain.core.memory.MemoryProvenance
 import com.example.domain.core.memory.MemoryType
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.provider.HealthStatus
+import com.example.domain.core.provider.ProviderCategory
+import com.example.domain.core.provider.ProviderConfiguration
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.task.TaskConstraints
 import com.example.domain.core.task.TaskDefinition
@@ -66,7 +70,8 @@ class MainViewModel(
     private val providerRegistryService: ProviderRegistryService,
     private val extensionManager: ExtensionManager,
     private val intelligenceRadarPipeline: IntelligenceRadarPipeline,
-    private val ragPipelineService: RagPipelineService
+    private val ragPipelineService: RagPipelineService,
+    private val providerControlPlaneService: ProviderControlPlaneService
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UiState())
@@ -82,10 +87,17 @@ class MainViewModel(
 
     private fun observeSubsystems() {
         viewModelScope.launch {
+            providerControlPlaneService.allProvidersFlow.collect { configs ->
+                _uiState.update { it.copy(providerConfigurations = configs) }
+                refreshCapabilities()
+            }
+        }
+        viewModelScope.launch {
             providerRegistryService.registeredProviders.collect { providers ->
                 _uiState.update { it.copy(providers = providers) }
             }
         }
+
         viewModelScope.launch {
             providerRegistryService.discoveredModels.collect { models ->
                 _uiState.update { it.copy(discoveredModels = models) }
@@ -366,8 +378,95 @@ class MainViewModel(
         }
     }
 
+    // --- Provider & Resource Control Plane ---
+    fun saveProvider(config: ProviderConfiguration, secretApiKey: String? = null) {
+        viewModelScope.launch {
+            when (val outcome = providerControlPlaneService.saveProvider(config, secretApiKey)) {
+                is Outcome.Success -> {
+                    _uiState.update { it.copy(isAddProviderDialogOpen = false, editingProvider = null) }
+                    refreshCapabilities()
+                }
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> _uiState.update { it.copy(isAddProviderDialogOpen = false, editingProvider = null) }
+            }
+        }
+    }
+
+    fun deleteProvider(id: String) {
+        viewModelScope.launch {
+            when (val outcome = providerControlPlaneService.deleteProvider(id)) {
+                is Outcome.Success -> refreshCapabilities()
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> refreshCapabilities()
+            }
+        }
+    }
+
+    fun toggleProvider(id: String, isEnabled: Boolean) {
+        viewModelScope.launch {
+            when (val outcome = providerControlPlaneService.toggleProvider(id, isEnabled)) {
+                is Outcome.Success -> refreshCapabilities()
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> refreshCapabilities()
+            }
+        }
+    }
+
+    fun setAsDefaultProvider(id: String, category: ProviderCategory) {
+        viewModelScope.launch {
+            when (val outcome = providerControlPlaneService.setAsDefaultProvider(id, category)) {
+                is Outcome.Success -> refreshCapabilities()
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> refreshCapabilities()
+            }
+        }
+    }
+
+    fun testProviderConnection(id: String) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isTestingProvider = true, testingProviderId = id, providerTestResult = null) }
+            try {
+                when (val outcome = providerControlPlaneService.validateAndRecordHealth(id)) {
+                    is Outcome.Success -> {
+                        _uiState.update {
+                            it.copy(
+                                isTestingProvider = false,
+                                providerTestResult = outcome.value,
+                                diagnosticBanner = outcome.value.message
+                            )
+                        }
+                    }
+                    is Outcome.Error -> {
+                        _uiState.update {
+                            it.copy(
+                                isTestingProvider = false,
+                                errorMessage = outcome.diagnosticMessage
+                            )
+                        }
+                    }
+                    else -> _uiState.update { it.copy(isTestingProvider = false) }
+                }
+            } finally {
+                _uiState.update { it.copy(isTestingProvider = false) }
+            }
+        }
+    }
+
+    fun openAddProviderDialog(editing: ProviderConfiguration? = null) {
+        _uiState.update { it.copy(isAddProviderDialogOpen = true, editingProvider = editing) }
+    }
+
+    fun closeAddProviderDialog() {
+        _uiState.update { it.copy(isAddProviderDialogOpen = false, editingProvider = null) }
+    }
+
+    fun clearProviderTestResult() {
+        _uiState.update { it.copy(providerTestResult = null, testingProviderId = null) }
+    }
+
     // --- Model Discovery ---
     fun discoverModels() {
+
         viewModelScope.launch {
             _uiState.update { it.copy(isDiscoveringModels = true) }
             try {

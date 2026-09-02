@@ -93,8 +93,14 @@ data class UiState(
 
     // Models & Providers
     val providers: List<ProviderDescriptor> = emptyList(),
+    val providerConfigurations: List<com.example.domain.core.provider.ProviderConfiguration> = emptyList(),
     val discoveredModels: List<ModelDescriptor> = emptyList(),
     val isDiscoveringModels: Boolean = false,
+    val isTestingProvider: Boolean = false,
+    val testingProviderId: String? = null,
+    val providerTestResult: com.example.domain.core.provider.ProviderValidationResult? = null,
+    val isAddProviderDialogOpen: Boolean = false,
+    val editingProvider: com.example.domain.core.provider.ProviderConfiguration? = null,
 
     // Memory & Knowledge RAG
     val memoryQuery: String = "",

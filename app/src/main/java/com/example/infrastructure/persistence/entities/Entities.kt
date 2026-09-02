@@ -131,3 +131,25 @@ data class ExtensionConfigEntity(
     val authMetadataJson: String?,
     val lastVerifiedEpochMs: Long
 )
+
+@Entity(tableName = "provider_configs")
+data class ProviderConfigEntity(
+    @PrimaryKey
+    val id: String,
+    val name: String,
+    val category: String, // LLM, EMBEDDING, SEARCH, VECTOR_STORE
+    val flavor: String, // GEMINI, OPENAI_COMPATIBLE, OLLAMA, TAVILY, MULTI_SOURCE_SEARCH, LOCAL_EMBEDDING
+    val endpointUrl: String,
+    val defaultModelId: String,
+    val isEnabled: Boolean,
+    val isDefault: Boolean,
+    val healthStatus: String, // HEALTHY, DEGRADED, UNAVAILABLE, UNKNOWN
+    val lastValidatedEpochMs: Long,
+    val lastLatencyMs: Long,
+    val lastErrorMessage: String?,
+    val extraHeadersJson: String?,
+    val timeoutSeconds: Int,
+    val createdAtEpochMs: Long,
+    val updatedAtEpochMs: Long
+)
+

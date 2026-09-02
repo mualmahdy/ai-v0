@@ -11,6 +11,7 @@ import com.example.infrastructure.persistence.entities.ExecutionLogEntity
 import com.example.infrastructure.persistence.entities.ExtensionConfigEntity
 import com.example.infrastructure.persistence.entities.MemoryEntity
 import com.example.infrastructure.persistence.entities.ProjectEntity
+import com.example.infrastructure.persistence.entities.ProviderConfigEntity
 import com.example.infrastructure.persistence.entities.RadarItemEntity
 import com.example.infrastructure.persistence.entities.SessionEntity
 import com.example.infrastructure.persistence.entities.TaskEntity
@@ -178,3 +179,37 @@ interface ExtensionConfigDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(configs: List<ExtensionConfigEntity>)
 }
+
+@Dao
+interface ProviderConfigDao {
+    @Query("SELECT * FROM provider_configs ORDER BY createdAtEpochMs ASC")
+    fun getAllProvidersFlow(): Flow<List<ProviderConfigEntity>>
+
+    @Query("SELECT * FROM provider_configs ORDER BY createdAtEpochMs ASC")
+    suspend fun getAllProviders(): List<ProviderConfigEntity>
+
+    @Query("SELECT * FROM provider_configs WHERE id = :id LIMIT 1")
+    suspend fun getProviderById(id: String): ProviderConfigEntity?
+
+    @Query("SELECT * FROM provider_configs WHERE category = :category AND isEnabled = 1")
+    suspend fun getEnabledByCategory(category: String): List<ProviderConfigEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdate(config: ProviderConfigEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(configs: List<ProviderConfigEntity>)
+
+    @Query("DELETE FROM provider_configs WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("UPDATE provider_configs SET isEnabled = :isEnabled, updatedAtEpochMs = :now WHERE id = :id")
+    suspend fun updateEnabled(id: String, isEnabled: Boolean, now: Long)
+
+    @Query("UPDATE provider_configs SET isDefault = CASE WHEN id = :id THEN 1 ELSE 0 END, updatedAtEpochMs = :now WHERE category = :category")
+    suspend fun setDefault(id: String, category: String, now: Long)
+
+    @Query("UPDATE provider_configs SET healthStatus = :healthStatus, lastValidatedEpochMs = :validatedMs, lastLatencyMs = :latencyMs, lastErrorMessage = :error, updatedAtEpochMs = :now WHERE id = :id")
+    suspend fun updateHealth(id: String, healthStatus: String, validatedMs: Long, latencyMs: Long, error: String?, now: Long)
+}
+

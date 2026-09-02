@@ -10,6 +10,7 @@ import com.example.infrastructure.persistence.dao.ExecutionLogDao
 import com.example.infrastructure.persistence.dao.ExtensionConfigDao
 import com.example.infrastructure.persistence.dao.MemoryDao
 import com.example.infrastructure.persistence.dao.ProjectDao
+import com.example.infrastructure.persistence.dao.ProviderConfigDao
 import com.example.infrastructure.persistence.dao.RadarItemDao
 import com.example.infrastructure.persistence.dao.SessionDao
 import com.example.infrastructure.persistence.dao.TaskDao
@@ -19,6 +20,7 @@ import com.example.infrastructure.persistence.entities.ExecutionLogEntity
 import com.example.infrastructure.persistence.entities.ExtensionConfigEntity
 import com.example.infrastructure.persistence.entities.MemoryEntity
 import com.example.infrastructure.persistence.entities.ProjectEntity
+import com.example.infrastructure.persistence.entities.ProviderConfigEntity
 import com.example.infrastructure.persistence.entities.RadarItemEntity
 import com.example.infrastructure.persistence.entities.SessionEntity
 import com.example.infrastructure.persistence.entities.TaskEntity
@@ -33,9 +35,10 @@ import com.example.infrastructure.persistence.entities.TaskEntity
         DecisionCaseEntity::class,
         RadarItemEntity::class,
         EvolutionCandidateEntity::class,
-        ExtensionConfigEntity::class
+        ExtensionConfigEntity::class,
+        ProviderConfigEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -49,6 +52,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun radarItemDao(): RadarItemDao
     abstract fun evolutionCandidateDao(): EvolutionCandidateDao
     abstract fun extensionConfigDao(): ExtensionConfigDao
+    abstract fun providerConfigDao(): ProviderConfigDao
+
 
     companion object {
         @Volatile
