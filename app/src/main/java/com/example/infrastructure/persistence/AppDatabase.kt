@@ -5,25 +5,37 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.example.infrastructure.persistence.dao.DecisionCaseDao
+import com.example.infrastructure.persistence.dao.DecisionRecordDao
+import com.example.infrastructure.persistence.dao.EvidenceRecordDao
 import com.example.infrastructure.persistence.dao.EvolutionCandidateDao
 import com.example.infrastructure.persistence.dao.ExecutionLogDao
+import com.example.infrastructure.persistence.dao.ExecutionRecordDao
 import com.example.infrastructure.persistence.dao.ExtensionConfigDao
 import com.example.infrastructure.persistence.dao.MemoryDao
 import com.example.infrastructure.persistence.dao.ProjectDao
 import com.example.infrastructure.persistence.dao.ProviderConfigDao
 import com.example.infrastructure.persistence.dao.RadarItemDao
+import com.example.infrastructure.persistence.dao.ResourceHealthSnapshotDao
+import com.example.infrastructure.persistence.dao.ResourceRecordDao
 import com.example.infrastructure.persistence.dao.SessionDao
 import com.example.infrastructure.persistence.dao.TaskDao
+import com.example.infrastructure.persistence.dao.VerificationOutcomeDao
 import com.example.infrastructure.persistence.entities.DecisionCaseEntity
+import com.example.infrastructure.persistence.entities.DecisionRecordEntity
+import com.example.infrastructure.persistence.entities.EvidenceRecordEntity
 import com.example.infrastructure.persistence.entities.EvolutionCandidateEntity
 import com.example.infrastructure.persistence.entities.ExecutionLogEntity
+import com.example.infrastructure.persistence.entities.ExecutionRecordEntity
 import com.example.infrastructure.persistence.entities.ExtensionConfigEntity
 import com.example.infrastructure.persistence.entities.MemoryEntity
 import com.example.infrastructure.persistence.entities.ProjectEntity
 import com.example.infrastructure.persistence.entities.ProviderConfigEntity
 import com.example.infrastructure.persistence.entities.RadarItemEntity
+import com.example.infrastructure.persistence.entities.ResourceHealthSnapshotEntity
+import com.example.infrastructure.persistence.entities.ResourceRecordEntity
 import com.example.infrastructure.persistence.entities.SessionEntity
 import com.example.infrastructure.persistence.entities.TaskEntity
+import com.example.infrastructure.persistence.entities.VerificationOutcomeEntity
 
 @Database(
     entities = [
@@ -36,9 +48,16 @@ import com.example.infrastructure.persistence.entities.TaskEntity
         RadarItemEntity::class,
         EvolutionCandidateEntity::class,
         ExtensionConfigEntity::class,
-        ProviderConfigEntity::class
+        ProviderConfigEntity::class,
+        // P0 RESOURCE CONTRACT (APPROVED-BASELINE v2.1) — schema revision v4
+        ResourceRecordEntity::class,
+        ResourceHealthSnapshotEntity::class,
+        DecisionRecordEntity::class,
+        ExecutionRecordEntity::class,
+        EvidenceRecordEntity::class,
+        VerificationOutcomeEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -53,6 +72,13 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun evolutionCandidateDao(): EvolutionCandidateDao
     abstract fun extensionConfigDao(): ExtensionConfigDao
     abstract fun providerConfigDao(): ProviderConfigDao
+    // P0 RESOURCE CONTRACT
+    abstract fun resourceRecordDao(): ResourceRecordDao
+    abstract fun resourceHealthSnapshotDao(): ResourceHealthSnapshotDao
+    abstract fun decisionRecordDao(): DecisionRecordDao
+    abstract fun executionRecordDao(): ExecutionRecordDao
+    abstract fun evidenceRecordDao(): EvidenceRecordDao
+    abstract fun verificationOutcomeDao(): VerificationOutcomeDao
 
 
     companion object {

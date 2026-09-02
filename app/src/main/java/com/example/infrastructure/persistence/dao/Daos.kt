@@ -6,6 +6,9 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import com.example.infrastructure.persistence.entities.DecisionCaseEntity
+import com.example.infrastructure.persistence.entities.DecisionRecordEntity
+import com.example.infrastructure.persistence.entities.EvidenceRecordEntity
+import com.example.infrastructure.persistence.entities.ExecutionRecordEntity
 import com.example.infrastructure.persistence.entities.EvolutionCandidateEntity
 import com.example.infrastructure.persistence.entities.ExecutionLogEntity
 import com.example.infrastructure.persistence.entities.ExtensionConfigEntity
@@ -13,8 +16,11 @@ import com.example.infrastructure.persistence.entities.MemoryEntity
 import com.example.infrastructure.persistence.entities.ProjectEntity
 import com.example.infrastructure.persistence.entities.ProviderConfigEntity
 import com.example.infrastructure.persistence.entities.RadarItemEntity
+import com.example.infrastructure.persistence.entities.ResourceHealthSnapshotEntity
+import com.example.infrastructure.persistence.entities.ResourceRecordEntity
 import com.example.infrastructure.persistence.entities.SessionEntity
 import com.example.infrastructure.persistence.entities.TaskEntity
+import com.example.infrastructure.persistence.entities.VerificationOutcomeEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -213,3 +219,103 @@ interface ProviderConfigDao {
     suspend fun updateHealth(id: String, healthStatus: String, validatedMs: Long, latencyMs: Long, error: String?, now: Long)
 }
 
+
+// =============================================================================
+// P0 RESOURCE CONTRACT (APPROVED-BASELINE v2.1) — schema revision v4
+// =============================================================================
+
+@Dao
+interface ResourceRecordDao {
+    @Query("SELECT * FROM resource_records WHERE resourceId = :resourceId LIMIT 1")
+    suspend fun getByResourceId(resourceId: String): ResourceRecordEntity?
+
+    @Query("SELECT * FROM resource_records WHERE providerId = :providerId AND serviceId = :serviceId LIMIT 1")
+    suspend fun getByLogicalKey(providerId: String, serviceId: String): ResourceRecordEntity?
+
+    @Query("SELECT * FROM resource_records ORDER BY registeredAt ASC")
+    suspend fun getAll(): List<ResourceRecordEntity>
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insert(entity: ResourceRecordEntity)
+
+    @Query("SELECT * FROM resource_records WHERE lifecycleState = :state AND runtimeSupported = 1 ORDER BY registeredAt ASC")
+    suspend fun getUsableByLifecycle(state: String): List<ResourceRecordEntity>
+
+    @Query("SELECT * FROM resource_records WHERE lifecycleState = :state AND runtimeSupported = 1 ORDER BY registeredAt ASC")
+    fun observeUsableByLifecycle(state: String): Flow<List<ResourceRecordEntity>>
+
+    @Query("UPDATE resource_records SET configurationVersion = configurationVersion + 1, lastStateChangeAt = :now WHERE resourceId = :resourceId")
+    suspend fun bumpConfigurationVersion(resourceId: String, now: Long): Int
+
+    @Query("UPDATE resource_records SET lifecycleState = :state, lastStateChangeAt = :now WHERE resourceId = :resourceId")
+    suspend fun updateLifecycleState(resourceId: String, state: String, now: Long): Int
+
+    @Query("UPDATE resource_records SET runtimeSupported = :supported, lastStateChangeAt = :now WHERE resourceId = :resourceId")
+    suspend fun updateRuntimeSupported(resourceId: String, supported: Boolean, now: Long): Int
+
+    @Query("SELECT * FROM resource_records WHERE lifecycleState = :state AND runtimeSupported = 1")
+    suspend fun getByLifecycleAndRuntimeSupport(state: String): List<ResourceRecordEntity>
+
+    @Query("DELETE FROM resource_records WHERE resourceId = :resourceId")
+    suspend fun deleteByResourceId(resourceId: String): Int
+}
+
+@Dao
+interface ResourceHealthSnapshotDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(snapshots: List<ResourceHealthSnapshotEntity>)
+
+    @Query("SELECT * FROM resource_health_snapshots")
+    suspend fun getAll(): List<ResourceHealthSnapshotEntity>
+
+    @Query("DELETE FROM resource_health_snapshots")
+    suspend fun clearAll()
+}
+
+@Dao
+interface DecisionRecordDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(record: DecisionRecordEntity)
+
+    @Query("SELECT * FROM decision_records WHERE decisionId = :decisionId LIMIT 1")
+    suspend fun getById(decisionId: String): DecisionRecordEntity?
+
+    @Query("SELECT * FROM decision_records WHERE taskId = :taskId ORDER BY timestamp ASC")
+    suspend fun getByTask(taskId: String): List<DecisionRecordEntity>
+
+    @Query("SELECT MAX(decisionVersion) FROM decision_records WHERE taskId = :taskId AND stepId = :stepId")
+    suspend fun latestVersion(taskId: String, stepId: String): Int?
+}
+
+@Dao
+interface ExecutionRecordDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(record: ExecutionRecordEntity)
+
+    @Query("SELECT * FROM execution_records WHERE executionId = :executionId LIMIT 1")
+    suspend fun getById(executionId: String): ExecutionRecordEntity?
+
+    @Query("SELECT * FROM execution_records WHERE taskId = :taskId ORDER BY timestamp ASC")
+    suspend fun getByTask(taskId: String): List<ExecutionRecordEntity>
+}
+
+@Dao
+interface EvidenceRecordDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(record: EvidenceRecordEntity)
+
+    @Query("SELECT * FROM evidence_records WHERE stepId = :stepId ORDER BY createdAt ASC")
+    suspend fun getByStep(stepId: String): List<EvidenceRecordEntity>
+
+    @Query("SELECT * FROM evidence_records WHERE taskId = :taskId ORDER BY createdAt ASC")
+    suspend fun getByTask(taskId: String): List<EvidenceRecordEntity>
+}
+
+@Dao
+interface VerificationOutcomeDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(record: VerificationOutcomeEntity)
+
+    @Query("SELECT * FROM verification_outcomes WHERE stepId = :stepId ORDER BY createdAt ASC")
+    suspend fun getByStep(stepId: String): List<VerificationOutcomeEntity>
+}

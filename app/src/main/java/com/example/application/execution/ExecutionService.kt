@@ -17,12 +17,20 @@ import com.example.domain.core.llm.LlmRequest
 import com.example.domain.core.llm.MessageRole
 import com.example.domain.core.map
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.resource.DecisionRecord
+import com.example.domain.core.resource.ExecutionOutcome
+import com.example.domain.core.resource.ResourceCategory
+import com.example.domain.core.resource.ResourceExecutionInput
+import com.example.domain.core.resource.ResourceLifecycleState
+import com.example.domain.core.resource.executionPermitted
 import com.example.domain.core.search.SearchFailure
 import com.example.domain.core.search.SearchQuery
 import com.example.domain.core.security.SecurityDecision
 import com.example.domain.core.security.SecurityPolicy
 import com.example.domain.core.tools.ToolFailure
 import com.example.domain.core.tools.ToolInput
+import com.example.domain.ports.resource.RuntimeAdapterBinding
+import com.example.domain.ports.resource.RuntimeAdapterResolver
 import kotlinx.coroutines.delay
 import java.util.UUID
 
@@ -43,12 +51,27 @@ data class ExecutionResult(
 /**
  * Execution Service defining the explicit execution boundary for all system actions.
  * Executes LLM models, Tools, MCP protocols, Web Search, Memory/RAG, Skills, and Integrations.
+ *
+ * P0 RESOURCE CONTRACT (APPROVED-BASELINE v2.1, Section F — LOCKED):
+ * [execute] implements the LOCKED resolution chain
+ *   selectedResourceId -> registry.get() -> controlPlane.getAdapter() -> execute
+ * with explicit failure modes and NO code path that substitutes a resource:
+ *   - registry miss            -> FAILURE "resource_unresolvable"
+ *   - runtimeSupported = false -> FAILURE "runtime_unsupported"
+ *   - lifecycle != HEALTHY     -> FAILURE "resource_not_usable"
+ *   - adapter missing          -> FAILURE "adapter_binding_failed"
+ *   - governance blocked       -> FAILURE "governance_blocked" (RULE GOV-3)
+ * On SUCCESS, executedResourceId == selectedResourceId is structurally guaranteed
+ * (asserted). On FAILURE, executedResourceId records the INTENDED resource.
  */
 class ExecutionService(
     private val componentRegistry: ComponentRegistry,
     private val securityGuard: SecurityGuardService,
     private val extensionManager: ExtensionManager? = null,
-    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy()
+    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
+    // P0 RESOURCE CONTRACT collaborators (composition-root wired):
+    private val resourceRegistry: com.example.domain.ports.resource.ResourceRegistryService? = null,
+    private val adapterResolver: RuntimeAdapterResolver? = null
 ) {
 
     /**
@@ -136,15 +159,23 @@ class ExecutionService(
         startTime: Long,
         onEvent: suspend (ExecutionEvent) -> Unit
     ): ExecutionResult {
+        // P0.5 (Section M — Remove): silent first-provider substitution is REMOVED.
+        // The providerId is an explicit decision-time selection carried in the action
+        // payload. Absence of a resolvable provider is an EXPLICIT failure — never a
+        // silent fallback to whichever provider happens to be registered first.
         val providerId = action.payload["providerId"]
-        val provider = componentRegistry.getLlmProvider(providerId) ?: componentRegistry.listLlmProviders().firstOrNull()
+        val provider = providerId?.let { componentRegistry.getLlmProvider(it) }
 
         if (provider == null) {
-            val errorMsg = "لا يوجد مزود ذكاء اصطناعي متاح حالياً."
+            val errorMsg = if (providerId == null) {
+                "لم يتم تحديد مزود ذكاء اصطناعي صراحةً في القرار (missing explicit providerId in decision payload)."
+            } else {
+                "المزود المحدد في القرار غير متاح: $providerId"
+            }
             onEvent(
                 ExecutionEvent.Error(
                     executionId = executionId,
-                    failureCode = "PROVIDER_NOT_FOUND",
+                    failureCode = "PROVIDER_NOT_RESOLVED",
                     message = errorMsg,
                     isFatal = true
                 )
@@ -809,6 +840,252 @@ class ExecutionService(
                     )
                 )
             }
+        }
+    }
+
+    // =========================================================================
+    // P0 RESOURCE CONTRACT — Execution Identity Enforcement
+    // (APPROVED-BASELINE v2.1, Section F / P0.5 — LOCKED)
+    // =========================================================================
+
+    /**
+     * Executes EXACTLY [decision.selectedResourceId] via the LOCKED resolution chain:
+     *
+     *   selectedResourceId -> registry.get() -> controlPlane.getAdapter() -> execute
+     *
+     * MANDATORY INVARIANT (Section F):
+     *   result.executedResourceId == decision.selectedResourceId
+     *   OR execution failed
+     *   OR a new DecisionRecord was created by the orchestrator (replan)
+     *     and THAT record was executed.
+     *
+     * There is NO code path in which this method substitutes a resource.
+     * Failure modes are explicit and machine-readable (transportError codes).
+     *
+     * REPLAN_REQUESTED: outcome set by the ORCHESTRATOR when FallbackPolicy.Replan /
+     * PreferAlternative triggers re-decision. ExecutionService itself returns
+     * FAILURE; the orchestrator converts it to a re-decision.
+     */
+    suspend fun execute(
+        decision: DecisionRecord,
+        input: ResourceExecutionInput? = null
+    ): com.example.domain.core.resource.ExecutionResult {
+        val startTime = System.currentTimeMillis()
+        val registry = resourceRegistry
+            ?: return com.example.domain.core.resource.ExecutionResult.failure(
+                decision,
+                transportError = "resource_unresolvable"
+            )
+
+        // RULE GOV-3: execution permitted only when securityResult permits AND
+        // governanceResult.state in {ALLOWED, NOT_APPLICABLE}.
+        if (!decision.executionPermitted()) {
+            return com.example.domain.core.resource.ExecutionResult.failure(
+                decision,
+                transportError = "governance_blocked",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        // Step 1 — registry lookup (never resolves by provider/model NAME).
+        val record = registry.get(decision.selectedResourceId)
+            ?: return com.example.domain.core.resource.ExecutionResult.failure(
+                decision,
+                transportError = "resource_unresolvable",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+
+        // Step 2 — runtime support track (binary, adapter existence).
+        if (!record.runtimeSupported) {
+            return com.example.domain.core.resource.ExecutionResult.failure(
+                decision,
+                transportError = "runtime_unsupported",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        // Step 3 — lifecycle track.
+        if (record.lifecycleState != ResourceLifecycleState.HEALTHY) {
+            return com.example.domain.core.resource.ExecutionResult.failure(
+                decision,
+                transportError = "resource_not_usable",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        // Step 4 — adapter binding bound to the decision's configurationVersion.
+        val binding = adapterResolver?.resolveAdapter(
+            decision.selectedResourceId,
+            decision.selectedConfigurationVersion
+        ) ?: return com.example.domain.core.resource.ExecutionResult.failure(
+            decision,
+            transportError = "adapter_binding_failed",
+            latencyMs = System.currentTimeMillis() - startTime
+        )
+
+        // Step 5 — real adapter execution, resource-type dispatched.
+        val executionInput = input ?: ResourceExecutionInput()
+        val result = when (binding) {
+            is RuntimeAdapterBinding.Llm ->
+                executeLlmResource(decision, binding, executionInput, startTime)
+            is RuntimeAdapterBinding.Search ->
+                executeSearchResource(decision, binding, executionInput, startTime)
+            is RuntimeAdapterBinding.Embedding ->
+                executeEmbeddingResource(decision, binding, executionInput, startTime)
+        }
+
+        // Structural identity invariant (Section F): on SUCCESS the executed resource
+        // MUST equal the selected resource. This is guaranteed by the result factories,
+        // and asserted here defensively.
+        if (result.outcome == ExecutionOutcome.SUCCESS) {
+            check(result.executedResourceId == decision.selectedResourceId) {
+                "IDENTITY VIOLATION: executedResourceId (${result.executedResourceId.value}) != " +
+                    "selectedResourceId (${decision.selectedResourceId.value})"
+            }
+        }
+        return result
+    }
+
+    private suspend fun executeLlmResource(
+        decision: DecisionRecord,
+        binding: RuntimeAdapterBinding.Llm,
+        input: ResourceExecutionInput,
+        startTime: Long
+    ): com.example.domain.core.resource.ExecutionResult {
+        val messages = mutableListOf<LlmMessage>()
+        messages.add(
+            LlmMessage(
+                role = MessageRole.SYSTEM,
+                content = input.systemPrompt ?: "You are a helpful assistant."
+            )
+        )
+        messages.addAll(input.conversationHistory)
+        messages.add(LlmMessage(role = MessageRole.USER, content = input.prompt.orEmpty()))
+
+        val request = LlmRequest(messages = messages)
+        return try {
+            when (val outcome = binding.port.generate(request)) {
+                is Outcome.Success -> com.example.domain.core.resource.ExecutionResult.success(
+                    decision = decision,
+                    output = mapOf(
+                        "synthesizedText" to outcome.value.text,
+                        "providerId" to binding.port.providerId
+                    ),
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+                is Outcome.Degraded -> com.example.domain.core.resource.ExecutionResult.success(
+                    decision = decision,
+                    output = mapOf(
+                        "synthesizedText" to (outcome.partialValue?.text ?: ""),
+                        "degraded" to true,
+                        "degradedReason" to outcome.reason.code
+                    ),
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+                is Outcome.Error -> com.example.domain.core.resource.ExecutionResult.failure(
+                    decision = decision,
+                    transportError = "execution_error: ${outcome.diagnosticMessage}",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
+        } catch (e: Exception) {
+            com.example.domain.core.resource.ExecutionResult.failure(
+                decision = decision,
+                transportError = "execution_error: ${e.localizedMessage}",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+    }
+
+    private suspend fun executeSearchResource(
+        decision: DecisionRecord,
+        binding: RuntimeAdapterBinding.Search,
+        input: ResourceExecutionInput,
+        startTime: Long
+    ): com.example.domain.core.resource.ExecutionResult {
+        val query = input.searchQuery ?: input.prompt ?: return com.example.domain.core.resource.ExecutionResult.failure(
+            decision = decision,
+            transportError = "execution_error: missing search query input"
+        )
+        return try {
+            when (val outcome = binding.port.search(SearchQuery(query = query))) {
+                is Outcome.Success -> {
+                    val items = outcome.value.items
+                    com.example.domain.core.resource.ExecutionResult.success(
+                        decision = decision,
+                        output = mapOf(
+                            "searchResults" to items.map { "[${it.title}] (${it.url}): ${it.snippet}" },
+                            "searchRawItems" to items
+                        ),
+                        latencyMs = System.currentTimeMillis() - startTime
+                    )
+                }
+                is Outcome.Degraded -> com.example.domain.core.resource.ExecutionResult.success(
+                    decision = decision,
+                    output = mapOf(
+                        "searchResults" to (outcome.partialValue?.items ?: emptyList<Any>())
+                            .map { it.toString() },
+                        "degraded" to true
+                    ),
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+                is Outcome.Error -> com.example.domain.core.resource.ExecutionResult.failure(
+                    decision = decision,
+                    transportError = "execution_error: ${outcome.diagnosticMessage}",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
+        } catch (e: Exception) {
+            com.example.domain.core.resource.ExecutionResult.failure(
+                decision = decision,
+                transportError = "execution_error: ${e.localizedMessage}",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+    }
+
+    private suspend fun executeEmbeddingResource(
+        decision: DecisionRecord,
+        binding: RuntimeAdapterBinding.Embedding,
+        input: ResourceExecutionInput,
+        startTime: Long
+    ): com.example.domain.core.resource.ExecutionResult {
+        val texts = input.embeddingTexts.ifEmpty {
+            input.prompt?.let { listOf(it) } ?: emptyList()
+        }
+        if (texts.isEmpty()) {
+            return com.example.domain.core.resource.ExecutionResult.failure(
+                decision = decision,
+                transportError = "execution_error: missing embedding input texts"
+            )
+        }
+        return try {
+            when (val outcome = binding.port.generateEmbeddings(texts)) {
+                is Outcome.Success -> com.example.domain.core.resource.ExecutionResult.success(
+                    decision = decision,
+                    output = mapOf(
+                        "embeddingVector" to (outcome.value.firstOrNull()?.values?.toList() ?: emptyList()),
+                        "dimension" to binding.port.dimension
+                    ),
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+                is Outcome.Degraded -> com.example.domain.core.resource.ExecutionResult.failure(
+                    decision = decision,
+                    transportError = "execution_error: embedding degraded — ${outcome.diagnosticMessage}",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+                is Outcome.Error -> com.example.domain.core.resource.ExecutionResult.failure(
+                    decision = decision,
+                    transportError = "execution_error: ${outcome.diagnosticMessage}",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
+        } catch (e: Exception) {
+            com.example.domain.core.resource.ExecutionResult.failure(
+                decision = decision,
+                transportError = "execution_error: ${e.localizedMessage}",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
         }
     }
 }

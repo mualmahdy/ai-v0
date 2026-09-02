@@ -17,6 +17,7 @@ import com.example.domain.ports.storage.WorkspaceStoragePort
 import com.example.infrastructure.llm.custom.OpenAiCompatibleAdapter
 import com.example.infrastructure.llm.gemini.GeminiLlmAdapter
 import com.example.infrastructure.memory.LocalDeterministicEmbeddingAdapter
+import com.example.infrastructure.memory.OpenAiCompatibleEmbeddingAdapter
 import com.example.infrastructure.search.MultiSourceSearchAdapter
 import com.example.infrastructure.search.TavilySearchAdapter
 import kotlinx.coroutines.Dispatchers
@@ -83,15 +84,43 @@ class ProviderAdapterFactory(
 
     fun createEmbeddingAdapter(config: ProviderConfiguration, apiKeyProvider: () -> String?): EmbeddingProviderPort {
         return when (config.flavor) {
+            // P0.6 (RULE AD-3): the ONLY local embedding creation path is an explicitly
+            // LOCAL_EMBEDDING-flavored configuration. Local embedding is also registered
+            // as its own ResourceRecord (category=LOCAL, isFallback=true) and is
+            // selectable ONLY via an explicit decision — never via adapter-internal
+            // substitution for an unavailable external provider.
             ProviderFlavor.LOCAL_EMBEDDING -> LocalDeterministicEmbeddingAdapter(
                 providerId = config.id,
                 dimension = 128
             )
-            else -> LocalDeterministicEmbeddingAdapter(
+            // P0.6: REAL external embedding path — no silent local substitution.
+            ProviderFlavor.OPENAI_COMPATIBLE -> OpenAiCompatibleEmbeddingAdapter(
                 providerId = config.id,
-                dimension = 128
+                endpointUrl = config.endpointUrl,
+                modelName = config.defaultModelId.ifBlank { "text-embedding-3-small" },
+                apiKeyProvider = apiKeyProvider,
+                client = httpClient
+            )
+            else -> throw IllegalArgumentException(
+                "No real embedding adapter exists for flavor ${config.flavor.code} (canCreate must be consulted first — RULE AD-2)."
             )
         }
+    }
+
+    /**
+     * P0.6 — Adapter existence check (Section J / RULE AD-2).
+     *
+     * Determined ONLY by this factory's real capabilities. If this returns false the
+     * resource remains runtimeSupported=false and MUST NOT appear in the usable graph
+     * regardless of lifecycle state. ProviderControlPlaneService consults this before
+     * create; create() throws for unsupported combinations as a defensive backstop.
+     */
+    fun canCreate(category: ProviderCategory, flavor: ProviderFlavor): Boolean = when (category) {
+        ProviderCategory.LLM -> true // GEMINI / OPENAI_COMPATIBLE / OLLAMA all have real adapters
+        ProviderCategory.SEARCH -> true // TAVILY / MULTI_SOURCE_SEARCH have real adapters
+        ProviderCategory.EMBEDDING -> flavor == ProviderFlavor.LOCAL_EMBEDDING ||
+            flavor == ProviderFlavor.OPENAI_COMPATIBLE
+        ProviderCategory.VECTOR_STORE -> false // no runtime adapter beyond P0 scope
     }
 
     /**

@@ -39,7 +39,13 @@ class DecisionService(
     private val cbrMdpEngine: CbrMdpEngine,
     private val componentRegistry: ComponentRegistry,
     private val securityGuard: SecurityGuardService,
-    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy()
+    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
+    // P0 RESOURCE CONTRACT (APPROVED-BASELINE v2.1) — optional collaborators wired by
+    // the composition root. When wired, evaluateWithRecord() produces the LOCKED
+    // DecisionRecord for every capability-requiring decision (Section F / P0.4).
+    private val resourceRegistry: com.example.domain.ports.resource.ResourceRegistryService? = null,
+    private val resourceHealthService: com.example.domain.ports.resource.ResourceHealthService? = null,
+    private val decisionRecordStore: com.example.domain.ports.resource.DecisionRecordStorePort? = null
 ) {
 
     /**
@@ -287,12 +293,24 @@ class DecisionService(
                 )
             }
 
-            // LLM Synthesis / Direct Execution step candidate
+            // LLM Synthesis / Direct Execution step candidate.
+            // P0.5 (Section M — Remove): silent first-provider substitution in
+            // ExecutionService is removed, so this candidate now carries an EXPLICIT
+            // decision-time provider selection (the explicitly configured default
+            // provider) in its payload.
+            val defaultProvider = componentRegistry.getLlmProvider()
             candidates.add(
                 DecisionAction(
                     type = DecisionActionType.EXECUTE_STEP,
                     targetId = "standard_llm_stream",
-                    payload = mapOf("prompt" to task.input.rawPrompt, "step" to currentStep.toString()),
+                    payload = buildMap {
+                        put("prompt", task.input.rawPrompt)
+                        put("step", currentStep.toString())
+                        if (defaultProvider != null) {
+                            put("providerId", defaultProvider.providerId)
+                            put("isLocal", defaultProvider.metadata.isLocal.toString())
+                        }
+                    },
                     estimatedLatencyMs = 750L
                 )
             )
@@ -550,5 +568,128 @@ class DecisionService(
     }
 
     fun getCbrMdpEngine(): CbrMdpEngine = cbrMdpEngine
+
+    // =========================================================================
+    // P0 RESOURCE CONTRACT — DecisionRecord emission (APPROVED-BASELINE v2.1,
+    // Section F / P0.4 — LOCKED).
+    // =========================================================================
+
+    /**
+     * Produces the LOCKED [DecisionRecord] for a capability-requiring decision
+     * (P0.4: "DecisionService MUST produce this record for every capability-requiring
+     * decision. No legacy output form.").
+     *
+     * Contract compliance:
+     * - selectedResourceId is MANDATORY and non-null; when no usable resource exists
+     *   (usable conjunction, Section E) this returns null — the caller treats it as
+     *   an explicit no-capable-resource state, never as a silent substitution.
+     * - governanceResult is NEVER null — explicit NOT_APPLICABLE default (RULE GOV-1/2).
+     * - candidateEvaluations always contains at least the selected resource's evaluation.
+     * - fallbackPolicy is present as a planning hint only — never execution authority
+     *   (RULE FB-1).
+     * - Scoring is the Section O heuristic multi-objective evaluation: capability fit,
+     *   health, latency, cost — deterministic, with a documented formula.
+     *
+     * @param requiredCapabilityIds capability ids (CapabilityType.code) required by the step.
+     * @param preferredResourceIds optional PreferAlternative hint (planning only).
+     * @return the persisted DecisionRecord, or null when no usable resource exists.
+     */
+    suspend fun evaluateWithRecord(
+        taskId: String,
+        stepId: String,
+        requiredCapabilityIds: Set<String>,
+        preferredResourceIds: List<String> = emptyList()
+    ): com.example.domain.core.resource.DecisionRecord? {
+        val registry = resourceRegistry
+            ?: error("ResourceRegistryService is not wired — P0 contract requires it for capability-requiring decisions")
+        val health = resourceHealthService
+
+        // 1. Candidate retrieval: union over required capabilities of the registry's
+        //    usable conjunction (HEALTHY AND runtimeSupported AND NOT in cooldown).
+        val candidates = linkedMapOf<com.example.domain.core.resource.ResourceId, com.example.domain.core.resource.UsableResource>()
+        for (capabilityId in requiredCapabilityIds) {
+            for (usable in registry.queryUsableByCapability(capabilityId)) {
+                candidates.putIfAbsent(usable.resourceId, usable)
+            }
+        }
+        if (candidates.isEmpty()) return null
+
+        // 2. Deterministic multi-objective scoring (Section O heuristic):
+        //    finalScore = 0.50*capabilityFit + 0.30*healthScore
+        //               + 0.15*latencyFactor + 0.05*costFactor (+0.05 PreferAlternative hint)
+        //    latencyFactor: 1.0 if avgLatency <= 500ms, 0.5 floor at >= 5000ms
+        //    costFactor:    1.0 - min(costPer1kTokens metadata, 1.0) * 0.5
+        val evaluations = candidates.values.map { usable ->
+            val capabilitySet = usable.capabilities.toSet()
+            val fit = if (requiredCapabilityIds.isEmpty()) 1.0
+            else requiredCapabilityIds.count { capabilitySet.contains(it) }.toDouble() / requiredCapabilityIds.size
+            val resourceHealth = health?.getHealth(usable.resourceId)
+            val healthScore = resourceHealth?.healthScore ?: 0.0
+            val avgLatency = resourceHealth?.averageLatencyMs ?: 0L
+            val latencyFactor = when {
+                avgLatency <= 500L -> 1.0
+                avgLatency >= 5000L -> 0.5
+                else -> 1.0 - 0.5 * (avgLatency - 500.0) / 4500.0
+            }
+            val cost = usable.run {
+                registry.get(usable.resourceId)?.metadata?.get("costPer1kTokens")?.toDoubleOrNull() ?: 0.0
+            }.coerceIn(0.0, 1.0)
+            val costFactor = 1.0 - cost * 0.5
+            val preferenceBoost = if (preferredResourceIds.contains(usable.resourceId.value)) 0.05 else 0.0
+            val score = (0.50 * fit + 0.30 * healthScore + 0.15 * latencyFactor + 0.05 * costFactor + preferenceBoost)
+                .coerceIn(0.0, 1.0)
+            com.example.domain.core.resource.CandidateEvaluation(
+                resourceId = usable.resourceId,
+                providerId = usable.providerId,
+                serviceId = usable.serviceId,
+                capabilityFit = fit,
+                healthScore = healthScore,
+                estimatedLatencyMs = avgLatency,
+                estimatedCost = cost,
+                finalScore = score,
+                isSelected = false,
+                rationale = "fit=${"%.2f".format(fit)}, health=${"%.2f".format(healthScore)}, latency=${avgLatency}ms, cost=${"%.2f".format(cost)}"
+            )
+        }.sortedWith(
+            compareByDescending<com.example.domain.core.resource.CandidateEvaluation> { it.finalScore }
+                .thenBy { it.resourceId.value } // deterministic tie-break
+        )
+
+        val selected = evaluations.first()
+        val selectedRecord = requireNotNull(candidates[selected.resourceId])
+
+        // 3. Security & governance (explicit, auditable — Section F/H).
+        val securityResult = com.example.domain.core.resource.SecurityResult.permitted(
+            reason = "Resource selection (non-tool) has no SecurityGuard rule in P0; tool executions are evaluated at execution time."
+        )
+        val governanceResult = com.example.domain.core.resource.GovernanceResult.NOT_APPLICABLE
+
+        // 4. Version + persistence. decisionVersion increments for re-decisions of the
+        //    same (taskId, stepId) (acceptance test 10).
+        val version = (decisionRecordStore?.latestVersionFor(taskId, stepId) ?: 0) + 1
+        val decisionId = java.util.UUID.randomUUID().toString()
+        val record = com.example.domain.core.resource.DecisionRecord(
+            decisionId = decisionId,
+            taskId = taskId,
+            stepId = stepId,
+            timestamp = System.currentTimeMillis(),
+            decisionVersion = version,
+            selectedResourceId = selected.resourceId,
+            selectedProviderId = selected.providerId,
+            selectedServiceId = selected.serviceId,
+            selectedConfigurationVersion = selectedRecord.configurationVersion,
+            selectedAgentId = null, // null in P0 (Section F)
+            selectedToolIds = emptyList(),
+            requiredCapabilities = requiredCapabilityIds,
+            candidateEvaluations = evaluations.map { if (it.resourceId == selected.resourceId) it.copy(isSelected = true) else it },
+            decisionRationale = "Heuristic multi-objective scoring selected ${selected.resourceId.value} (score=${"%.3f".format(selected.finalScore)}): ${selected.rationale}",
+            confidence = selected.finalScore,
+            securityResult = securityResult,
+            governanceResult = governanceResult,
+            fallbackPolicy = com.example.domain.core.resource.FallbackPolicy.Fail
+        )
+        decisionRecordStore?.save(record)
+        return record
+    }
 }
 

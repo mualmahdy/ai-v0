@@ -75,6 +75,13 @@ class RagPipelineService(
 
     /**
      * Ingests a new document into the knowledge base, splits into chunks, and computes embeddings.
+     *
+     * P0.6 (RULE AD-3): when an embedding provider IS configured but the call FAILS,
+     * the chunk is REJECTED — it is never silently lexically substituted. The returned
+     * document's totalChunks reflects only successfully embedded chunks; rejected
+     * chunks are counted in [KnowledgeDocument-ingestion metadata] via the
+     * returned value's totalChunks vs. actual split count difference and surfaced in
+     * ingestionFailureNote (explicit, observable).
      */
     suspend fun ingestDocument(title: String, content: String, sourceUri: String, tags: List<String> = emptyList()): KnowledgeDocument = withContext(Dispatchers.Default) {
         val docId = "doc_${System.currentTimeMillis()}"
@@ -88,6 +95,7 @@ class RagPipelineService(
 
         val splitChunks = splitIntoChunks(doc)
         val embeddedChunks = mutableListOf<DocumentChunk>()
+        val rejectedChunkIds = mutableListOf<String>()
 
         for (chunk in splitChunks) {
             var vector: EmbeddingVector? = null
@@ -97,16 +105,25 @@ class RagPipelineService(
                     vector = embOutcome.value.firstOrNull()
                 }
             }
-            // Generate lexical fallback vector if embedding not available
-            if (vector == null) {
-                vector = generateLexicalVector(chunk.text)
+            if (vector != null) {
+                embeddedChunks.add(chunk.copy(vector = vector))
+            } else if (embeddingPort == null) {
+                // No embedding provider configured at all: lexical indexing is the
+                // honest local mode (explicit capability state, NOT substitution).
+                embeddedChunks.add(chunk.copy(vector = generateLexicalVector(chunk.text)))
+            } else {
+                // P0.6: configured provider failed -> chunk REJECTED, explicit failure.
+                rejectedChunkIds.add(chunk.id)
             }
-            embeddedChunks.add(chunk.copy(vector = vector))
         }
 
         val completedDoc = doc.copy(totalChunks = embeddedChunks.size)
         _documents.update { it + completedDoc }
         chunks.addAll(embeddedChunks)
+        if (rejectedChunkIds.isNotEmpty()) {
+            // Explicit, observable rejection record — never a silent substitution.
+            println("[RagPipelineService][P0.6] Rejected ${rejectedChunkIds.size}/${splitChunks.size} chunks for doc ${doc.id}: embedding provider failed (no substitution per RULE AD-3). Rejected ids=$rejectedChunkIds")
+        }
         completedDoc
     }
 
@@ -140,24 +157,51 @@ class RagPipelineService(
 
     /**
      * Semantic and keyword hybrid search over chunked knowledge base.
+     *
+     * P0.6 (RULE AD-3): when a configured embedding provider FAILS, retrieval
+     * degrades explicitly to pure lexical scoring (retrievalMode=LEXICAL_FALLBACK,
+     * explicit flag in the result) — the failed semantic call is never silently
+     * replaced by a locally generated "semantic" vector.
      */
     suspend fun retrieveRelevantContext(query: String, topK: Int = 4, maxTokenBudget: Int = 2000): AssembledRagContext = withContext(Dispatchers.Default) {
+        var semanticEmbeddingFailed = false
         val queryVector = if (embeddingPort != null) {
             val outcome = embeddingPort.generateEmbeddings(listOf(query))
-            if (outcome is Outcome.Success) (outcome.value.firstOrNull() ?: generateLexicalVector(query)) else generateLexicalVector(query)
+            when {
+                outcome is Outcome.Success && outcome.value.firstOrNull() != null ->
+                    outcome.value.first()
+                else -> {
+                    // Configured provider failed: EXPLICIT degradation to lexical scoring.
+                    semanticEmbeddingFailed = true
+                    null
+                }
+            }
         } else {
-            generateLexicalVector(query)
+            null // no provider configured: lexical mode is the honest local mode
         }
 
         val scoredChunks = chunks.map { chunk ->
-            val sim = computeCosineSimilarity(queryVector.values, chunk.vector?.values ?: generateLexicalVector(chunk.text).values)
+            val chunkVector = chunk.vector
+            val sim = if (queryVector != null && chunkVector != null) {
+                computeCosineSimilarity(queryVector.values, chunkVector.values)
+            } else 0.0f
             val lexicalMatch = if (chunk.text.contains(query, ignoreCase = true)) 0.3f else 0.0f
-            val combinedScore = (sim * 0.7f + lexicalMatch * 0.3f).coerceIn(0.0f, 1.0f)
+            val combinedScore = if (queryVector != null) {
+                (sim * 0.7f + lexicalMatch * 0.3f).coerceIn(0.0f, 1.0f)
+            } else {
+                lexicalMatch.coerceIn(0.0f, 1.0f)
+            }
+
+            val mode = when {
+                queryVector != null -> RetrievalMode.HYBRID
+                semanticEmbeddingFailed -> RetrievalMode.LEXICAL_FALLBACK // explicit degradation
+                else -> RetrievalMode.LEXICAL_FALLBACK // no provider configured
+            }
 
             RetrievedContextChunk(
                 chunk = chunk,
                 relevanceScore = combinedScore,
-                retrievalMode = if (embeddingPort != null) RetrievalMode.HYBRID else RetrievalMode.LEXICAL_FALLBACK,
+                retrievalMode = mode,
                 snippet = chunk.text
             )
         }
@@ -167,6 +211,9 @@ class RagPipelineService(
 
         val assembledText = buildString {
             appendLine("=== سياق المعرفة المسترجع (RAG Knowledge Base) ===")
+            if (semanticEmbeddingFailed) {
+                appendLine("[تنبيه صريح]: فشل مزود التضمين المُعد — تم التراجع صراحةً إلى المطابقة المعجمية (RULE AD-3: لا يوجد بديل صامت).")
+            }
             scoredChunks.forEachIndexed { i, c ->
                 appendLine("[مصدر ${i + 1}: ${c.chunk.documentTitle} (صلة: ${"%.2f".format(c.relevanceScore)})]")
                 appendLine(c.chunk.text)

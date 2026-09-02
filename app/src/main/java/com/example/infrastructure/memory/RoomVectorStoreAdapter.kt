@@ -114,25 +114,53 @@ class RoomVectorStoreAdapter(
     // --- MemoryRepositoryPort Implementation ---
 
     override suspend fun storeMemory(entry: MemoryEntry): Outcome<Unit, VectorStoreFailure> = withContext(Dispatchers.IO) {
-        val vector = if (embeddingProvider != null) {
+        // P0.6 (RULE AD-3): when an embedding provider IS configured but its call
+        // FAILS, the failure is surfaced EXPLICITLY — silent lexical-sparse-vector
+        // substitution for a configured provider is REMOVED. When NO provider is
+        // configured at all, lexical hashing is the honest local storage mode (not a
+        // substitution), surfaced via RetrievalMode.LEXICAL_FALLBACK on retrieval.
+        val vectorOutcome: Outcome<EmbeddingVector, VectorStoreFailure> = if (embeddingProvider != null) {
             when (val embedResult = embeddingProvider.generateEmbeddings(listOf(entry.content))) {
-                is Outcome.Success -> embedResult.value.firstOrNull() ?: createLexicalSparseVector(entry.content)
-                else -> createLexicalSparseVector(entry.content)
+                is Outcome.Success -> {
+                    val vector = embedResult.value.firstOrNull()
+                    if (vector != null) Outcome.Success(vector)
+                    else Outcome.Error(
+                        VectorStoreFailure.StorageWriteError(
+                            "مزود التضمين المُعد لم يرجع أي متجه للنص — فشل صريح (لا يوجد بديل صامت)."
+                        )
+                    )
+                }
+                is Outcome.Degraded -> Outcome.Error(
+                    VectorStoreFailure.StorageWriteError(
+                        "فشل مزود التضمين المُعد (متراجع): ${embedResult.diagnosticMessage} — لا يوجد بديل صامت."
+                    )
+                )
+                is Outcome.Error -> Outcome.Error(
+                    VectorStoreFailure.StorageWriteError(
+                        "فشل مزود التضمين المُعد: ${embedResult.diagnosticMessage} — لا يوجد بديل صامت (RULE AD-3)."
+                    )
+                )
             }
         } else {
-            createLexicalSparseVector(entry.content)
+            Outcome.Success(createLexicalSparseVector(entry.content))
         }
 
-        val record = VectorStoreRecord(
-            id = entry.id,
-            vector = vector,
-            payloadText = entry.content,
-            metadata = mapOf(
-                "source" to (entry.provenance.sourceSessionId ?: "USER_INPUT"),
-                "confidence" to entry.confidence.toString()
-            )
-        )
-        upsert(record)
+        when (val vector = vectorOutcome) {
+            is Outcome.Error -> vector
+            is Outcome.Success -> {
+                val record = VectorStoreRecord(
+                    id = entry.id,
+                    vector = vector.value,
+                    payloadText = entry.content,
+                    metadata = mapOf(
+                        "source" to (entry.provenance.sourceSessionId ?: "USER_INPUT"),
+                        "confidence" to entry.confidence.toString()
+                    )
+                )
+                upsert(record)
+            }
+            else -> Outcome.Error(VectorStoreFailure.StorageWriteError("حالة متجه غير متوقعة."))
+        }
     }
 
     override suspend fun retrieveMemories(
@@ -144,13 +172,41 @@ class RoomVectorStoreAdapter(
             val entities = memoryDao.getAllActiveMemories()
             if (entities.isEmpty()) return@withContext Outcome.Success(emptyList())
 
-            val queryVector = if (embeddingProvider != null) {
+            // P0.6 (RULE AD-3): explicit failure when the CONFIGURED embedding provider
+            // fails — no silent lexical substitution. Lexical query vector is used ONLY
+            // when no embedding provider is configured at all (honest local mode).
+            val queryVectorOutcome: Outcome<EmbeddingVector, VectorStoreFailure> = if (embeddingProvider != null) {
                 when (val embResult = embeddingProvider.generateEmbeddings(listOf(query))) {
-                    is Outcome.Success -> embResult.value.firstOrNull() ?: createLexicalSparseVector(query)
-                    else -> createLexicalSparseVector(query)
+                    is Outcome.Success -> {
+                        val vector = embResult.value.firstOrNull()
+                        if (vector != null) Outcome.Success(vector)
+                        else Outcome.Error(
+                            VectorStoreFailure.StorageReadError(
+                                "مزود التضمين المُعد لم يرجع متجهاً للاستعلام — فشل صريح (لا يوجد بديل صامت)."
+                            )
+                        )
+                    }
+                    is Outcome.Degraded -> Outcome.Error(
+                        VectorStoreFailure.StorageReadError(
+                            "فشل مزود التضمين المُعد (متراجع): ${embResult.diagnosticMessage} — لا يوجد بديل صامت."
+                        )
+                    )
+                    is Outcome.Error -> Outcome.Error(
+                        VectorStoreFailure.StorageReadError(
+                            "فشل مزود التضمين المُعد: ${embResult.diagnosticMessage} — لا يوجد بديل صامت (RULE AD-3)."
+                        )
+                    )
                 }
             } else {
-                createLexicalSparseVector(query)
+                Outcome.Success(createLexicalSparseVector(query))
+            }
+
+            val queryVector = when (val outcome = queryVectorOutcome) {
+                is Outcome.Success -> outcome.value
+                is Outcome.Error -> return@withContext Outcome.Error(outcome.failure)
+                else -> return@withContext Outcome.Error(
+                    VectorStoreFailure.StorageReadError("حالة استعلام غير متوقعة.")
+                )
             }
 
             val scoredRecords = mutableListOf<ScoredMemoryRecord>()

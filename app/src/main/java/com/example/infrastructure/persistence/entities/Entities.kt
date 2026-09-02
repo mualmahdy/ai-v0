@@ -1,6 +1,7 @@
 package com.example.infrastructure.persistence.entities
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "projects")
@@ -151,5 +152,138 @@ data class ProviderConfigEntity(
     val timeoutSeconds: Int,
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long
+)
+
+// =============================================================================
+// P0 RESOURCE CONTRACT (APPROVED-BASELINE v2.1) — schema revision v4
+// =============================================================================
+
+/**
+ * P0.2 — ResourceRecord persistence (Section B locked contract, Room projection).
+ * The (providerId, serviceId) logical key is UNIQUE at the database level,
+ * enforcing RULE REG-1 / REG-4 (one ResourceRecord per logical key).
+ */
+@Entity(
+    tableName = "resource_records",
+    indices = [Index(value = ["providerId", "serviceId"], unique = true)]
+)
+data class ResourceRecordEntity(
+    @PrimaryKey
+    val resourceId: String,
+    val providerId: String,
+    val serviceId: String,
+    val resourceType: String,         // LLM, EMBEDDING, SEARCH, TOOL, AGENT, STORAGE
+    val category: String,             // REMOTE or LOCAL
+    val capabilitiesJson: String,     // CapabilityId list serialized as JSON array
+    val lifecycleState: String,       // CONFIGURED, VALIDATING, HEALTHY, UNAVAILABLE, DISABLED
+    val runtimeSupported: Boolean,    // SEPARATE from lifecycleState
+    val configurationVersion: Int,
+    val isFallback: Boolean = false,
+    val registeredAt: Long,
+    val lastStateChangeAt: Long,
+    val metadataJson: String          // Extensible, flat key-value JSON object
+)
+
+/**
+ * P0.3 — Health snapshot persistence (best-effort restart survival, Section G).
+ */
+@Entity(tableName = "resource_health_snapshots")
+data class ResourceHealthSnapshotEntity(
+    @PrimaryKey
+    val resourceId: String,
+    val successRate: Double,
+    val averageLatencyMs: Long,
+    val p95LatencyMs: Long,
+    val timeoutRate: Double,
+    val lastSuccessAt: Long?,
+    val lastFailureAt: Long?,
+    val lastFailureReason: String?,
+    val inCooldownUntil: Long?,
+    val sampleSize: Int,
+    val healthScore: Double,
+    val consecutiveFailures: Int,
+    val windowJson: String,
+    val updatedAt: Long
+)
+
+/**
+ * P0.4 — DecisionRecord persistence (Section F: "persisted via Room `decisions` table").
+ */
+@Entity(tableName = "decision_records")
+data class DecisionRecordEntity(
+    @PrimaryKey
+    val decisionId: String,
+    val taskId: String,
+    val stepId: String,
+    val timestamp: Long,
+    val decisionVersion: Int,
+    val selectedResourceId: String,
+    val selectedProviderId: String,
+    val selectedServiceId: String,
+    val selectedConfigurationVersion: Int,
+    val selectedAgentId: String?,
+    val selectedToolIdsJson: String,
+    val requiredCapabilitiesJson: String,
+    val candidateEvaluationsJson: String,
+    val decisionRationale: String,
+    val confidence: Double,
+    val securityPermitted: Boolean,
+    val securityRuleId: String?,
+    val securityReason: String,
+    val governanceState: String,      // NOT_APPLICABLE, ALLOWED, BLOCKED, REQUIRES_APPROVAL
+    val governancePolicyId: String?,
+    val governanceReason: String,
+    val fallbackPolicyType: String,   // Fail, Replan, PreferAlternative
+    val fallbackPolicyPayloadJson: String,
+    val createdAt: Long
+)
+
+/**
+ * P0.8 — Execution state store (Section I).
+ */
+@Entity(tableName = "execution_records")
+data class ExecutionRecordEntity(
+    @PrimaryKey
+    val executionId: String,
+    val decisionId: String,
+    val taskId: String,
+    val stepId: String,
+    val resourceId: String,
+    val outcome: String,              // SUCCESS, FAILURE, REPLAN_REQUESTED
+    val transportError: String?,
+    val latencyMs: Long,
+    val timestamp: Long
+)
+
+/**
+ * P0.8 — Evidence store (Section I).
+ */
+@Entity(tableName = "evidence_records")
+data class EvidenceRecordEntity(
+    @PrimaryKey
+    val evidenceId: String,
+    val taskId: String,
+    val stepId: String,
+    val decisionId: String,
+    val resourceId: String,
+    val evidenceKeysJson: String,
+    val summary: String,
+    val payloadJson: String,
+    val createdAt: Long
+)
+
+/**
+ * P0.8 — Verification outcome store (Section I).
+ */
+@Entity(tableName = "verification_outcomes")
+data class VerificationOutcomeEntity(
+    @PrimaryKey
+    val id: String,
+    val taskId: String,
+    val stepId: String,
+    val verified: Boolean,
+    val confidence: Double,
+    val summary: String,
+    val createdAt: Long
 )
 
