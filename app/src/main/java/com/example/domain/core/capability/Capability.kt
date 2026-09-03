@@ -408,7 +408,12 @@ data class CapabilityGapAnalysis(
     val conflictingCapabilities: Set<CapabilityType> = emptySet(),
     val unavailableCapabilities: Set<CapabilityType> = emptySet(),
     val candidateResourcesForPending: Map<CapabilityType, List<CapabilityDescriptor>> = emptyMap(),
-    val candidateResourcesForMissing: Map<CapabilityType, List<CapabilityDescriptor>> = candidateResourcesForPending,
+    // FIX DOM-P0-03: Previously `candidateResourcesForMissing = candidateResourcesForPending` was
+    // evaluated at construction with candidateResourcesForPending = emptyMap() (Kotlin evaluates
+    // default args left-to-right), so candidateResourcesForMissing was ALWAYS empty unless
+    // explicitly passed. Silent data-loss for callers reading the field.
+    // Now it defaults to emptyMap() and must be set explicitly by the producer.
+    val candidateResourcesForMissing: Map<CapabilityType, List<CapabilityDescriptor>> = emptyMap(),
     val status: CapabilityStatus = when {
         conflictingCapabilities.isNotEmpty() && satisfiedCapabilities.isEmpty() -> CapabilityStatus.BLOCKED
         unavailableCapabilities.isNotEmpty() && missingCapabilities.isNotEmpty() -> CapabilityStatus.CAPABILITY_UNAVAILABLE

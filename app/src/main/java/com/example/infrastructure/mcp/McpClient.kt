@@ -116,17 +116,23 @@ class McpClient(
                     )
                 )
             } else {
-                Outcome.Success(
-                    server.copy(
-                        health = HealthStatus.DEGRADED
-                    )
+                // FIX INF-P0-11: Previously returned Outcome.Success(server.copy(health = DEGRADED))
+                // on HTTP non-200, masking the failure as success. Callers could not distinguish
+                // "discovered but unhealthy" from "discovery HTTP error". Now we return Outcome.Error
+                // with the HTTP code so the caller can branch on the failure type.
+                val code = response.code
+                Outcome.Error(
+                    failure = "MCP discovery HTTP $code for ${server.name} (${server.endpointUri})",
+                    diagnosticMessage = "خادم MCP ${server.name} أعاد رمز HTTP $code أثناء محاولة الاكتشاف."
                 )
             }
         } catch (e: Exception) {
-            Outcome.Success(
-                server.copy(
-                    health = HealthStatus.UNAVAILABLE
-                )
+            // FIX INF-P0-11: Previously returned Outcome.Success(server.copy(health = UNAVAILABLE))
+            // on exceptions, masking transport errors as success. Callers could not distinguish
+            // "discovered but unavailable" from "discovery crashed". Now we surface the exception.
+            Outcome.Error(
+                failure = "MCP discovery failed for ${server.name}: ${e::class.java.simpleName} - ${e.message}",
+                diagnosticMessage = "تعذّر الوصول إلى خادم MCP ${server.name}: ${e.localizedMessage ?: e.message ?: "خطأ غير معروف"}"
             )
         }
     }

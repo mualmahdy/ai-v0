@@ -27,6 +27,12 @@ data class ExtractedCapabilityProfile(
 
 /**
  * Discovered Radar item representing an ecosystem event or technology development.
+ *
+ * FIX DOM-P2-23: Previously defaulted to `confidence = 0.95f`. Every radar item claimed
+ * 0.95 confidence by default with no measurement. Now defaults to `0.0f` — callers must
+ * explicitly set the confidence based on real scoring (or leave at 0.0 to indicate
+ * "not yet scored"). UI can render 0.0-confidence items as "unscored" rather than
+ * presenting them as 95%-certain matches.
  */
 data class RadarItem(
     val id: String,
@@ -36,7 +42,7 @@ data class RadarItem(
     val sourceUrl: String,
     val sourceName: String,
     val relevanceScore: Float, // 0.0 to 1.0
-    val confidence: Float = 0.95f,
+    val confidence: Float = 0.0f,
     val extractedCapability: ExtractedCapabilityProfile? = null,
     val tags: List<String> = emptyList(),
     val discoveredTimestampMs: Long = System.currentTimeMillis()

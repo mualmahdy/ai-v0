@@ -33,17 +33,22 @@ data class McpDiscoveredResource(
 
 /**
  * Representation of an external MCP Server registered in the Capability Registry.
+ *
+ * FIX DOM-P2-20: Previously defaulted to `health = HEALTHY`, `latencyMs = 45L`, and
+ * `lastPingTimestampMs = System.currentTimeMillis()`. A newly registered MCP server
+ * with no ping should not claim HEALTHY with 45ms latency and a fresh ping timestamp.
+ * Now defaults are honest: `health = UNKNOWN`, `latencyMs = 0L`, `lastPingTimestampMs = null`.
  */
 data class McpServerDescriptor(
     val id: String,
     val name: String,
     val endpointUri: String,
     val transportType: McpTransportType = McpTransportType.SSE,
-    val health: HealthStatus = HealthStatus.HEALTHY,
+    val health: HealthStatus = HealthStatus.UNKNOWN,
     val isEnabled: Boolean = true,
     val exposedTools: List<McpDiscoveredTool> = emptyList(),
     val exposedResources: List<McpDiscoveredResource> = emptyList(),
     val requiredPermissions: List<String> = emptyList(),
-    val latencyMs: Long = 45L,
-    val lastPingTimestampMs: Long = System.currentTimeMillis()
+    val latencyMs: Long = 0L,
+    val lastPingTimestampMs: Long? = null
 )

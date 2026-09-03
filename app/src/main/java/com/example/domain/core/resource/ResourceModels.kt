@@ -37,6 +37,18 @@ enum class ResourceLifecycleState {
 
 /**
  * Authoritative record of a managed system resource in the ResourceRegistry.
+ *
+ * FIX DOM-P2-19: Previously defaulted to `lifecycleState = ENABLED`,
+ * `runtimeSupported = true`, `healthStatus = HEALTHY` — all of which were MISLEADING
+ * because a freshly-constructed ResourceRecord had not actually been enabled, verified
+ * at runtime, or health-checked. Now the defaults are honest:
+ *   - lifecycleState = REGISTERED (just registered, not yet configured/enabled)
+ *   - runtimeSupported = false (must be explicitly verified)
+ *   - healthStatus = UNKNOWN (must be explicitly probed)
+ *
+ * Note: ComponentRegistry.registerLlmProvider / registerSearchProvider / etc. continue
+ * to override these defaults with explicit values appropriate for those registration
+ * paths. The defaults here are the safe-honest baseline for direct construction.
  */
 data class ResourceRecord(
     val resourceId: ResourceId,
@@ -45,9 +57,9 @@ data class ResourceRecord(
     val resourceType: ResourceType,
     val capabilities: Set<CapabilityType>,
     val configurationVersion: Long = 1L,
-    val lifecycleState: ResourceLifecycleState = ResourceLifecycleState.ENABLED,
-    val runtimeSupported: Boolean = true,
-    val healthStatus: HealthStatus = HealthStatus.HEALTHY,
+    val lifecycleState: ResourceLifecycleState = ResourceLifecycleState.REGISTERED,
+    val runtimeSupported: Boolean = false,
+    val healthStatus: HealthStatus = HealthStatus.UNKNOWN,
     val isLocal: Boolean = false,
     val metadata: Map<String, String> = emptyMap()
 ) {

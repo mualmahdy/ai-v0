@@ -24,6 +24,12 @@ enum class TriStateCapability {
 
 /**
  * Normalized model descriptor representing capabilities discovered or registered in AI-V0 Platform.
+ *
+ * FIX DOM-P2-24: Previously defaulted to `discoverySource = "AUTOMATIC_DISCOVERY"` and
+ * `confidence = 0.95f`. A descriptor that wasn't actually discovered shouldn't claim
+ * "AUTOMATIC_DISCOVERY", and 0.95 confidence without measurement was synthetic. Now:
+ *   - discoverySource = "UNSPECIFIED" (caller must set the real source)
+ *   - confidence = 0.0f (caller must set based on real measurement)
  */
 data class ModelDescriptor(
     val id: String,
@@ -43,7 +49,7 @@ data class ModelDescriptor(
     val health: HealthStatus = HealthStatus.UNKNOWN,
     val estimatedCostPer1kTokensUsd: Double? = null,
     val averageLatencyMs: Long? = null,
-    val discoverySource: String = "AUTOMATIC_DISCOVERY",
-    val confidence: Float = 0.95f,
+    val discoverySource: String = "UNSPECIFIED",
+    val confidence: Float = 0.0f,
     val lastDiscoveredTimestampMs: Long = System.currentTimeMillis()
 )

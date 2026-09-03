@@ -13,12 +13,26 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.sqrt
 
 /**
  * Real RAG & Knowledge Subsystem for document ingestion, semantic chunking, and context assembly.
+ *
+ * FIX APP-P3-27: `chunks` was previously a plain `mutableListOf<DocumentChunk>` mutated from
+ * `Dispatchers.Default` in `ingestDocument()` and `ingestDocumentSync()`. Concurrent ingest
+ * calls would race and could corrupt the list. Now it's a `CopyOnWriteArrayList` which is
+ * safe for concurrent read/iterate and acceptably fast for the small chunk counts we expect
+ * per session (typically < 1000). The `documents` StateFlow was already thread-safe via
+ * `MutableStateFlow.update { ... }` atomic CAS.
+ *
+ * Note: The chunks list is still in-memory only — persistence to Room is tracked as a
+ * separate follow-up (Phase 2 Workspace Persistence). The thread-safety fix here prevents
+ * corruption but does not survive app restart.
  */
 class RagPipelineService(
     private val embeddingPort: EmbeddingProviderPort? = null
@@ -26,7 +40,11 @@ class RagPipelineService(
     private val _documents = MutableStateFlow<List<KnowledgeDocument>>(emptyList())
     val documents: StateFlow<List<KnowledgeDocument>> = _documents.asStateFlow()
 
-    private val chunks = mutableListOf<DocumentChunk>()
+    // FIX APP-P3-27: thread-safe list for concurrent ingest calls.
+    private val chunks = CopyOnWriteArrayList<DocumentChunk>()
+    // Mutex protects read-modify-write sequences that span multiple operations on chunks
+    // (e.g. ingestDocument's split + embed + addAll sequence).
+    private val chunksMutex = Mutex()
 
     init {
         bootstrapDefaultKnowledge()

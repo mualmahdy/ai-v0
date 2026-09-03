@@ -22,6 +22,9 @@ interface ProjectDao {
     @Query("SELECT * FROM projects WHERE isArchived = 0 ORDER BY updatedAtEpochMs DESC")
     fun getAllActiveProjects(): Flow<List<ProjectEntity>>
 
+    @Query("SELECT * FROM projects WHERE isArchived = 0 ORDER BY updatedAtEpochMs DESC")
+    suspend fun getAllActiveProjectsList(): List<ProjectEntity>
+
     @Query("SELECT * FROM projects WHERE id = :id LIMIT 1")
     suspend fun getProjectById(id: Long): ProjectEntity?
 
@@ -39,6 +42,12 @@ interface ProjectDao {
 interface SessionDao {
     @Query("SELECT * FROM sessions WHERE projectId = :projectId ORDER BY updatedAtEpochMs DESC")
     fun getSessionsForProject(projectId: Long): Flow<List<SessionEntity>>
+
+    // FIX APP-P0-05: listSessions() in SandboxWorkspaceStorageAdapter was returning
+    // emptyList() even though saveSession() wrote to Room. Added a suspend query so
+    // the storage adapter can actually read back what was written.
+    @Query("SELECT * FROM sessions WHERE projectId = :projectId ORDER BY updatedAtEpochMs DESC")
+    suspend fun getSessionsForProjectList(projectId: Long): List<SessionEntity>
 
     @Query("SELECT * FROM sessions WHERE sessionId = :sessionId LIMIT 1")
     suspend fun getSessionById(sessionId: String): SessionEntity?

@@ -121,9 +121,15 @@ class OutcomeService {
         }
 
         // 4. Verify explicit Required Output Keys
+        // FIX DOM-P0-04: Previously the check was
+        //   `if (accumulatedEvidence.containsKey(requiredKey) || finalOutputText.isNotBlank())`
+        // The `||` clause meant ANY non-blank final output satisfied EVERY required output key,
+        // even when the evidence map did not contain the key. STRICT verification was effectively
+        // bypassed when any text was produced. Now we only accept the evidence-map hit, and
+        // allow the permissive path through the strategy evaluation in step 8 instead.
         val allRequiredKeys = (successCriteria.requiredOutputKeys + requirements.requiredResourceTypes).distinct()
         for (requiredKey in allRequiredKeys) {
-            if (accumulatedEvidence.containsKey(requiredKey) || finalOutputText.isNotBlank()) {
+            if (accumulatedEvidence.containsKey(requiredKey)) {
                 satisfied.add("Found required output: $requiredKey")
             } else {
                 missing.add("Missing required output key: $requiredKey")

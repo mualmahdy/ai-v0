@@ -188,12 +188,32 @@ class SandboxWorkspaceStorageAdapter(
     }
 
     override suspend fun listProjects(): Outcome<List<ProjectMetadata>, StorageFailure> = withContext(Dispatchers.IO) {
+        // FIX APP-P0-06: Previously this method called getActiveProject() and wrapped the
+        // single result in listOf(...), claiming to be a list while only ever returning
+        // one project (the hardcoded id=1L default). Now we actually query ProjectDao
+        // for all active projects so multi-project workspaces are supported.
         try {
-            val defaultProj = getActiveProject()
-            if (defaultProj is Outcome.Success) {
-                Outcome.Success(listOf(defaultProj.value))
+            val entities = projectDao.getAllActiveProjectsList()
+            if (entities.isEmpty()) {
+                // No projects at all yet — auto-create the default and return it.
+                val defaultProj = getActiveProject()
+                if (defaultProj is Outcome.Success) {
+                    Outcome.Success(listOf(defaultProj.value))
+                } else {
+                    Outcome.Success(emptyList())
+                }
             } else {
-                Outcome.Error(StorageFailure.ReadWriteError("projects", "لا توجد مشاريع متاحة."))
+                Outcome.Success(
+                    entities.map { entity ->
+                        ProjectMetadata(
+                            id = entity.id,
+                            name = entity.name,
+                            description = entity.description,
+                            isDefault = entity.id == 1L,
+                            createdAtTimestampMs = entity.createdAtEpochMs
+                        )
+                    }
+                )
             }
         } catch (e: Exception) {
             Outcome.Error(StorageFailure.ReadWriteError("projects", "فشل استرجاع المشاريع: ${e.localizedMessage}"))
@@ -229,7 +249,27 @@ class SandboxWorkspaceStorageAdapter(
     }
 
     override suspend fun listSessions(projectId: Long): Outcome<List<WorkspaceSessionInfo>, StorageFailure> = withContext(Dispatchers.IO) {
-        Outcome.Success(emptyList())
+        // FIX APP-P0-05: Previously returned Outcome.Success(emptyList()) unconditionally,
+        // even though saveSession() wrote to Room. Sessions were persisted but invisible.
+        // Asymmetric persistence = invisible data loss. Now we actually query the SessionDao.
+        try {
+            val entities = sessionDao.getSessionsForProjectList(projectId)
+            val sessions = entities.map { entity ->
+                WorkspaceSessionInfo(
+                    sessionId = entity.sessionId,
+                    projectId = entity.projectId,
+                    title = entity.title,
+                    assignedAgentId = entity.assignedAgentId,
+                    activeModelId = entity.activeModelId,
+                    totalTokensConsumed = entity.totalTokensConsumed,
+                    createdAtTimestampMs = entity.createdAtEpochMs,
+                    lastUpdatedTimestampMs = entity.updatedAtEpochMs
+                )
+            }
+            Outcome.Success(sessions)
+        } catch (e: Exception) {
+            Outcome.Error(StorageFailure.ReadWriteError("sessions", "فشل استرجاع الجلسات: ${e.localizedMessage}"))
+        }
     }
 
     override suspend fun saveSession(session: WorkspaceSessionInfo): Outcome<Unit, StorageFailure> = withContext(Dispatchers.IO) {
@@ -239,8 +279,11 @@ class SandboxWorkspaceStorageAdapter(
                     sessionId = session.sessionId,
                     projectId = session.projectId,
                     title = session.title,
-                    assignedAgentId = "default_orchestrator",
-                    activeModelId = "gemini-2.5-flash",
+                    // FIX: previously hardcoded "default_orchestrator" and "gemini-2.5-flash"
+                    // — stored session didn't reflect which agent/model was actually used.
+                    // Now we persist the real values from the session parameter.
+                    assignedAgentId = session.assignedAgentId.ifBlank { "default_orchestrator" },
+                    activeModelId = session.activeModelId.ifBlank { "unknown" },
                     createdAtEpochMs = session.lastUpdatedTimestampMs,
                     updatedAtEpochMs = session.lastUpdatedTimestampMs,
                     totalTokensConsumed = session.totalTokensConsumed

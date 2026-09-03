@@ -26,6 +26,14 @@ enum class TaskPriority {
 /**
  * Lifecycle states of an autonomous task as mandated by the Master Directive:
  * CREATED, READY, PLANNING, RUNNING, WAITING, BLOCKED, REPLANNING, COMPLETED, FAILED, CANCELLED
+ *
+ * FIX DOM-P0-02: Added DEGRADED as a valid lifecycle state. AgentOrchestrator.persistTaskFinal
+ * previously wrote stateStr = "DEGRADED" but DEGRADED was not a valid enum value, so
+ * TaskLifecycleState.valueOf("DEGRADED") on resume would throw IllegalArgumentException
+ * — making it impossible to resume degraded tasks. Now the round-trip is sound.
+ * DEGRADED is a terminal-ish state: the task completed but did not fully satisfy its
+ * success criteria (allowDegradedExecution = true). It is distinct from COMPLETED
+ * (fully satisfied) and FAILED (terminal failure).
  */
 enum class TaskLifecycleState {
     CREATED,
@@ -36,6 +44,7 @@ enum class TaskLifecycleState {
     BLOCKED,
     REPLANNING,
     COMPLETED,
+    DEGRADED,
     FAILED,
     CANCELLED
 }

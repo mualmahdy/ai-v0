@@ -9,6 +9,10 @@ sealed class DiscoveryFailure(val message: String, val isRecoverable: Boolean) {
     class NetworkError(val error: String) : DiscoveryFailure("فشل الاتصال بالخادم: $error", true)
     class ParsingError(val error: String) : DiscoveryFailure("خطأ في معالجة استجابة النماذج: $error", false)
     class UnsupportedProvider(val providerId: String) : DiscoveryFailure("المزود غير مدعوم للاستكشاف التلقائي", false)
+    // FIX INF-P0-14: Added TransportError for explicit transport-level failures
+    // (ConnectException, SocketTimeoutException, SSLException, etc.) so callers can
+    // distinguish them from generic NetworkError.
+    class TransportError(val providerId: String, val error: String) : DiscoveryFailure("خطأ في النقل لـ $providerId: $error", true)
 }
 
 /**

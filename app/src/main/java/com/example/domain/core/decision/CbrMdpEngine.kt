@@ -16,9 +16,13 @@ class CbrMdpEngine(
     private val cbrWeight: Float = 0.55f
     private val mdpWeight: Float = 0.45f
 
-    // Estimated transition success probabilities per action type
+    // Estimated transition success probabilities per action type.
+    // FIX DOM-P2-25: Previously initialized to 0.85f for every action type — a synthetic
+    // optimistic prior that biased the engine toward assuming actions succeed. Now we use
+    // 0.5f (uninformative prior) so the EMA updates from real observations drive the
+    // estimates toward their true values without an initial optimism bias.
     private val actionSuccessEstimates = mutableMapOf<DecisionActionType, Float>().apply {
-        DecisionActionType.entries.forEach { this[it] = 0.85f }
+        DecisionActionType.entries.forEach { this[it] = 0.5f }
     }
 
     /**

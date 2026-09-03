@@ -60,7 +60,7 @@ data class TaskEntity(
     val id: String,
     val assignedAgentId: String,
     val rawPrompt: String,
-    val lifecycleState: String, // CREATED, PLANNING, RUNNING, COMPLETED, FAILED, DEGRADED, CANCELLED
+    val lifecycleState: String, // CREATED, PLANNING, RUNNING, COMPLETED, DEGRADED, FAILED, CANCELLED, WAITING
     val autonomyPolicy: String,
     val resultSummary: String?,
     val totalTokensConsumed: Int = 0,
@@ -69,7 +69,24 @@ data class TaskEntity(
     val degradedReason: String? = null,
     val errorMessage: String? = null,
     val createdAtEpochMs: Long,
-    val updatedAtEpochMs: Long
+    val updatedAtEpochMs: Long,
+    // FIX APP-P0-07 (DOM-P0-02): Added fields to support full TaskDefinition round-trip
+    // so that resumeTask can reconstruct the original task instead of dropping most fields.
+    val goal: String = rawPrompt,
+    val currentStepIndex: Int = 0,
+    val tokenLimit: Int = 30000,
+    val maxRetries: Int = 3,
+    val allowDegradedExecution: Boolean = true,
+    val requireHumanConsentForSensitiveTools: Boolean = true,
+    val timeoutMs: Long = 60000L,
+    val minOutputLengthChars: Int = 1,
+    val verificationStrategy: String = "STRICT",
+    val assignedModelId: String? = null,
+    val activeToolsJson: String? = null,         // JSON array of tool IDs
+    val requiredCapabilitiesJson: String? = null, // JSON array of CapabilityType names
+    val requiredEvidenceKeysJson: String? = null, // JSON array of evidence keys
+    val requiredOutputKeysJson: String? = null,   // JSON array of output keys
+    val executionLogJson: String? = null          // JSON array of log entries
 )
 
 @Entity(tableName = "decision_cases")

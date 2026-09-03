@@ -23,14 +23,22 @@ data class ProjectMetadata(
 
 /**
  * Persistent session summary.
+ *
+ * FIX APP-P0-05: Added assignedAgentId, activeModelId, createdAtTimestampMs fields so
+ * saveSession/listSessions can round-trip the real agent+model used during the session
+ * instead of hardcoding "default_orchestrator" / "gemini-2.5-flash" on read-back.
+ * messageCount is now optional (defaults to 0) since callers may not always know it.
  */
 data class WorkspaceSessionInfo(
     val sessionId: String,
     val projectId: Long,
     val title: String,
-    val messageCount: Int,
+    val messageCount: Int = 0,
     val totalTokensConsumed: Int,
-    val lastUpdatedTimestampMs: Long = System.currentTimeMillis()
+    val lastUpdatedTimestampMs: Long = System.currentTimeMillis(),
+    val createdAtTimestampMs: Long = lastUpdatedTimestampMs,
+    val assignedAgentId: String = "",
+    val activeModelId: String = ""
 )
 
 /**

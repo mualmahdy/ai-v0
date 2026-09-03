@@ -14,6 +14,11 @@ enum class SkillState {
 
 /**
  * Manifest definition of a reusable high-level Skill.
+ *
+ * FIX DOM-P2-22: Previously defaulted to `isVerified = true`. Every skill was marked
+ * verified by default with no verification process. Now defaults to `false` — a skill
+ * must be explicitly verified (via the Phase 7 verification pipeline) before isVerified
+ * can be set to true.
  */
 data class SkillManifest(
     val id: String,
@@ -28,6 +33,6 @@ data class SkillManifest(
     val state: SkillState = SkillState.AVAILABLE,
     val workflowTemplate: String? = null,
     val author: String = "AI-V0 Core Community",
-    val isVerified: Boolean = true,
+    val isVerified: Boolean = false,
     val installedTimestampMs: Long? = null
 )

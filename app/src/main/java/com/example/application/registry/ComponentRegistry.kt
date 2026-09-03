@@ -16,11 +16,16 @@ import com.example.domain.ports.memory.EmbeddingProviderPort
 import com.example.domain.ports.search.SearchProviderPort
 import com.example.domain.ports.tools.ToolPort
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Registry for system capabilities, providers, and tools.
  *
  * Exposes authoritative ResourceRegistry, ResourceCapabilityGraph, and RuntimeAdapterResolver.
+ *
+ * FIX APP-P3-26: defaultLlmProviderId / defaultSearchProviderId / defaultEmbeddingProviderId
+ * were previously plain `var` fields read/written from concurrent register/unregister calls.
+ * Now they are AtomicReference<String?> for thread-safe atomic read-modify-write.
  */
 class ComponentRegistry(
     val resourceRegistry: ResourceRegistryService = ResourceRegistryService()
@@ -34,16 +39,17 @@ class ComponentRegistry(
     private val embeddingProviders = ConcurrentHashMap<String, EmbeddingProviderPort>()
     private val tools = ConcurrentHashMap<String, ToolPort>()
 
-    private var defaultLlmProviderId: String? = null
-    private var defaultSearchProviderId: String? = null
-    private var defaultEmbeddingProviderId: String? = null
+    // FIX APP-P3-26: thread-safe atomic references for default provider IDs
+    private val defaultLlmProviderId = AtomicReference<String?>(null)
+    private val defaultSearchProviderId = AtomicReference<String?>(null)
+    private val defaultEmbeddingProviderId = AtomicReference<String?>(null)
 
     // --- LLM Providers ---
     fun registerLlmProvider(provider: LlmProviderPort, isDefault: Boolean = false) {
         val key = provider.providerId.lowercase()
         llmProviders[key] = provider
-        if (isDefault || defaultLlmProviderId == null) {
-            defaultLlmProviderId = key
+        if (isDefault || defaultLlmProviderId.get() == null) {
+            defaultLlmProviderId.set(key)
         }
 
         val resId = ResourceId(key)
@@ -66,8 +72,8 @@ class ComponentRegistry(
     fun unregisterLlmProvider(providerId: String) {
         val key = providerId.lowercase()
         llmProviders.remove(key)
-        if (defaultLlmProviderId == key) {
-            defaultLlmProviderId = llmProviders.keys.firstOrNull()
+        if (defaultLlmProviderId.get() == key) {
+            defaultLlmProviderId.set(llmProviders.keys.firstOrNull())
         }
         val resId = ResourceId(key)
         resourceRegistry.unregisterResource(resId)
@@ -75,11 +81,11 @@ class ComponentRegistry(
     }
 
     fun setDefaultLlmProvider(providerId: String) {
-        defaultLlmProviderId = providerId.lowercase()
+        defaultLlmProviderId.set(providerId.lowercase())
     }
 
     fun getLlmProvider(providerId: String? = null): LlmProviderPort? {
-        val targetId = providerId?.lowercase() ?: defaultLlmProviderId
+        val targetId = providerId?.lowercase() ?: defaultLlmProviderId.get()
         return targetId?.let { llmProviders[it] }
     }
 
@@ -89,8 +95,8 @@ class ComponentRegistry(
     fun registerSearchProvider(provider: SearchProviderPort, isDefault: Boolean = false) {
         val key = provider.providerId.lowercase()
         searchProviders[key] = provider
-        if (isDefault || defaultSearchProviderId == null) {
-            defaultSearchProviderId = key
+        if (isDefault || defaultSearchProviderId.get() == null) {
+            defaultSearchProviderId.set(key)
         }
 
         val resId = ResourceId(key)
@@ -113,8 +119,8 @@ class ComponentRegistry(
     fun unregisterSearchProvider(providerId: String) {
         val key = providerId.lowercase()
         searchProviders.remove(key)
-        if (defaultSearchProviderId == key) {
-            defaultSearchProviderId = searchProviders.keys.firstOrNull()
+        if (defaultSearchProviderId.get() == key) {
+            defaultSearchProviderId.set(searchProviders.keys.firstOrNull())
         }
         val resId = ResourceId(key)
         resourceRegistry.unregisterResource(resId)
@@ -122,11 +128,11 @@ class ComponentRegistry(
     }
 
     fun setDefaultSearchProvider(providerId: String) {
-        defaultSearchProviderId = providerId.lowercase()
+        defaultSearchProviderId.set(providerId.lowercase())
     }
 
     fun getSearchProvider(providerId: String? = null): SearchProviderPort? {
-        val targetId = providerId?.lowercase() ?: defaultSearchProviderId
+        val targetId = providerId?.lowercase() ?: defaultSearchProviderId.get()
         return targetId?.let { searchProviders[it] }
     }
 
@@ -136,8 +142,8 @@ class ComponentRegistry(
     fun registerEmbeddingProvider(provider: EmbeddingProviderPort, isDefault: Boolean = false) {
         val key = provider.providerId.lowercase()
         embeddingProviders[key] = provider
-        if (isDefault || defaultEmbeddingProviderId == null) {
-            defaultEmbeddingProviderId = key
+        if (isDefault || defaultEmbeddingProviderId.get() == null) {
+            defaultEmbeddingProviderId.set(key)
         }
 
         val resId = ResourceId(key)
@@ -160,8 +166,8 @@ class ComponentRegistry(
     fun unregisterEmbeddingProvider(providerId: String) {
         val key = providerId.lowercase()
         embeddingProviders.remove(key)
-        if (defaultEmbeddingProviderId == key) {
-            defaultEmbeddingProviderId = embeddingProviders.keys.firstOrNull()
+        if (defaultEmbeddingProviderId.get() == key) {
+            defaultEmbeddingProviderId.set(embeddingProviders.keys.firstOrNull())
         }
         val resId = ResourceId(key)
         resourceRegistry.unregisterResource(resId)
@@ -169,11 +175,11 @@ class ComponentRegistry(
     }
 
     fun setDefaultEmbeddingProvider(providerId: String) {
-        defaultEmbeddingProviderId = providerId.lowercase()
+        defaultEmbeddingProviderId.set(providerId.lowercase())
     }
 
     fun getEmbeddingProvider(providerId: String? = null): EmbeddingProviderPort? {
-        val targetId = providerId?.lowercase() ?: defaultEmbeddingProviderId
+        val targetId = providerId?.lowercase() ?: defaultEmbeddingProviderId.get()
         return targetId?.let { embeddingProviders[it] }
     }
 

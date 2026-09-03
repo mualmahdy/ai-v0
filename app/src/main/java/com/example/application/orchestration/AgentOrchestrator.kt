@@ -23,6 +23,11 @@ import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.task.TaskId
 import com.example.domain.core.task.TaskInput
 import com.example.domain.core.task.TaskLifecycleState
+import com.example.domain.core.task.TaskBudget
+import com.example.domain.core.task.TaskConstraints
+import com.example.domain.core.task.TaskSuccessCriteria
+import com.example.domain.core.task.VerificationStrategy
+import com.example.domain.core.task.AutonomyPolicy
 import com.example.infrastructure.persistence.dao.TaskDao
 import com.example.infrastructure.persistence.entities.TaskEntity
 import kotlinx.coroutines.CoroutineScope
@@ -30,6 +35,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import java.util.UUID
 
 /**
@@ -398,6 +404,12 @@ class AgentOrchestrator(
 
     /**
      * Resumes execution of a previously persisted task from Room database.
+     *
+     * FIX APP-P0-07: Previously this method reconstructed TaskDefinition with ONLY 4 fields
+     * (id, agentId, rawPrompt, state), dropping specification/requirements/constraints/budget/
+     * successCriteria/currentStepIndex/outcomeSummary. The resumed task started fresh from
+     * step 0 with default constraints — effectively a re-execution, not a resume. Now we
+     * reconstruct the full TaskDefinition from the extended TaskEntity.
      */
     fun resumeTask(taskId: String): Flow<ExecutionEvent> = flow {
         val dao = taskDao
@@ -411,12 +423,51 @@ class AgentOrchestrator(
             return@flow
         }
 
+        val restoredState = try {
+            TaskLifecycleState.valueOf(taskEntity.lifecycleState)
+        } catch (_: IllegalArgumentException) {
+            // Legacy state strings that aren't valid enum values — default to CREATED
+            // so the orchestrator can re-run the task instead of crashing.
+            TaskLifecycleState.CREATED
+        }
+
+        // Reconstruct full TaskDefinition from the extended TaskEntity.
         val taskDef = TaskDefinition(
             id = TaskId(taskEntity.id),
             assignedAgentId = AgentId(taskEntity.assignedAgentId),
-            goal = taskEntity.rawPrompt,
+            goal = taskEntity.goal.ifBlank { taskEntity.rawPrompt },
             input = TaskInput(rawPrompt = taskEntity.rawPrompt),
-            state = TaskLifecycleState.valueOf(taskEntity.lifecycleState)
+            state = restoredState,
+            budget = TaskBudget(
+                tokenLimit = taskEntity.tokenLimit,
+                consumedTokens = taskEntity.totalTokensConsumed
+            ),
+            constraints = TaskConstraints(
+                timeoutMs = taskEntity.timeoutMs,
+                maxRetries = taskEntity.maxRetries,
+                allowDegradedExecution = taskEntity.allowDegradedExecution,
+                autonomyPolicy = try {
+                    AutonomyPolicy.valueOf(taskEntity.autonomyPolicy)
+                } catch (_: IllegalArgumentException) {
+                    AutonomyPolicy.SUPERVISED
+                },
+                requireHumanConsentForSensitiveTools = taskEntity.requireHumanConsentForSensitiveTools
+            ),
+            successCriteria = TaskSuccessCriteria(
+                minOutputLengthChars = taskEntity.minOutputLengthChars,
+                verificationStrategy = try {
+                    VerificationStrategy.valueOf(taskEntity.verificationStrategy)
+                } catch (_: IllegalArgumentException) {
+                    VerificationStrategy.STRICT
+                },
+                requiredOutputKeys = parseJsonStringArray(taskEntity.requiredOutputKeysJson),
+                requiredEvidenceKeys = parseJsonStringArray(taskEntity.requiredEvidenceKeysJson)
+            ),
+            assignedModelId = taskEntity.assignedModelId,
+            activeTools = parseJsonStringArray(taskEntity.activeToolsJson),
+            currentStepIndex = taskEntity.currentStepIndex,
+            executionLog = parseJsonStringArray(taskEntity.executionLogJson),
+            outcomeSummary = taskEntity.resultSummary
         )
 
         val assignedAgent = registry.listAgents().firstOrNull { it.identity.id.value == taskEntity.assignedAgentId }
@@ -429,6 +480,31 @@ class AgentOrchestrator(
         }
 
         executeTaskStream(assignedAgent, taskDef).collect { emit(it) }
+    }
+
+    /**
+     * Parses a JSON-encoded string array back to List<String>. Returns emptyList on any failure
+     * so resume is resilient to legacy / null / malformed rows.
+     */
+    private fun parseJsonStringArray(json: String?): List<String> {
+        if (json.isNullOrBlank()) return emptyList()
+        return try {
+            val arr = JSONArray(json)
+            val out = mutableListOf<String>()
+            for (i in 0 until arr.length()) {
+                out.add(arr.getString(i))
+            }
+            out
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /** Encodes a List<String> as a JSON array string for Room storage. */
+    private fun encodeStringArray(list: List<String>): String {
+        val arr = JSONArray()
+        list.forEach { arr.put(it) }
+        return arr.toString()
     }
 
     private suspend fun persistTaskInitial(task: TaskDefinition, agent: AgentDefinition) {
@@ -448,7 +524,23 @@ class AgentOrchestrator(
                     degradedReason = null,
                     errorMessage = null,
                     createdAtEpochMs = System.currentTimeMillis(),
-                    updatedAtEpochMs = System.currentTimeMillis()
+                    updatedAtEpochMs = System.currentTimeMillis(),
+                    // FIX APP-P0-07: persist full-fidelity fields for resume round-trip
+                    goal = task.goal,
+                    currentStepIndex = task.currentStepIndex,
+                    tokenLimit = task.budget.tokenLimit,
+                    maxRetries = task.constraints.maxRetries,
+                    allowDegradedExecution = task.constraints.allowDegradedExecution,
+                    requireHumanConsentForSensitiveTools = task.constraints.requireHumanConsentForSensitiveTools,
+                    timeoutMs = task.constraints.timeoutMs,
+                    minOutputLengthChars = task.successCriteria.minOutputLengthChars,
+                    verificationStrategy = task.successCriteria.verificationStrategy.name,
+                    assignedModelId = task.assignedModelId,
+                    activeToolsJson = encodeStringArray(task.activeTools),
+                    requiredCapabilitiesJson = null, // Set<CapabilityType> not serializable here; deferred to Phase 2
+                    requiredEvidenceKeysJson = encodeStringArray(task.successCriteria.requiredEvidenceKeys),
+                    requiredOutputKeysJson = encodeStringArray(task.successCriteria.requiredOutputKeys),
+                    executionLogJson = encodeStringArray(task.executionLog)
                 )
             )
         } catch (_: Exception) {

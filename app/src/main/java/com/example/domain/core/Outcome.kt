@@ -60,6 +60,9 @@ enum class DegradedReason(val code: String, val userFriendlyLabel: String) {
     PLATFORM_CAPABILITY_RESTRICTED("platform_capability_restricted", "القدرة مقيدة بواسطة بيئة تشغيل أندرويد"),
     CACHE_FALLBACK("cache_fallback", "تم استخدام بيانات مخبأة لتعذر الوصول للشبكة"),
     PARTIAL_EVIDENCE("partial_evidence", "تم إنجاز المهمة بأدلة جزئية غير مستوفاة بالكامل"),
+    // FIX INF-P0-14: Added for honest degradation when a provider endpoint is unreachable
+    // but we still want to surface a fallback list / partial result.
+    PROVIDER_UNREACHABLE("provider_unreachable", "تعذّر الوصول إلى نقطة نهاية المزود"),
     UNKNOWN_DEGRADATION("unknown_degradation", "انخفاض غير مصنف في جودة التشغيل")
 }
 
