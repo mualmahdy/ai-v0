@@ -3,6 +3,7 @@ package com.example.application.execution
 import com.example.application.decision.DecisionContext
 import com.example.application.extension.ExtensionManager
 import com.example.application.registry.ComponentRegistry
+import com.example.application.resource.RuntimeAdapterResolver
 import com.example.application.security.SecurityGuardService
 import com.example.domain.core.DegradedReason
 import com.example.domain.core.Outcome
@@ -17,6 +18,7 @@ import com.example.domain.core.llm.LlmRequest
 import com.example.domain.core.llm.MessageRole
 import com.example.domain.core.map
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.search.SearchFailure
 import com.example.domain.core.search.SearchQuery
 import com.example.domain.core.security.SecurityDecision
@@ -42,14 +44,29 @@ data class ExecutionResult(
 
 /**
  * Execution Service defining the explicit execution boundary for all system actions.
- * Executes LLM models, Tools, MCP protocols, Web Search, Memory/RAG, Skills, and Integrations.
+ * Executes LLM models, Tools, MCP protocols, Web Search, Memory/RAG, Skills, and Integrations
+ * exclusively through authoritative RuntimeAdapterResolver and DecisionRecord.
  */
 class ExecutionService(
-    private val componentRegistry: ComponentRegistry,
+    val runtimeAdapterResolver: RuntimeAdapterResolver,
     private val securityGuard: SecurityGuardService,
     private val extensionManager: ExtensionManager? = null,
-    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy()
+    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
+    private val componentRegistry: ComponentRegistry? = null
 ) {
+
+    constructor(
+        componentRegistry: ComponentRegistry,
+        securityGuard: SecurityGuardService,
+        extensionManager: ExtensionManager? = null,
+        defaultSecurityPolicy: SecurityPolicy = SecurityPolicy()
+    ) : this(
+        runtimeAdapterResolver = componentRegistry.runtimeAdapterResolver,
+        securityGuard = securityGuard,
+        extensionManager = extensionManager,
+        defaultSecurityPolicy = defaultSecurityPolicy,
+        componentRegistry = componentRegistry
+    )
 
     /**
      * Executes any chosen DecisionAction, emitting fine-grained streaming events and returning a normalized ExecutionResult.
@@ -117,6 +134,15 @@ class ExecutionService(
                     latencyMs = System.currentTimeMillis() - startTime
                 )
             }
+            DecisionActionType.SELECT_AGENT, DecisionActionType.DELEGATE -> {
+                val targetAgentId = action.targetId
+                ExecutionResult(
+                    isSuccess = true,
+                    outputText = "تم تعيين وتوجيه المهمة إلى الوكيل المتخصص: $targetAgentId",
+                    outputData = mapOf("selectedAgentId" to targetAgentId),
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
             else -> {
                 ExecutionResult(
                     isSuccess = false,
@@ -136,11 +162,53 @@ class ExecutionService(
         startTime: Long,
         onEvent: suspend (ExecutionEvent) -> Unit
     ): ExecutionResult {
-        val providerId = action.payload["providerId"]
-        val provider = componentRegistry.getLlmProvider(providerId) ?: componentRegistry.listLlmProviders().firstOrNull()
+        val decisionRecord = action.decisionRecord
+        val provider = if (decisionRecord != null) {
+            val resolution = runtimeAdapterResolver.resolveLlmAdapter(
+                resourceId = decisionRecord.selectedResourceId,
+                expectedVersion = decisionRecord.configurationVersion
+            )
+            when (resolution) {
+                is Outcome.Success -> resolution.value
+                is Outcome.Error -> {
+                    val errorMsg = "Failed to resolve authoritative LLM resource '${decisionRecord.selectedResourceId.value}': ${resolution.failure.message}"
+                    onEvent(
+                        ExecutionEvent.Error(
+                            executionId = executionId,
+                            failureCode = "RESOURCE_RESOLUTION_FAILED",
+                            message = errorMsg,
+                            isFatal = true
+                        )
+                    )
+                    return ExecutionResult(
+                        isSuccess = false,
+                        errorDescription = errorMsg,
+                        latencyMs = System.currentTimeMillis() - startTime
+                    )
+                }
+                is Outcome.Degraded -> resolution.partialValue ?: return ExecutionResult(
+                    isSuccess = false,
+                    errorDescription = "LLM adapter degraded without provider instance",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
+        } else {
+            val resIdStr = action.payload["resourceId"] ?: action.targetId
+            val resId = if (!resIdStr.isNullOrBlank()) ResourceId(resIdStr) else null
+            if (resId != null) {
+                when (val res = runtimeAdapterResolver.resolveLlmAdapter(resId)) {
+                    is Outcome.Success -> res.value
+                    is Outcome.Degraded -> res.partialValue
+                    is Outcome.Error -> null
+                }
+            } else {
+                val providerId = action.payload["providerId"]
+                componentRegistry?.getLlmProvider(providerId)
+            }
+        }
 
         if (provider == null) {
-            val errorMsg = "لا يوجد مزود ذكاء اصطناعي متاح حالياً."
+            val errorMsg = "Authoritative LLM resource not found or resolution failed for target '${action.targetId}'."
             onEvent(
                 ExecutionEvent.Error(
                     executionId = executionId,
@@ -210,7 +278,7 @@ class ExecutionService(
 
         // Filter available tools by agent capability authorization
         val availableTools = if (agent.allowedCapabilities.contains(CapabilityType.TOOL_EXECUTION)) {
-            componentRegistry.listTools().map { it.declaration }
+            componentRegistry?.listTools()?.map { it.declaration } ?: emptyList()
         } else {
             emptyList()
         }
@@ -290,14 +358,14 @@ class ExecutionService(
             }
 
             if (isSuccess) {
-                componentRegistry.recordSuccess(provider.providerId)
+                componentRegistry?.recordSuccess(provider.providerId)
             } else {
-                componentRegistry.recordFailure(provider.providerId, errorMessage ?: "Provider execution error")
+                componentRegistry?.recordFailure(provider.providerId, errorMessage ?: "Provider execution error")
             }
         } catch (e: Exception) {
             isSuccess = false
             errorMessage = e.localizedMessage ?: "حدث استثناء غير متوقع أثناء استدعاء المزود."
-            componentRegistry.recordFailure(provider.providerId, errorMessage ?: "Exception")
+            componentRegistry?.recordFailure(provider.providerId, errorMessage ?: "Exception")
         }
 
         val totalTokens = promptTokens + completionTokens
@@ -330,11 +398,40 @@ class ExecutionService(
             )
         }
 
-        val searchProvider = componentRegistry.getSearchProvider()
+        val decisionRecord = action.decisionRecord
+        val searchProvider = if (decisionRecord != null) {
+            when (val resolution = runtimeAdapterResolver.resolveSearchAdapter(
+                resourceId = decisionRecord.selectedResourceId,
+                expectedVersion = decisionRecord.configurationVersion
+            )) {
+                is Outcome.Success -> resolution.value
+                is Outcome.Degraded -> resolution.partialValue
+                is Outcome.Error -> {
+                    return ExecutionResult(
+                        isSuccess = false,
+                        errorDescription = "Failed to resolve authoritative Search resource '${decisionRecord.selectedResourceId.value}': ${resolution.failure.message}",
+                        latencyMs = System.currentTimeMillis() - startTime
+                    )
+                }
+            }
+        } else {
+            val resIdStr = action.payload["resourceId"] ?: action.targetId
+            val resId = if (!resIdStr.isNullOrBlank()) ResourceId(resIdStr) else null
+            if (resId != null) {
+                when (val res = runtimeAdapterResolver.resolveSearchAdapter(resId)) {
+                    is Outcome.Success -> res.value
+                    is Outcome.Degraded -> res.partialValue
+                    is Outcome.Error -> null
+                }
+            } else {
+                componentRegistry?.getSearchProvider()
+            }
+        }
+
         if (searchProvider == null) {
             return ExecutionResult(
                 isSuccess = false,
-                errorDescription = "مزود البحث غير مهيأ في السجل.",
+                errorDescription = "Authoritative Search resource not found or resolution failed for target '${action.targetId}'.",
                 latencyMs = System.currentTimeMillis() - startTime
             )
         }
@@ -342,7 +439,7 @@ class ExecutionService(
         val query = action.payload["query"] ?: context.task.input.rawPrompt.take(100)
         return when (val outcome = searchProvider.search(SearchQuery(query = query))) {
             is Outcome.Success -> {
-                componentRegistry.recordSuccess(searchProvider.providerId)
+                componentRegistry?.recordSuccess(searchProvider.providerId)
                 val items = outcome.value.items
                 val formattedItems = items.map { "[${it.title}] (${it.url}): ${it.snippet}" }
                 val summary = "تم استرجاع ${items.size} نتيجة بحث من ${outcome.value.providerId}."
@@ -357,7 +454,7 @@ class ExecutionService(
                 )
             }
             is Outcome.Degraded -> {
-                componentRegistry.recordSuccess(searchProvider.providerId)
+                componentRegistry?.recordSuccess(searchProvider.providerId)
                 val partialItems = outcome.partialValue?.items ?: emptyList()
                 val formatted = partialItems.map { "[${it.title}] (${it.url}): ${it.snippet}" }
                 onEvent(
@@ -384,7 +481,7 @@ class ExecutionService(
                     is SearchFailure.ProviderUnavailable -> "مزود البحث ${failure.providerId} غير متاح: ${failure.message}"
                     is SearchFailure.QueryInvalid -> "استعلام البحث غير صالح: ${failure.reason}"
                 }
-                componentRegistry.recordFailure(searchProvider.providerId, errorMsg)
+                componentRegistry?.recordFailure(searchProvider.providerId, errorMsg)
                 ExecutionResult(
                     isSuccess = false,
                     errorDescription = errorMsg,
@@ -401,51 +498,107 @@ class ExecutionService(
         onEvent: suspend (ExecutionEvent) -> Unit,
         executionId: String
     ): ExecutionResult {
-        val memoryRepo = componentRegistry.getMemoryRepository()
-        if (memoryRepo == null) {
-            return ExecutionResult(
-                isSuccess = false,
-                errorDescription = "مستودع الذاكرة غير متاح.",
-                latencyMs = System.currentTimeMillis() - startTime
-            )
+        val decisionRecord = action.decisionRecord
+        val embeddingProvider = if (decisionRecord != null) {
+            when (val resolution = runtimeAdapterResolver.resolveEmbeddingAdapter(
+                resourceId = decisionRecord.selectedResourceId,
+                expectedVersion = decisionRecord.configurationVersion
+            )) {
+                is Outcome.Success -> resolution.value
+                is Outcome.Degraded -> resolution.partialValue
+                is Outcome.Error -> {
+                    return ExecutionResult(
+                        isSuccess = false,
+                        errorDescription = "Failed to resolve authoritative Embedding resource '${decisionRecord.selectedResourceId.value}': ${resolution.failure.message}",
+                        latencyMs = System.currentTimeMillis() - startTime
+                    )
+                }
+            }
+        } else {
+            val resIdStr = action.payload["resourceId"] ?: action.targetId
+            val resId = if (!resIdStr.isNullOrBlank()) ResourceId(resIdStr) else null
+            if (resId != null) {
+                when (val res = runtimeAdapterResolver.resolveEmbeddingAdapter(resId)) {
+                    is Outcome.Success -> res.value
+                    is Outcome.Degraded -> res.partialValue
+                    is Outcome.Error -> null
+                }
+            } else null
         }
 
+        val memoryRepo = componentRegistry?.getMemoryRepository()
         val query = action.payload["query"] ?: context.task.input.rawPrompt
-        return when (val memOutcome = memoryRepo.retrieveMemories(query, topK = 4)) {
-            is Outcome.Success -> {
-                val entries = memOutcome.value.map { it.entry.content }
-                ExecutionResult(
-                    isSuccess = true,
-                    outputText = "تم استرجاع ${entries.size} مدخلات من الذاكرة والوثائق.",
-                    outputData = mapOf("memorySnippets" to entries),
-                    latencyMs = System.currentTimeMillis() - startTime
-                )
-            }
-            is Outcome.Degraded -> {
-                val partial = memOutcome.partialValue?.map { it.entry.content } ?: emptyList()
-                onEvent(
-                    ExecutionEvent.Degraded(
-                        executionId = executionId,
-                        reason = memOutcome.reason,
-                        message = memOutcome.diagnosticMessage
+
+        if (memoryRepo != null) {
+            return when (val memOutcome = memoryRepo.retrieveMemories(query, topK = 4)) {
+                is Outcome.Success -> {
+                    val entries = memOutcome.value.map { it.entry.content }
+                    ExecutionResult(
+                        isSuccess = true,
+                        outputText = "تم استرجاع ${entries.size} مدخلات من الذاكرة والوثائق.",
+                        outputData = mapOf("memorySnippets" to entries),
+                        latencyMs = System.currentTimeMillis() - startTime
                     )
-                )
-                ExecutionResult(
-                    isSuccess = true,
-                    outputText = "تم استرجاع الذاكرة بوضع متراجع (${memOutcome.diagnosticMessage}).",
-                    outputData = mapOf("memorySnippets" to partial),
-                    latencyMs = System.currentTimeMillis() - startTime,
-                    isDegraded = true,
-                    degradedReason = memOutcome.reason
-                )
+                }
+                is Outcome.Degraded -> {
+                    val partial = memOutcome.partialValue?.map { it.entry.content } ?: emptyList()
+                    onEvent(
+                        ExecutionEvent.Degraded(
+                            executionId = executionId,
+                            reason = memOutcome.reason,
+                            message = memOutcome.diagnosticMessage
+                        )
+                    )
+                    ExecutionResult(
+                        isSuccess = true,
+                        outputText = "تم استرجاع الذاكرة بوضع متراجع (${memOutcome.diagnosticMessage}).",
+                        outputData = mapOf("memorySnippets" to partial),
+                        latencyMs = System.currentTimeMillis() - startTime,
+                        isDegraded = true,
+                        degradedReason = memOutcome.reason
+                    )
+                }
+                is Outcome.Error -> {
+                    ExecutionResult(
+                        isSuccess = false,
+                        errorDescription = memOutcome.diagnosticMessage.ifBlank { "فشل في استرجاع الذاكرة" },
+                        latencyMs = System.currentTimeMillis() - startTime
+                    )
+                }
             }
-            is Outcome.Error -> {
-                ExecutionResult(
-                    isSuccess = false,
-                    errorDescription = memOutcome.diagnosticMessage.ifBlank { "فشل في استرجاع الذاكرة" },
-                    latencyMs = System.currentTimeMillis() - startTime
-                )
+        } else if (embeddingProvider != null) {
+            return when (val embOutcome = embeddingProvider.generateEmbeddings(listOf(query))) {
+                is Outcome.Success -> {
+                    ExecutionResult(
+                        isSuccess = true,
+                        outputText = "تم توليد التضمينات بنجاح عبر مزود التضمين المعتمد.",
+                        outputData = mapOf("embeddingDimension" to embOutcome.value.firstOrNull()?.values?.size),
+                        latencyMs = System.currentTimeMillis() - startTime
+                    )
+                }
+                is Outcome.Degraded -> {
+                    ExecutionResult(
+                        isSuccess = true,
+                        outputText = "تم توليد التضمينات بوضع متراجع.",
+                        isDegraded = true,
+                        degradedReason = embOutcome.reason,
+                        latencyMs = System.currentTimeMillis() - startTime
+                    )
+                }
+                is Outcome.Error -> {
+                    ExecutionResult(
+                        isSuccess = false,
+                        errorDescription = "فشل توليد التضمينات من المزود المعتمد: ${embOutcome.failure}",
+                        latencyMs = System.currentTimeMillis() - startTime
+                    )
+                }
             }
+        } else {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "مستودع الذاكرة ومزود التضمين المعتمد غير متاحين.",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
         }
     }
 
@@ -457,20 +610,38 @@ class ExecutionService(
         onEvent: suspend (ExecutionEvent) -> Unit,
         executionId: String
     ): ExecutionResult {
-        val toolName = action.targetId ?: return ExecutionResult(
-            isSuccess = false,
-            errorDescription = "اسم الأداة غير محدد في الإجراء.",
-            latencyMs = System.currentTimeMillis() - startTime
-        )
+        val decisionRecord = action.decisionRecord
+        val tool = if (decisionRecord != null) {
+            when (val resolution = runtimeAdapterResolver.resolveToolAdapter(
+                resourceId = decisionRecord.selectedResourceId,
+                expectedVersion = decisionRecord.configurationVersion
+            )) {
+                is Outcome.Success -> resolution.value
+                is Outcome.Degraded -> resolution.partialValue
+                is Outcome.Error -> null
+            }
+        } else {
+            val toolName = action.targetId
+            toolName?.let {
+                val resId = ResourceId(it)
+                when (val res = runtimeAdapterResolver.resolveToolAdapter(resId)) {
+                    is Outcome.Success -> res.value
+                    is Outcome.Degraded -> res.partialValue
+                    is Outcome.Error -> componentRegistry?.getTool(it)
+                }
+            }
+        }
 
-        val tool = componentRegistry.getTool(toolName)
         if (tool == null) {
+            val targetName = decisionRecord?.selectedResourceId?.value ?: action.targetId ?: "unknown"
             return ExecutionResult(
                 isSuccess = false,
-                errorDescription = "الأداة $toolName غير مسجلة.",
+                errorDescription = "الأداة $targetName غير مسجلة أو تعذر حلها من RuntimeAdapterResolver.",
                 latencyMs = System.currentTimeMillis() - startTime
             )
         }
+
+        val toolName = tool.declaration.name
 
         // Check Agent Authority
         if (!agent.allowedCapabilities.contains(CapabilityType.TOOL_EXECUTION) &&
@@ -521,7 +692,7 @@ class ExecutionService(
 
         return when (outcome) {
             is Outcome.Success -> {
-                componentRegistry.recordSuccess(toolName)
+                componentRegistry?.recordSuccess(toolName)
                 ExecutionResult(
                     isSuccess = true,
                     outputText = outcome.value.content,
@@ -533,7 +704,7 @@ class ExecutionService(
                 )
             }
             is Outcome.Degraded -> {
-                componentRegistry.recordSuccess(toolName)
+                componentRegistry?.recordSuccess(toolName)
                 val partialText = outcome.partialValue?.content ?: ""
                 onEvent(
                     ExecutionEvent.Degraded(
@@ -560,7 +731,7 @@ class ExecutionService(
                     is ToolFailure.InvalidParameters -> f.reason
                     is ToolFailure.ExecutionTimeout -> "تجاوزت الأداة المهلة الزمنية (${f.timeoutMs}ms)"
                 }
-                componentRegistry.recordFailure(toolName, errorMsg)
+                componentRegistry?.recordFailure(toolName, errorMsg)
                 ExecutionResult(
                     isSuccess = false,
                     errorDescription = errorMsg,
@@ -578,7 +749,13 @@ class ExecutionService(
         onEvent: suspend (ExecutionEvent) -> Unit
     ): ExecutionResult {
         val toolName = action.targetId ?: "mcp_tool"
-        val tool = componentRegistry.getTool(toolName)
+        val tool = runtimeAdapterResolver.resolveToolAdapter(ResourceId(toolName)).let {
+            when (it) {
+                is Outcome.Success -> it.value
+                is Outcome.Degraded -> it.partialValue
+                is Outcome.Error -> componentRegistry?.getTool(toolName)
+            }
+        }
         if (tool == null) {
             return ExecutionResult(
                 isSuccess = false,
@@ -732,7 +909,13 @@ class ExecutionService(
         argumentsJson: String,
         agent: AgentDefinition
     ): ExecutionEvent.ToolResult {
-        val tool = componentRegistry.getTool(toolName)
+        val tool = runtimeAdapterResolver.resolveToolAdapter(ResourceId(toolName)).let {
+            when (it) {
+                is Outcome.Success -> it.value
+                is Outcome.Degraded -> it.partialValue
+                is Outcome.Error -> componentRegistry?.getTool(toolName)
+            }
+        }
         if (tool == null) {
             return ExecutionEvent.ToolResult(
                 executionId = executionId,
@@ -740,9 +923,9 @@ class ExecutionService(
                 toolName = toolName,
                 outcome = Outcome.Error(
                     failure = ToolFailure.InternalExecutionError(
-                        message = "الأداة المطلوبة $toolName غير موجودة في سجل النظام."
+                        message = "الأداة المطلوبة $toolName غير موجودة في سجل النظام أو تعذر حلها."
                     ),
-                    diagnosticMessage = "Tool not found in ComponentRegistry"
+                    diagnosticMessage = "Tool not found in RuntimeAdapterResolver"
                 )
             )
         }
@@ -771,7 +954,7 @@ class ExecutionService(
 
         return when (val result = tool.execute(toolInput)) {
             is Outcome.Success -> {
-                componentRegistry.recordSuccess(toolName)
+                componentRegistry?.recordSuccess(toolName)
                 ExecutionEvent.ToolResult(
                     executionId = executionId,
                     callId = callId,
@@ -783,7 +966,7 @@ class ExecutionService(
                 )
             }
             is Outcome.Degraded -> {
-                componentRegistry.recordSuccess(toolName)
+                componentRegistry?.recordSuccess(toolName)
                 ExecutionEvent.ToolResult(
                     executionId = executionId,
                     callId = callId,
@@ -797,7 +980,7 @@ class ExecutionService(
                 )
             }
             is Outcome.Error -> {
-                componentRegistry.recordFailure(toolName, result.diagnosticMessage)
+                componentRegistry?.recordFailure(toolName, result.diagnosticMessage)
                 ExecutionEvent.ToolResult(
                     executionId = executionId,
                     callId = callId,

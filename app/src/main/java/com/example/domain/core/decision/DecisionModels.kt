@@ -1,7 +1,9 @@
 package com.example.domain.core.decision
 
 import com.example.domain.core.agent.AgentId
+import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.task.TaskId
 
 /**
@@ -80,14 +82,49 @@ data class DecisionState(
 }
 
 /**
+ * Candidate evaluation record for decision trace.
+ */
+data class CandidateEvaluation(
+    val resourceId: ResourceId,
+    val score: Float,
+    val rationale: String
+)
+
+/**
+ * Fallback policy attached to the decision record.
+ */
+data class FallbackPolicy(
+    val allowFallback: Boolean = true,
+    val maxRetries: Int = 2,
+    val strategy: String = "REPLAN_ON_FAILURE"
+)
+
+/**
+ * Authoritative record of a runtime resource selection produced by DecisionService.
+ */
+data class DecisionRecord(
+    val selectedResourceId: ResourceId,
+    val providerId: String,
+    val serviceId: String,
+    val configurationVersion: Long,
+    val requiredCapabilities: Set<CapabilityType>,
+    val candidateEvaluations: List<CandidateEvaluation> = emptyList(),
+    val rationale: String,
+    val confidence: Float,
+    val governanceState: String = "APPROVED",
+    val fallbackPolicy: FallbackPolicy = FallbackPolicy()
+)
+
+/**
  * Concrete action proposed by CBR-MDP engine.
  */
 data class DecisionAction(
     val type: DecisionActionType,
-    val targetId: String? = null, // ModelId, AgentId, ToolName, etc.
+    val targetId: String? = null, // ModelId, AgentId, ToolName, ResourceId, etc.
     val payload: Map<String, String> = emptyMap(),
     val estimatedCost: Double = 0.0,
-    val estimatedLatencyMs: Long = 500L
+    val estimatedLatencyMs: Long = 500L,
+    val decisionRecord: DecisionRecord? = null
 )
 
 /**
@@ -133,7 +170,8 @@ data class DecisionResult(
     val stateSnapshot: DecisionState,
     val evaluatedAlternatives: List<ScoredActionCandidate>,
     val matchedHistoricalCasesCount: Int,
-    val timestampMs: Long = System.currentTimeMillis()
+    val timestampMs: Long = System.currentTimeMillis(),
+    val decisionRecord: DecisionRecord? = chosenAction.decisionRecord
 )
 
 /**

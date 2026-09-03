@@ -14,14 +14,19 @@ import com.example.domain.core.capability.CapabilityStatus
 import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.capability.Locality
 import com.example.domain.core.capability.NetworkRequirement
+import com.example.domain.core.capability.ResourceCapabilityGraph
 import com.example.domain.core.capability.SideEffectClassification
+import com.example.domain.core.decision.CandidateEvaluation
 import com.example.domain.core.decision.CbrMdpEngine
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
+import com.example.domain.core.decision.DecisionRecord
 import com.example.domain.core.decision.DecisionResult
 import com.example.domain.core.decision.DecisionState
 import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.resource.ResourceId
+import com.example.domain.core.resource.ResourceType
 import com.example.domain.core.security.SecurityDecision
 import com.example.domain.core.security.SecurityPolicy
 import com.example.domain.core.task.TaskCapabilityRequirements
@@ -37,10 +42,24 @@ import com.example.domain.core.workspace.Workspace
  */
 class DecisionService(
     private val cbrMdpEngine: CbrMdpEngine,
-    private val componentRegistry: ComponentRegistry,
+    val resourceCapabilityGraph: ResourceCapabilityGraph,
     private val securityGuard: SecurityGuardService,
-    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy()
+    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
+    private val componentRegistry: ComponentRegistry? = null
 ) {
+
+    constructor(
+        cbrMdpEngine: CbrMdpEngine,
+        componentRegistry: ComponentRegistry,
+        securityGuard: SecurityGuardService,
+        defaultSecurityPolicy: SecurityPolicy = SecurityPolicy()
+    ) : this(
+        cbrMdpEngine = cbrMdpEngine,
+        resourceCapabilityGraph = componentRegistry.resourceCapabilityGraph,
+        securityGuard = securityGuard,
+        defaultSecurityPolicy = defaultSecurityPolicy,
+        componentRegistry = componentRegistry
+    )
 
     /**
      * Builds the complete multi-dimensional DecisionContext by aggregating Workspace,
@@ -102,7 +121,7 @@ class DecisionService(
                 DecisionActionType.EXECUTE_TOOL -> {
                     currentlySatisfied.add(CapabilityType.TOOL_EXECUTION)
                     lastAction.targetId?.let { toolName ->
-                        componentRegistry.getTool(toolName)?.declaration?.providedCapabilities?.let {
+                        componentRegistry?.getTool(toolName)?.declaration?.providedCapabilities?.let {
                             currentlySatisfied.addAll(it)
                         }
                     }
@@ -111,18 +130,18 @@ class DecisionService(
             }
         }
 
-        val capabilities = componentRegistry.getCapabilityDescriptors()
+        val capabilities = componentRegistry?.getCapabilityDescriptors() ?: emptyList()
         val graph = CapabilityResourceGraph(capabilities)
 
         // Build failure counts map for graph analysis
         val failureCounts = mutableMapOf<String, Int>()
-        componentRegistry.listTools().forEach { tool ->
+        componentRegistry?.listTools()?.forEach { tool ->
             failureCounts[tool.declaration.name] = componentRegistry.getFailureCount(tool.declaration.name)
         }
-        componentRegistry.listLlmProviders().forEach { provider ->
+        componentRegistry?.listLlmProviders()?.forEach { provider ->
             failureCounts[provider.providerId] = componentRegistry.getFailureCount(provider.providerId)
         }
-        componentRegistry.getSearchProvider()?.let { search ->
+        componentRegistry?.getSearchProvider()?.let { search ->
             failureCounts[search.providerId] = componentRegistry.getFailureCount(search.providerId)
         }
 
@@ -135,7 +154,7 @@ class DecisionService(
             currentlySatisfied = currentlySatisfied
         )
 
-        val availableTools = componentRegistry.listTools().map { it.declaration.name }
+        val availableTools = componentRegistry?.listTools()?.map { it.declaration.name } ?: emptyList()
 
         return DecisionContext(
             task = taskWithRequirements,
@@ -163,9 +182,8 @@ class DecisionService(
     }
 
     /**
-     * Dynamically generates the candidate action space based on capability matching,
-     * resource availability, agent authorization, network policies, task requirements,
-     * and closed-loop progress.
+     * Dynamically generates the candidate action space based on authoritative ResourceCapabilityGraph,
+     * network policies, and task requirements.
      */
     fun generateCandidateActions(context: DecisionContext): List<DecisionAction> {
         val candidates = mutableListOf<DecisionAction>()
@@ -173,86 +191,136 @@ class DecisionService(
         val currentStep = task.currentStepIndex
         val isOffline = context.networkPolicy == NetworkPolicy.OFFLINE || !context.isNetworkAvailable
         val effectiveRequirements = task.requirements
-        val graph = context.capabilityGraph
         val requiredCaps = effectiveRequirements.requiredCapabilities
         val optionalCaps = effectiveRequirements.optionalCapabilities
 
-        val failureCounts = mutableMapOf<String, Int>()
-        componentRegistry.listTools().forEach { tool ->
-            failureCounts[tool.declaration.name] = componentRegistry.getFailureCount(tool.declaration.name)
-        }
-        componentRegistry.listLlmProviders().forEach { provider ->
-            failureCounts[provider.providerId] = componentRegistry.getFailureCount(provider.providerId)
-        }
-        componentRegistry.getSearchProvider()?.let { search ->
-            failureCounts[search.providerId] = componentRegistry.getFailureCount(search.providerId)
+        // 0. Agent Selection Candidate
+        if (task.assignedAgentId.value.isNotBlank() && currentStep == 0 && context.lastAction?.type != DecisionActionType.SELECT_AGENT) {
+            candidates.add(
+                DecisionAction(
+                    type = DecisionActionType.SELECT_AGENT,
+                    targetId = task.assignedAgentId.value,
+                    payload = mapOf("agentId" to task.assignedAgentId.value),
+                    estimatedLatencyMs = 50L
+                )
+            )
         }
 
-        // 1. Governed Capability-Driven Tools from Unified Registry (Rule 9)
-        val allTools = componentRegistry.listTools()
-        val capableTools = graph.findCapableTools(
-            requirements = effectiveRequirements,
-            availableTools = allTools,
-            networkPolicy = context.networkPolicy,
-            isNetworkAvailable = context.isNetworkAvailable,
-            failureCounts = failureCounts
+        // 1. Tool Candidates from ResourceCapabilityGraph
+        val toolCandidates = resourceCapabilityGraph.findCandidatesByType(
+            ResourceType.TOOL,
+            context.networkPolicy,
+            context.isNetworkAvailable
         )
 
-        for (tool in capableTools) {
-            val decl = tool.declaration
-            val toolName = decl.name
+        for (toolCand in toolCandidates) {
+            if (componentRegistry?.isResourceAvailable(toolCand.resourceId.value) == false) {
+                continue
+            }
+            val toolName = toolCand.serviceId
+            val toolDesc = toolCand.metadata["description"] ?: toolName
             val toolInput = ToolInput(
                 toolName = toolName,
-                arguments = mapOf("description" to decl.description),
+                arguments = mapOf("description" to toolDesc),
                 executionId = task.id.value
             )
-            // Pre-CBR-MDP security policy filtering (Rule 12 & Rule 16)
             val secEvaluation = securityGuard.evaluateToolExecution(toolInput, defaultSecurityPolicy)
             if (secEvaluation.decision != SecurityDecision.DENY) {
+                val decisionRecord = DecisionRecord(
+                    selectedResourceId = toolCand.resourceId,
+                    providerId = toolCand.providerId,
+                    serviceId = toolCand.serviceId,
+                    configurationVersion = toolCand.configurationVersion,
+                    requiredCapabilities = setOf(CapabilityType.TOOL_EXECUTION),
+                    rationale = "Selected tool resource '${toolCand.resourceId.value}' via ResourceCapabilityGraph",
+                    confidence = 0.9f
+                )
                 candidates.add(
                     DecisionAction(
                         type = DecisionActionType.EXECUTE_TOOL,
-                        targetId = toolName,
-                        payload = mapOf("description" to decl.description),
-                        estimatedLatencyMs = 300L
+                        targetId = toolCand.resourceId.value,
+                        payload = mapOf(
+                            "resourceId" to toolCand.resourceId.value,
+                            "toolName" to toolName,
+                            "description" to toolDesc
+                        ),
+                        estimatedLatencyMs = 300L,
+                        decisionRecord = decisionRecord
                     )
                 )
             }
         }
 
-        // 2. Search Candidates (only if search capability is required or optional, online, and not already gathered)
+        // 2. Search Candidates from ResourceCapabilityGraph
         val needsSearch = requiredCaps.contains(CapabilityType.SEARCH) || optionalCaps.contains(CapabilityType.SEARCH)
-        val searchAvailable = !isOffline && componentRegistry.getSearchProvider() != null &&
-                componentRegistry.isResourceAvailable(componentRegistry.getSearchProvider()?.providerId ?: "")
+        if (needsSearch && !isOffline && !context.hasSearchEvidence) {
+            val searchCandidates = resourceCapabilityGraph.findCandidatesByType(
+                ResourceType.SEARCH,
+                context.networkPolicy,
+                context.isNetworkAvailable
+            ).filter { it.capabilities.contains(CapabilityType.SEARCH) }
 
-        if (needsSearch && searchAvailable && !context.hasSearchEvidence) {
-            candidates.add(
-                DecisionAction(
-                    type = DecisionActionType.SEARCH,
-                    targetId = "multi_source_search",
-                    payload = mapOf("query" to task.input.rawPrompt.take(100)),
-                    estimatedLatencyMs = 600L
+            for (searchCand in searchCandidates) {
+                val decisionRecord = DecisionRecord(
+                    selectedResourceId = searchCand.resourceId,
+                    providerId = searchCand.providerId,
+                    serviceId = searchCand.serviceId,
+                    configurationVersion = searchCand.configurationVersion,
+                    requiredCapabilities = setOf(CapabilityType.SEARCH),
+                    rationale = "Selected search resource '${searchCand.resourceId.value}' via ResourceCapabilityGraph",
+                    confidence = 0.9f
                 )
-            )
+                candidates.add(
+                    DecisionAction(
+                        type = DecisionActionType.SEARCH,
+                        targetId = searchCand.resourceId.value,
+                        payload = mapOf(
+                            "query" to task.input.rawPrompt.take(100),
+                            "resourceId" to searchCand.resourceId.value
+                        ),
+                        estimatedLatencyMs = 600L,
+                        decisionRecord = decisionRecord
+                    )
+                )
+            }
         }
 
-        // 3. Memory & Knowledge Retrieval (if required/optional or memory repo available)
-        val memoryRepo = componentRegistry.getMemoryRepository()
+        // 3. Memory & Knowledge Retrieval from ResourceCapabilityGraph
         val needsMemory = requiredCaps.contains(CapabilityType.MEMORY_RETRIEVAL) ||
                 requiredCaps.contains(CapabilityType.EMBEDDING) ||
                 optionalCaps.contains(CapabilityType.MEMORY_RETRIEVAL)
-        if (memoryRepo != null && (needsMemory || (!context.hasMemoryEvidence && currentStep == 0 && requiredCaps.isEmpty()))) {
-            candidates.add(
-                DecisionAction(
-                    type = DecisionActionType.RETRIEVE_KNOWLEDGE,
-                    targetId = "rag_vector_store",
-                    payload = mapOf("query" to task.input.rawPrompt.take(100)),
-                    estimatedLatencyMs = 150L
-                )
+        if (needsMemory || (!context.hasMemoryEvidence && currentStep == 0 && requiredCaps.isEmpty())) {
+            val embeddingCandidates = resourceCapabilityGraph.findCandidatesByType(
+                ResourceType.EMBEDDING,
+                context.networkPolicy,
+                context.isNetworkAvailable
             )
+            for (embCand in embeddingCandidates) {
+                val decisionRecord = DecisionRecord(
+                    selectedResourceId = embCand.resourceId,
+                    providerId = embCand.providerId,
+                    serviceId = embCand.serviceId,
+                    configurationVersion = embCand.configurationVersion,
+                    requiredCapabilities = setOf(CapabilityType.EMBEDDING, CapabilityType.MEMORY_RETRIEVAL),
+                    rationale = "Selected embedding resource '${embCand.resourceId.value}' via ResourceCapabilityGraph",
+                    confidence = 0.85f
+                )
+                candidates.add(
+                    DecisionAction(
+                        type = DecisionActionType.RETRIEVE_KNOWLEDGE,
+                        targetId = embCand.resourceId.value,
+                        payload = mapOf(
+                            "query" to task.input.rawPrompt.take(100),
+                            "resourceId" to embCand.resourceId.value
+                        ),
+                        estimatedLatencyMs = 150L,
+                        decisionRecord = decisionRecord
+                    )
+                )
+            }
         }
 
-        // 4. LLM Model / Provider Candidates (Rule 7 & Rule 10: Only when LLM capabilities are required/helpful)
+        // 4. LLM Model / Provider Candidates from ResourceCapabilityGraph
         val requiresLlm = requiredCaps.contains(CapabilityType.LLM_GENERATION) ||
                 requiredCaps.contains(CapabilityType.REASONING) ||
                 requiredCaps.contains(CapabilityType.STREAMING) ||
@@ -260,42 +328,71 @@ class DecisionService(
                 optionalCaps.contains(CapabilityType.LLM_GENERATION) ||
                 optionalCaps.contains(CapabilityType.REASONING) ||
                 effectiveRequirements.requiredModelCapabilities.isNotEmpty() ||
-                (requiredCaps.isEmpty() && capableTools.isEmpty())
+                (requiredCaps.isEmpty() && candidates.isEmpty())
 
         if (requiresLlm) {
-            val capableModelDescriptors = graph.findCapableModels(
-                requirements = effectiveRequirements,
-                networkPolicy = context.networkPolicy,
-                isNetworkAvailable = context.isNetworkAvailable,
-                failureCounts = failureCounts
-            )
+            val llmCandidates = resourceCapabilityGraph.findCandidatesByType(
+                ResourceType.LLM,
+                context.networkPolicy,
+                context.isNetworkAvailable
+            ).filter { cand ->
+                requiredCaps.isEmpty() || cand.capabilities.any { it in requiredCaps }
+            }
 
-            for (desc in capableModelDescriptors) {
-                val provider = componentRegistry.getLlmProvider(desc.providerId) ?: continue
-                val modelId = provider.metadata.defaultModel ?: "default"
+            for (llmCand in llmCandidates) {
+                val decisionRecord = DecisionRecord(
+                    selectedResourceId = llmCand.resourceId,
+                    providerId = llmCand.providerId,
+                    serviceId = llmCand.serviceId,
+                    configurationVersion = llmCand.configurationVersion,
+                    requiredCapabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.REASONING),
+                    rationale = "Selected LLM resource '${llmCand.resourceId.value}' via ResourceCapabilityGraph",
+                    confidence = 0.95f
+                )
                 candidates.add(
                     DecisionAction(
                         type = DecisionActionType.SELECT_MODEL,
-                        targetId = modelId,
+                        targetId = llmCand.resourceId.value,
                         payload = mapOf(
-                            "providerId" to provider.providerId,
-                            "isLocal" to provider.metadata.isLocal.toString(),
+                            "resourceId" to llmCand.resourceId.value,
+                            "providerId" to llmCand.providerId,
+                            "serviceId" to llmCand.serviceId,
+                            "isLocal" to llmCand.isLocal.toString(),
                             "step" to currentStep.toString()
                         ),
-                        estimatedLatencyMs = if (provider.metadata.isLocal) 200L else 650L
+                        estimatedLatencyMs = if (llmCand.isLocal) 200L else 650L,
+                        decisionRecord = decisionRecord
+                    )
+                )
+                candidates.add(
+                    DecisionAction(
+                        type = DecisionActionType.EXECUTE_STEP,
+                        targetId = llmCand.resourceId.value,
+                        payload = mapOf(
+                            "prompt" to task.input.rawPrompt,
+                            "resourceId" to llmCand.resourceId.value,
+                            "providerId" to llmCand.providerId,
+                            "serviceId" to llmCand.serviceId,
+                            "step" to currentStep.toString()
+                        ),
+                        estimatedLatencyMs = if (llmCand.isLocal) 300L else 750L,
+                        decisionRecord = decisionRecord
                     )
                 )
             }
-
-            // LLM Synthesis / Direct Execution step candidate
-            candidates.add(
-                DecisionAction(
-                    type = DecisionActionType.EXECUTE_STEP,
-                    targetId = "standard_llm_stream",
-                    payload = mapOf("prompt" to task.input.rawPrompt, "step" to currentStep.toString()),
-                    estimatedLatencyMs = 750L
+            if (llmCandidates.isEmpty()) {
+                candidates.add(
+                    DecisionAction(
+                        type = DecisionActionType.EXECUTE_STEP,
+                        targetId = "default_llm_step",
+                        payload = mapOf(
+                            "prompt" to task.input.rawPrompt,
+                            "step" to currentStep.toString()
+                        ),
+                        estimatedLatencyMs = 500L
+                    )
                 )
-            )
+            }
         }
 
         // 5. Workflow / Plan Creation candidate for explicit high-complexity multi-step goals
@@ -322,20 +419,19 @@ class DecisionService(
             )
         }
 
-        // 7. Control Actions: Replan, User Intervention, or Blocking Fallbacks (Rule 11 & Rule 18)
-        if (context.capabilityGap.status == CapabilityStatus.BLOCKED ||
-            context.capabilityGap.status == CapabilityStatus.NO_CAPABLE_RESOURCE ||
-            context.capabilityGap.status == CapabilityStatus.CAPABILITY_UNAVAILABLE ||
-            (context.capabilityGap.status == CapabilityStatus.CAPABILITY_MISSING && context.missingCapabilities.isNotEmpty() && capableTools.isEmpty())
-        ) {
+        // 7. Control Actions: Replan, User Intervention, or Blocking Fallbacks
+        val unsatisfiedRequiredCaps = requiredCaps.filter { reqCap ->
+            !context.satisfiedCapabilities.contains(reqCap) &&
+                    candidates.none { it.decisionRecord?.requiredCapabilities?.contains(reqCap) == true }
+        }
+        if (unsatisfiedRequiredCaps.isNotEmpty()) {
             candidates.add(
                 DecisionAction(
                     type = DecisionActionType.ASK_USER,
                     targetId = "capability_gap_resolution",
                     payload = mapOf(
-                        "missingCapabilities" to context.missingCapabilities.joinToString { it.name },
-                        "status" to context.capabilityGap.status.name,
-                        "reason" to "توجد قدرات إلزامية غير متوفرة أو محجوبة في النظام: ${context.missingCapabilities.joinToString { it.name }}"
+                        "missingCapabilities" to unsatisfiedRequiredCaps.joinToString { it.name },
+                        "reason" to "No usable resource in ResourceCapabilityGraph satisfies required capabilities: ${unsatisfiedRequiredCaps.joinToString { it.name }}"
                     )
                 )
             )
@@ -384,14 +480,37 @@ class DecisionService(
         // 2. Deterministic Governance & Security Validation
         val validatedAction = enforceGovernance(rawDecision.chosenAction, context)
 
-        return if (validatedAction != rawDecision.chosenAction) {
-            rawDecision.copy(
-                chosenAction = validatedAction,
-                rationale = "${rawDecision.rationale} [تم تطبيق سياسة الحوكمة والأمان لمنع الإجراء غير المسموح به]"
+        val candidateEvals = rawDecision.evaluatedAlternatives.mapNotNull { scored ->
+            scored.action.decisionRecord?.let {
+                CandidateEvaluation(
+                    resourceId = it.selectedResourceId,
+                    score = scored.finalScore,
+                    rationale = scored.reason
+                )
+            }
+        }
+
+        val enrichedAction = if (validatedAction.decisionRecord != null) {
+            validatedAction.copy(
+                decisionRecord = validatedAction.decisionRecord.copy(
+                    candidateEvaluations = candidateEvals,
+                    confidence = rawDecision.confidence,
+                    rationale = rawDecision.rationale
+                )
             )
         } else {
-            rawDecision
+            validatedAction
         }
+
+        return rawDecision.copy(
+            chosenAction = enrichedAction,
+            decisionRecord = enrichedAction.decisionRecord,
+            rationale = if (validatedAction != rawDecision.chosenAction) {
+                "${rawDecision.rationale} [تم تطبيق سياسة الحوكمة والأمان لمنع الإجراء غير المسموح به]"
+            } else {
+                rawDecision.rationale
+            }
+        )
     }
 
     /**
@@ -441,7 +560,7 @@ class DecisionService(
         if (availableAgents.isEmpty()) return null
 
         val requirements = resolveTaskRequirements(task)
-        val capabilities = componentRegistry.getCapabilityDescriptors()
+        val capabilities = componentRegistry?.getCapabilityDescriptors() ?: emptyList()
         val graph = CapabilityResourceGraph(capabilities)
 
         val capableAgents = graph.findCapableAgents(

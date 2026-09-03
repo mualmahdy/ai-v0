@@ -1,8 +1,16 @@
 package com.example.application.registry
 
+import com.example.application.resource.ResourceRegistryService
+import com.example.application.resource.RuntimeAdapterResolver
 import com.example.domain.core.capability.CapabilityDescriptor
 import com.example.domain.core.capability.CapabilityState
 import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.capability.ResourceCapabilityGraph
+import com.example.domain.core.provider.HealthStatus
+import com.example.domain.core.resource.ResourceId
+import com.example.domain.core.resource.ResourceLifecycleState
+import com.example.domain.core.resource.ResourceRecord
+import com.example.domain.core.resource.ResourceType
 import com.example.domain.ports.llm.LlmProviderPort
 import com.example.domain.ports.memory.EmbeddingProviderPort
 import com.example.domain.ports.search.SearchProviderPort
@@ -10,12 +18,16 @@ import com.example.domain.ports.tools.ToolPort
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Thread-safe Registry for system capabilities, providers, and tools.
+ * Registry for system capabilities, providers, and tools.
  *
- * Implements clean decoupling: Providers are registered in the Composition Root,
- * while Application/Orchestrator resolves them by ID or capability type without concrete coupling.
+ * Exposes authoritative ResourceRegistry, ResourceCapabilityGraph, and RuntimeAdapterResolver.
  */
-class ComponentRegistry {
+class ComponentRegistry(
+    val resourceRegistry: ResourceRegistryService = ResourceRegistryService()
+) {
+
+    val resourceCapabilityGraph: ResourceCapabilityGraph = ResourceCapabilityGraph(resourceRegistry)
+    val runtimeAdapterResolver: RuntimeAdapterResolver = RuntimeAdapterResolver(resourceRegistry)
 
     private val llmProviders = ConcurrentHashMap<String, LlmProviderPort>()
     private val searchProviders = ConcurrentHashMap<String, SearchProviderPort>()
@@ -33,6 +45,22 @@ class ComponentRegistry {
         if (isDefault || defaultLlmProviderId == null) {
             defaultLlmProviderId = key
         }
+
+        val resId = ResourceId(key)
+        val record = ResourceRecord(
+            resourceId = resId,
+            providerId = provider.providerId,
+            serviceId = provider.metadata.defaultModel?.ifBlank { "default-model" } ?: "default-model",
+            resourceType = ResourceType.LLM,
+            capabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.REASONING),
+            configurationVersion = 1L,
+            lifecycleState = ResourceLifecycleState.ENABLED,
+            runtimeSupported = true,
+            healthStatus = if (provider.metadata.isOnline) HealthStatus.HEALTHY else HealthStatus.UNAVAILABLE,
+            isLocal = provider.metadata.isLocal
+        )
+        resourceRegistry.registerResource(record)
+        runtimeAdapterResolver.registerLlmAdapter(resId, provider)
     }
 
     fun unregisterLlmProvider(providerId: String) {
@@ -41,6 +69,9 @@ class ComponentRegistry {
         if (defaultLlmProviderId == key) {
             defaultLlmProviderId = llmProviders.keys.firstOrNull()
         }
+        val resId = ResourceId(key)
+        resourceRegistry.unregisterResource(resId)
+        runtimeAdapterResolver.unregister(resId)
     }
 
     fun setDefaultLlmProvider(providerId: String) {
@@ -61,6 +92,22 @@ class ComponentRegistry {
         if (isDefault || defaultSearchProviderId == null) {
             defaultSearchProviderId = key
         }
+
+        val resId = ResourceId(key)
+        val record = ResourceRecord(
+            resourceId = resId,
+            providerId = provider.providerId,
+            serviceId = "search-service",
+            resourceType = ResourceType.SEARCH,
+            capabilities = setOf(CapabilityType.SEARCH),
+            configurationVersion = 1L,
+            lifecycleState = ResourceLifecycleState.ENABLED,
+            runtimeSupported = true,
+            healthStatus = if (provider.metadata.isEnabled && provider.metadata.isConfigured) HealthStatus.HEALTHY else HealthStatus.UNAVAILABLE,
+            isLocal = false
+        )
+        resourceRegistry.registerResource(record)
+        runtimeAdapterResolver.registerSearchAdapter(resId, provider)
     }
 
     fun unregisterSearchProvider(providerId: String) {
@@ -69,6 +116,9 @@ class ComponentRegistry {
         if (defaultSearchProviderId == key) {
             defaultSearchProviderId = searchProviders.keys.firstOrNull()
         }
+        val resId = ResourceId(key)
+        resourceRegistry.unregisterResource(resId)
+        runtimeAdapterResolver.unregister(resId)
     }
 
     fun setDefaultSearchProvider(providerId: String) {
@@ -89,6 +139,22 @@ class ComponentRegistry {
         if (isDefault || defaultEmbeddingProviderId == null) {
             defaultEmbeddingProviderId = key
         }
+
+        val resId = ResourceId(key)
+        val record = ResourceRecord(
+            resourceId = resId,
+            providerId = provider.providerId,
+            serviceId = "embedding-service",
+            resourceType = ResourceType.EMBEDDING,
+            capabilities = setOf(CapabilityType.EMBEDDING, CapabilityType.MEMORY_RETRIEVAL),
+            configurationVersion = 1L,
+            lifecycleState = ResourceLifecycleState.ENABLED,
+            runtimeSupported = true,
+            healthStatus = HealthStatus.HEALTHY,
+            isLocal = provider.metadata.isLocal
+        )
+        resourceRegistry.registerResource(record)
+        runtimeAdapterResolver.registerEmbeddingAdapter(resId, provider)
     }
 
     fun unregisterEmbeddingProvider(providerId: String) {
@@ -97,6 +163,9 @@ class ComponentRegistry {
         if (defaultEmbeddingProviderId == key) {
             defaultEmbeddingProviderId = embeddingProviders.keys.firstOrNull()
         }
+        val resId = ResourceId(key)
+        resourceRegistry.unregisterResource(resId)
+        runtimeAdapterResolver.unregister(resId)
     }
 
     fun setDefaultEmbeddingProvider(providerId: String) {
@@ -113,7 +182,24 @@ class ComponentRegistry {
 
     // --- Tools ---
     fun registerTool(tool: ToolPort) {
-        tools[tool.declaration.name.lowercase()] = tool
+        val key = tool.declaration.name.lowercase()
+        tools[key] = tool
+
+        val resId = ResourceId(key)
+        val record = ResourceRecord(
+            resourceId = resId,
+            providerId = tool.declaration.name,
+            serviceId = tool.declaration.name,
+            resourceType = ResourceType.TOOL,
+            capabilities = setOf(CapabilityType.TOOL_EXECUTION),
+            configurationVersion = 1L,
+            lifecycleState = ResourceLifecycleState.ENABLED,
+            runtimeSupported = true,
+            healthStatus = HealthStatus.HEALTHY,
+            isLocal = true
+        )
+        resourceRegistry.registerResource(record)
+        runtimeAdapterResolver.registerToolAdapter(resId, tool)
     }
 
     fun getTool(toolName: String): ToolPort? = tools[toolName.lowercase()]
@@ -146,14 +232,22 @@ class ComponentRegistry {
 
     fun recordFailure(resourceId: String, error: String) {
         val key = resourceId.lowercase()
-        failureCounts[key] = (failureCounts[key] ?: 0) + 1
+        val count = (failureCounts[key] ?: 0) + 1
+        failureCounts[key] = count
         lastErrors[key] = error
+        val resId = ResourceId(key)
+        if (count >= 3) {
+            resourceRegistry.updateHealth(resId, HealthStatus.UNAVAILABLE)
+        } else if (count > 0) {
+            resourceRegistry.updateHealth(resId, HealthStatus.DEGRADED)
+        }
     }
 
     fun recordSuccess(resourceId: String) {
         val key = resourceId.lowercase()
         failureCounts[key] = 0
         lastErrors.remove(key)
+        resourceRegistry.updateHealth(ResourceId(key), HealthStatus.HEALTHY)
     }
 
     fun getFailureCount(resourceId: String): Int = failureCounts[resourceId.lowercase()] ?: 0
