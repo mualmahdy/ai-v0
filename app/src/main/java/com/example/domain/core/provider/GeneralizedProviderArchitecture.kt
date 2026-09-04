@@ -1,6 +1,9 @@
 package com.example.domain.core.provider
 
 import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.provider.offering.OfferingCatalog
+import com.example.domain.core.provider.offering.OfferingType
+import com.example.domain.core.provider.offering.ServiceOffering
 import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.domain.core.resource.ResourceRecord
@@ -115,7 +118,7 @@ data class ServiceProtocol(
 data class ServiceConfiguration(
     val id: String,
     val serviceId: String,
-    val protocolId: String,
+    val protocolId: ServiceProtocolId,
     val endpointUrl: String,
     val defaultOfferingId: String = "",
     val isEnabled: Boolean = true,
@@ -127,100 +130,29 @@ data class ServiceConfiguration(
     val extraHeaders: Map<String, String> = emptyMap(),
     val timeoutSeconds: Int = 30,
     val hasSecretKey: Boolean = false,
+    val authAlias: String? = null,
     val configurationVersion: Long = 1L,
     val createdAtEpochMs: Long = System.currentTimeMillis(),
     val updatedAtEpochMs: Long = System.currentTimeMillis()
-)
-
-/**
- * 5. OFFERING & OFFERING CATALOG
- * Concrete models, search indexes, or capabilities exposed by a Service.
- */
-enum class OfferingType(val code: String) {
-    MODEL("model"),
-    INDEX("index"),
-    TOOL("tool"),
-    ENDPOINT("endpoint")
-}
-
-data class ServiceOffering(
-    val id: String,
-    val serviceId: String,
-    val offeringType: OfferingType = OfferingType.MODEL,
-    val name: String,
-    val description: String = "",
-    val contextWindowTokens: Int? = null,
-    val supportedCapabilities: Set<CapabilityType> = emptySet(),
-    val isLocal: Boolean = false,
-    val isAvailable: Boolean = true,
-    val pricingInputTokensPerMillion: Double? = null,
-    val pricingOutputTokensPerMillion: Double? = null,
-    val latencyScoreMs: Long = 0L,
-    val discoveredEpochMs: Long = System.currentTimeMillis(),
-    val discoverySource: String = "DISCOVERY_PORT"
 ) {
     /**
-     * Maps an Offering directly to an authoritative ResourceRecord for ComponentRegistry and CapabilityGraph.
+     * Phase 4 (Correction #3): monotonic, atomic version bump. The repository
+     * calls this on every update so decision records can detect stale
+     * configurations and demand revalidation instead of silently reusing them.
      */
-    fun toResourceRecord(
-        providerId: String,
-        config: ServiceConfiguration,
-        resourceType: ResourceType
-    ): ResourceRecord {
-        return ResourceRecord(
-            resourceId = ResourceId("res-$id"),
-            providerId = providerId,
-            serviceId = serviceId,
-            resourceType = resourceType,
-            capabilities = supportedCapabilities,
-            configurationVersion = config.configurationVersion,
-            lifecycleState = if (config.isEnabled && isAvailable) ResourceLifecycleState.ACTIVE else ResourceLifecycleState.DISABLED,
-            runtimeSupported = true,
-            healthStatus = config.healthStatus,
-            isLocal = isLocal,
-            metadata = mapOf(
-                "offeringId" to id,
-                "offeringType" to offeringType.name,
-                "serviceId" to serviceId,
-                "providerId" to providerId,
-                "endpointUrl" to config.endpointUrl,
-                "discoverySource" to discoverySource
-            )
-        )
-    }
+    fun withBumpedVersion(fromVersion: Long): ServiceConfiguration = copy(
+        configurationVersion = fromVersion + 1L,
+        updatedAtEpochMs = System.currentTimeMillis()
+    )
 }
 
-/**
- * Authoritative Offering Catalog maintaining live offerings discovered across services.
- */
-class OfferingCatalog {
-    private val offerings = ConcurrentHashMap<String, ServiceOffering>()
-
-    fun registerOffering(offering: ServiceOffering) {
-        offerings[offering.id.lowercase()] = offering
-    }
-
-    fun unregisterOffering(offeringId: String) {
-        offerings.remove(offeringId.lowercase())
-    }
-
-    fun getOffering(offeringId: String): ServiceOffering? {
-        return offerings[offeringId.lowercase()]
-    }
-
-    fun listOfferings(): List<ServiceOffering> = offerings.values.toList()
-
-    fun findOfferingsForCapability(capability: CapabilityType): List<ServiceOffering> {
-        return offerings.values.filter { capability in it.supportedCapabilities && it.isAvailable }
-    }
-
-    fun findOfferingsForService(serviceId: String): List<ServiceOffering> {
-        return offerings.values.filter { it.serviceId.equals(serviceId, ignoreCase = true) }
-    }
-
-    fun clear() {
-        offerings.clear()
-    }
+private fun flavorToProtocolId(flavor: ProviderFlavor): ServiceProtocolId = when (flavor) {
+    ProviderFlavor.GEMINI -> ServiceProtocolId.GEMINI_NATIVE
+    ProviderFlavor.OPENAI_COMPATIBLE -> ServiceProtocolId.OPENAI_COMPATIBLE
+    ProviderFlavor.OLLAMA -> ServiceProtocolId.OLLAMA_NATIVE
+    ProviderFlavor.TAVILY -> ServiceProtocolId.TAVILY_NATIVE
+    ProviderFlavor.MULTI_SOURCE_SEARCH -> ServiceProtocolId.IN_PROCESS
+    ProviderFlavor.LOCAL_EMBEDDING -> ServiceProtocolId.IN_PROCESS
 }
 
 /**
@@ -286,7 +218,7 @@ fun ProviderConfiguration.toServiceConfiguration(): ServiceConfiguration {
     return ServiceConfiguration(
         id = "cfg-${this.id}",
         serviceId = "${this.id}-service",
-        protocolId = "${this.flavor.name.lowercase()}-protocol",
+        protocolId = flavorToProtocolId(this.flavor),
         endpointUrl = this.endpointUrl,
         defaultOfferingId = this.defaultModelId,
         isEnabled = this.isEnabled,

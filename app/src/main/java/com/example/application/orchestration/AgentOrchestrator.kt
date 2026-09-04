@@ -46,7 +46,12 @@ class AgentOrchestrator(
     private val registry: ComponentRegistry,
     private val securityGuard: SecurityGuardService,
     private val decisionService: DecisionService,
-    private val executionService: ExecutionService = ExecutionService(registry, securityGuard),
+    private val executionService: ExecutionService = ExecutionService(
+        runtimeAdapterResolver = registry.runtimeAdapterResolver,
+        resourceRegistry = registry.resourceRegistry,
+        securityGuard = securityGuard,
+        memoryRepositoryProvider = { registry.getMemoryRepository() }
+    ),
     private val observationService: ObservationService = ObservationService(),
     private val outcomeService: OutcomeService = OutcomeService(),
     private val taskDao: TaskDao? = null,

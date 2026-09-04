@@ -44,7 +44,7 @@ import com.example.presentation.ui.screens.DecisionIntelligenceScreen
 import com.example.presentation.ui.screens.ExtensionsScreen
 import com.example.presentation.ui.screens.FilesWorkspaceScreen
 import com.example.presentation.ui.screens.KnowledgeRagScreen
-import com.example.presentation.ui.screens.ModelsCapabilitiesScreen
+import com.example.presentation.ui.screens.ProviderServiceManagerScreen
 import com.example.presentation.ui.screens.RadarEvolutionScreen
 import com.example.presentation.ui.screens.TasksWorkflowsScreen
 import com.example.presentation.viewmodel.MainViewModel
@@ -164,7 +164,7 @@ fun MainAppScreen(
                 ActiveNavigationTab.DECISION_INTELLIGENCE -> DecisionIntelligenceScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.RADAR_EVOLUTION -> RadarEvolutionScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.EXTENSIONS -> ExtensionsScreen(state = state, viewModel = viewModel)
-                ActiveNavigationTab.MODELS_CAPABILITIES -> ModelsCapabilitiesScreen(state = state, viewModel = viewModel)
+                ActiveNavigationTab.MODELS_CAPABILITIES -> ProviderServiceManagerScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.KNOWLEDGE_RAG -> KnowledgeRagScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.FILES -> FilesWorkspaceScreen(state = state, viewModel = viewModel)
             }

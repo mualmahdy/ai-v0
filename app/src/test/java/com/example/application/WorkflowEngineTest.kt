@@ -3,6 +3,7 @@ package com.example.application
 import com.example.application.orchestration.AgentOrchestrator
 import com.example.application.orchestration.WorkflowEngine
 import com.example.application.registry.ComponentRegistry
+import com.example.application.testing.TestResourceRegistration
 import com.example.application.security.SecurityGuardService
 import com.example.domain.core.Outcome
 import com.example.domain.core.agent.AgentRole
@@ -82,7 +83,7 @@ class WorkflowEngineTest {
             override fun stream(request: LlmRequest, executionId: String) = emptyFlow<com.example.domain.core.events.ExecutionEvent>()
         }
 
-        registry.registerLlmProvider(mockProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, mockProvider)
 
         val step1 = StepNode("s1", TaskId("t-1"), AgentRole.PLANNER, "Plan architecture", dependencies = emptySet())
         val step2 = StepNode("s2", TaskId("t-2"), AgentRole.CODER, "Implement models", dependencies = setOf("s1"))

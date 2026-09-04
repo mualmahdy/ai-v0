@@ -15,10 +15,17 @@ import com.example.infrastructure.persistence.dao.KnowledgeDocumentDao
 import com.example.infrastructure.persistence.dao.MemoryDao
 import com.example.infrastructure.persistence.dao.ProjectDao
 import com.example.infrastructure.persistence.dao.ProviderConfigDao
+import com.example.infrastructure.persistence.dao.ProviderDao
+import com.example.infrastructure.persistence.dao.ProviderServiceDao
 import com.example.infrastructure.persistence.dao.RadarItemDao
 import com.example.infrastructure.persistence.dao.ResourceEdgeDao
+import com.example.infrastructure.persistence.dao.ResourceRecordDao
+import com.example.infrastructure.persistence.dao.ServiceConfigurationDao
+import com.example.infrastructure.persistence.dao.ServiceHealthRecordDao
+import com.example.infrastructure.persistence.dao.ServiceOfferingDao
 import com.example.infrastructure.persistence.dao.SessionDao
 import com.example.infrastructure.persistence.dao.TaskDao
+import com.example.infrastructure.persistence.dao.UserResourcePreferenceDao
 import com.example.infrastructure.persistence.dao.WorkspaceDao
 import com.example.infrastructure.persistence.entities.DecisionCaseEntity
 import com.example.infrastructure.persistence.entities.DocumentChunkEntity
@@ -29,10 +36,17 @@ import com.example.infrastructure.persistence.entities.KnowledgeDocumentEntity
 import com.example.infrastructure.persistence.entities.MemoryEntity
 import com.example.infrastructure.persistence.entities.ProjectEntity
 import com.example.infrastructure.persistence.entities.ProviderConfigEntity
+import com.example.infrastructure.persistence.entities.ProviderEntity
+import com.example.infrastructure.persistence.entities.ProviderServiceEntity
 import com.example.infrastructure.persistence.entities.RadarItemEntity
 import com.example.infrastructure.persistence.entities.ResourceEdgeEntity
+import com.example.infrastructure.persistence.entities.ResourceRecordEntity
+import com.example.infrastructure.persistence.entities.ServiceConfigurationEntity
+import com.example.infrastructure.persistence.entities.ServiceHealthRecordEntity
+import com.example.infrastructure.persistence.entities.ServiceOfferingEntity
 import com.example.infrastructure.persistence.entities.SessionEntity
 import com.example.infrastructure.persistence.entities.TaskEntity
+import com.example.infrastructure.persistence.entities.UserResourcePreferenceEntity
 import com.example.infrastructure.persistence.entities.WorkspaceEntity
 
 /**
@@ -45,6 +59,10 @@ import com.example.infrastructure.persistence.entities.WorkspaceEntity
  *
  * Phase 2: Added workspaces, knowledge_documents, document_chunks, resource_edges tables
  * to support true multi-workspace runtime and RAG persistence. Bumped version 4 → 5.
+ *
+ * Phase 4 (Generalized Provider Architecture): added seven tables for the
+ * Provider → Service → Configuration → Offering → ResourceRecord → Preference
+ * pipeline. Bumped version 5 → 6. Purely additive — no existing table altered.
  *
  * Migration policy going forward:
  *   1. Bump `version` below when adding columns/tables.
@@ -67,9 +85,17 @@ import com.example.infrastructure.persistence.entities.WorkspaceEntity
         WorkspaceEntity::class,
         KnowledgeDocumentEntity::class,
         DocumentChunkEntity::class,
-        ResourceEdgeEntity::class
+        ResourceEdgeEntity::class,
+        // Phase 4 — Generalized Provider Architecture persistence
+        ProviderEntity::class,
+        ProviderServiceEntity::class,
+        ServiceConfigurationEntity::class,
+        ServiceHealthRecordEntity::class,
+        ServiceOfferingEntity::class,
+        UserResourcePreferenceEntity::class,
+        ResourceRecordEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -89,6 +115,15 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun knowledgeDocumentDao(): KnowledgeDocumentDao
     abstract fun documentChunkDao(): DocumentChunkDao
     abstract fun resourceEdgeDao(): ResourceEdgeDao
+
+    // Phase 4 — Generalized Provider Architecture DAOs
+    abstract fun providerDao(): ProviderDao
+    abstract fun providerServiceDao(): ProviderServiceDao
+    abstract fun serviceConfigurationDao(): ServiceConfigurationDao
+    abstract fun serviceHealthRecordDao(): ServiceHealthRecordDao
+    abstract fun serviceOfferingDao(): ServiceOfferingDao
+    abstract fun userResourcePreferenceDao(): UserResourcePreferenceDao
+    abstract fun resourceRecordDao(): ResourceRecordDao
 
     companion object {
         @Volatile
@@ -220,10 +255,155 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Phase 4 — Migration v5 → v6: seven new tables for the Generalized
+         * Provider Architecture (providers, provider_services,
+         * service_configurations, service_health_records, service_offerings,
+         * user_resource_preferences, resource_records). Purely additive — no
+         * existing table is altered, so v5 data (workspaces, RAG, tasks) is safe.
+         */
+        private val MIGRATION_5_TO_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS providers (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        websiteUrl TEXT,
+                        isLocal INTEGER NOT NULL,
+                        isEnabled INTEGER NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS provider_services (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        providerId TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        serviceType TEXT NOT NULL,
+                        supportedProtocolIdsJson TEXT NOT NULL,
+                        isEnabled INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_provider_services_providerId ON provider_services(providerId)"
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS service_configurations (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        serviceId TEXT NOT NULL,
+                        protocolId TEXT NOT NULL,
+                        endpointUrl TEXT NOT NULL,
+                        defaultOfferingId TEXT NOT NULL,
+                        isEnabled INTEGER NOT NULL,
+                        isDefault INTEGER NOT NULL,
+                        healthStatus TEXT NOT NULL,
+                        lastValidatedEpochMs INTEGER NOT NULL,
+                        lastLatencyMs INTEGER NOT NULL,
+                        lastErrorMessage TEXT,
+                        extraHeadersJson TEXT NOT NULL,
+                        timeoutSeconds INTEGER NOT NULL,
+                        hasSecretKey INTEGER NOT NULL,
+                        authAlias TEXT,
+                        configurationVersion INTEGER NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_service_configurations_serviceId ON service_configurations(serviceId)"
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS service_health_records (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        serviceConfigurationId TEXT NOT NULL,
+                        healthStatus TEXT NOT NULL,
+                        lastHealthClassification TEXT NOT NULL,
+                        lastValidatedEpochMs INTEGER NOT NULL,
+                        lastLatencyMs INTEGER NOT NULL,
+                        lastErrorMessage TEXT,
+                        validatedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_service_health_records_serviceConfigurationId ON service_health_records(serviceConfigurationId)"
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS service_offerings (
+                        id TEXT NOT NULL,
+                        serviceId TEXT NOT NULL,
+                        offeringType TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        contextWindowTokens INTEGER,
+                        supportedCapabilitiesJson TEXT NOT NULL,
+                        isLocal INTEGER NOT NULL,
+                        isAvailable INTEGER NOT NULL,
+                        pricingInputTokensPerMillion REAL,
+                        pricingOutputTokensPerMillion REAL,
+                        latencyScoreMs INTEGER NOT NULL,
+                        discoveredEpochMs INTEGER NOT NULL,
+                        discoverySource TEXT NOT NULL,
+                        PRIMARY KEY(id, serviceId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_resource_preferences (
+                        serviceType TEXT NOT NULL PRIMARY KEY,
+                        preferredResourceId TEXT NOT NULL,
+                        preferredResourceName TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS resource_records (
+                        resourceId TEXT NOT NULL PRIMARY KEY,
+                        providerId TEXT NOT NULL,
+                        serviceId TEXT NOT NULL,
+                        resourceType TEXT NOT NULL,
+                        capabilitiesJson TEXT NOT NULL,
+                        configurationVersion INTEGER NOT NULL,
+                        lifecycleState TEXT NOT NULL,
+                        runtimeSupported INTEGER NOT NULL,
+                        healthStatus TEXT NOT NULL,
+                        isLocal INTEGER NOT NULL,
+                        metadataJson TEXT NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_resource_records_serviceId ON resource_records(serviceId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_resource_records_providerId ON resource_records(providerId)"
+                )
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             MIGRATION_3_TO_4,
             MIGRATION_4_TO_5,
+            MIGRATION_5_TO_6,
         )
+
+
 
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {

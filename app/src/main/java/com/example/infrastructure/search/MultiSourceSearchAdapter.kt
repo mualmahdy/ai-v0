@@ -28,7 +28,7 @@ import java.util.concurrent.TimeUnit
  * 3. Offline/Workspace Fallback: Local Workspace files search.
  */
 class MultiSourceSearchAdapter(
-    private val tavilyApiKeyProvider: () -> String? = { null },
+    private val tavilyApiKeyProvider: suspend () -> String? = { null },
     private val workspaceStoragePort: WorkspaceStoragePort? = null,
     private val defaultProjectId: Long = 1L,
     private val client: OkHttpClient = OkHttpClient.Builder()
