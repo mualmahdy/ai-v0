@@ -1,5 +1,11 @@
 package com.example.domain.models
 
+/**
+ * FIX DOM-P4-30: Legacy parallel model declarations pre-dating domain.core.*.
+ * Marked @Deprecated with migration pointers to domain.core.*.
+ */
+
+@Deprecated("Legacy parallel model. Use com.example.domain.core.storage.ProjectMetadata instead.")
 data class Project(
     val id: Long,
     val name: String,
@@ -10,6 +16,7 @@ data class Project(
     val lastOpenedAt: String?
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.storage.WorkspaceSessionInfo instead.")
 data class Session(
     val sessionId: String,
     val projectId: Long,
@@ -21,6 +28,7 @@ data class Session(
     val updatedAt: String
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.llm.LlmMessage instead.")
 data class ChatMessage(
     val id: Long = 0,
     val projectId: Long,
@@ -37,6 +45,7 @@ data class ChatMessage(
     val toolCalls: List<ToolCallInfo> = emptyList()
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.tools.ToolCall instead.")
 data class ToolCallInfo(
     val id: String,
     val name: String,
@@ -46,6 +55,7 @@ data class ToolCallInfo(
     val durationMs: Long = 0
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.agent.AgentDefinition instead.")
 data class AgentConfig(
     val id: Long = 0,
     val projectId: Long,
@@ -61,6 +71,7 @@ data class AgentConfig(
     val inFlight: Int = 0
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.provider.ProviderConfiguration instead.")
 data class ModelProvider(
     val id: Long = 0,
     val projectId: Long,
@@ -76,6 +87,7 @@ data class ModelProvider(
     val healthStatus: Boolean? = null
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.provider.ProviderConfiguration instead.")
 data class SearchProvider(
     val id: Long = 0,
     val projectId: Long,
@@ -88,6 +100,7 @@ data class SearchProvider(
     val isOnlineOnly: Boolean = false
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.provider.ProviderConfiguration instead.")
 data class EmbeddingProvider(
     val id: Long = 0,
     val projectId: Long,
@@ -101,6 +114,7 @@ data class EmbeddingProvider(
     val isDefault: Boolean = false
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.memory.MemoryEntry instead.")
 data class LongTermMemory(
     val id: Long = 0,
     val projectId: Long,
@@ -114,6 +128,7 @@ data class LongTermMemory(
     val similarityScore: Float? = null
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.rag.KnowledgeDocument instead.")
 data class DocumentItem(
     val id: Long = 0,
     val docId: String,
@@ -123,18 +138,21 @@ data class DocumentItem(
     val chunkCount: Int = 0
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.rag.DocumentChunk instead.")
 data class DocumentChunk(
     val chunkIndex: Int,
     val text: String,
     val similarity: Float? = null
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.workflow.WorkflowPlan instead.")
 data class WorkflowPlan(
     val goal: String,
     val steps: List<PlanStep>,
     val executionMode: String = "sequential"
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.workflow.WorkflowStep instead.")
 data class PlanStep(
     val id: Int,
     val action: String,
@@ -145,6 +163,7 @@ data class PlanStep(
     var output: String? = null
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.workflow.WorkflowExecutionResult instead.")
 data class WorkflowExecutionResult(
     val goal: String,
     val status: String, // "completed", "completed_with_errors", "stopped_early", "failed"
@@ -156,12 +175,14 @@ data class WorkflowExecutionResult(
     val durationMs: Long
 )
 
+@Deprecated("Legacy parallel model. CBR-MDP uses continuous Bayesian belief distributions.")
 data class BeliefState(
     val bins: List<Float>,
     val weights: List<Float>,
     val expectedValue: Float
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.workspace.ResourceNode instead.")
 data class GraphNode(
     val id: String,
     val agent: String,
@@ -169,6 +190,7 @@ data class GraphNode(
     val status: String
 )
 
+@Deprecated("Legacy parallel model.")
 data class WorldState(
     val projectId: Long,
     val activeAgents: Map<String, AgentConfig>,
@@ -178,6 +200,7 @@ data class WorldState(
     val totalDocumentsCount: Int
 )
 
+@Deprecated("Legacy parallel model.")
 data class WorkspaceComponent(
     val componentId: String,
     val title: String,
@@ -187,6 +210,7 @@ data class WorkspaceComponent(
     val panelWeight: Float
 )
 
+@Deprecated("Legacy parallel model. Use com.example.domain.core.tools.SafeDiagnosticsTool instead.")
 data class SystemDiagnostics(
     val cpuUsagePercent: Float,
     val memoryUsedMb: Long,

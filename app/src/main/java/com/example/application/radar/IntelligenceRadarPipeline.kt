@@ -254,34 +254,32 @@ class IntelligenceRadarPipeline(
         }
     }
 
-    fun advanceEvolutionStage(candidateId: String, nextStage: EvolutionStage) {
+    suspend fun advanceEvolutionStage(candidateId: String, nextStage: EvolutionStage) = withContext(Dispatchers.IO) {
+        var candidateToPersist: EvolutionCandidate? = null
         _evolutionCandidates.update { list ->
             list.map { candidate ->
                 if (candidate.id == candidateId) {
-                    val auditPassed = when (nextStage) {
-                        EvolutionStage.DISCOVERED, EvolutionStage.CANDIDATE -> candidate.securityAuditPassed
-                        else -> true
-                    }
-                    val governanceApproved = when (nextStage) {
-                        EvolutionStage.INTEGRATED, EvolutionStage.VERIFIED, EvolutionStage.REGISTERED -> true
-                        else -> candidate.governanceApproved
-                    }
+                    // FIX APP-P3-29: Do not auto-approve governance or security audits without explicit audit evidence.
+                    // Preserve existing audit and governance flags honestly.
                     val updated = candidate.copy(
                         stage = nextStage,
-                        governanceApproved = governanceApproved,
-                        securityAuditPassed = auditPassed,
-                        evaluationNotes = "تم تحديث مرحلة التطور إلى ${nextStage.name} وفقاً لمعايير التدقيق الأمني والحوكمة."
+                        evaluationNotes = "تم تحديث مرحلة التطور إلى ${nextStage.name}."
                     )
-                    evolutionCandidateDao?.let { dao ->
-                        coroutineScope.launch {
-                            try {
-                                dao.updateStage(updated.id, updated.stage.name, updated.governanceApproved, System.currentTimeMillis())
-                            } catch (_: Exception) {}
-                        }
-                    }
+                    candidateToPersist = updated
                     updated
                 } else candidate
             }
+        }
+        // Synchronous persistence prevents state-persistence divergence
+        candidateToPersist?.let { updated ->
+            try {
+                evolutionCandidateDao?.updateStage(
+                    id = updated.id,
+                    stage = updated.stage.name,
+                    governanceApproved = updated.governanceApproved,
+                    now = System.currentTimeMillis()
+                )
+            } catch (_: Exception) {}
         }
     }
 

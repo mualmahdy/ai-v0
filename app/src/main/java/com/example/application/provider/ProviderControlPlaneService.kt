@@ -6,6 +6,7 @@ import com.example.domain.core.provider.HealthStatus
 import com.example.domain.core.provider.ProviderCategory
 import com.example.domain.core.provider.ProviderConfiguration
 import com.example.domain.core.provider.ProviderValidationResult
+import com.example.domain.core.provider.toDefaultOffering
 import com.example.domain.ports.provider.ProviderRepositoryPort
 import com.example.infrastructure.provider.ProviderAdapterFactory
 import kotlinx.coroutines.CoroutineScope
@@ -28,7 +29,8 @@ import kotlinx.coroutines.withContext
 class ProviderControlPlaneService(
     private val providerRepository: ProviderRepositoryPort,
     private val adapterFactory: ProviderAdapterFactory,
-    private val componentRegistry: ComponentRegistry,
+    val componentRegistry: ComponentRegistry,
+    val offeringCatalog: com.example.domain.core.provider.OfferingCatalog = com.example.domain.core.provider.OfferingCatalog(),
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + Job())
 ) {
 
@@ -56,29 +58,27 @@ class ProviderControlPlaneService(
             // 1. Process each configuration
             for (config in configs) {
                 if (config.isEnabled) {
+                    offeringCatalog.registerOffering(config.toDefaultOffering())
                     when (config.category) {
                         ProviderCategory.LLM -> {
-                            val adapter = adapterFactory.createLlmAdapter(config) {
-                                kotlinx.coroutines.runBlocking { providerRepository.getSecretForProvider(config.id) }
-                            }
+                            val secret = providerRepository.getSecretForProvider(config.id)
+                            val adapter = adapterFactory.createLlmAdapter(config) { secret }
                             componentRegistry.registerLlmProvider(adapter, isDefault = config.isDefault)
                             if (config.isDefault) {
                                 componentRegistry.setDefaultLlmProvider(config.id)
                             }
                         }
                         ProviderCategory.SEARCH -> {
-                            val adapter = adapterFactory.createSearchAdapter(config) {
-                                kotlinx.coroutines.runBlocking { providerRepository.getSecretForProvider(config.id) }
-                            }
+                            val secret = providerRepository.getSecretForProvider(config.id)
+                            val adapter = adapterFactory.createSearchAdapter(config) { secret }
                             componentRegistry.registerSearchProvider(adapter, isDefault = config.isDefault)
                             if (config.isDefault) {
                                 componentRegistry.setDefaultSearchProvider(config.id)
                             }
                         }
                         ProviderCategory.EMBEDDING -> {
-                            val adapter = adapterFactory.createEmbeddingAdapter(config) {
-                                kotlinx.coroutines.runBlocking { providerRepository.getSecretForProvider(config.id) }
-                            }
+                            val secret = providerRepository.getSecretForProvider(config.id)
+                            val adapter = adapterFactory.createEmbeddingAdapter(config) { secret }
                             componentRegistry.registerEmbeddingProvider(adapter, isDefault = config.isDefault)
                             if (config.isDefault) {
                                 componentRegistry.setDefaultEmbeddingProvider(config.id)
@@ -87,7 +87,8 @@ class ProviderControlPlaneService(
                         else -> Unit
                     }
                 } else {
-                    // Disabled: unregister from runtime
+                    // Disabled: unregister from runtime and offering catalog
+                    offeringCatalog.unregisterOffering(config.defaultModelId.ifBlank { "${config.id}-default-offering" })
                     when (config.category) {
                         ProviderCategory.LLM -> componentRegistry.unregisterLlmProvider(config.id)
                         ProviderCategory.SEARCH -> componentRegistry.unregisterSearchProvider(config.id)

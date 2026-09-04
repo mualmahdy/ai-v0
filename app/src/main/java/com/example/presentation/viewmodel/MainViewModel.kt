@@ -65,7 +65,6 @@ class MainViewModel(
     private val executeWorkflowUseCase: ExecuteWorkflowUseCase,
     private val manageMemoryUseCase: ManageMemoryUseCase,
     private val manageWorkspaceFilesUseCase: ManageWorkspaceFilesUseCase,
-    private val sessionRepository: SessionRepositoryPort,
     private val componentRegistry: ComponentRegistry,
     private val cbrMdpEngine: CbrMdpEngine,
     private val providerRegistryService: ProviderRegistryService,
@@ -595,7 +594,9 @@ class MainViewModel(
     }
 
     fun advanceCandidateStage(candidateId: String, nextStage: EvolutionStage) {
-        intelligenceRadarPipeline.advanceEvolutionStage(candidateId, nextStage)
+        viewModelScope.launch {
+            intelligenceRadarPipeline.advanceEvolutionStage(candidateId, nextStage)
+        }
     }
 
     // --- Knowledge & RAG Operations ---

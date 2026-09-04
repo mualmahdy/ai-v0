@@ -345,7 +345,6 @@ class MainViewModelFactory(
                 executeWorkflowUseCase = appContainer.executeWorkflowUseCase,
                 manageMemoryUseCase = appContainer.manageMemoryUseCase,
                 manageWorkspaceFilesUseCase = appContainer.manageWorkspaceFilesUseCase,
-                sessionRepository = appContainer.workspaceStorage,
                 componentRegistry = appContainer.componentRegistry,
                 cbrMdpEngine = appContainer.cbrMdpEngine,
                 providerRegistryService = appContainer.providerRegistryService,
