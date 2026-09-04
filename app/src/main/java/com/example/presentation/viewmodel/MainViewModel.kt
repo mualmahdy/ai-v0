@@ -12,6 +12,7 @@ import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
 import com.example.application.usecases.ManageMemoryUseCase
 import com.example.application.usecases.ManageWorkspaceFilesUseCase
+import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.Outcome
 import com.example.domain.core.agent.AgentBudget
 import com.example.domain.core.agent.AgentDefinition
@@ -71,11 +72,19 @@ class MainViewModel(
     private val extensionManager: ExtensionManager,
     private val intelligenceRadarPipeline: IntelligenceRadarPipeline,
     private val ragPipelineService: RagPipelineService,
-    private val providerControlPlaneService: ProviderControlPlaneService
+    private val providerControlPlaneService: ProviderControlPlaneService,
+    // Phase 2 — workspace runtime service for multi-workspace support
+    private val workspaceRuntimeService: WorkspaceRuntimeService
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    // Phase 2 — expose active workspace and workspace list as StateFlows
+    val activeWorkspace: StateFlow<com.example.domain.core.workspace.Workspace?> =
+        workspaceRuntimeService.activeWorkspace
+    val allWorkspaces: StateFlow<List<com.example.domain.core.workspace.Workspace>> =
+        workspaceRuntimeService.allWorkspaces
 
     private var currentExecutionJob: Job? = null
 
@@ -83,6 +92,65 @@ class MainViewModel(
         initializeAgents()
         observeSubsystems()
         loadInitialData()
+        observeWorkspace()
+    }
+
+    /**
+     * Phase 2 — Observes the active workspace and reacts to workspace switches:
+     *   - Updates UiState.activeProject to the active workspace's lastActiveProjectId
+     *   - Reloads the RAG in-memory index from the new workspace's persisted knowledge
+     *   - Refreshes files for the new project
+     */
+    private fun observeWorkspace() {
+        viewModelScope.launch {
+            workspaceRuntimeService.activeWorkspace.collect { workspace ->
+                if (workspace != null) {
+                    _uiState.update {
+                        it.copy(
+                            activeProject = com.example.domain.core.storage.ProjectMetadata(
+                                id = workspace.activeProjectId.takeIf { id -> id > 0 } ?: 1L,
+                                name = workspace.name,
+                                description = workspace.description,
+                                isDefault = workspace.id == "default",
+                                createdAtTimestampMs = workspace.createdAtTimestampMs
+                            )
+                        )
+                    }
+                    // Reload RAG knowledge for the new workspace scope.
+                    ragPipelineService.loadFromPersistence()
+                    // Refresh files for the new active project.
+                    refreshFiles()
+                }
+            }
+        }
+    }
+
+    /**
+     * Phase 2 — Switches to a different workspace. The UI calls this when the user
+     * picks a workspace from the workspace switcher.
+     */
+    fun switchWorkspace(workspaceId: String) {
+        viewModelScope.launch {
+            workspaceRuntimeService.switchWorkspace(workspaceId)
+        }
+    }
+
+    /**
+     * Phase 2 — Creates a new workspace and switches to it.
+     */
+    fun createWorkspace(name: String, description: String) {
+        viewModelScope.launch {
+            workspaceRuntimeService.createWorkspace(name = name, description = description)
+        }
+    }
+
+    /**
+     * Phase 2 — Updates the network policy of the active workspace.
+     */
+    fun updateWorkspaceNetworkPolicy(policy: NetworkPolicy) {
+        viewModelScope.launch {
+            workspaceRuntimeService.updateNetworkPolicy(policy)
+        }
     }
 
     private fun observeSubsystems() {

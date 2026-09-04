@@ -9,6 +9,7 @@ import com.example.application.orchestration.WorkflowEngine
 import com.example.application.provider.ProviderControlPlaneService
 import com.example.application.provider.ProviderRegistryService
 import com.example.application.radar.IntelligenceRadarPipeline
+import com.example.application.rag.KnowledgePersistenceService
 import com.example.application.rag.RagPipelineService
 import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
@@ -16,6 +17,7 @@ import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
 import com.example.application.usecases.ManageMemoryUseCase
 import com.example.application.usecases.ManageWorkspaceFilesUseCase
+import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.decision.CaseBase
 import com.example.domain.core.decision.CbrMdpEngine
 import com.example.domain.ports.provider.ProviderRepositoryPort
@@ -72,6 +74,21 @@ class AppContainer(context: Context) {
             context = appContext,
             projectDao = database.projectDao(),
             sessionDao = database.sessionDao()
+        )
+    }
+
+    // Phase 2 — WorkspaceRuntimeService: turns Workspace from a Domain-only model
+    // into a first-class runtime citizen with persistence and multi-workspace switching.
+    val workspaceRuntimeService: WorkspaceRuntimeService by lazy {
+        WorkspaceRuntimeService(workspaceDao = database.workspaceDao())
+    }
+
+    // Phase 2 — KnowledgePersistenceService: persists RAG documents+chunks to Room
+    // so the knowledge base survives app restart.
+    val knowledgePersistenceService: KnowledgePersistenceService by lazy {
+        KnowledgePersistenceService(
+            documentDao = database.knowledgeDocumentDao(),
+            chunkDao = database.documentChunkDao()
         )
     }
 
@@ -243,8 +260,16 @@ class AppContainer(context: Context) {
     }
 
     // Knowledge & RAG Subsystem
+    // Phase 2 — wired with persistenceService + workspaceIdProvider so documents
+    // and chunks survive app restart. The workspaceIdProvider reads from
+    // workspaceRuntimeService.requireActiveWorkspaceId() so RAG is always scoped
+    // to the currently active workspace.
     val ragPipelineService: RagPipelineService by lazy {
-        RagPipelineService(embeddingPort = defaultEmbeddingAdapter)
+        RagPipelineService(
+            embeddingPort = defaultEmbeddingAdapter,
+            persistenceService = knowledgePersistenceService,
+            workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+        )
     }
 
     // Dedicated Decision Service Boundary (CBR-MDP Decision Intelligence)
@@ -327,7 +352,8 @@ class MainViewModelFactory(
                 extensionManager = appContainer.extensionManager,
                 intelligenceRadarPipeline = appContainer.intelligenceRadarPipeline,
                 ragPipelineService = appContainer.ragPipelineService,
-                providerControlPlaneService = appContainer.providerControlPlaneService
+                providerControlPlaneService = appContainer.providerControlPlaneService,
+                workspaceRuntimeService = appContainer.workspaceRuntimeService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

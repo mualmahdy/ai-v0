@@ -5,6 +5,10 @@ import com.example.domain.core.memory.RetrievalMode
 
 /**
  * Ingested document in the Knowledge Base.
+ *
+ * Phase 2: Added `createdAtTimestampMs` so KnowledgePersistenceService can
+ * round-trip the creation timestamp. The legacy `ingestedTimestampMs` field
+ * is kept for backwards compatibility and mirrors `createdAtTimestampMs`.
  */
 data class KnowledgeDocument(
     val id: String,
@@ -14,7 +18,8 @@ data class KnowledgeDocument(
     val content: String,
     val tags: List<String> = emptyList(),
     val totalChunks: Int = 0,
-    val ingestedTimestampMs: Long = System.currentTimeMillis()
+    val ingestedTimestampMs: Long = System.currentTimeMillis(),
+    val createdAtTimestampMs: Long = ingestedTimestampMs
 )
 
 /**

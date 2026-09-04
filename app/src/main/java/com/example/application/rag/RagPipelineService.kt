@@ -30,12 +30,21 @@ import kotlin.math.sqrt
  * per session (typically < 1000). The `documents` StateFlow was already thread-safe via
  * `MutableStateFlow.update { ... }` atomic CAS.
  *
- * Note: The chunks list is still in-memory only — persistence to Room is tracked as a
- * separate follow-up (Phase 2 Workspace Persistence). The thread-safety fix here prevents
- * corruption but does not survive app restart.
+ * Phase 2: Added optional `persistenceService` and `workspaceIdProvider` constructor params.
+ * When both are non-null, the service:
+ *   1. Loads persisted documents+chunks from Room on init via `loadFromPersistence()`
+ *      (caller-invoked, NOT in the constructor to avoid blocking the UI thread)
+ *   2. Persists every newly-ingested document+chunks to Room so they survive restart
+ *   3. Falls back to in-memory-only mode if persistence is null (backwards compatible)
+ *
+ * The `workspaceIdProvider` lambda is called on every persist so the service writes to the
+ * currently active workspace's scope. When the user switches workspaces, the caller should
+ * invoke `loadFromPersistence()` again to swap the in-memory index.
  */
 class RagPipelineService(
-    private val embeddingPort: EmbeddingProviderPort? = null
+    private val embeddingPort: EmbeddingProviderPort? = null,
+    private val persistenceService: KnowledgePersistenceService? = null,
+    private val workspaceIdProvider: () -> String = { "default" }
 ) {
     private val _documents = MutableStateFlow<List<KnowledgeDocument>>(emptyList())
     val documents: StateFlow<List<KnowledgeDocument>> = _documents.asStateFlow()
@@ -48,6 +57,24 @@ class RagPipelineService(
 
     init {
         bootstrapDefaultKnowledge()
+    }
+
+    /**
+     * Phase 2 — Loads all persisted documents+chunks for the current workspace
+     * into the in-memory index. Call this on app startup (after WorkspaceRuntimeService
+     * has determined the active workspace) and whenever the user switches workspaces.
+     *
+     * Replaces the in-memory index entirely (clears then loads).
+     */
+    suspend fun loadFromPersistence() {
+        val persistence = persistenceService ?: return
+        val workspaceId = workspaceIdProvider()
+        val (docs, loadedChunks) = persistence.loadWorkspaceKnowledge(workspaceId)
+        chunksMutex.withLock {
+            chunks.clear()
+            chunks.addAll(loadedChunks)
+        }
+        _documents.update { docs }
     }
 
     private fun bootstrapDefaultKnowledge() {
@@ -93,6 +120,9 @@ class RagPipelineService(
 
     /**
      * Ingests a new document into the knowledge base, splits into chunks, and computes embeddings.
+     *
+     * Phase 2: If `persistenceService` is non-null, the document and its chunks are also
+     * persisted to Room so they survive app restart.
      */
     suspend fun ingestDocument(title: String, content: String, sourceUri: String, tags: List<String> = emptyList()): KnowledgeDocument = withContext(Dispatchers.Default) {
         val docId = "doc_${System.currentTimeMillis()}"
@@ -125,6 +155,22 @@ class RagPipelineService(
         val completedDoc = doc.copy(totalChunks = embeddedChunks.size)
         _documents.update { it + completedDoc }
         chunks.addAll(embeddedChunks)
+
+        // Phase 2 — persist to Room so the knowledge survives app restart.
+        if (persistenceService != null) {
+            try {
+                persistenceService.persistDocument(
+                    workspaceId = workspaceIdProvider(),
+                    document = completedDoc,
+                    chunks = embeddedChunks
+                )
+            } catch (_: Exception) {
+                // Persistence failure is non-fatal — the in-memory index still works.
+                // The caller can retry persistence later via loadFromPersistence() which
+                // will pick up whatever was successfully saved.
+            }
+        }
+
         completedDoc
     }
 

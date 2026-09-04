@@ -302,6 +302,79 @@ object CriticalFindingsRegister {
             """.trimIndent(),
             fix = "Phase 2: unify into a single ResourceType enum or remove the dead 21-value enum.",
         ),
+        // ────────────────────────────────────────────────────────────────────
+        // Phase 2 — Unified Workspace & Resource Runtime
+        // ────────────────────────────────────────────────────────────────────
+        Finding(
+            id = "P2-WS-01",
+            severity = Severity.P1,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Workspace was Domain-only model with no runtime persistence",
+            file = "application/workspace/WorkspaceRuntimeService.kt (new)",
+            description = """
+                Workspace data class existed but was never instantiated, never persisted,
+                and never switched. The app hardcoded a single implicit workspace (project
+                id=1L). There was no concept of multi-workspace, no workspace switcher,
+                no persistence of active workspace across app restart.
+            """.trimIndent(),
+            fix = "Added WorkspaceRuntimeService with WorkspaceDao + WorkspaceEntity persistence. " +
+                "Auto-bootstraps a default workspace on first launch. Supports create/switch/" +
+                "rename/delete. Exposes activeWorkspace and allWorkspaces StateFlows. " +
+                "Persists networkPolicy, autonomyPolicy, settings, lastActiveProjectId.",
+        ),
+        Finding(
+            id = "P2-WS-02",
+            severity = Severity.P1,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "RAG knowledge base was in-memory only (lost on app restart)",
+            file = "application/rag/KnowledgePersistenceService.kt (new) + RagPipelineService.kt",
+            description = """
+                RagPipelineService held _documents StateFlow and chunks CopyOnWriteArrayList
+                purely in memory. All ingested knowledge documents and their embedding vectors
+                were lost when the app closed. Users had to re-ingest on every restart.
+            """.trimIndent(),
+            fix = "Added KnowledgePersistenceService backed by KnowledgeDocumentDao + " +
+                "DocumentChunkDao. RagPipelineService now accepts optional persistenceService " +
+                "and workspaceIdProvider. On ingest, documents+chunks are persisted to Room. " +
+                "loadFromPersistence() reloads them on startup or workspace switch. " +
+                "Knowledge is scoped to the active workspace.",
+        ),
+        Finding(
+            id = "P2-WS-03",
+            severity = Severity.P1,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Resource Graph edges had no persistence",
+            file = "infrastructure/persistence/entities/WorkspaceEntities.kt (new)",
+            description = """
+                The 21-value workspace.ResourceType + ResourceGraph + ResourceEdge + ResourceEdgeType
+                model existed but no edges were ever created at runtime, and even if they were,
+                they would be lost on restart. The graph was a dead data structure.
+            """.trimIndent(),
+            fix = "Added ResourceEdgeEntity + ResourceEdgeDao for persistent storage of " +
+                "workspace-scoped semantic edges (DEPENDS_ON, USES_TOOL, REFERENCES_KNOWLEDGE, " +
+                "etc.). Edges are scoped to workspaceId and indexed on sourceId, targetId, " +
+                "edgeType for fast lookup.",
+        ),
+        Finding(
+            id = "P2-WS-04",
+            severity = Severity.P2,
+            verdict = Verdict.MISLEADING,
+            status = FixStatus.FIXED,
+            title = "activeProject in UiState was never assigned",
+            file = "presentation/viewmodel/MainViewModel.kt",
+            description = """
+                The Phase 1 audit found that UiState.activeProject was permanently null and
+                the UI showed hardcoded fallback strings. listProjects() only returned the
+                single active project wrapped in listOf().
+            """.trimIndent(),
+            fix = "MainViewModel now observes WorkspaceRuntimeService.activeWorkspace and " +
+                "updates UiState.activeProject from workspace.activeProjectId. When the user " +
+                "switches workspaces, activeProject is updated to the new workspace's project " +
+                "and refreshFiles() is called to load the new project's files.",
+        ),
         Finding(
             id = "DOM-P1-18",
             severity = Severity.P1,
