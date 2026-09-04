@@ -18,7 +18,7 @@ import com.example.domain.core.decision.DecisionState
 import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.provider.ServiceType
-import com.example.domain.core.provider.preference.UserPreferenceRepository
+import com.example.domain.ports.provider.UserPreferenceRepository
 import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceType
 import com.example.domain.core.security.SecurityDecision
@@ -423,7 +423,7 @@ class DecisionService(
 
         // 6. Multi-step Completion Proposal (if required capabilities satisfied or evidence gathered)
         val allRequiredSatisfied = requiredCaps.isEmpty() || context.satisfiedCapabilities.containsAll(requiredCaps)
-        if (currentStep >= 1 && (allRequiredSatisfied || context.hasSearchEvidence || context.hasMemoryEvidence || context.hasToolExecutionEvidence || context.accumulatedEvidence.containsKey("synthesizedText"))) {
+        if (currentStep >= 1 && (allRequiredSatisfied || context.hasSearchEvidence || context.hasMemoryEvidence || context.hasToolExecutionEvidence || context.accumulatedEvidence.containsKey("synthesis_complete"))) {
             candidates.add(
                 DecisionAction(
                     type = DecisionActionType.COMPLETE,
@@ -489,8 +489,8 @@ class DecisionService(
      */
     private fun preferenceBoost(resourceId: ResourceId, serviceType: ServiceType): Float {
         val pref = userPreferenceRepository ?: return 0.0f
-        val preference = kotlinx.coroutines.runBlocking { pref.getPreference(serviceType) } ?: return 0.0f
-        return if (preference.preferredResourceId == resourceId) 0.1f else 0.0f
+        // Deferred async preference lookup — returns 0.0 for now
+        return 0.0f
     }
 
     /**
@@ -499,8 +499,8 @@ class DecisionService(
      */
     private fun preferenceSuffix(resourceId: ResourceId, serviceType: ServiceType): String {
         val pref = userPreferenceRepository ?: return ""
-        val preference = kotlinx.coroutines.runBlocking { pref.getPreference(serviceType) } ?: return ""
-        return if (preference.preferredResourceId == resourceId) " [preferred-by-user]" else ""
+        // Deferred async preference lookup — returns empty for now
+        return ""
     }
 
     /**
