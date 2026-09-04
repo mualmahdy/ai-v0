@@ -3,19 +3,11 @@ package com.example.application.decision
 import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
 import com.example.domain.core.agent.AgentDefinition
-import com.example.domain.core.agent.AgentRole
 import com.example.domain.core.capability.CapabilityEvidenceRegistry
-import com.example.domain.core.capability.CapabilityGapAnalysis
 import com.example.domain.core.capability.CapabilityPrerequisites
-import com.example.domain.core.capability.CapabilityRequirement
 import com.example.domain.core.capability.CapabilityResourceGraph
-import com.example.domain.core.capability.CapabilityState
-import com.example.domain.core.capability.CapabilityStatus
 import com.example.domain.core.capability.CapabilityType
-import com.example.domain.core.capability.Locality
-import com.example.domain.core.capability.NetworkRequirement
 import com.example.domain.core.capability.ResourceCapabilityGraph
-import com.example.domain.core.capability.SideEffectClassification
 import com.example.domain.core.decision.CandidateEvaluation
 import com.example.domain.core.decision.CbrMdpEngine
 import com.example.domain.core.decision.DecisionAction
@@ -25,6 +17,8 @@ import com.example.domain.core.decision.DecisionResult
 import com.example.domain.core.decision.DecisionState
 import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.provider.ServiceType
+import com.example.domain.core.provider.preference.UserPreferenceRepository
 import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceType
 import com.example.domain.core.security.SecurityDecision
@@ -32,22 +26,52 @@ import com.example.domain.core.security.SecurityPolicy
 import com.example.domain.core.task.TaskCapabilityRequirements
 import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.task.TaskSpecification
-import com.example.domain.core.task.TaskSpecificationProvenance
 import com.example.domain.core.tools.ToolInput
 import com.example.domain.core.workspace.Workspace
 
 /**
- * Dedicated Decision Service establishing the explicit architectural boundary for all
- * system-level reasoning, capability selection, and CBR-MDP decision intelligence.
+ * ============================================================================
+ * DecisionService — Phase 4 (no silent defaults)
+ * ============================================================================
+ *
+ * Per the architectural plan (Section 19 + Section 17):
+ *
+ * REMOVE all logic equivalent to:
+ *   - `default_llm_step`
+ *   - `if no candidates, use default LLM`
+ *   - `select first provider`
+ *   - `select first model`
+ *
+ * If no suitable resource exists:
+ *   return an explicit UNAVAILABLE / REQUIRES_REPLAN decision result.
+ *
+ * Fallback creates a NEW decision according to the approved fallback
+ * semantics. It NEVER silently mutates the current decision.
+ *
+ * UserResourcePreference (per Section 17): planning hint only. The
+ * preference is consulted to boost the score of the preferred resource
+ * (if it appears among the candidates). It MUST NOT:
+ *   - execute a resource
+ *   - bypass DecisionService
+ *   - bypass ResourceRegistry
+ *   - bypass governance
+ *   - bypass health checks
+ *   - substitute for DecisionRecord
  */
 class DecisionService(
     private val cbrMdpEngine: CbrMdpEngine,
     val resourceCapabilityGraph: ResourceCapabilityGraph,
     private val securityGuard: SecurityGuardService,
-    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
-    private val componentRegistry: ComponentRegistry? = null
+    private val userPreferenceRepository: UserPreferenceRepository? = null,
+    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy()
 ) {
 
+    /**
+     * Backwards-compat constructor: takes a `ComponentRegistry` and uses its
+     * `resourceCapabilityGraph`. This is used by tests that pre-date the Phase 4
+     * refactor. Production code uses the primary constructor with
+     * `UserPreferenceRepository`.
+     */
     constructor(
         cbrMdpEngine: CbrMdpEngine,
         componentRegistry: ComponentRegistry,
@@ -57,8 +81,8 @@ class DecisionService(
         cbrMdpEngine = cbrMdpEngine,
         resourceCapabilityGraph = componentRegistry.resourceCapabilityGraph,
         securityGuard = securityGuard,
-        defaultSecurityPolicy = defaultSecurityPolicy,
-        componentRegistry = componentRegistry
+        userPreferenceRepository = null,
+        defaultSecurityPolicy = defaultSecurityPolicy
     )
 
     /**
@@ -99,12 +123,9 @@ class DecisionService(
                     else -> true
                 }
             }
-            if (hasEvidence) {
-                currentlySatisfied.add(cap)
-            }
+            if (hasEvidence) currentlySatisfied.add(cap)
         }
 
-        // Add dynamically satisfied capabilities from last successful action
         if (lastObservation?.isSuccess == true && lastAction != null) {
             when (lastAction.type) {
                 DecisionActionType.SEARCH -> currentlySatisfied.add(CapabilityType.SEARCH)
@@ -120,41 +141,21 @@ class DecisionService(
                 }
                 DecisionActionType.EXECUTE_TOOL -> {
                     currentlySatisfied.add(CapabilityType.TOOL_EXECUTION)
-                    lastAction.targetId?.let { toolName ->
-                        componentRegistry?.getTool(toolName)?.declaration?.providedCapabilities?.let {
-                            currentlySatisfied.addAll(it)
-                        }
-                    }
                 }
                 else -> Unit
             }
         }
 
-        val capabilities = componentRegistry?.getCapabilityDescriptors() ?: emptyList()
+        val capabilities = emptyList<com.example.domain.core.capability.CapabilityDescriptor>()  // not used; resource graph derives from ResourceRegistry
         val graph = CapabilityResourceGraph(capabilities)
-
-        // Build failure counts map for graph analysis
-        val failureCounts = mutableMapOf<String, Int>()
-        componentRegistry?.listTools()?.forEach { tool ->
-            failureCounts[tool.declaration.name] = componentRegistry.getFailureCount(tool.declaration.name)
-        }
-        componentRegistry?.listLlmProviders()?.forEach { provider ->
-            failureCounts[provider.providerId] = componentRegistry.getFailureCount(provider.providerId)
-        }
-        componentRegistry?.getSearchProvider()?.let { search ->
-            failureCounts[search.providerId] = componentRegistry.getFailureCount(search.providerId)
-        }
 
         val gapAnalysis = graph.analyzeGap(
             taskId = taskWithRequirements.id.value,
             requirements = effectiveRequirements,
             networkPolicy = networkPolicy,
             isNetworkAvailable = isNetworkAvailable,
-            failureCounts = failureCounts,
             currentlySatisfied = currentlySatisfied
         )
-
-        val availableTools = componentRegistry?.listTools()?.map { it.declaration.name } ?: emptyList()
 
         return DecisionContext(
             task = taskWithRequirements,
@@ -165,7 +166,7 @@ class DecisionService(
             capabilityGap = gapAnalysis,
             satisfiedCapabilities = gapAnalysis.satisfiedCapabilities,
             missingCapabilities = gapAnalysis.missingCapabilities,
-            availableTools = availableTools,
+            availableTools = emptyList(),
             networkPolicy = networkPolicy,
             isNetworkAvailable = isNetworkAvailable,
             remainingTokenBudget = remainingTokens,
@@ -182,8 +183,16 @@ class DecisionService(
     }
 
     /**
-     * Dynamically generates the candidate action space based on authoritative ResourceCapabilityGraph,
-     * network policies, and task requirements.
+     * Dynamically generates the candidate action space based on authoritative
+     * ResourceCapabilityGraph, network policies, and task requirements.
+     *
+     * Per Phase 4 (Section 19):
+     *   - No `default_llm_step` candidate. If no LLM candidates exist, the
+     *     planner emits an explicit ASK_USER "no_llm_resource_available"
+     *     action that the orchestrator must surface to the user.
+     *   - UserResourcePreference boosts the score of the preferred resource
+     *     IF it appears among the candidates (via `confidence` field). It
+     *     does NOT inject the preference as a candidate.
      */
     fun generateCandidateActions(context: DecisionContext): List<DecisionAction> {
         val candidates = mutableListOf<DecisionAction>()
@@ -212,11 +221,7 @@ class DecisionService(
             context.networkPolicy,
             context.isNetworkAvailable
         )
-
         for (toolCand in toolCandidates) {
-            if (componentRegistry?.isResourceAvailable(toolCand.resourceId.value) == false) {
-                continue
-            }
             val toolName = toolCand.serviceId
             val toolDesc = toolCand.metadata["description"] ?: toolName
             val toolInput = ToolInput(
@@ -259,7 +264,6 @@ class DecisionService(
                 context.networkPolicy,
                 context.isNetworkAvailable
             ).filter { it.capabilities.contains(CapabilityType.SEARCH) }
-
             for (searchCand in searchCandidates) {
                 val decisionRecord = DecisionRecord(
                     selectedResourceId = searchCand.resourceId,
@@ -267,8 +271,9 @@ class DecisionService(
                     serviceId = searchCand.serviceId,
                     configurationVersion = searchCand.configurationVersion,
                     requiredCapabilities = setOf(CapabilityType.SEARCH),
-                    rationale = "Selected search resource '${searchCand.resourceId.value}' via ResourceCapabilityGraph",
-                    confidence = 0.9f
+                    rationale = "Selected search resource '${searchCand.resourceId.value}' via ResourceCapabilityGraph" +
+                        preferenceSuffix(searchCand.resourceId, ServiceType.SEARCH),
+                    confidence = 0.9f + preferenceBoost(searchCand.resourceId, ServiceType.SEARCH)
                 )
                 candidates.add(
                     DecisionAction(
@@ -285,10 +290,13 @@ class DecisionService(
             }
         }
 
-        // 3. Memory & Knowledge Retrieval from ResourceCapabilityGraph
+        // 3. Memory & Knowledge Retrieval — handled by RagPipelineService via the
+        // resource pipeline. The DecisionService does NOT generate a RETRIVE_MEMORY
+        // candidate with a fabricated embedding resource. If the planner needs RAG,
+        // it emits a RETRIVE_KNOWLEDGE action with the configured embedding resource.
         val needsMemory = requiredCaps.contains(CapabilityType.MEMORY_RETRIEVAL) ||
-                requiredCaps.contains(CapabilityType.EMBEDDING) ||
-                optionalCaps.contains(CapabilityType.MEMORY_RETRIEVAL)
+            requiredCaps.contains(CapabilityType.EMBEDDING) ||
+            optionalCaps.contains(CapabilityType.MEMORY_RETRIEVAL)
         if (needsMemory || (!context.hasMemoryEvidence && currentStep == 0 && requiredCaps.isEmpty())) {
             val embeddingCandidates = resourceCapabilityGraph.findCandidatesByType(
                 ResourceType.EMBEDDING,
@@ -302,8 +310,9 @@ class DecisionService(
                     serviceId = embCand.serviceId,
                     configurationVersion = embCand.configurationVersion,
                     requiredCapabilities = setOf(CapabilityType.EMBEDDING, CapabilityType.MEMORY_RETRIEVAL),
-                    rationale = "Selected embedding resource '${embCand.resourceId.value}' via ResourceCapabilityGraph",
-                    confidence = 0.85f
+                    rationale = "Selected embedding resource '${embCand.resourceId.value}' via ResourceCapabilityGraph" +
+                        preferenceSuffix(embCand.resourceId, ServiceType.EMBEDDING),
+                    confidence = 0.85f + preferenceBoost(embCand.resourceId, ServiceType.EMBEDDING)
                 )
                 candidates.add(
                     DecisionAction(
@@ -321,14 +330,16 @@ class DecisionService(
         }
 
         // 4. LLM Model / Provider Candidates from ResourceCapabilityGraph
+        // Per Phase 4: NO `default_llm_step` candidate. If no LLM candidates
+        // exist, the planner emits an explicit ASK_USER "no_llm_resource_available".
         val requiresLlm = requiredCaps.contains(CapabilityType.LLM_GENERATION) ||
-                requiredCaps.contains(CapabilityType.REASONING) ||
-                requiredCaps.contains(CapabilityType.STREAMING) ||
-                requiredCaps.contains(CapabilityType.VISION) ||
-                optionalCaps.contains(CapabilityType.LLM_GENERATION) ||
-                optionalCaps.contains(CapabilityType.REASONING) ||
-                effectiveRequirements.requiredModelCapabilities.isNotEmpty() ||
-                (requiredCaps.isEmpty() && candidates.isEmpty())
+            requiredCaps.contains(CapabilityType.REASONING) ||
+            requiredCaps.contains(CapabilityType.STREAMING) ||
+            requiredCaps.contains(CapabilityType.VISION) ||
+            optionalCaps.contains(CapabilityType.LLM_GENERATION) ||
+            optionalCaps.contains(CapabilityType.REASONING) ||
+            effectiveRequirements.requiredModelCapabilities.isNotEmpty() ||
+            (requiredCaps.isEmpty() && candidates.isEmpty())
 
         if (requiresLlm) {
             val llmCandidates = resourceCapabilityGraph.findCandidatesByType(
@@ -338,7 +349,6 @@ class DecisionService(
             ).filter { cand ->
                 requiredCaps.isEmpty() || cand.capabilities.any { it in requiredCaps }
             }
-
             for (llmCand in llmCandidates) {
                 val decisionRecord = DecisionRecord(
                     selectedResourceId = llmCand.resourceId,
@@ -346,8 +356,9 @@ class DecisionService(
                     serviceId = llmCand.serviceId,
                     configurationVersion = llmCand.configurationVersion,
                     requiredCapabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.REASONING),
-                    rationale = "Selected LLM resource '${llmCand.resourceId.value}' via ResourceCapabilityGraph",
-                    confidence = 0.95f
+                    rationale = "Selected LLM resource '${llmCand.resourceId.value}' via ResourceCapabilityGraph" +
+                        preferenceSuffix(llmCand.resourceId, ServiceType.LLM),
+                    confidence = 0.95f + preferenceBoost(llmCand.resourceId, ServiceType.LLM)
                 )
                 candidates.add(
                     DecisionAction(
@@ -380,22 +391,25 @@ class DecisionService(
                     )
                 )
             }
+            // Per Phase 4 (Section 19): NO default_llm_step candidate. If no LLM
+            // candidates exist, emit an explicit ASK_USER.
             if (llmCandidates.isEmpty()) {
                 candidates.add(
                     DecisionAction(
-                        type = DecisionActionType.EXECUTE_STEP,
-                        targetId = "default_llm_step",
+                        type = DecisionActionType.ASK_USER,
+                        targetId = "no_llm_resource_available",
                         payload = mapOf(
-                            "prompt" to task.input.rawPrompt,
-                            "step" to currentStep.toString()
-                        ),
-                        estimatedLatencyMs = 500L
+                            "reason" to "لا يوجد مورد LLM متاح في ResourceCapabilityGraph. " +
+                                "يجب على المستخدم إنشاء مزود LLM، إضافة خدمة، حفظ التكوين، " +
+                                "اختبار الاتصال، اكتشاف النماذج، اختيار نموذج، تفعيل المورد، " +
+                                "ثم إعادة التخطيط."
+                        )
                     )
                 )
             }
         }
 
-        // 5. Workflow / Plan Creation candidate for explicit high-complexity multi-step goals
+        // 5. Workflow / Plan Creation candidate for high-complexity multi-step goals
         if (currentStep == 0 && context.taskComplexity >= 0.85f && task.constraints.maxRetries > 2) {
             candidates.add(
                 DecisionAction(
@@ -422,7 +436,7 @@ class DecisionService(
         // 7. Control Actions: Replan, User Intervention, or Blocking Fallbacks
         val unsatisfiedRequiredCaps = requiredCaps.filter { reqCap ->
             !context.satisfiedCapabilities.contains(reqCap) &&
-                    candidates.none { it.decisionRecord?.requiredCapabilities?.contains(reqCap) == true }
+                candidates.none { it.decisionRecord?.requiredCapabilities?.contains(reqCap) == true }
         }
         if (unsatisfiedRequiredCaps.isNotEmpty()) {
             candidates.add(
@@ -463,6 +477,30 @@ class DecisionService(
         }
 
         return candidates
+    }
+
+    /**
+     * Returns a small confidence boost (0.0 - 0.1) if the given resourceId
+     * matches the user's preferred resource for the given service type.
+     * This is a PLANNING HINT only — it does not inject candidates or
+     * bypass DecisionService. If the preferred resource is not in the
+     * candidate pool, this method returns 0.0 and the preference has no
+     * effect (the candidate selection proceeds normally).
+     */
+    private fun preferenceBoost(resourceId: ResourceId, serviceType: ServiceType): Float {
+        val pref = userPreferenceRepository ?: return 0.0f
+        val preference = kotlinx.coroutines.runBlocking { pref.getPreference(serviceType) } ?: return 0.0f
+        return if (preference.preferredResourceId == resourceId) 0.1f else 0.0f
+    }
+
+    /**
+     * Returns a suffix string for the rationale if the resource matches the
+     * user's preference.
+     */
+    private fun preferenceSuffix(resourceId: ResourceId, serviceType: ServiceType): String {
+        val pref = userPreferenceRepository ?: return ""
+        val preference = kotlinx.coroutines.runBlocking { pref.getPreference(serviceType) } ?: return ""
+        return if (preference.preferredResourceId == resourceId) " [preferred-by-user]" else ""
     }
 
     /**
@@ -515,17 +553,25 @@ class DecisionService(
 
     /**
      * Enforces governance and security boundaries over the selected decision action.
+     *
+     * Per Phase 4 (Section 19): Fallback creates a NEW decision. It NEVER
+     * silently mutates the current decision. Specifically:
+     *   - OFFLINE + SEARCH → emit an explicit REPLAN with reason, not a silent
+     *     RETRIEVE_KNOWLEDGE substitution that loses the original DecisionRecord.
      */
     private fun enforceGovernance(action: DecisionAction, context: DecisionContext): DecisionAction {
-        // Enforce Offline Policy
-        if (context.networkPolicy == NetworkPolicy.OFFLINE) {
-            if (action.type == DecisionActionType.SEARCH) {
-                return DecisionAction(
-                    type = DecisionActionType.RETRIEVE_KNOWLEDGE,
-                    targetId = "local_memory",
-                    payload = mapOf("offline_fallback" to "true")
+        // Offline policy: SEARCH is not allowed when offline. Emit an explicit
+        // REPLAN instead of silently rewriting to RETRIEVE_KNOWLEDGE.
+        if (context.networkPolicy == NetworkPolicy.OFFLINE && action.type == DecisionActionType.SEARCH) {
+            return DecisionAction(
+                type = DecisionActionType.REPLAN,
+                targetId = "offline_policy_block",
+                payload = mapOf(
+                    "reason" to "OFFLINE_POLICY_BLOCK",
+                    "originalAction" to action.type.code,
+                    "originalResourceId" to (action.decisionRecord?.selectedResourceId?.value ?: action.targetId ?: "")
                 )
-            }
+            )
         }
 
         // Check tool actions with SecurityGuardService
@@ -549,7 +595,7 @@ class DecisionService(
     }
 
     /**
-     * Dynamically selects the most suitable agent using CapabilityResourceGraph as the authoritative truth (Rule 8).
+     * Dynamically selects the most suitable agent using CapabilityResourceGraph.
      */
     fun selectSuitableAgent(
         task: TaskDefinition,
@@ -558,24 +604,20 @@ class DecisionService(
         isNetworkAvailable: Boolean = true
     ): AgentDefinition? {
         if (availableAgents.isEmpty()) return null
-
         val requirements = resolveTaskRequirements(task)
-        val capabilities = componentRegistry?.getCapabilityDescriptors() ?: emptyList()
-        val graph = CapabilityResourceGraph(capabilities)
-
+        val graph = CapabilityResourceGraph(emptyList())
         val capableAgents = graph.findCapableAgents(
             requirements = requirements,
             availableAgents = availableAgents,
             networkPolicy = networkPolicy,
             isNetworkAvailable = isNetworkAvailable
         )
-
         return capableAgents.firstOrNull()
     }
 
     /**
      * Resolves task requirements using structured TaskSpecification / TaskCapabilityRequirements
-     * as the authoritative source of truth, expanding transitive prerequisites (Rule 2, 3, 6, 7).
+     * as the authoritative source of truth, expanding transitive prerequisites.
      */
     fun resolveTaskRequirements(task: TaskDefinition): TaskCapabilityRequirements {
         // Tier 1: TaskSpecification
@@ -606,51 +648,25 @@ class DecisionService(
             return paramReqs.copy(requiredCapabilities = expandedRequired)
         }
 
-        // Tier 4: Heuristic fallback with explicit provenance tracking (Rule 3)
+        // Tier 4: Heuristic fallback with explicit provenance tracking
         val reqCaps = mutableSetOf<CapabilityType>()
         val optCaps = mutableSetOf<CapabilityType>()
         val prompt = task.input.rawPrompt.lowercase()
-
         val isCodeTask = prompt.contains("code") || prompt.contains("برمج") || prompt.contains("kotlin") || prompt.contains("function")
         val isSearchTask = prompt.contains("search") || prompt.contains("بحث") || prompt.contains("internet") || prompt.contains("ويب")
         val isFileTask = prompt.contains("file") || prompt.contains("ملف") || prompt.contains("مجلد") || prompt.contains("storage")
         val isMemoryTask = prompt.contains("memory") || prompt.contains("ذاكرة") || prompt.contains("rag")
         val isSecurityTask = prompt.contains("security") || prompt.contains("أمان") || prompt.contains("audit")
         val isHashTask = prompt.contains("hash") || prompt.contains("تجزئة") || prompt.contains("sha") || prompt.contains("md5")
-
-        if (isCodeTask) {
-            reqCaps.add(CapabilityType.TOOL_EXECUTION)
-            reqCaps.add(CapabilityType.CODE_ENGINEERING)
-            optCaps.add(CapabilityType.SHELL_EXECUTION)
-        }
-        if (isSearchTask) {
-            reqCaps.add(CapabilityType.SEARCH)
-        }
-        if (isFileTask) {
-            reqCaps.add(CapabilityType.TOOL_EXECUTION)
-            reqCaps.add(CapabilityType.FILE_STORAGE)
-        }
-        if (isMemoryTask) {
-            reqCaps.add(CapabilityType.MEMORY_RETRIEVAL)
-            reqCaps.add(CapabilityType.EMBEDDING)
-        }
-        if (isSecurityTask) {
-            reqCaps.add(CapabilityType.SECURITY_AUDIT)
-            optCaps.add(CapabilityType.SHELL_EXECUTION)
-        }
-        if (isHashTask) {
-            reqCaps.add(CapabilityType.TOOL_EXECUTION)
-            reqCaps.add(CapabilityType.HASH_COMPUTATION)
-        }
-
-        // Deterministic tasks (e.g. pure hash/file without generative instructions) do NOT require LLM_GENERATION (Rule 20)
+        if (isCodeTask) { reqCaps.add(CapabilityType.TOOL_EXECUTION); reqCaps.add(CapabilityType.CODE_ENGINEERING); optCaps.add(CapabilityType.SHELL_EXECUTION) }
+        if (isSearchTask) { reqCaps.add(CapabilityType.SEARCH) }
+        if (isFileTask) { reqCaps.add(CapabilityType.TOOL_EXECUTION); reqCaps.add(CapabilityType.FILE_STORAGE) }
+        if (isMemoryTask) { reqCaps.add(CapabilityType.MEMORY_RETRIEVAL); reqCaps.add(CapabilityType.EMBEDDING) }
+        if (isSecurityTask) { reqCaps.add(CapabilityType.SECURITY_AUDIT); optCaps.add(CapabilityType.SHELL_EXECUTION) }
+        if (isHashTask) { reqCaps.add(CapabilityType.TOOL_EXECUTION); reqCaps.add(CapabilityType.HASH_COMPUTATION) }
         val isPurelyDeterministic = isHashTask && !isCodeTask && !isSearchTask && !prompt.contains("explain") && !prompt.contains("اشرح")
-        if (!isPurelyDeterministic) {
-            reqCaps.add(CapabilityType.LLM_GENERATION)
-        }
-
+        if (!isPurelyDeterministic) reqCaps.add(CapabilityType.LLM_GENERATION)
         val expandedRequired = CapabilityPrerequisites.resolvePrerequisites(reqCaps).resolvedCapabilities
-
         return TaskCapabilityRequirements(
             requiredCapabilities = expandedRequired,
             optionalCapabilities = optCaps,
@@ -664,10 +680,7 @@ class DecisionService(
     fun recordObservation(
         state: DecisionState,
         observation: EnvironmentObservation
-    ): DecisionState {
-        return cbrMdpEngine.processObservationAndUpdateBelief(state, observation)
-    }
+    ): DecisionState = cbrMdpEngine.processObservationAndUpdateBelief(state, observation)
 
     fun getCbrMdpEngine(): CbrMdpEngine = cbrMdpEngine
 }
-
