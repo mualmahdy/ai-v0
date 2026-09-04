@@ -48,6 +48,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 
 /**
@@ -271,7 +272,7 @@ class CapabilityIntelligenceCoreTest {
     }
 
     @Test
-    fun testToolSelection_StrictlyCapabilityDriven() {
+    fun testToolSelection_StrictlyCapabilityDriven() = runBlocking {
         val dummyTool = object : ToolPort {
             override val declaration: ToolDeclaration = ToolDeclaration(
                 name = "special_crypto_signer",
@@ -305,7 +306,7 @@ class CapabilityIntelligenceCoreTest {
     }
 
     @Test
-    fun testDecisionService_CapabilityGapBlockNotification() {
+    fun testDecisionService_CapabilityGapBlockNotification() = runBlocking {
         val taskWithImpossibleCap = TaskDefinition(
             id = TaskId("task_impossible"),
             assignedAgentId = AgentId("default"),
@@ -394,7 +395,7 @@ class CapabilityIntelligenceCoreTest {
     }
 
     @Test
-    fun testDegradedToolExclusion_WhenFailuresExceedThreshold() {
+    fun testDegradedToolExclusion_WhenFailuresExceedThreshold() = runBlocking {
         val failingTool = object : ToolPort {
             override val declaration: ToolDeclaration = ToolDeclaration(
                 name = "flaky_tool",

@@ -24,8 +24,8 @@ import com.example.domain.core.llm.SafeProviderMetadata
 import com.example.domain.core.llm.TokenUsage
 import com.example.domain.core.provider.AuthenticationType
 import com.example.domain.core.provider.HealthStatus
-import com.example.domain.core.provider.OfferingCatalog
-import com.example.domain.core.provider.OfferingType
+import com.example.domain.core.provider.offering.OfferingCatalog
+import com.example.domain.core.provider.offering.OfferingType
 import com.example.domain.core.provider.ProtocolWireFormat
 import com.example.domain.core.provider.Provider
 import com.example.domain.core.provider.ProviderCategory
@@ -33,8 +33,9 @@ import com.example.domain.core.provider.ProviderConfiguration
 import com.example.domain.core.provider.ProviderFlavor
 import com.example.domain.core.provider.ProviderService
 import com.example.domain.core.provider.ServiceConfiguration
-import com.example.domain.core.provider.ServiceOffering
+import com.example.domain.core.provider.offering.ServiceOffering
 import com.example.domain.core.provider.ServiceProtocol
+import com.example.domain.core.provider.ServiceProtocolId
 import com.example.domain.core.provider.ServiceType
 import com.example.domain.core.provider.toAuthoritativeResourceRecord
 import com.example.domain.core.provider.toDefaultOffering
@@ -51,6 +52,7 @@ import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.task.TaskId
 import com.example.domain.core.task.TaskInput
 import com.example.domain.core.task.TaskLifecycleState
+import com.example.application.testing.TestResourceRegistration
 import com.example.domain.ports.llm.LlmProviderPort
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -104,7 +106,7 @@ class GeneralizedProviderArchitectureTest {
         val config = ServiceConfiguration(
             id = "cfg-gemini",
             serviceId = service.id,
-            protocolId = protocol.id,
+            protocolId = ServiceProtocolId.GEMINI_NATIVE,
             endpointUrl = "https://generativelanguage.googleapis.com",
             defaultOfferingId = "gemini-2.5-flash",
             isEnabled = true,
@@ -114,7 +116,7 @@ class GeneralizedProviderArchitectureTest {
             configurationVersion = 1L
         )
         assertEquals(service.id, config.serviceId)
-        assertEquals(protocol.id, config.protocolId)
+        assertEquals(ServiceProtocolId.GEMINI_NATIVE, config.protocolId)
 
         // 5. OFFERING & OFFERING CATALOG
         val offering = ServiceOffering(
@@ -224,7 +226,7 @@ class GeneralizedProviderArchitectureTest {
             }
         }
 
-        registry.registerLlmProvider(mockAdapter, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, mockAdapter)
 
         val decisionService = DecisionService(
             cbrMdpEngine = cbrMdpEngine,
@@ -233,7 +235,8 @@ class GeneralizedProviderArchitectureTest {
         )
 
         val executionService = ExecutionService(
-            componentRegistry = registry,
+            runtimeAdapterResolver = registry.runtimeAdapterResolver,
+            resourceRegistry = registry.resourceRegistry,
             securityGuard = securityGuard
         )
 

@@ -46,9 +46,10 @@ enum class ResourceLifecycleState {
  *   - runtimeSupported = false (must be explicitly verified)
  *   - healthStatus = UNKNOWN (must be explicitly probed)
  *
- * Note: ComponentRegistry.registerLlmProvider / registerSearchProvider / etc. continue
- * to override these defaults with explicit values appropriate for those registration
- * paths. The defaults here are the safe-honest baseline for direct construction.
+ * Note: TestResourceRegistration (tests) and ProviderControlPlaneService
+ * (production) register providers with explicit lifecycle/runtime/health
+ * values appropriate for their registration paths. The defaults here are the
+ * safe-honest baseline for direct construction.
  */
 data class ResourceRecord(
     val resourceId: ResourceId,

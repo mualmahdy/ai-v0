@@ -15,12 +15,15 @@ import com.example.domain.core.extension.PluginManifest
 import com.example.domain.core.extension.SkillManifest
 import com.example.domain.core.memory.MemoryEntry
 import com.example.domain.core.memory.ScoredMemoryRecord
-import com.example.domain.core.model.ModelDescriptor
 import com.example.domain.core.network.NetworkPolicy
-import com.example.domain.core.provider.ProviderDescriptor
+import com.example.domain.core.provider.Provider
+import com.example.domain.core.provider.ProviderService
+import com.example.domain.core.provider.ServiceConfiguration
+import com.example.domain.core.provider.offering.ServiceOffering
 import com.example.domain.core.radar.RadarItem
 import com.example.domain.core.rag.AssembledRagContext
 import com.example.domain.core.rag.KnowledgeDocument
+import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.storage.WorkspaceFileEntry
 import com.example.domain.core.task.AutonomyPolicy
@@ -49,6 +52,22 @@ data class ExecutionStepItem(
     val isDegraded: Boolean = false
 )
 
+/**
+ * ============================================================================
+ * UiState — Phase 4 (generalized provider architecture)
+ * ============================================================================
+ *
+ * The provider management fields use the new generalized types:
+ *   - `generalizedProviders` — List<Provider>
+ *   - `generalizedServices` — List<ProviderService>
+ *   - `generalizedConfigurations` — List<ServiceConfiguration>
+ *   - `discoveredOfferings` — List<ServiceOffering>
+ *   - `materializedResources` — List<ResourceRecord>
+ *
+ * The legacy `providerConfigurations` field is REMOVED. The
+ * `ModelsCapabilitiesScreen` has been replaced by `ProviderServiceManagerScreen`
+ * (Phase 4 follow-up commit will add the screen).
+ */
 data class UiState(
     val activeTab: ActiveNavigationTab = ActiveNavigationTab.STUDIO,
     val activeProject: ProjectMetadata? = null,
@@ -91,16 +110,16 @@ data class UiState(
     val mcpServers: List<McpServerDescriptor> = emptyList(),
     val integrations: List<IntegrationDescriptor> = emptyList(),
 
-    // Models & Providers
-    val providers: List<ProviderDescriptor> = emptyList(),
-    val providerConfigurations: List<com.example.domain.core.provider.ProviderConfiguration> = emptyList(),
-    val discoveredModels: List<ModelDescriptor> = emptyList(),
+    // Phase 4 — Generalized Provider Architecture
+    val generalizedProviders: List<Provider> = emptyList(),
+    val generalizedServices: List<ProviderService> = emptyList(),
+    val generalizedConfigurations: List<ServiceConfiguration> = emptyList(),
+    val discoveredOfferings: List<ServiceOffering> = emptyList(),
+    val materializedResources: List<ResourceRecord> = emptyList(),
     val isDiscoveringModels: Boolean = false,
     val isTestingProvider: Boolean = false,
     val testingProviderId: String? = null,
-    val providerTestResult: com.example.domain.core.provider.ProviderValidationResult? = null,
     val isAddProviderDialogOpen: Boolean = false,
-    val editingProvider: com.example.domain.core.provider.ProviderConfiguration? = null,
 
     // Memory & Knowledge RAG
     val memoryQuery: String = "",

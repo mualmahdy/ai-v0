@@ -7,6 +7,7 @@ import com.example.application.observation.ObservationService
 import com.example.application.orchestration.AgentOrchestrator
 import com.example.application.outcome.OutcomeService
 import com.example.application.registry.ComponentRegistry
+import com.example.application.testing.TestResourceRegistration
 import com.example.application.security.SecurityGuardService
 import com.example.domain.core.DegradedReason
 import com.example.domain.core.Outcome
@@ -20,6 +21,7 @@ import com.example.domain.core.decision.CaseBase
 import com.example.domain.core.decision.CbrMdpEngine
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
+import com.example.domain.core.decision.DecisionRecord
 import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.llm.LlmFailure
@@ -34,6 +36,7 @@ import com.example.domain.core.memory.RetrievalMode
 import com.example.domain.core.memory.ScoredMemoryRecord
 import com.example.domain.ports.memory.MemoryRepositoryPort
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.search.SearchFailure
 import com.example.domain.core.search.SearchQuery
 import com.example.domain.core.search.SearchResultItem
@@ -121,8 +124,10 @@ class IntelligencePipelineComprehensiveTest {
             securityGuard = securityGuard
         )
         executionService = ExecutionService(
-            componentRegistry = registry,
-            securityGuard = securityGuard
+            runtimeAdapterResolver = registry.runtimeAdapterResolver,
+            resourceRegistry = registry.resourceRegistry,
+            securityGuard = securityGuard,
+            memoryRepositoryProvider = { registry.getMemoryRepository() }
         )
         observationService = ObservationService()
         outcomeService = OutcomeService()
@@ -138,11 +143,11 @@ class IntelligencePipelineComprehensiveTest {
 
     // 1. Offline Model Selection Test
     @Test
-    fun `1 - test offline model selection uses only local resources`() {
+    fun `1 - test offline model selection uses only local resources`() = runBlocking {
         val remoteProvider = createMockLlmProvider("remote_gemini", isLocal = false)
         val localProvider = createMockLlmProvider("local_ollama", isLocal = true)
-        registry.registerLlmProvider(remoteProvider)
-        registry.registerLlmProvider(localProvider)
+        TestResourceRegistration.registerLlmProvider(registry, remoteProvider)
+        TestResourceRegistration.registerLlmProvider(registry, localProvider)
 
         val task = TaskDefinition(
             id = TaskId("task-offline-1"),
@@ -189,7 +194,7 @@ class IntelligencePipelineComprehensiveTest {
             }
         }
 
-        registry.registerLlmProvider(failingProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, failingProvider)
 
         val task = TaskDefinition(
             id = TaskId("task-fallback-2"),
@@ -259,7 +264,20 @@ class IntelligencePipelineComprehensiveTest {
 
         val task = TaskDefinition(id = TaskId("task-tool-4"), assignedAgentId = testAgent.identity.id, input = TaskInput("read file"))
         val context = decisionService.buildDecisionContext(task)
-        val action = DecisionAction(DecisionActionType.EXECUTE_TOOL, targetId = "safe_file_reader")
+        // Phase 4: in-app tools are ResourceRecords — execution requires an
+        // authoritative DecisionRecord pointing at the tool's ResourceId.
+        val action = DecisionAction(
+            DecisionActionType.EXECUTE_TOOL, targetId = "safe_file_reader",
+            decisionRecord = DecisionRecord(
+                selectedResourceId = ResourceId("safe_file_reader"),
+                providerId = "in_app",
+                serviceId = "in_app_tools",
+                configurationVersion = 1L,
+                requiredCapabilities = setOf(CapabilityType.TOOL_EXECUTION),
+                rationale = "اختبار أداة مسموحة",
+                confidence = 0.9f
+            )
+        )
 
         val result = executionService.executeAction(action, context, testAgent)
         assertTrue(result.isSuccess)
@@ -284,7 +302,7 @@ class IntelligencePipelineComprehensiveTest {
                 return Outcome.Error(SearchFailure.NetworkError("DNS resolution failed"))
             }
         }
-        registry.registerSearchProvider(failingSearch)
+        TestResourceRegistration.registerSearchProvider(registry, failingSearch)
 
         val task = TaskDefinition(id = TaskId("task-search-5"), assignedAgentId = testAgent.identity.id, input = TaskInput("search internet"))
         val context = decisionService.buildDecisionContext(task)
@@ -306,7 +324,7 @@ class IntelligencePipelineComprehensiveTest {
                 emit(ExecutionEvent.Error(executionId, "MODEL_FAILURE", "LLM stream disconnected unexpectedly"))
             }
         }
-        registry.registerLlmProvider(failingProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, failingProvider)
 
         val task = TaskDefinition(id = TaskId("task-mod-6"), assignedAgentId = testAgent.identity.id, input = TaskInput("Generate code"))
         val events = orchestrator.executeTaskStream(testAgent, task).toList()
@@ -317,11 +335,24 @@ class IntelligencePipelineComprehensiveTest {
     @Test
     fun `7 - test retry action triggers backoff delay and retries model step`() = runBlocking {
         val mockProvider = createMockLlmProvider("retry_provider", isLocal = false)
-        registry.registerLlmProvider(mockProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, mockProvider)
 
         val task = TaskDefinition(id = TaskId("task-retry-7"), assignedAgentId = testAgent.identity.id, input = TaskInput("Calculate result"))
         val context = decisionService.buildDecisionContext(task, consecutiveFailures = 1)
-        val action = DecisionAction(DecisionActionType.RETRY, targetId = "retry_provider")
+        // Phase 4: retrying a model step still requires the authoritative
+        // DecisionRecord identifying the target resource.
+        val action = DecisionAction(
+            DecisionActionType.RETRY, targetId = "retry_provider",
+            decisionRecord = DecisionRecord(
+                selectedResourceId = ResourceId("retry_provider"),
+                providerId = "retry_provider",
+                serviceId = "retry_provider-service",
+                configurationVersion = 1L,
+                requiredCapabilities = setOf(CapabilityType.LLM_GENERATION),
+                rationale = "إعادة محاولة بعد فشل عابر",
+                confidence = 0.9f
+            )
+        )
 
         val result = executionService.executeAction(action, context, testAgent)
         assertTrue(result.isSuccess)
@@ -330,7 +361,7 @@ class IntelligencePipelineComprehensiveTest {
 
     // 8. Replan on Consecutive Failures Test
     @Test
-    fun `8 - test replan candidate generated when consecutive failures exceed threshold`() {
+    fun `8 - test replan candidate generated when consecutive failures exceed threshold`() = runBlocking {
         val task = TaskDefinition(id = TaskId("task-replan-8"), assignedAgentId = testAgent.identity.id, input = TaskInput("Complex pipeline"))
         val context = decisionService.buildDecisionContext(task, consecutiveFailures = 3)
 
@@ -389,7 +420,7 @@ class IntelligencePipelineComprehensiveTest {
 
     // 11. Resource Selection Test
     @Test
-    fun `11 - test resource selection filters based on network policy`() {
+    fun `11 - test resource selection filters based on network policy`() = runBlocking {
         val task = TaskDefinition(id = TaskId("task-res-11"), assignedAgentId = testAgent.identity.id, input = TaskInput("Fast local task"))
         val offlineContext = decisionService.buildDecisionContext(task, networkPolicy = NetworkPolicy.OFFLINE, isNetworkAvailable = false)
 
@@ -400,7 +431,7 @@ class IntelligencePipelineComprehensiveTest {
 
     // 12. Agent Selection Test
     @Test
-    fun `12 - test agent selection candidate generation`() {
+    fun `12 - test agent selection candidate generation`() = runBlocking {
         val task = TaskDefinition(id = TaskId("task-agent-12"), assignedAgentId = testAgent.identity.id, input = TaskInput("Write clean code module"))
         val context = decisionService.buildDecisionContext(task)
 
@@ -412,7 +443,7 @@ class IntelligencePipelineComprehensiveTest {
     @Test
     fun `13 - test streaming event emission lifecycle order`() = runBlocking {
         val mockProvider = createMockLlmProvider("stream_provider", isLocal = false)
-        registry.registerLlmProvider(mockProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, mockProvider)
 
         val task = TaskDefinition(id = TaskId("task-evt-13"), assignedAgentId = testAgent.identity.id, input = TaskInput("Test stream lifecycle"))
         val events = orchestrator.executeTaskStream(testAgent, task).toList()
@@ -441,7 +472,18 @@ class IntelligencePipelineComprehensiveTest {
 
         val task = TaskDefinition(id = TaskId("task-deg-14"), assignedAgentId = testAgent.identity.id, input = TaskInput("Run diagnostics"))
         val context = decisionService.buildDecisionContext(task)
-        val action = DecisionAction(DecisionActionType.EXECUTE_TOOL, targetId = "degraded_tool")
+        val action = DecisionAction(
+            DecisionActionType.EXECUTE_TOOL, targetId = "degraded_tool",
+            decisionRecord = DecisionRecord(
+                selectedResourceId = ResourceId("degraded_tool"),
+                providerId = "in_app",
+                serviceId = "in_app_tools",
+                configurationVersion = 1L,
+                requiredCapabilities = setOf(CapabilityType.TOOL_EXECUTION),
+                rationale = "اختبار تنفيذ متدهور",
+                confidence = 0.9f
+            )
+        )
 
         val result = executionService.executeAction(action, context, testAgent)
         assertTrue(result.isSuccess)
@@ -465,15 +507,33 @@ class IntelligencePipelineComprehensiveTest {
             prohibitedParameters = listOf("rm -rf", "delete_system_root")
         )
         val strictSecurityGuard = SecurityGuardService()
-        val strictExecutionService = ExecutionService(registry, strictSecurityGuard, defaultSecurityPolicy = strictPolicy)
+        val strictExecutionService = ExecutionService(
+            runtimeAdapterResolver = registry.runtimeAdapterResolver,
+            resourceRegistry = registry.resourceRegistry,
+            securityGuard = strictSecurityGuard,
+            defaultSecurityPolicy = strictPolicy,
+            memoryRepositoryProvider = { registry.getMemoryRepository() }
+        )
 
         val task = TaskDefinition(id = TaskId("task-sec-15"), assignedAgentId = testAgent.identity.id, input = TaskInput("Delete system files"))
         val context = decisionService.buildDecisionContext(task)
-        val action = DecisionAction(DecisionActionType.EXECUTE_TOOL, targetId = "delete_system_root")
+        // Phase 4: التنفيذ يمر عبر DecisionRecord موثوق، ثم يرفضه حارس الأمن.
+        val action = DecisionAction(
+            DecisionActionType.EXECUTE_TOOL, targetId = "delete_system_root",
+            decisionRecord = DecisionRecord(
+                selectedResourceId = ResourceId("delete_system_root"),
+                providerId = "in_app",
+                serviceId = "in_app_tools",
+                configurationVersion = 1L,
+                requiredCapabilities = setOf(CapabilityType.TOOL_EXECUTION),
+                rationale = "اختبار رفض أمني لأداة خطرة",
+                confidence = 0.9f
+            )
+        )
 
         val result = strictExecutionService.executeAction(action, context, testAgent)
         assertFalse(result.isSuccess)
-        assertTrue(result.errorDescription?.contains("أمان") == true || result.errorDescription?.contains("Security") == true || result.errorDescription?.contains("رفض") == true)
+        assertTrue(result.errorDescription?.contains("أمان") == true || result.errorDescription?.contains("Security") == true || result.errorDescription?.contains("رفض") == true || result.errorDescription?.contains("حظر") == true)
     }
 
     private fun createMockLlmProvider(id: String, isLocal: Boolean): LlmProviderPort {

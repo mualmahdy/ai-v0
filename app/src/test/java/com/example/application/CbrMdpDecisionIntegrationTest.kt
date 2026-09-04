@@ -16,6 +16,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 
 class CbrMdpDecisionIntegrationTest {
@@ -40,7 +41,7 @@ class CbrMdpDecisionIntegrationTest {
     }
 
     @Test
-    fun `test decision service generates candidate actions and selects best action`() {
+    fun `test decision service generates candidate actions and selects best action`() = runBlocking {
         val task = TaskDefinition(
             id = TaskId("task-eval-1"),
             assignedAgentId = AgentId("code_craftsman"),
@@ -66,7 +67,7 @@ class CbrMdpDecisionIntegrationTest {
     }
 
     @Test
-    fun `test offline policy governance constrains external search action`() {
+    fun `test offline policy governance constrains external search action`() = runBlocking {
         val task = TaskDefinition(
             id = TaskId("task-eval-2"),
             assignedAgentId = AgentId("architect_orchestrator"),
@@ -89,7 +90,7 @@ class CbrMdpDecisionIntegrationTest {
     }
 
     @Test
-    fun `test observation recording updates uncertainty and expands case base`() {
+    fun `test observation recording updates uncertainty and expands case base`() = runBlocking {
         val task = TaskDefinition(
             id = TaskId("task-eval-3"),
             assignedAgentId = AgentId("code_craftsman"),

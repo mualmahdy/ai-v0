@@ -3,6 +3,7 @@ package com.example.application
 import com.example.application.orchestration.AgentOrchestrator
 import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
+import com.example.application.testing.TestResourceRegistration
 import com.example.domain.core.Outcome
 import com.example.domain.core.agent.AgentBudget
 import com.example.domain.core.agent.AgentDefinition
@@ -102,7 +103,7 @@ class AgentOrchestratorTest {
             }
         }
 
-        registry.registerLlmProvider(mockProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, mockProvider)
 
         val task = TaskDefinition(
             id = TaskId("t-2"),
@@ -146,7 +147,7 @@ class AgentOrchestratorTest {
             }
         }
 
-        registry.registerLlmProvider(mockProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, mockProvider)
 
         val task = TaskDefinition(
             id = TaskId("t-3"),

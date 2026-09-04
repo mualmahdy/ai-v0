@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.application.extension.ExtensionManager
 import com.example.application.provider.ProviderControlPlaneService
-import com.example.application.provider.ProviderRegistryService
 import com.example.application.radar.IntelligenceRadarPipeline
 import com.example.application.rag.RagPipelineService
 import com.example.application.registry.ComponentRegistry
@@ -35,8 +34,14 @@ import com.example.domain.core.memory.MemoryProvenance
 import com.example.domain.core.memory.MemoryType
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.provider.HealthStatus
-import com.example.domain.core.provider.ProviderCategory
-import com.example.domain.core.provider.ProviderConfiguration
+import com.example.domain.core.provider.Provider
+import com.example.domain.core.provider.ProviderService
+import com.example.domain.core.provider.ServiceConfiguration
+import com.example.domain.core.provider.ServiceType
+import com.example.domain.core.provider.ServiceValidationResult
+import com.example.domain.core.provider.offering.ServiceOffering
+import com.example.domain.core.resource.ResourceId
+import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.task.TaskConstraints
 import com.example.domain.core.task.TaskDefinition
@@ -67,7 +72,6 @@ class MainViewModel(
     private val manageWorkspaceFilesUseCase: ManageWorkspaceFilesUseCase,
     private val componentRegistry: ComponentRegistry,
     private val cbrMdpEngine: CbrMdpEngine,
-    private val providerRegistryService: ProviderRegistryService,
     private val extensionManager: ExtensionManager,
     private val intelligenceRadarPipeline: IntelligenceRadarPipeline,
     private val ragPipelineService: RagPipelineService,
@@ -92,6 +96,9 @@ class MainViewModel(
         observeSubsystems()
         loadInitialData()
         observeWorkspace()
+        // Phase 4 — first-run bootstrap: seeds local embedding + multi-source
+        // search + Gemini provider records (idempotent, no network for in-process).
+        providerControlPlaneService.launchBootstrapDefaults()
     }
 
     /**
@@ -154,20 +161,24 @@ class MainViewModel(
 
     private fun observeSubsystems() {
         viewModelScope.launch {
-            providerControlPlaneService.allProvidersFlow.collect { configs ->
-                _uiState.update { it.copy(providerConfigurations = configs) }
+            providerControlPlaneService.allProvidersFlow.collect { providers ->
+                _uiState.update { it.copy(generalizedProviders = providers) }
                 refreshCapabilities()
             }
         }
         viewModelScope.launch {
-            providerRegistryService.registeredProviders.collect { providers ->
-                _uiState.update { it.copy(providers = providers) }
+            providerControlPlaneService.allServicesFlow.collect { services ->
+                _uiState.update { it.copy(generalizedServices = services) }
             }
         }
-
         viewModelScope.launch {
-            providerRegistryService.discoveredModels.collect { models ->
-                _uiState.update { it.copy(discoveredModels = models) }
+            providerControlPlaneService.allConfigurationsFlow.collect { configs ->
+                _uiState.update { it.copy(generalizedConfigurations = configs) }
+            }
+        }
+        viewModelScope.launch {
+            providerControlPlaneService.allResourcesFlow.collect { resources ->
+                _uiState.update { it.copy(materializedResources = resources) }
             }
         }
         viewModelScope.launch {
@@ -445,16 +456,201 @@ class MainViewModel(
         }
     }
 
-    // --- Provider & Resource Control Plane ---
-    fun saveProvider(config: ProviderConfiguration, secretApiKey: String? = null) {
+    // --- Provider & Resource Control Plane (Phase 4 — generalized API) ---
+
+    /**
+     * Create a new Provider. Pure persistence — no network calls.
+     */
+    fun createProvider(name: String, description: String, websiteUrl: String?, isLocal: Boolean) {
         viewModelScope.launch {
-            when (val outcome = providerControlPlaneService.saveProvider(config, secretApiKey)) {
+            val provider = com.example.domain.core.provider.Provider(
+                id = "prov_${System.currentTimeMillis()}",
+                name = name,
+                description = description,
+                websiteUrl = websiteUrl,
+                isLocal = isLocal,
+                isEnabled = true
+            )
+            when (val outcome = providerControlPlaneService.createProvider(provider)) {
                 is Outcome.Success -> {
-                    _uiState.update { it.copy(isAddProviderDialogOpen = false, editingProvider = null) }
+                    _uiState.update { it.copy(isAddProviderDialogOpen = false) }
                     refreshCapabilities()
                 }
                 is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> _uiState.update { it.copy(isAddProviderDialogOpen = false, editingProvider = null) }
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * Add a service to an existing provider. ServiceType↔Protocol compatibility
+     * is verified by the control plane. Pure persistence — no network calls.
+     */
+    fun addService(providerId: String, name: String, serviceType: ServiceType, supportedProtocols: List<String>) {
+        viewModelScope.launch {
+            val service = ProviderService(
+                id = "${providerId}_${serviceType.code}_${System.currentTimeMillis()}",
+                providerId = providerId,
+                name = name,
+                serviceType = serviceType,
+                supportedProtocolIds = supportedProtocols,
+                isEnabled = true
+            )
+            when (val outcome = providerControlPlaneService.addService(service)) {
+                is Outcome.Success -> refreshCapabilities()
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * Save a ServiceConfiguration. Pure persistence — no network calls.
+     */
+    fun saveServiceConfiguration(
+        serviceId: String,
+        protocolId: com.example.domain.core.provider.ServiceProtocolId,
+        endpointUrl: String,
+        authAlias: String?,
+        secretApiKey: String?,
+        timeoutSeconds: Int = 30
+    ) {
+        viewModelScope.launch {
+            val config = ServiceConfiguration(
+                id = "cfg_${serviceId}_${System.currentTimeMillis()}",
+                serviceId = serviceId,
+                protocolId = protocolId,
+                endpointUrl = endpointUrl,
+                authAlias = authAlias,
+                timeoutSeconds = timeoutSeconds,
+                isEnabled = true
+            )
+            when (val outcome = providerControlPlaneService.saveConfiguration(config)) {
+                is Outcome.Success -> {
+                    // Also store the secret if provided
+                    if (!authAlias.isNullOrBlank() && !secretApiKey.isNullOrBlank()) {
+                        providerControlPlaneService.storeSecret(authAlias, secretApiKey)
+                    }
+                    refreshCapabilities()
+                }
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * Test the connection for a ServiceConfiguration. Explicit network call
+     * (POST /chat/completions for LLM, real protocol operation for others).
+     */
+    fun testServiceConnection(configId: String) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isTestingProvider = true, testingProviderId = configId) }
+            try {
+                when (val outcome = providerControlPlaneService.testServiceConnection(configId)) {
+                    is Outcome.Success -> {
+                        _uiState.update {
+                            it.copy(
+                                isTestingProvider = false,
+                                diagnosticBanner = outcome.value.message
+                            )
+                        }
+                    }
+                    is Outcome.Error -> {
+                        _uiState.update {
+                            it.copy(
+                                isTestingProvider = false,
+                                errorMessage = outcome.diagnosticMessage
+                            )
+                        }
+                    }
+                    else -> _uiState.update { it.copy(isTestingProvider = false) }
+                }
+            } finally {
+                _uiState.update { it.copy(isTestingProvider = false) }
+            }
+        }
+    }
+
+    /**
+     * Discover offerings for a service. Explicit network discovery — produces
+     * `ServiceOffering`s but does NOT materialize ResourceRecords.
+     */
+    fun discoverOfferings(serviceId: String) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isDiscoveringModels = true) }
+            try {
+                when (val outcome = providerControlPlaneService.discoverOfferings(serviceId)) {
+                    is Outcome.Success -> {
+                        _uiState.update {
+                            it.copy(discoveredOfferings = outcome.value)
+                        }
+                    }
+                    is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                    else -> Unit
+                }
+            } finally {
+                _uiState.update { it.copy(isDiscoveringModels = false) }
+            }
+        }
+    }
+
+    /**
+     * Materialize a ServiceOffering into a ResourceRecord. The record starts
+     * at REGISTERED/runtimeSupported=false/UNKNOWN. The user must call
+     * `validateResource(resourceId)` to promote it to ENABLED/true/HEALTHY.
+     */
+    fun materializeResource(providerId: String, serviceId: String, offeringId: String) {
+        viewModelScope.launch {
+            when (val outcome = providerControlPlaneService.materializeResource(providerId, serviceId, offeringId)) {
+                is Outcome.Success -> refreshCapabilities()
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * Validate a materialized ResourceRecord. Runs the appropriate
+     * ResourceValidator and updates lifecycle/runtimeSupported/health.
+     */
+    fun validateResource(resourceId: String) {
+        viewModelScope.launch {
+            when (val outcome = providerControlPlaneService.validateResource(ResourceId(resourceId))) {
+                is Outcome.Success -> {
+                    _uiState.update {
+                        it.copy(diagnosticBanner = outcome.value.message)
+                    }
+                    refreshCapabilities()
+                }
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * Enable a previously-validated resource.
+     */
+    fun enableResource(resourceId: String) {
+        viewModelScope.launch {
+            when (val outcome = providerControlPlaneService.enableResource(ResourceId(resourceId))) {
+                is Outcome.Success -> refreshCapabilities()
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * Disable a materialized resource (lifecycle → DISABLED).
+     */
+    fun disableResource(resourceId: String) {
+        viewModelScope.launch {
+            when (val outcome = providerControlPlaneService.disableResource(ResourceId(resourceId))) {
+                is Outcome.Success -> refreshCapabilities()
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> Unit
             }
         }
     }
@@ -479,69 +675,16 @@ class MainViewModel(
         }
     }
 
-    fun setAsDefaultProvider(id: String, category: ProviderCategory) {
-        viewModelScope.launch {
-            when (val outcome = providerControlPlaneService.setAsDefaultProvider(id, category)) {
-                is Outcome.Success -> refreshCapabilities()
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> refreshCapabilities()
-            }
-        }
-    }
-
-    fun testProviderConnection(id: String) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isTestingProvider = true, testingProviderId = id, providerTestResult = null) }
-            try {
-                when (val outcome = providerControlPlaneService.validateAndRecordHealth(id)) {
-                    is Outcome.Success -> {
-                        _uiState.update {
-                            it.copy(
-                                isTestingProvider = false,
-                                providerTestResult = outcome.value,
-                                diagnosticBanner = outcome.value.message
-                            )
-                        }
-                    }
-                    is Outcome.Error -> {
-                        _uiState.update {
-                            it.copy(
-                                isTestingProvider = false,
-                                errorMessage = outcome.diagnosticMessage
-                            )
-                        }
-                    }
-                    else -> _uiState.update { it.copy(isTestingProvider = false) }
-                }
-            } finally {
-                _uiState.update { it.copy(isTestingProvider = false) }
-            }
-        }
-    }
-
-    fun openAddProviderDialog(editing: ProviderConfiguration? = null) {
-        _uiState.update { it.copy(isAddProviderDialogOpen = true, editingProvider = editing) }
+    fun openAddProviderDialog() {
+        _uiState.update { it.copy(isAddProviderDialogOpen = true) }
     }
 
     fun closeAddProviderDialog() {
-        _uiState.update { it.copy(isAddProviderDialogOpen = false, editingProvider = null) }
+        _uiState.update { it.copy(isAddProviderDialogOpen = false) }
     }
 
     fun clearProviderTestResult() {
-        _uiState.update { it.copy(providerTestResult = null, testingProviderId = null) }
-    }
-
-    // --- Model Discovery ---
-    fun discoverModels() {
-
-        viewModelScope.launch {
-            _uiState.update { it.copy(isDiscoveringModels = true) }
-            try {
-                providerRegistryService.discoverAllProvidersAndModels()
-            } finally {
-                _uiState.update { it.copy(isDiscoveringModels = false) }
-            }
-        }
+        _uiState.update { it.copy(testingProviderId = null) }
     }
 
     // --- Extensibility Management ---
