@@ -1,6 +1,6 @@
 package com.example.application.registry
 
-import com.example.application.resource.ResourceRegistryService
+import com.example.application.resource.DurableResourceRegistryService
 import com.example.application.resource.RuntimeAdapterResolver
 import com.example.domain.core.capability.CapabilityDescriptor
 import com.example.domain.core.capability.CapabilityState
@@ -11,186 +11,70 @@ import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.resource.ResourceType
-import com.example.domain.ports.llm.LlmProviderPort
-import com.example.domain.ports.memory.EmbeddingProviderPort
-import com.example.domain.ports.search.SearchProviderPort
 import com.example.domain.ports.tools.ToolPort
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Registry for system capabilities, providers, and tools.
+ * ============================================================================
+ * ComponentRegistry — Phase 4 (refactored)
+ * ============================================================================
  *
- * Exposes authoritative ResourceRegistry, ResourceCapabilityGraph, and RuntimeAdapterResolver.
+ * Per the architectural plan (Section 5): `ComponentRegistry` must NOT be a
+ * second provider/resource authority. The authoritative external resource
+ * lifecycle is `ResourceRegistryService` (now `DurableResourceRegistryService`).
  *
- * FIX APP-P3-26: defaultLlmProviderId / defaultSearchProviderId / defaultEmbeddingProviderId
- * were previously plain `var` fields read/written from concurrent register/unregister calls.
- * Now they are AtomicReference<String?> for thread-safe atomic read-modify-write.
+ * `ComponentRegistry` retains ONLY genuine in-process runtime components/
+ * extensions: in-app tools, in-app agents, and the memory repository. It
+ * no longer registers LLM/Search/Embedding providers — those are now
+ * registered as `ResourceRecord`s by the `ProviderControlPlaneService` via
+ * the `ResourceRecordRepository` → `DurableResourceRegistryService`.
+ *
+ * REMOVED (these were the legacy provider authority — Phase 4):
+ *   - `registerLlmProvider` / `unregisterLlmProvider` / `getLlmProvider` /
+ *     `listLlmProviders` / `setDefaultLlmProvider`
+ *   - `registerSearchProvider` / `unregisterSearchProvider` /
+ *     `getSearchProvider` / `listSearchProviders` / `setDefaultSearchProvider`
+ *   - `registerEmbeddingProvider` / `unregisterEmbeddingProvider` /
+ *     `getEmbeddingProvider` / `listEmbeddingProviders` /
+ *     `setDefaultEmbeddingProvider`
+ *   - `defaultLlmProviderId` / `defaultSearchProviderId` /
+ *     `defaultEmbeddingProviderId`
+ *
+ * KEPT (genuine runtime extensions):
+ *   - `registerTool` / `getTool` / `listTools` — for in-app tools like
+ *     FileSystemTool, SafeDiagnosticsTool (NOT for MCP-discovered tools —
+ *     those become ResourceRecords via the Control Plane).
+ *   - `registerAgent` / `getAgent` / `listAgents` — for in-app agent definitions.
+ *   - `registerMemoryRepository` / `getMemoryRepository` — for the RoomVectorStoreAdapter.
+ *   - `recordFailure` / `recordSuccess` / failure-tracking maps — for the
+ *     capability graph's reliability scoring.
+ *   - `getCapabilityDescriptors` — emits descriptors for the in-app components
+ *     (tools, agents, memory repository). The descriptors for provider-backed
+ *     resources are derived from `ResourceRegistryService` via
+ *     `ResourceCapabilityGraph` (not from this registry).
+ *
+ * Note: `registerTool` continues to create a `ResourceRecord` of type `TOOL`
+ * for in-app tools (since they ARE genuine operational resources). This is
+ * the in-process side of the architecture — MCP-discovered tools come in
+ * through the Control Plane materialization flow.
  */
 class ComponentRegistry(
-    val resourceRegistry: ResourceRegistryService = ResourceRegistryService()
+    val resourceRegistry: DurableResourceRegistryService = DurableResourceRegistryService()
 ) {
 
     val resourceCapabilityGraph: ResourceCapabilityGraph = ResourceCapabilityGraph(resourceRegistry)
     val runtimeAdapterResolver: RuntimeAdapterResolver = RuntimeAdapterResolver(resourceRegistry)
 
-    private val llmProviders = ConcurrentHashMap<String, LlmProviderPort>()
-    private val searchProviders = ConcurrentHashMap<String, SearchProviderPort>()
-    private val embeddingProviders = ConcurrentHashMap<String, EmbeddingProviderPort>()
+    // --- In-app Tools ---
     private val tools = ConcurrentHashMap<String, ToolPort>()
 
-    // FIX APP-P3-26: thread-safe atomic references for default provider IDs
-    private val defaultLlmProviderId = AtomicReference<String?>(null)
-    private val defaultSearchProviderId = AtomicReference<String?>(null)
-    private val defaultEmbeddingProviderId = AtomicReference<String?>(null)
-
-    // --- LLM Providers ---
-    fun registerLlmProvider(provider: LlmProviderPort, isDefault: Boolean = false) {
-        val key = provider.providerId.lowercase()
-        llmProviders[key] = provider
-        if (isDefault || defaultLlmProviderId.get() == null) {
-            defaultLlmProviderId.set(key)
-        }
-
-        val resId = ResourceId(key)
-        val record = ResourceRecord(
-            resourceId = resId,
-            providerId = provider.providerId,
-            serviceId = provider.metadata.defaultModel?.ifBlank { "default-model" } ?: "default-model",
-            resourceType = ResourceType.LLM,
-            capabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.REASONING),
-            configurationVersion = 1L,
-            lifecycleState = ResourceLifecycleState.ENABLED,
-            runtimeSupported = true,
-            healthStatus = if (provider.metadata.isOnline) HealthStatus.HEALTHY else HealthStatus.UNAVAILABLE,
-            isLocal = provider.metadata.isLocal
-        )
-        resourceRegistry.registerResource(record)
-        runtimeAdapterResolver.registerLlmAdapter(resId, provider)
-    }
-
-    fun unregisterLlmProvider(providerId: String) {
-        val key = providerId.lowercase()
-        llmProviders.remove(key)
-        if (defaultLlmProviderId.get() == key) {
-            defaultLlmProviderId.set(llmProviders.keys.firstOrNull())
-        }
-        val resId = ResourceId(key)
-        resourceRegistry.unregisterResource(resId)
-        runtimeAdapterResolver.unregister(resId)
-    }
-
-    fun setDefaultLlmProvider(providerId: String) {
-        defaultLlmProviderId.set(providerId.lowercase())
-    }
-
-    fun getLlmProvider(providerId: String? = null): LlmProviderPort? {
-        val targetId = providerId?.lowercase() ?: defaultLlmProviderId.get()
-        return targetId?.let { llmProviders[it] }
-    }
-
-    fun listLlmProviders(): List<LlmProviderPort> = llmProviders.values.toList()
-
-    // --- Search Providers ---
-    fun registerSearchProvider(provider: SearchProviderPort, isDefault: Boolean = false) {
-        val key = provider.providerId.lowercase()
-        searchProviders[key] = provider
-        if (isDefault || defaultSearchProviderId.get() == null) {
-            defaultSearchProviderId.set(key)
-        }
-
-        val resId = ResourceId(key)
-        val record = ResourceRecord(
-            resourceId = resId,
-            providerId = provider.providerId,
-            serviceId = "search-service",
-            resourceType = ResourceType.SEARCH,
-            capabilities = setOf(CapabilityType.SEARCH),
-            configurationVersion = 1L,
-            lifecycleState = ResourceLifecycleState.ENABLED,
-            runtimeSupported = true,
-            healthStatus = if (provider.metadata.isEnabled && provider.metadata.isConfigured) HealthStatus.HEALTHY else HealthStatus.UNAVAILABLE,
-            isLocal = false
-        )
-        resourceRegistry.registerResource(record)
-        runtimeAdapterResolver.registerSearchAdapter(resId, provider)
-    }
-
-    fun unregisterSearchProvider(providerId: String) {
-        val key = providerId.lowercase()
-        searchProviders.remove(key)
-        if (defaultSearchProviderId.get() == key) {
-            defaultSearchProviderId.set(searchProviders.keys.firstOrNull())
-        }
-        val resId = ResourceId(key)
-        resourceRegistry.unregisterResource(resId)
-        runtimeAdapterResolver.unregister(resId)
-    }
-
-    fun setDefaultSearchProvider(providerId: String) {
-        defaultSearchProviderId.set(providerId.lowercase())
-    }
-
-    fun getSearchProvider(providerId: String? = null): SearchProviderPort? {
-        val targetId = providerId?.lowercase() ?: defaultSearchProviderId.get()
-        return targetId?.let { searchProviders[it] }
-    }
-
-    fun listSearchProviders(): List<SearchProviderPort> = searchProviders.values.toList()
-
-    // --- Embedding Providers ---
-    fun registerEmbeddingProvider(provider: EmbeddingProviderPort, isDefault: Boolean = false) {
-        val key = provider.providerId.lowercase()
-        embeddingProviders[key] = provider
-        if (isDefault || defaultEmbeddingProviderId.get() == null) {
-            defaultEmbeddingProviderId.set(key)
-        }
-
-        val resId = ResourceId(key)
-        val record = ResourceRecord(
-            resourceId = resId,
-            providerId = provider.providerId,
-            serviceId = "embedding-service",
-            resourceType = ResourceType.EMBEDDING,
-            capabilities = setOf(CapabilityType.EMBEDDING, CapabilityType.MEMORY_RETRIEVAL),
-            configurationVersion = 1L,
-            lifecycleState = ResourceLifecycleState.ENABLED,
-            runtimeSupported = true,
-            healthStatus = HealthStatus.HEALTHY,
-            isLocal = provider.metadata.isLocal
-        )
-        resourceRegistry.registerResource(record)
-        runtimeAdapterResolver.registerEmbeddingAdapter(resId, provider)
-    }
-
-    fun unregisterEmbeddingProvider(providerId: String) {
-        val key = providerId.lowercase()
-        embeddingProviders.remove(key)
-        if (defaultEmbeddingProviderId.get() == key) {
-            defaultEmbeddingProviderId.set(embeddingProviders.keys.firstOrNull())
-        }
-        val resId = ResourceId(key)
-        resourceRegistry.unregisterResource(resId)
-        runtimeAdapterResolver.unregister(resId)
-    }
-
-    fun setDefaultEmbeddingProvider(providerId: String) {
-        defaultEmbeddingProviderId.set(providerId.lowercase())
-    }
-
-    fun getEmbeddingProvider(providerId: String? = null): EmbeddingProviderPort? {
-        val targetId = providerId?.lowercase() ?: defaultEmbeddingProviderId.get()
-        return targetId?.let { embeddingProviders[it] }
-    }
-
-    fun listEmbeddingProviders(): List<EmbeddingProviderPort> = embeddingProviders.values.toList()
-
-
-    // --- Tools ---
     fun registerTool(tool: ToolPort) {
         val key = tool.declaration.name.lowercase()
         tools[key] = tool
 
+        // In-app tools ARE genuine operational resources. Register them with the
+        // authoritative ResourceRegistry. This is consistent with how MCP tools
+        // are materialized via the Control Plane.
         val resId = ResourceId(key)
         val record = ResourceRecord(
             resourceId = resId,
@@ -208,6 +92,14 @@ class ComponentRegistry(
         runtimeAdapterResolver.registerToolAdapter(resId, tool)
     }
 
+    fun unregisterTool(toolName: String) {
+        val key = toolName.lowercase()
+        tools.remove(key)
+        val resId = ResourceId(key)
+        resourceRegistry.unregisterResource(resId)
+        runtimeAdapterResolver.unregister(resId)
+    }
+
     fun getTool(toolName: String): ToolPort? = tools[toolName.lowercase()]
 
     fun listTools(): List<ToolPort> = tools.values.toList()
@@ -219,7 +111,8 @@ class ComponentRegistry(
         agents[agent.identity.id.value.lowercase()] = agent
     }
 
-    fun getAgent(agentId: String): com.example.domain.core.agent.AgentDefinition? = agents[agentId.lowercase()]
+    fun getAgent(agentId: String): com.example.domain.core.agent.AgentDefinition? =
+        agents[agentId.lowercase()]
 
     fun listAgents(): List<com.example.domain.core.agent.AgentDefinition> = agents.values.toList()
 
@@ -262,101 +155,25 @@ class ComponentRegistry(
 
     fun isResourceAvailable(resourceId: String): Boolean = getFailureCount(resourceId) < 3
 
-    // --- Capability Descriptors & Graph ---
+    // --- Capability Descriptors (in-app components only) ---
+
+    /**
+     * Returns capability descriptors for in-app components (tools, agents, memory
+     * repository). Provider-backed resources (LLM, Search, Embedding) are surfaced
+     * via the `ResourceCapabilityGraph` derived from `ResourceRegistryService` —
+     * NOT from this method.
+     *
+     * This method exists for backward compatibility with `CapabilityResourceGraph`
+     * consumers that expect a flat list of descriptors. The CapabilityGraph itself
+     * is the authoritative source — it derives its candidates from
+     * `ResourceRegistryService.listResources()` and consults this method only
+     * for in-app extensions that don't have a ResourceRecord (like agents and
+     * the memory repository).
+     */
     fun getCapabilityDescriptors(): List<CapabilityDescriptor> {
         val descriptors = mutableListOf<CapabilityDescriptor>()
 
-        // 1. LLM Providers
-        llmProviders.values.forEach { provider ->
-            val failures = getFailureCount(provider.providerId)
-            val state = when {
-                !provider.metadata.isOnline || failures >= 3 -> CapabilityState.UNAVAILABLE
-                failures > 0 -> CapabilityState.DEGRADED
-                else -> CapabilityState.AVAILABLE
-            }
-            descriptors.add(
-                CapabilityDescriptor(
-                    type = CapabilityType.LLM_GENERATION,
-                    state = state,
-                    providerId = provider.providerId,
-                    resourceType = "MODEL",
-                    isLocal = provider.metadata.isLocal,
-                    attributes = mapOf("modelName" to (provider.metadata.defaultModel ?: "default"), "providerType" to provider.metadata.providerType)
-                )
-            )
-            if (provider.metadata.supportedCapabilities.contains("streaming")) {
-                descriptors.add(
-                    CapabilityDescriptor(
-                        type = CapabilityType.STREAMING,
-                        state = state,
-                        providerId = provider.providerId,
-                        resourceType = "MODEL",
-                        isLocal = provider.metadata.isLocal
-                    )
-                )
-            }
-            if (provider.metadata.supportedCapabilities.contains("vision")) {
-                descriptors.add(
-                    CapabilityDescriptor(
-                        type = CapabilityType.VISION,
-                        state = state,
-                        providerId = provider.providerId,
-                        resourceType = "MODEL",
-                        isLocal = provider.metadata.isLocal
-                    )
-                )
-            }
-        }
-
-
-        // 2. Search Providers
-        searchProviders.values.forEach { provider ->
-            val failures = getFailureCount(provider.providerId)
-            val state = when {
-                !provider.metadata.isConfigured || failures >= 3 -> CapabilityState.UNAVAILABLE
-                failures > 0 -> CapabilityState.DEGRADED
-                else -> CapabilityState.AVAILABLE
-            }
-            descriptors.add(
-                CapabilityDescriptor(
-                    type = CapabilityType.SEARCH,
-                    state = state,
-                    providerId = provider.providerId,
-                    resourceType = "SEARCH_PROVIDER",
-                    isLocal = false
-                )
-            )
-        }
-
-        // 3. Embedding Providers
-        embeddingProviders.values.forEach { provider ->
-            val failures = getFailureCount(provider.providerId)
-            val state = when {
-                !provider.metadata.isEnabled || failures >= 3 -> CapabilityState.UNAVAILABLE
-                failures > 0 -> CapabilityState.DEGRADED
-                else -> CapabilityState.AVAILABLE
-            }
-            descriptors.add(
-                CapabilityDescriptor(
-                    type = CapabilityType.EMBEDDING,
-                    state = state,
-                    providerId = provider.providerId,
-                    resourceType = "EMBEDDING_PROVIDER",
-                    isLocal = provider.metadata.isLocal
-                )
-            )
-            descriptors.add(
-                CapabilityDescriptor(
-                    type = CapabilityType.VECTOR_STORE,
-                    state = state,
-                    providerId = provider.providerId,
-                    resourceType = "EMBEDDING_PROVIDER",
-                    isLocal = provider.metadata.isLocal
-                )
-            )
-        }
-
-        // 4. Memory Repository
+        // 1. Memory Repository
         memoryRepository?.let {
             descriptors.add(
                 CapabilityDescriptor(
@@ -369,7 +186,7 @@ class ComponentRegistry(
             )
         }
 
-        // 5. Tools (extracting all structured provided capabilities!)
+        // 2. Tools (in-app only — MCP tools come in via ResourceRegistry)
         tools.values.forEach { tool ->
             val decl = tool.declaration
             val failures = getFailureCount(decl.name)
@@ -398,7 +215,7 @@ class ComponentRegistry(
             }
         }
 
-        // 6. Agents
+        // 3. Agents
         agents.values.forEach { agent ->
             if (agent.enabled) {
                 for (capType in agent.allowedCapabilities) {
@@ -421,9 +238,11 @@ class ComponentRegistry(
 
     /**
      * Builds and returns a live snapshot of the CapabilityResourceGraph.
+     * The graph derives its provider-backed resource candidates from the
+     * authoritative ResourceRegistryService, then augments with in-app
+     * extensions from this method.
      */
     fun getCapabilityResourceGraph(): com.example.domain.core.capability.CapabilityResourceGraph {
         return com.example.domain.core.capability.CapabilityResourceGraph(getCapabilityDescriptors())
     }
 }
-

@@ -7,6 +7,7 @@ import com.example.application.observation.ObservationService
 import com.example.application.orchestration.AgentOrchestrator
 import com.example.application.outcome.OutcomeService
 import com.example.application.registry.ComponentRegistry
+import com.example.application.testing.TestResourceRegistration
 import com.example.application.security.SecurityGuardService
 import com.example.domain.core.DegradedReason
 import com.example.domain.core.Outcome
@@ -141,8 +142,8 @@ class IntelligencePipelineComprehensiveTest {
     fun `1 - test offline model selection uses only local resources`() {
         val remoteProvider = createMockLlmProvider("remote_gemini", isLocal = false)
         val localProvider = createMockLlmProvider("local_ollama", isLocal = true)
-        registry.registerLlmProvider(remoteProvider)
-        registry.registerLlmProvider(localProvider)
+        TestResourceRegistration.registerLlmProvider(registry, remoteProvider)
+        TestResourceRegistration.registerLlmProvider(registry, localProvider)
 
         val task = TaskDefinition(
             id = TaskId("task-offline-1"),
@@ -189,7 +190,7 @@ class IntelligencePipelineComprehensiveTest {
             }
         }
 
-        registry.registerLlmProvider(failingProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, failingProvider)
 
         val task = TaskDefinition(
             id = TaskId("task-fallback-2"),
@@ -284,7 +285,7 @@ class IntelligencePipelineComprehensiveTest {
                 return Outcome.Error(SearchFailure.NetworkError("DNS resolution failed"))
             }
         }
-        registry.registerSearchProvider(failingSearch)
+        TestResourceRegistration.registerSearchProvider(registry, failingSearch)
 
         val task = TaskDefinition(id = TaskId("task-search-5"), assignedAgentId = testAgent.identity.id, input = TaskInput("search internet"))
         val context = decisionService.buildDecisionContext(task)
@@ -306,7 +307,7 @@ class IntelligencePipelineComprehensiveTest {
                 emit(ExecutionEvent.Error(executionId, "MODEL_FAILURE", "LLM stream disconnected unexpectedly"))
             }
         }
-        registry.registerLlmProvider(failingProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, failingProvider)
 
         val task = TaskDefinition(id = TaskId("task-mod-6"), assignedAgentId = testAgent.identity.id, input = TaskInput("Generate code"))
         val events = orchestrator.executeTaskStream(testAgent, task).toList()
@@ -317,7 +318,7 @@ class IntelligencePipelineComprehensiveTest {
     @Test
     fun `7 - test retry action triggers backoff delay and retries model step`() = runBlocking {
         val mockProvider = createMockLlmProvider("retry_provider", isLocal = false)
-        registry.registerLlmProvider(mockProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, mockProvider)
 
         val task = TaskDefinition(id = TaskId("task-retry-7"), assignedAgentId = testAgent.identity.id, input = TaskInput("Calculate result"))
         val context = decisionService.buildDecisionContext(task, consecutiveFailures = 1)
@@ -412,7 +413,7 @@ class IntelligencePipelineComprehensiveTest {
     @Test
     fun `13 - test streaming event emission lifecycle order`() = runBlocking {
         val mockProvider = createMockLlmProvider("stream_provider", isLocal = false)
-        registry.registerLlmProvider(mockProvider, isDefault = true)
+        TestResourceRegistration.registerLlmProvider(registry, mockProvider)
 
         val task = TaskDefinition(id = TaskId("task-evt-13"), assignedAgentId = testAgent.identity.id, input = TaskInput("Test stream lifecycle"))
         val events = orchestrator.executeTaskStream(testAgent, task).toList()

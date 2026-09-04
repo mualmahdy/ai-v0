@@ -3,15 +3,20 @@ package com.example.presentation.di
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import com.example.application.decision.DecisionService
+import com.example.application.execution.ExecutionService
 import com.example.application.extension.ExtensionManager
 import com.example.application.orchestration.AgentOrchestrator
 import com.example.application.orchestration.WorkflowEngine
+import com.example.application.observation.ObservationService
+import com.example.application.outcome.OutcomeService
 import com.example.application.provider.ProviderControlPlaneService
 import com.example.application.provider.ProviderRegistryService
 import com.example.application.radar.IntelligenceRadarPipeline
 import com.example.application.rag.KnowledgePersistenceService
 import com.example.application.rag.RagPipelineService
 import com.example.application.registry.ComponentRegistry
+import com.example.application.resource.DurableResourceRegistryService
 import com.example.application.security.SecurityGuardService
 import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
@@ -77,14 +82,11 @@ class AppContainer(context: Context) {
         )
     }
 
-    // Phase 2 — WorkspaceRuntimeService: turns Workspace from a Domain-only model
-    // into a first-class runtime citizen with persistence and multi-workspace switching.
     val workspaceRuntimeService: WorkspaceRuntimeService by lazy {
         WorkspaceRuntimeService(workspaceDao = database.workspaceDao())
     }
 
-    // Phase 2 — KnowledgePersistenceService: persists RAG documents+chunks to Room
-    // so the knowledge base survives app restart.
+    // --- RAG persistence ---
     val knowledgePersistenceService: KnowledgePersistenceService by lazy {
         KnowledgePersistenceService(
             documentDao = database.knowledgeDocumentDao(),
@@ -92,6 +94,7 @@ class AppContainer(context: Context) {
         )
     }
 
+    // --- Local Embedding Adapter (used as the in-process fallback for RAG) ---
     val defaultEmbeddingAdapter: LocalDeterministicEmbeddingAdapter by lazy {
         LocalDeterministicEmbeddingAdapter(providerId = "local_embedding_engine", dimension = 128)
     }
@@ -103,25 +106,9 @@ class AppContainer(context: Context) {
         )
     }
 
-    val geminiLlmAdapter: GeminiLlmAdapter by lazy {
-        GeminiLlmAdapter()
-    }
+    val securityGuardService: SecurityGuardService by lazy { SecurityGuardService() }
 
-    val searchAdapter: MultiSourceSearchAdapter by lazy {
-        MultiSourceSearchAdapter(
-            tavilyApiKeyProvider = {
-                kotlinx.coroutines.runBlocking { providerRepository.getSecretForProvider("tavily_search") }
-            },
-            workspaceStoragePort = workspaceStorage,
-            defaultProjectId = 1L
-        )
-    }
-
-    val securityGuardService: SecurityGuardService by lazy {
-        SecurityGuardService()
-    }
-
-    // Concrete Tools
+    // --- Concrete Tools (in-app extensions) ---
     val fileSystemTool: FileSystemTool by lazy {
         FileSystemTool(storagePort = workspaceStorage, defaultProjectId = 1L)
     }
@@ -131,26 +118,78 @@ class AppContainer(context: Context) {
         SafeDiagnosticsTool(sandboxDir = sandboxDir)
     }
 
-    // Executable Skills
+    // --- Executable Skills ---
     val cleanArchitectureSkill by lazy {
         CleanArchitectureScaffolderSkill(storagePort = workspaceStorage, defaultProjectId = 1L)
     }
 
-    val securityAuditorSkill by lazy {
-        SecurityAuditorSkill()
+    val securityAuditorSkill by lazy { SecurityAuditorSkill() }
+
+    // ========================================================================
+    // Phase 4 — Generalized Provider Architecture (single authoritative path)
+    // ========================================================================
+
+    val geminiBootstrap: GeminiBootstrap by lazy {
+        GeminiBootstrap(appContext).also { it.ensureInitialized() }
     }
 
-    // Component & Tools Registry
+    val protocolAdapterFactory: ProtocolAdapterFactory by lazy {
+        ProtocolAdapterFactory(
+            workspaceStoragePort = workspaceStorage,
+            defaultProjectId = 1L,
+            geminiBootstrap = geminiBootstrap
+        )
+    }
+
+    val resourceValidatorRegistry by lazy { defaultResourceValidatorRegistry() }
+
+    val generalizedProviderRepository: ProviderRepository by lazy {
+        RoomProviderRepository(database.providerDao())
+    }
+    val generalizedServiceRepository: ProviderServiceRepository by lazy {
+        RoomProviderServiceRepository(database.providerServiceDao())
+    }
+    val generalizedConfigurationRepository: ServiceConfigurationRepository by lazy {
+        RoomServiceConfigurationRepository(
+            dao = database.serviceConfigurationDao(),
+            serviceDao = database.providerServiceDao()
+        )
+    }
+    val generalizedHealthRepository: ServiceHealthRepository by lazy {
+        RoomServiceHealthRepository(database.serviceHealthRecordDao())
+    }
+    val generalizedOfferingRepository: OfferingRepository by lazy {
+        RoomOfferingRepository(database.serviceOfferingDao())
+    }
+    val generalizedUserPreferenceRepository: UserPreferenceRepository by lazy {
+        RoomUserPreferenceRepository(database.userResourcePreferenceDao())
+    }
+    val generalizedResourceRecordRepository: ResourceRecordRepository by lazy {
+        RoomResourceRecordRepository(database.resourceRecordDao())
+    }
+
+    /**
+     * Single authoritative resource registry. `DurableResourceRegistryService` is
+     * the in-memory facade backed by `ResourceRecordRepository` (Room). The
+     * `ComponentRegistry` references this same instance so there is one source of
+     * truth for resource identity, lifecycle, and health.
+     */
+    val durableResourceRegistryService: DurableResourceRegistryService by lazy {
+        DurableResourceRegistryService(generalizedResourceRecordRepository)
+    }
+
+    /**
+     * ComponentRegistry — Phase 4: contains only in-app runtime extensions
+     * (tools, agents, memory repository). It does NOT register LLM/Search/
+     * Embedding providers — those are now `ResourceRecord`s authored by the
+     * `ProviderControlPlaneService` via the `ResourceRecordRepository`.
+     */
     val componentRegistry: ComponentRegistry by lazy {
-        ComponentRegistry().apply {
-            registerLlmProvider(geminiLlmAdapter, isDefault = true)
-            registerSearchProvider(searchAdapter, isDefault = true)
-            registerEmbeddingProvider(defaultEmbeddingAdapter, isDefault = true)
+        ComponentRegistry(durableResourceRegistryService).apply {
             registerMemoryRepository(memoryVectorStore)
             registerTool(fileSystemTool)
             registerTool(safeDiagnosticsTool)
 
-            // Register standard agents
             registerAgent(
                 com.example.domain.core.agent.AgentDefinition(
                     identity = com.example.domain.core.agent.AgentIdentity(
@@ -207,36 +246,45 @@ class AppContainer(context: Context) {
         }
     }
 
-    // Provider Adapter Factory & Control Plane Service
-    val providerAdapterFactory: ProviderAdapterFactory by lazy {
-        ProviderAdapterFactory(workspaceStoragePort = workspaceStorage, defaultProjectId = 1L)
-    }
-
+    /**
+     * Authoritative control plane service. Operates on
+     * Provider → ProviderService → ServiceConfiguration and resolves
+     * protocol-specific adapters through ProtocolAdapterFactory.
+     */
     val providerControlPlaneService: ProviderControlPlaneService by lazy {
         ProviderControlPlaneService(
-            providerRepository = providerRepository,
-            adapterFactory = providerAdapterFactory,
-            componentRegistry = componentRegistry
-        ).apply {
-            initialize()
-        }
+            providerRepository = generalizedProviderRepository,
+            serviceRepository = generalizedServiceRepository,
+            configurationRepository = generalizedConfigurationRepository,
+            healthRepository = generalizedHealthRepository,
+            offeringRepository = generalizedOfferingRepository,
+            resourceRecordRepository = generalizedResourceRecordRepository,
+            userPreferenceRepository = generalizedUserPreferenceRepository,
+            secureCredentialStorage = secureCredentialStorage,
+            adapterFactory = protocolAdapterFactory,
+            validatorRegistry = resourceValidatorRegistry
+        )
     }
 
-    // CBR-MDP Decision Intelligence Engine with persistent CaseBase
+    // --- CBR-MDP Decision Intelligence ---
     val cbrMdpEngine: CbrMdpEngine by lazy {
         val persistentCaseBase = CaseBase(decisionCaseDao = database.decisionCaseDao())
         CbrMdpEngine(caseBase = persistentCaseBase)
     }
 
-    // Provider & Model Registry Service with Discovery Adapters
+    /**
+     * Legacy provider registry service — kept ONLY for the model discovery UI
+     * surface in the existing `ModelsCapabilitiesScreen`. This will be removed in
+     * a follow-up commit when the new `ProviderServiceManagerScreen` replaces it.
+     *
+     * It does NOT feed the runtime decision/execution path. Runtime resource
+     * selection uses `ResourceRegistryService` via `ResourceCapabilityGraph`.
+     */
     val providerRegistryService: ProviderRegistryService by lazy {
-        ProviderRegistryService().apply {
-            registerDiscoveryAdapter(GeminiModelDiscoveryAdapter())
-            registerDiscoveryAdapter(OpenAiCompatibleDiscoveryAdapter("local_ollama", "http://127.0.0.1:11434"))
-        }
+        ProviderRegistryService()
     }
 
-    // Extensibility Engine (Skills, Plugins, MCP, Integrations)
+    // --- Extensibility Engine ---
     val extensionManager: ExtensionManager by lazy {
         ExtensionManager(
             componentRegistry = componentRegistry,
@@ -247,58 +295,55 @@ class AppContainer(context: Context) {
         )
     }
 
-    // Intelligence Radar & Capability Evolution Pipeline
+    // --- Intelligence Radar ---
     val intelligenceRadarPipeline: IntelligenceRadarPipeline by lazy {
         IntelligenceRadarPipeline(
-            radarSources = listOf(
-                GitHubReleasesRadarSource(),
-                RssFeedRadarSource()
-            ),
+            radarSources = listOf(GitHubReleasesRadarSource(), RssFeedRadarSource()),
             radarItemDao = database.radarItemDao(),
             evolutionCandidateDao = database.evolutionCandidateDao()
         )
     }
 
-    // Knowledge & RAG Subsystem
-    // Phase 2 — wired with persistenceService + workspaceIdProvider so documents
-    // and chunks survive app restart. The workspaceIdProvider reads from
-    // workspaceRuntimeService.requireActiveWorkspaceId() so RAG is always scoped
-    // to the currently active workspace.
+    /**
+     * RAG Pipeline — Phase 4: routed through the resource pipeline.
+     * The embedding adapter is resolved via `ResourceRecordRepository` /
+     * `DurableResourceRegistryService` (no direct injection of a single
+     * concrete adapter). When no embedding ResourceRecord is registered (e.g.
+     * first run before user materializes one), the local in-process fallback
+     * is used explicitly so RAG keeps working.
+     */
     val ragPipelineService: RagPipelineService by lazy {
         RagPipelineService(
-            embeddingPort = defaultEmbeddingAdapter,
+            resourceRegistry = durableResourceRegistryService,
+            runtimeAdapterResolver = componentRegistry.runtimeAdapterResolver,
+            fallbackEmbeddingProvider = defaultEmbeddingAdapter,
             persistenceService = knowledgePersistenceService,
             workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
         )
     }
 
-    // Dedicated Decision Service Boundary (CBR-MDP Decision Intelligence)
-    val decisionService: com.example.application.decision.DecisionService by lazy {
-        com.example.application.decision.DecisionService(
+    // --- Decision & Execution ---
+    val decisionService: DecisionService by lazy {
+        DecisionService(
             cbrMdpEngine = cbrMdpEngine,
-            componentRegistry = componentRegistry,
-            securityGuard = securityGuardService
+            resourceCapabilityGraph = componentRegistry.resourceCapabilityGraph,
+            securityGuard = securityGuardService,
+            userPreferenceRepository = generalizedUserPreferenceRepository
         )
     }
 
-    // Autonomous Closed-Loop Execution, Observation & Outcome Services
-    val executionService: com.example.application.execution.ExecutionService by lazy {
-        com.example.application.execution.ExecutionService(
-            componentRegistry = componentRegistry,
+    val executionService: ExecutionService by lazy {
+        ExecutionService(
+            runtimeAdapterResolver = componentRegistry.runtimeAdapterResolver,
+            resourceRegistry = durableResourceRegistryService,
             securityGuard = securityGuardService,
             extensionManager = extensionManager
         )
     }
 
-    val observationService: com.example.application.observation.ObservationService by lazy {
-        com.example.application.observation.ObservationService()
-    }
+    val observationService: ObservationService by lazy { ObservationService() }
+    val outcomeService: OutcomeService by lazy { OutcomeService() }
 
-    val outcomeService: com.example.application.outcome.OutcomeService by lazy {
-        com.example.application.outcome.OutcomeService()
-    }
-
-    // Orchestrator Engine with Task Lifecycle Persistence & CBR-MDP Integration
     val agentOrchestrator: AgentOrchestrator by lazy {
         AgentOrchestrator(
             registry = componentRegistry,
@@ -358,4 +403,3 @@ class MainViewModelFactory(
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
     }
 }
-
