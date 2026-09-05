@@ -89,14 +89,18 @@ private suspend fun httpPing(
     }
 }
 
-/** Gemini pings the models endpoint with the key as a query param (per Google spec). */
+/** Gemini pings the models endpoint with the key in the x-goog-api-key header (no URL leakage). */
 private suspend fun geminiPing(
     apiKey: String
 ): ServiceValidationResult = withContext(Dispatchers.IO) {
     val start = System.currentTimeMillis()
     try {
-        val url = "https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey"
-        val response = validatorClient.newCall(Request.Builder().url(url).get().build()).execute()
+        // FIX P0-8 (audit c03919d): API key moved from ?key= URL param to the
+        // x-goog-api-key request header.
+        val url = "https://generativelanguage.googleapis.com/v1beta/models"
+        val response = validatorClient.newCall(
+            Request.Builder().url(url).header("x-goog-api-key", apiKey).get().build()
+        ).execute()
         response.use { resp ->
             val latency = System.currentTimeMillis() - start
             when {

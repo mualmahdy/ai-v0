@@ -18,7 +18,6 @@ import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceIdScheme
 import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.domain.core.resource.ResourceRecord
-import com.example.domain.core.resource.ResourceType
 import com.example.domain.core.resource.ResourceValidatorRegistry
 import com.example.domain.ports.provider.OfferingRepository
 import com.example.domain.ports.provider.ProviderRepository
@@ -29,6 +28,8 @@ import com.example.domain.ports.provider.ServiceHealthRepository
 import com.example.domain.ports.provider.UserPreferenceRepository
 import com.example.domain.ports.resource.ResourceRecordRepository
 import com.example.domain.core.provider.preference.UserResourcePreference
+import com.example.application.resource.RuntimeAdapterResolver
+import com.example.domain.core.resource.ResourceType
 import com.example.infrastructure.mcp.McpAdapter
 import com.example.infrastructure.mcp.McpAdapterPort
 import com.example.infrastructure.provider.ProtocolAdapterFactory
@@ -79,6 +80,14 @@ class ProviderControlPlaneService(
     private val secureCredentialStorage: SecureCredentialStoragePort,
     private val adapterFactory: ProtocolAdapterFactory,
     private val validatorRegistry: ResourceValidatorRegistry,
+    /**
+     * FIX F-1/F-2/F-3 (audit c03919d): the authoritative RuntimeAdapterResolver
+     * used by ExecutionService. Every materialized/validated resource adapter is
+     * REGISTERED here and UNREGISTERED on disable/delete — previously adapters
+     * were deposited into a private map that nothing consumed, so every LLM /
+     * search / embedding execution failed with AdapterNotFound.
+     */
+    private val runtimeAdapterResolver: RuntimeAdapterResolver? = null,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + Job())
 ) {
 
@@ -170,6 +179,14 @@ class ProviderControlPlaneService(
 
     suspend fun deleteService(serviceId: String): Outcome<Unit, String> {
         // Cascade: delete configurations, health records, offerings, resources.
+        // FIX F-1: unregister every runtime adapter owned by this service's
+        // resources BEFORE the records disappear (previously they leaked in the resolver).
+        resourceRecordRepository.getAllResources()
+            .filter { it.serviceId == serviceId }
+            .forEach { record ->
+                adapters.remove(record.resourceId)
+                runtimeAdapterResolver?.unregister(record.resourceId)
+            }
         configurationRepository.deleteConfigurationsForService(serviceId)
         offeringRepository.clearForService(serviceId)
         resourceRecordRepository.deleteResourcesForService(serviceId)
@@ -386,6 +403,9 @@ class ProviderControlPlaneService(
                 "Failed to create adapter for (${service.serviceType}, ${config.protocolId})"
             )
         adapters[resourceId] = adapter
+        // FIX F-1: bridge the adapter into the authoritative RuntimeAdapterResolver
+        // so ExecutionService can actually resolve it (previously: private map only).
+        registerAdapterInResolver(resourceId, resourceType, adapter)
 
         // Build the ResourceRecord at REGISTERED/false/UNKNOWN — never fabricate (Correction #1)
         val record = offering.toResourceRecord(
@@ -425,6 +445,8 @@ class ProviderControlPlaneService(
         if (adapters[resourceId] == null) {
             adapters[resourceId] = adapter
         }
+        // FIX F-1: (re-)bridge the adapter into the resolver (covers app-restart paths).
+        registerAdapterInResolver(resourceId, record.resourceType, adapter)
 
         val validator = validatorRegistry.get(record.resourceType)
             ?: return Outcome.Error("VALIDATOR_NOT_FOUND", "No validator for ${record.resourceType}")
@@ -461,6 +483,10 @@ class ProviderControlPlaneService(
             runtimeSupported = record.runtimeSupported,
             healthStatus = record.healthStatus
         )
+        // FIX F-1: unregister the runtime adapter when the resource is disabled so
+        // the resolver can no longer resolve it (previously the stale adapter stayed).
+        adapters.remove(resourceId)
+        runtimeAdapterResolver?.unregister(resourceId)
         return Outcome.Success(Unit)
     }
 
@@ -477,6 +503,20 @@ class ProviderControlPlaneService(
                 "Resource $resourceId must be validated before enabling"
             )
         }
+        // FIX F-1: re-create the runtime adapter after an app restart (the in-memory
+        // adapters map is empty) so an ENABLED resource is actually resolvable.
+        if (adapters[resourceId] == null || runtimeAdapterResolver != null) {
+            val service = serviceRepository.getServiceById(record.serviceId)
+            val config = configurationRepository.getCurrentConfigurationForService(record.serviceId)
+            if (service != null && config != null) {
+                val apiKeyProvider: suspend () -> String? = { getSecret(config.authAlias ?: config.id) }
+                val adapter = createAdapterFor(service, config, apiKeyProvider, record.metadata["offeringId"])
+                if (adapter != null) {
+                    adapters[resourceId] = adapter
+                    registerAdapterInResolver(resourceId, record.resourceType, adapter)
+                }
+            }
+        }
         resourceRecordRepository.updateRuntimeState(
             resourceId = resourceId,
             lifecycleState = ResourceLifecycleState.ENABLED,
@@ -491,6 +531,8 @@ class ProviderControlPlaneService(
      */
     suspend fun deleteResource(resourceId: ResourceId): Outcome<Unit, String> {
         adapters.remove(resourceId)
+        // FIX F-1: remove from the authoritative resolver as well.
+        runtimeAdapterResolver?.unregister(resourceId)
         resourceRecordRepository.deleteResource(resourceId)
         return Outcome.Success(Unit)
     }
@@ -500,6 +542,66 @@ class ProviderControlPlaneService(
      * RuntimeAdapterResolver to execute a DecisionRecord.
      */
     fun getAdapter(resourceId: ResourceId): Any? = adapters[resourceId]
+
+    /**
+     * FIX F-1: registers a control-plane-created adapter into the authoritative
+     * RuntimeAdapterResolver consumed by ExecutionService, keyed by exact
+     * ResourceId and resource type. Type-safe: an adapter that does not
+     * implement the port for its resource type is NOT registered (explicit
+     * mismatch stays visible instead of failing later at call time).
+     */
+    private fun registerAdapterInResolver(
+        resourceId: ResourceId,
+        resourceType: ResourceType,
+        adapter: Any
+    ) {
+        val resolver = runtimeAdapterResolver ?: return
+        when (resourceType) {
+            ResourceType.LLM ->
+                (adapter as? com.example.domain.ports.llm.LlmProviderPort)?.let {
+                    resolver.registerLlmAdapter(resourceId, it)
+                }
+            ResourceType.SEARCH ->
+                (adapter as? com.example.domain.ports.search.SearchProviderPort)?.let {
+                    resolver.registerSearchAdapter(resourceId, it)
+                }
+            ResourceType.EMBEDDING ->
+                (adapter as? com.example.domain.ports.memory.EmbeddingProviderPort)?.let {
+                    resolver.registerEmbeddingAdapter(resourceId, it)
+                }
+            ResourceType.TOOL ->
+                (adapter as? com.example.domain.ports.tools.ToolPort)?.let {
+                    resolver.registerToolAdapter(resourceId, it)
+                }
+            // STORAGE / INTEGRATION resources have no runtime execution adapter
+            // yet — nothing to register (explicit, honest).
+            else -> Unit
+        }
+    }
+
+    /**
+     * FIX F-1 (app-restart survival): re-creates and registers runtime adapters
+     * for every persisted ENABLED/ACTIVE resource. The in-memory adapters map
+     * is lost on process death; without this restore the resolver stays empty
+     * after every restart and all executions fail with AdapterNotFound.
+     *
+     * Called from [launchBootstrapDefaults] and from AppContainer.bootstrapRuntime().
+     */
+    suspend fun restoreAdaptersForPersistedResources() {
+        val resolver = runtimeAdapterResolver ?: return
+        for (record in resourceRecordRepository.getAllResources()) {
+            if (record.lifecycleState != ResourceLifecycleState.ENABLED &&
+                record.lifecycleState != ResourceLifecycleState.ACTIVE
+            ) continue
+            if (adapters.containsKey(record.resourceId)) continue
+            val service = serviceRepository.getServiceById(record.serviceId) ?: continue
+            val config = configurationRepository.getCurrentConfigurationForService(record.serviceId) ?: continue
+            val apiKeyProvider: suspend () -> String? = { getSecret(config.authAlias ?: config.id) }
+            val adapter = createAdapterFor(service, config, apiKeyProvider, record.metadata["offeringId"]) ?: continue
+            adapters[record.resourceId] = adapter
+            registerAdapterInResolver(record.resourceId, record.resourceType, adapter)
+        }
+    }
 
     /**
      * Set a user resource preference (planning hint only — never execution authority).
@@ -729,10 +831,14 @@ class ProviderControlPlaneService(
 
     /**
      * Launches [ensureBootstrapDefaults] in the control plane scope (used by
-     * the AppContainer/ViewModel at startup).
+     * the AppContainer/ViewModel at startup), then restores runtime adapters
+     * for every persisted ENABLED resource (FIX F-1: restart survival).
      */
     fun launchBootstrapDefaults() {
-        scope.launch { ensureBootstrapDefaults() }
+        scope.launch {
+            ensureBootstrapDefaults()
+            restoreAdaptersForPersistedResources()
+        }
     }
 
     // ========================================================================

@@ -130,7 +130,14 @@ class WorkspaceRuntimeService(
         workspaceDao.insertOrUpdate(entity)
         refreshAllWorkspaces()
         refreshActiveWorkspace()
-        _activeWorkspace.value!!
+        // FIX R-2 (audit c03919d): previously `_activeWorkspace.value!!` — a
+        // null active workspace (e.g. DAO refresh failure right after insert)
+        // crashed with a NullPointerException. Now an explicit honest error.
+        _activeWorkspace.value
+            ?: throw IllegalStateException(
+                "Workspace '$id' was persisted but could not be reloaded as active — " +
+                    "database refresh failed after insert."
+            )
     }
 
     /**

@@ -38,9 +38,12 @@ class GeminiModelDiscoveryAdapter(
         }
 
         try {
-            val endpoint = "https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey"
+            // FIX P0-8 (audit c03919d): API key moved from URL query param to
+            // the x-goog-api-key request header (no key leakage in URLs).
+            val endpoint = "https://generativelanguage.googleapis.com/v1beta/models"
             val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
+                setRequestProperty("x-goog-api-key", apiKey)
                 connectTimeout = 8000
                 readTimeout = 8000
             }

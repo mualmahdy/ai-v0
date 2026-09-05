@@ -25,6 +25,7 @@ import com.example.application.usecases.ManageWorkspaceFilesUseCase
 import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.decision.CaseBase
 import com.example.domain.core.decision.CbrMdpEngine
+import com.example.domain.core.decision.MdpLearningStore
 import com.example.domain.ports.provider.OfferingRepository
 import com.example.domain.ports.provider.ProviderRepository
 import com.example.domain.ports.provider.ProviderServiceRepository
@@ -39,6 +40,7 @@ import com.example.infrastructure.mcp.McpClient
 import com.example.infrastructure.memory.LocalDeterministicEmbeddingAdapter
 import com.example.infrastructure.memory.RoomVectorStoreAdapter
 import com.example.infrastructure.persistence.AppDatabase
+import com.example.infrastructure.persistence.repository.RoomMdpLearningStore
 import com.example.infrastructure.persistence.repository.RoomOfferingRepository
 import com.example.infrastructure.persistence.repository.RoomProviderRepository
 import com.example.infrastructure.persistence.repository.RoomProviderServiceRepository
@@ -57,6 +59,10 @@ import com.example.infrastructure.tools.FileSystemTool
 import com.example.infrastructure.tools.SafeDiagnosticsTool
 import com.example.infrastructure.validation.defaultResourceValidatorRegistry
 import com.example.presentation.viewmodel.MainViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 
 /**
@@ -76,6 +82,12 @@ import java.io.File
  */
 class AppContainer(context: Context) {
     val appContext = context.applicationContext
+
+    /**
+     * FIX R-1: application-wide IO scope for one-shot bootstrap work (registry
+     * eager load, MDP Q-table load, adapter restore) — never the main thread.
+     */
+    val applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // --- Persistence (Room Database) ---
     val database: AppDatabase by lazy { AppDatabase.getInstance(appContext) }
@@ -275,21 +287,89 @@ class AppContainer(context: Context) {
             userPreferenceRepository = generalizedUserPreferenceRepository,
             secureCredentialStorage = secureCredentialStorage,
             adapterFactory = protocolAdapterFactory,
-            validatorRegistry = resourceValidatorRegistry
+            validatorRegistry = resourceValidatorRegistry,
+            // FIX F-1: bridge materialized/validated adapters into the SAME
+            // RuntimeAdapterResolver consumed by ExecutionService & RAG.
+            runtimeAdapterResolver = componentRegistry.runtimeAdapterResolver
         )
     }
 
     // --- CBR-MDP Decision Intelligence ---
+    /**
+     * FIX D-1/D-4 (audit c03919d): the engine is backed by the persistent
+     * tabular-MDP Q-table (Room `mdp_q_values`) — per-(region, action) values
+     * and transition rates that survive app restarts.
+     */
     val cbrMdpEngine: CbrMdpEngine by lazy {
         val persistentCaseBase = CaseBase(decisionCaseDao = database.decisionCaseDao())
-        CbrMdpEngine(caseBase = persistentCaseBase)
+        val mdpLearningStore: MdpLearningStore = RoomMdpLearningStore(database.mdpQValueDao())
+        CbrMdpEngine(
+            caseBase = persistentCaseBase,
+            mdpStore = mdpLearningStore,
+            persistenceScope = applicationScope
+        )
     }
 
     // --- Extensibility Engine ---
+    /**
+     * FIX F-8: the in-process MCP bridge tools are backed by REAL executors —
+     * `workspace_summary` reads the actual sandbox workspace file statistics
+     * (previously the bridge returned canned placeholder text).
+     */
+    private val inProcessMcpTools: Map<String, suspend (Map<String, Any?>) -> com.example.domain.core.Outcome<com.example.domain.core.tools.ToolOutput, com.example.domain.core.tools.ToolFailure>> = mapOf(
+        "workspace_summary" to { _ ->
+            when (val files = workspaceStorage.listFiles(1L)) {
+                is com.example.domain.core.Outcome.Success<*> -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val entries = files.value as? List<com.example.domain.core.storage.WorkspaceFileEntry> ?: emptyList()
+                    val totalBytes = entries.sumOf { it.sizeBytes }
+                    val fileCount = entries.count { !it.isDirectory }
+                    val dirCount = entries.count { it.isDirectory }
+                    val summary = """[MCP Local Bridge: workspace_summary — REAL DATA]
+- ملفات مساحة العمل النشطة: $fileCount
+- المجلدات: $dirCount
+- إجمالي الحجم: $totalBytes بايت
+- أبرز الملفات: ${entries.take(5).joinToString(", ") { it.relativePath }}
+                    """.trimIndent()
+                    com.example.domain.core.Outcome.Success(
+                        com.example.domain.core.tools.ToolOutput(
+                            content = summary,
+                            rawBytesCount = summary.toByteArray().size.toLong()
+                        )
+                    )
+                }
+                is com.example.domain.core.Outcome.Degraded<*, *> -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val partial = files.partialValue as? List<com.example.domain.core.storage.WorkspaceFileEntry>
+                    com.example.domain.core.Outcome.Degraded(
+                        partialValue = com.example.domain.core.tools.ToolOutput(
+                            content = "قراءة جزئية لملفات مساحة العمل (${partial?.size ?: 0} ملف)"
+                        ),
+                        reason = files.reason,
+                        diagnosticMessage = files.diagnosticMessage
+                    )
+                }
+                is com.example.domain.core.Outcome.Error<*> -> com.example.domain.core.Outcome.Error(
+                    failure = com.example.domain.core.tools.ToolFailure.CapabilityUnavailable(
+                        capabilityName = "workspace_summary",
+                        message = files.diagnosticMessage ?: "تعذر قراءة ملفات مساحة العمل"
+                    ),
+                    diagnosticMessage = files.diagnosticMessage
+                )
+                else -> com.example.domain.core.Outcome.Error(
+                    failure = com.example.domain.core.tools.ToolFailure.CapabilityUnavailable(
+                        capabilityName = "workspace_summary",
+                        message = "نتيجة غير معروفة من مخزن مساحة العمل"
+                    )
+                )
+            }
+        }
+    )
+
     val extensionManager: ExtensionManager by lazy {
         ExtensionManager(
             componentRegistry = componentRegistry,
-            mcpClient = McpClient(),
+            mcpClient = McpClient(inProcessTools = inProcessMcpTools),
             integrationGateway = IntegrationGateway(),
             extensionConfigDao = database.extensionConfigDao(),
             executableSkills = listOf(cleanArchitectureSkill, securityAuditorSkill)
@@ -384,9 +464,18 @@ class AppContainer(context: Context) {
      * local embedding + multi-source search + Gemini provider records, then
      * validates ONLY the zero-network in-process resources. Called once from
      * the MainViewModel init scope.
+     *
+     * FIX R-1 + F-1 + D-4: runs on the application IO scope — eagerly loads
+     * persisted resources AND the CBR-MDP Q-table (no runBlocking on main)
+     * and restores runtime adapters for every persisted ENABLED resource.
      */
     fun bootstrapRuntime() {
-        providerControlPlaneService.launchBootstrapDefaults()
+        applicationScope.launch {
+            durableResourceRegistryService.eagerLoad()
+            cbrMdpEngine.loadPersistedQTable()
+            providerControlPlaneService.ensureBootstrapDefaults()
+            providerControlPlaneService.restoreAdaptersForPersistedResources()
+        }
     }
 }
 

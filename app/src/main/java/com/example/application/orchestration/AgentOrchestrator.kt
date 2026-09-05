@@ -208,6 +208,41 @@ class AgentOrchestrator(
                     finalOutputText = accumulatedOutputText.toString(),
                     lastAction = chosenAction
                 )
+                // ------------------------------------------------------------
+                // FIX D-2 (audit c03919d): the verification result is the REAL
+                // terminal reward signal. Previously the COMPLETE action never
+                // received an observation on the satisfied path (the loop broke
+                // before recording anything), so the CBR-MDP engine could not
+                // learn from acceptance-criteria outcomes at all.
+                // ------------------------------------------------------------
+                val quality = if (verification.isSatisfied) verification.confidence else -verification.confidence
+                val terminalResult = ExecutionResult(
+                    isSuccess = verification.isSatisfied,
+                    outputText = accumulatedOutputText.toString().ifBlank {
+                        chosenAction.payload["summary"] ?: "تم تقييم اكتمال المهمة."
+                    },
+                    outputData = mapOf(
+                        "verificationStatus" to verification.status.name,
+                        "satisfiedCriteria" to verification.satisfiedCriteria,
+                        "missingCriteria" to verification.missingCriteria
+                    )
+                )
+                val terminalObservation = observationService.createObservation(
+                    action = chosenAction,
+                    result = terminalResult,
+                    stepIndex = stepIndex,
+                    actionOutcome = outcomeService.evaluateActionOutcome(chosenAction, terminalResult),
+                    taskVerificationQuality = quality
+                )
+                observationHistory.add(terminalObservation)
+                currentDecisionState = decisionService.recordObservation(currentDecisionState, terminalObservation)
+                emit(
+                    ExecutionEvent.ObservationRecorded(
+                        executionId = executionId,
+                        observation = terminalObservation,
+                        updatedUncertainty = currentDecisionState.uncertaintyScore
+                    )
+                )
                 if (verification.isSatisfied) {
                     val summaryText = accumulatedOutputText.toString().ifBlank { chosenAction.payload["summary"] ?: "تم إكمال المهمة بنجاح." }
                     finalResultText = summaryText
@@ -216,6 +251,11 @@ class AgentOrchestrator(
                 } else {
                     consecutiveFailures++
                     accumulatedOutputText.append("\n[حوكمة]: لم تُستوفَ معايير الاكتمال: ${verification.missingCriteria.joinToString(", ")}")
+                    // COMPLETE/STOP have no side effects to execute — learning
+                    // already happened above; continue the loop to re-decide.
+                    stepIndex++
+                    currentTask = currentTask.copy(currentStepIndex = stepIndex)
+                    continue
                 }
             } else if (chosenAction.type == DecisionActionType.ASK_USER) {
                 val reason = chosenAction.payload["reason"] ?: "مطلوب تأكيد أو مدخلات من المستخدم."
@@ -269,7 +309,16 @@ class AgentOrchestrator(
             }
 
             // 6. Normalize Observation
-            val observation = observationService.createObservation(chosenAction, execResult, stepIndex)
+            // FIX D-3 (audit c03919d): the previously-dead
+            // OutcomeService.evaluateActionOutcome is now wired into the live
+            // loop — its classification shapes the CBR-MDP feedback reward.
+            val actionOutcomeType = outcomeService.evaluateActionOutcome(chosenAction, execResult)
+            val observation = observationService.createObservation(
+                action = chosenAction,
+                result = execResult,
+                stepIndex = stepIndex,
+                actionOutcome = actionOutcomeType
+            )
             observationHistory.add(observation)
 
             // 7. Feed Observation into CBR-MDP Engine -> updates belief state and retains case

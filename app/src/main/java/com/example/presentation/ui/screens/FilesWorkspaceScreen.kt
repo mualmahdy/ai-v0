@@ -98,7 +98,7 @@ fun FilesWorkspaceScreen(
             FileEditorView(
                 filePath = state.selectedFilePath,
                 content = state.selectedFileContent,
-                onBack = { viewModel.openFile("") },
+                onBack = { viewModel.closeFileEditor() },
                 onSave = { updated -> viewModel.saveFile(state.selectedFilePath, updated) }
             )
         } else {

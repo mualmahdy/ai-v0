@@ -1,28 +1,161 @@
 package com.example.domain.core.decision
 
 import com.example.domain.core.network.NetworkPolicy
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.ln
+import kotlin.math.sqrt
 
 /**
  * Real CBR-MDP (Case-Based Reasoning + Markov Decision Process) Decision Intelligence Engine.
  * Evaluates candidate actions over state vectors, combines historical case retrieval with expected MDP utility,
  * and maintains belief updates upon receiving environment observations.
+ *
+ * ============================================================================
+ * FIX D-1 / D-4 (audit c03919d) — tabular MDP with persistence
+ * ============================================================================
+ *
+ * Previous defects:
+ *   - D-1: "MDP" was nominal — ONE global success estimate per action TYPE
+ *     (no V/Q per (s,a), no state aggregation, no transition rates).
+ *   - D-4: all learned estimates lived in a plain in-memory map and were
+ *     lost on every process death.
+ *
+ * The engine now maintains a REAL tabular MDP:
+ *
+ *   1. STATE AGGREGATION — DecisionState is hashed into a coarse region key
+ *      (task type × evidence flags × failure bucket × step bucket × network
+ *      availability). Coarse regions keep the table small enough to learn
+ *      on-device without a function approximator.
+ *
+ *   2. PER-(REGION, ACTION) CELLS — each cell stores a Q value, a visit
+ *      count, and a success count (transition success rate).
+ *
+ *   3. TD LEARNING — on every environment observation:
+ *         Q(r,a) ← Q(r,a) + α · (reward + γ · maxQ(r') − Q(r,a))
+ *      where r is the region BEFORE the action and r' the region AFTER.
+ *
+ *   4. PERSISTENCE — dirty cells are written to the [MdpLearningStore]
+ *      (Room in production, in-memory in tests) asynchronously; the whole
+ *      table is loaded once at bootstrap, so experience accumulates ACROSS
+ *      sessions (D-4).
+ *
+ *   5. EXPLORATION — a UCB-style bonus favors under-visited actions within
+ *      a region (deterministic, bounded — no random flakiness in tests).
+ *
+ *   6. EVOI GATE (P1) — ASK_USER is only scored as valuable when the
+ *      expected value of information justifies interrupting the user
+ *      (high uncertainty or repeated failures); otherwise it is heavily
+ *      penalized so the engine prefers autonomous progress.
  */
 class CbrMdpEngine(
-    private val caseBase: CaseBase = CaseBase()
+    private val caseBase: CaseBase = CaseBase(),
+    /** FIX D-4: persistent tabular-MDP store (Room-backed in production). */
+    private val mdpStore: MdpLearningStore? = null,
+    /** Scope used to persist dirty Q-table cells asynchronously. */
+    private val persistenceScope: CoroutineScope? = null
 ) {
     // Discount factor gamma for MDP
     private val gamma: Float = 0.9f
     private val cbrWeight: Float = 0.55f
     private val mdpWeight: Float = 0.45f
 
-    // Estimated transition success probabilities per action type.
-    // FIX DOM-P2-25: Previously initialized to 0.85f for every action type — a synthetic
-    // optimistic prior that biased the engine toward assuming actions succeed. Now we use
-    // 0.5f (uninformative prior) so the EMA updates from real observations drive the
-    // estimates toward their true values without an initial optimism bias.
+    // FIX D-1: TD learning rate for the Q-table update.
+    private val learningRateAlpha: Float = 0.3f
+
+    // FIX D-1 (exploration): UCB exploration coefficient — small enough that
+    // it only breaks ties in favor of under-explored actions.
+    private val explorationCoefficient: Float = 0.12f
+
+    // FIX D-1 (shrinkage): visits/(visits + VISIT_CONFIDENCE) — weight given
+    // to the LEARNED Q value vs. the heuristic prior for a (region, action).
+    private val VISIT_CONFIDENCE = 5
+
+    // P1 (EVOI gate): ASK_USER is only valuable when uncertainty is at least
+    // this high, or after this many consecutive failures.
+    private val evoiUncertaintyThreshold: Float = 0.55f
+    private val evoiFailureThreshold: Int = 2
+
+    // Estimated transition success probabilities per action type (global
+    // fallback prior for unvisited (region, action) cells).
+    // FIX DOM-P2-25: uninformative 0.5 prior (no optimism bias); per-region
+    // truth now comes from the Q-table below.
     private val actionSuccessEstimates = mutableMapOf<DecisionActionType, Float>().apply {
         DecisionActionType.entries.forEach { this[it] = 0.5f }
+    }
+
+    // ========================================================================
+    // FIX D-1/D-4: the tabular MDP Q-table.
+    // key = "regionKey|ACTION_NAME", value = learned cell.
+    // ========================================================================
+    private val qTable = ConcurrentHashMap<String, MdpQEntry>()
+    private val dirtyCells = ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Aggregates a [DecisionState] into a coarse region key — the "s" of the
+     * tabular MDP. Dimensions (deliberately few, so the table stays learnable):
+     *   taskType | memory-evidence | search-evidence | tool-evidence |
+     *   failure-bucket (0/1/2+) | step-bucket (0/1/2+) | network
+     */
+    fun stateRegionKey(state: DecisionState): String {
+        val taskType = when {
+            state.requiresCoding -> "COD"
+            state.requiresWebSearch -> "SEA"
+            else -> "GEN"
+        }
+        val failureBucket = when {
+            state.consecutiveFailures <= 0 -> "F0"
+            state.consecutiveFailures == 1 -> "F1"
+            else -> "F2"
+        }
+        val stepBucket = when {
+            state.currentStep <= 0 -> "P0"
+            state.currentStep == 1 -> "P1"
+            else -> "P2"
+        }
+        val network = if (state.networkPolicy == NetworkPolicy.OFFLINE || !state.isNetworkAvailable) "OFF" else "ON"
+        return "$taskType|M${if (state.hasMemoryEvidence) 1 else 0}|S${if (state.hasSearchEvidence) 1 else 0}|" +
+            "T${if (state.hasToolExecutionEvidence) 1 else 0}|$failureBucket|$stepBucket|$network"
+    }
+
+    private fun cellKey(regionKey: String, actionType: DecisionActionType): String =
+        "$regionKey|${actionType.name}"
+
+    /** Direct read access for observability/tests. */
+    fun getQEntry(regionKey: String, actionType: DecisionActionType): MdpQEntry? =
+        qTable[cellKey(regionKey, actionType)]
+
+    /** Number of learned cells (observability). */
+    fun qTableSize(): Int = qTable.size
+
+    /**
+     * FIX D-4: loads the persisted Q-table into memory. Called once at
+     * bootstrap (AppContainer) BEFORE any decision is evaluated.
+     */
+    suspend fun loadPersistedQTable() {
+        val store = mdpStore ?: return
+        runCatching {
+            for (entry in store.loadAll()) {
+                qTable[cellKey(entry.regionKey, entry.actionType)] = entry
+            }
+        }
+    }
+
+    /** Flushes dirty cells to the store (asynchronous when a scope is wired). */
+    private fun persistDirtyCells() {
+        val store = mdpStore ?: return
+        val scope = persistenceScope ?: return
+        if (dirtyCells.isEmpty()) return
+        val entries = dirtyCells.mapNotNull { key ->
+            qTable[key]?.copy(lastUpdatedEpochMs = System.currentTimeMillis())
+        }
+        if (entries.isEmpty()) return
+        dirtyCells.clear()
+        scope.launch {
+            runCatching { store.persist(entries) }
+        }
     }
 
     /**
@@ -34,9 +167,10 @@ class CbrMdpEngine(
     ): DecisionResult {
         val queryFeatures = state.toFeatureVector()
         val similarCases = caseBase.findSimilarCases(queryFeatures, k = 5, minSimilarity = 0.4f)
+        val regionKey = stateRegionKey(state)
 
         val scoredCandidates = candidateActions.map { action ->
-            scoreAction(action, state, similarCases)
+            scoreAction(action, state, regionKey, similarCases)
         }.sortedByDescending { it.finalScore }
 
         val bestCandidate = scoredCandidates.firstOrNull() ?: ScoredActionCandidate(
@@ -61,6 +195,7 @@ class CbrMdpEngine(
     private fun scoreAction(
         action: DecisionAction,
         state: DecisionState,
+        regionKey: String,
         similarCases: List<Pair<DecisionCase, Float>>
     ): ScoredActionCandidate {
         // 1. CBR Score: Aggregate rewards of similar historical cases that took matching action
@@ -153,13 +288,64 @@ class CbrMdpEngine(
             else -> Unit
         }
 
-        val actionSuccessProb = actionSuccessEstimates[action.type] ?: 0.8f
+        // ------------------------------------------------------------------
+        // P1 — EVOI gate before ASK_USER: interrupting the user is only worth
+        // its expected value of information when uncertainty is high or the
+        // loop has repeatedly failed. Otherwise heavily penalize so the engine
+        // prefers autonomous progress over stalling.
+        // ------------------------------------------------------------------
+        var evoiGated = false
+        if (action.type == DecisionActionType.ASK_USER) {
+            val uncertaintyJustifies = state.uncertaintyScore >= evoiUncertaintyThreshold
+            val failuresJustify = state.consecutiveFailures > evoiFailureThreshold
+            if (!uncertaintyJustifies && !failuresJustify) {
+                immediateReward -= 1.2f
+                evoiGated = true
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // FIX D-1: learned per-(region, action) Q value + REAL transition rate.
+        // learnedWeight grows with visits (shrinkage toward the heuristic when
+        // the cell is cold), so an empty table reproduces legacy behavior and
+        // a warm table overrides heuristics with measured experience.
+        // ------------------------------------------------------------------
+        val cell = qTable[cellKey(regionKey, action.type)]
+        val learnedQ = cell?.qValue ?: 0f
+        val learnedWeight = if (cell != null) {
+            cell.visitCount.toFloat() / (cell.visitCount + VISIT_CONFIDENCE).toFloat()
+        } else 0f
+        // Per-region transition success rate (D-1: real, measured) with the
+        // global EMA as the cold-start prior.
+        val transitionSuccessProb = if (cell != null && cell.visitCount > 0) {
+            cell.successCount.toFloat() / cell.visitCount
+        } else {
+            actionSuccessEstimates[action.type] ?: 0.5f
+        }
+
+        val actionSuccessProb = transitionSuccessProb
         val expectedFutureValue = gamma * actionSuccessProb * (1.0f - state.uncertaintyScore)
-        val mdpValue = ((immediateReward - costPenalty - latencyPenalty) + expectedFutureValue).coerceIn(-1.0f, 1.5f)
+        val heuristicMdpValue = (immediateReward - costPenalty - latencyPenalty) + expectedFutureValue
+        val mdpValue = ((1f - learnedWeight) * heuristicMdpValue + learnedWeight * learnedQ)
+            .coerceIn(-1.0f, 1.5f)
 
         // 3. Combined Final Score & Confidence
         val normalizedMdp = ((mdpValue + 1.0f) / 2.5f).coerceIn(0.0f, 1.0f)
-        val finalScore = (cbrWeight * cbrScore + mdpWeight * normalizedMdp).coerceIn(0.0f, 1.0f)
+        var finalScore = (cbrWeight * cbrScore + mdpWeight * normalizedMdp).coerceIn(0.0f, 1.0f)
+
+        // ------------------------------------------------------------------
+        // FIX D-1 (exploration): UCB-style bonus — favors under-visited actions
+        // so the engine keeps learning instead of locking onto the heuristic
+        // optimum. Deterministic and bounded (no test flakiness).
+        // ------------------------------------------------------------------
+        val regionVisitTotal = qTable.keys.count { it.startsWith("$regionKey|") }
+        if (regionVisitTotal > 0) {
+            val pairVisits = cell?.visitCount ?: 0
+            val explorationBonus = explorationCoefficient *
+                sqrt(ln((regionVisitTotal + 1).toDouble()) / (pairVisits + 1.0)).toFloat()
+            finalScore = (finalScore + explorationBonus).coerceIn(0.0f, 1.0f)
+        }
+
         val confidence = ((1.0f - state.uncertaintyScore) * 0.6f + (if (matchingCases.isNotEmpty()) 0.4f else 0.2f)).coerceIn(0.1f, 0.99f)
 
         val reason = buildString {
@@ -168,6 +354,10 @@ class CbrMdpEngine(
                 append("تطابق ${matchingCases.size} حالة سابقة (CBR: ${"%.2f".format(cbrScore)}) مع ")
             }
             append("قيمة المنفعة المتوقعة (MDP: ${"%.2f".format(normalizedMdp)}) ")
+            if (cell != null && cell.visitCount > 0) {
+                append("[منطقة $regionKey — ${cell.visitCount} زيارة، نسبة نجاح ${"%.0f".format(transitionSuccessProb * 100)}%] ")
+            }
+            if (evoiGated) append("[بوابة EVOI: قيمة معلومات الاستطلاع لا تبرر مقاطعة المستخدم] ")
             if (costPenalty > 0.1f) append("مع خصم استهلاك الموارد.")
         }
 
@@ -183,12 +373,20 @@ class CbrMdpEngine(
 
     /**
      * Environment Feedback Loop: Observation -> Belief Update -> Case Base Update.
+     *
+     * FIX D-1: performs the tabular TD update
+     *     Q(r,a) ← Q(r,a) + α·(reward + γ·maxQ(r') − Q(r,a))
+     * on the (region, action) cell, increments visit/success counts (the real
+     * transition rate), and marks the cell dirty for persistence (FIX D-4).
      */
     fun processObservationAndUpdateBelief(
         state: DecisionState,
         observation: EnvironmentObservation
     ): DecisionState {
+        val regionKey = stateRegionKey(state)
+
         // Update transition estimate using exponential moving average
+        // (kept as the cold-start global prior).
         val currentEst = actionSuccessEstimates[observation.action.type] ?: 0.8f
         val newSuccessSignal = if (observation.isSuccess) 1.0f else 0.0f
         actionSuccessEstimates[observation.action.type] = (0.8f * currentEst) + (0.2f * newSuccessSignal)
@@ -217,7 +415,7 @@ class CbrMdpEngine(
         val hasMemory = state.hasMemoryEvidence || ((observation.action.type == DecisionActionType.RETRIEVE_MEMORY || observation.action.type == DecisionActionType.RETRIEVE_KNOWLEDGE) && observation.isSuccess)
         val hasTool = state.hasToolExecutionEvidence || ((observation.action.type == DecisionActionType.EXECUTE_TOOL || observation.action.type == DecisionActionType.SELECT_TOOL || observation.action.type == DecisionActionType.EXECUTE_MCP || observation.action.type == DecisionActionType.EXECUTE_SKILL) && observation.isSuccess)
 
-        return state.copy(
+        val updatedState = state.copy(
             consecutiveFailures = updatedFailures,
             uncertaintyScore = updatedUncertainty,
             remainingTokenBudget = (state.remainingTokenBudget - observation.tokensConsumed).coerceAtLeast(0),
@@ -228,6 +426,44 @@ class CbrMdpEngine(
             lastActionSuccess = observation.isSuccess,
             currentStep = state.currentStep + 1
         )
+
+        // ------------------------------------------------------------------
+        // FIX D-1: tabular TD update on Q(r, a).
+        // r  = region BEFORE the action; r' = region AFTER (from updatedState).
+        // ------------------------------------------------------------------
+        val nextRegionKey = stateRegionKey(updatedState)
+        val maxNextQ = qTable.keys
+            .filter { it.startsWith("$nextRegionKey|") }
+            .mapNotNull { qTable[it]?.qValue }
+            .maxOrNull() ?: 0f
+
+        val reward = observation.feedbackReward
+        val key = cellKey(regionKey, observation.action.type)
+        val existing = qTable[key]
+        val newCell = if (existing == null) {
+            MdpQEntry(
+                regionKey = regionKey,
+                actionType = observation.action.type,
+                qValue = reward + gamma * maxNextQ,
+                visitCount = 1,
+                successCount = if (observation.isSuccess) 1 else 0
+            )
+        } else {
+            val tdTarget = reward + gamma * maxNextQ
+            val updatedQ = existing.qValue + learningRateAlpha * (tdTarget - existing.qValue)
+            existing.copy(
+                qValue = updatedQ.coerceIn(-1.5f, 1.5f),
+                visitCount = existing.visitCount + 1,
+                successCount = existing.successCount + if (observation.isSuccess) 1 else 0
+            )
+        }
+        qTable[key] = newCell
+        dirtyCells.add(key)
+
+        // FIX D-4: flush the learned cells to the persistent store.
+        persistDirtyCells()
+
+        return updatedState
     }
 
     fun getCaseBase(): CaseBase = caseBase

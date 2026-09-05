@@ -53,6 +53,19 @@ class RuntimeAdapterResolver(
         toolAdapters.remove(resourceId)
     }
 
+    /**
+     * FIX F-7 (audit c03919d): exposes the declarations of every registered tool
+     * adapter so the LLM prompt can advertise real callable tools to the model
+     * (tool-calling / delegation loop). Previously the ExecutionService built an
+     * always-empty tool list, so models could never request a tool.
+     */
+    fun listToolDeclarations(): List<com.example.domain.core.tools.ToolDeclaration> =
+        toolAdapters.values.map { it.declaration }
+
+    /** Number of currently registered LLM adapters (observability / diagnostics). */
+    fun registeredAdapterCount(): Int =
+        llmAdapters.size + searchAdapters.size + embeddingAdapters.size + toolAdapters.size
+
     fun resolveLlmAdapter(
         resourceId: ResourceId,
         expectedVersion: Long? = null

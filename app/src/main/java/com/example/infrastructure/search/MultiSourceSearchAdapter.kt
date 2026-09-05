@@ -57,7 +57,6 @@ class MultiSourceSearchAdapter(
         if (!tavilyKey.isNullOrBlank()) {
             try {
                 val jsonBody = JSONObject().apply {
-                    put("api_key", tavilyKey)
                     put("query", query.query)
                     put("max_results", query.maxResults.coerceIn(1, 10))
                     put("search_depth", "basic")
@@ -66,35 +65,41 @@ class MultiSourceSearchAdapter(
 
                 val request = Request.Builder()
                     .url("https://api.tavily.com/search")
+                    // FIX P0-8/R-4 (audit c03919d): the API key is sent as an
+                    // Authorization Bearer HEADER (recommended by Tavily) — not
+                    // in the request body — and the response is closed on every
+                    // path via .use{} (previously leaked on failures).
+                    .header("Authorization", "Bearer $tavilyKey")
                     .post(jsonBody.toString().toRequestBody("application/json".toMediaTypeOrNull()))
                     .build()
 
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val body = response.body?.string() ?: "{}"
-                    val json = JSONObject(body)
-                    val resultsArray = json.optJSONArray("results") ?: JSONArray()
-                    val items = mutableListOf<SearchResultItem>()
-                    for (i in 0 until resultsArray.length()) {
-                        val obj = resultsArray.getJSONObject(i)
-                        items.add(
-                            SearchResultItem(
-                                title = obj.optString("title", "نتيجة بحث"),
-                                url = obj.optString("url", ""),
-                                snippet = obj.optString("content", ""),
-                                score = obj.optDouble("score", 0.9).toFloat()
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val body = response.body?.string() ?: "{}"
+                        val json = JSONObject(body)
+                        val resultsArray = json.optJSONArray("results") ?: JSONArray()
+                        val items = mutableListOf<SearchResultItem>()
+                        for (i in 0 until resultsArray.length()) {
+                            val obj = resultsArray.getJSONObject(i)
+                            items.add(
+                                SearchResultItem(
+                                    title = obj.optString("title", "نتيجة بحث"),
+                                    url = obj.optString("url", ""),
+                                    snippet = obj.optString("content", ""),
+                                    score = obj.optDouble("score", 0.9).toFloat()
+                                )
                             )
+                        }
+                        val duration = System.currentTimeMillis() - startTime
+                        return@withContext Outcome.Success(
+                            value = SearchResultSet(
+                                query = query.query,
+                                items = items,
+                                providerId = "tavily"
+                            ),
+                            metadata = OutcomeMetadata(durationMs = duration, providerId = "tavily")
                         )
                     }
-                    val duration = System.currentTimeMillis() - startTime
-                    return@withContext Outcome.Success(
-                        value = SearchResultSet(
-                            query = query.query,
-                            items = items,
-                            providerId = "tavily"
-                        ),
-                        metadata = OutcomeMetadata(durationMs = duration, providerId = "tavily")
-                    )
                 }
             } catch (_: Exception) {
                 // Fallback to secondary source
@@ -110,37 +115,39 @@ class MultiSourceSearchAdapter(
                 .header("User-Agent", "AI-V0-Search/1.0")
                 .build()
 
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: "[]"
-                val json = JSONArray(body)
-                if (json.length() >= 4) {
-                    val titles = json.getJSONArray(1)
-                    val snippets = json.getJSONArray(2)
-                    val urls = json.getJSONArray(3)
-                    val items = mutableListOf<SearchResultItem>()
+            // FIX R-4: response closed on every path (.use).
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: "[]"
+                    val json = JSONArray(body)
+                    if (json.length() >= 4) {
+                        val titles = json.getJSONArray(1)
+                        val snippets = json.getJSONArray(2)
+                        val urls = json.getJSONArray(3)
+                        val items = mutableListOf<SearchResultItem>()
 
-                    for (i in 0 until titles.length()) {
-                        items.add(
-                            SearchResultItem(
-                                title = titles.optString(i, "معرفة عامة"),
-                                url = urls.optString(i, ""),
-                                snippet = snippets.optString(i, ""),
-                                score = 0.85f
+                        for (i in 0 until titles.length()) {
+                            items.add(
+                                SearchResultItem(
+                                    title = titles.optString(i, "معرفة عامة"),
+                                    url = urls.optString(i, ""),
+                                    snippet = snippets.optString(i, ""),
+                                    score = 0.85f
+                                )
                             )
-                        )
-                    }
+                        }
 
-                    if (items.isNotEmpty()) {
-                        val duration = System.currentTimeMillis() - startTime
-                        return@withContext Outcome.Success(
-                            value = SearchResultSet(
-                                query = query.query,
-                                items = items,
-                                providerId = "public_knowledge"
-                            ),
-                            metadata = OutcomeMetadata(durationMs = duration, providerId = "public_knowledge")
-                        )
+                        if (items.isNotEmpty()) {
+                            val duration = System.currentTimeMillis() - startTime
+                            return@withContext Outcome.Success(
+                                value = SearchResultSet(
+                                    query = query.query,
+                                    items = items,
+                                    providerId = "public_knowledge"
+                                ),
+                                metadata = OutcomeMetadata(durationMs = duration, providerId = "public_knowledge")
+                            )
+                        }
                     }
                 }
             }

@@ -109,24 +109,30 @@ class MainViewModel(
      */
     private fun observeWorkspace() {
         viewModelScope.launch {
-            workspaceRuntimeService.activeWorkspace.collect { workspace ->
-                if (workspace != null) {
-                    _uiState.update {
-                        it.copy(
-                            activeProject = com.example.domain.core.storage.ProjectMetadata(
-                                id = workspace.activeProjectId.takeIf { id -> id > 0 } ?: 1L,
-                                name = workspace.name,
-                                description = workspace.description,
-                                isDefault = workspace.id == "default",
-                                createdAtTimestampMs = workspace.createdAtTimestampMs
+            // FIX R-5 (audit c03919d): unhandled exception in an init-path
+            // collector previously crashed the app (no catch on launch).
+            runCatching {
+                workspaceRuntimeService.activeWorkspace.collect { workspace ->
+                    if (workspace != null) {
+                        _uiState.update {
+                            it.copy(
+                                activeProject = com.example.domain.core.storage.ProjectMetadata(
+                                    id = workspace.activeProjectId.takeIf { id -> id > 0 } ?: 1L,
+                                    name = workspace.name,
+                                    description = workspace.description,
+                                    isDefault = workspace.id == "default",
+                                    createdAtTimestampMs = workspace.createdAtTimestampMs
+                                )
                             )
-                        )
+                        }
+                        // Reload RAG knowledge for the new workspace scope.
+                        ragPipelineService.loadFromPersistence()
+                        // Refresh files for the new active project.
+                        refreshFiles()
                     }
-                    // Reload RAG knowledge for the new workspace scope.
-                    ragPipelineService.loadFromPersistence()
-                    // Refresh files for the new active project.
-                    refreshFiles()
                 }
+            }.onFailure { e ->
+                _uiState.update { it.copy(errorMessage = "تعذر تحميل مساحة العمل النشطة: ${e.localizedMessage}") }
             }
         }
     }
@@ -265,10 +271,16 @@ class MainViewModel(
 
     private fun loadInitialData() {
         viewModelScope.launch {
-            refreshMemories()
-            refreshFiles()
-            refreshCapabilities()
-            simulateDecision()
+            // FIX R-5: guarded initial load (previously an exception here — e.g.
+            // corrupt DB row — crashed the app during ViewModel init).
+            runCatching {
+                refreshMemories()
+                refreshFiles()
+                refreshCapabilities()
+                simulateDecision()
+            }.onFailure { e ->
+                _uiState.update { it.copy(errorMessage = "تعذر تحميل البيانات الأولية: ${e.localizedMessage}") }
+            }
         }
     }
 
@@ -683,6 +695,80 @@ class MainViewModel(
         _uiState.update { it.copy(isAddProviderDialogOpen = false) }
     }
 
+    // ------------------------------------------------------------------
+    // FIX F-4 (audit c03919d): credential input dialog — a real user path to
+    // store an API key for a service configuration. Previously there was NO
+    // way to enter a key (the flag existed but nothing read it), so every
+    // remote provider stayed unusable.
+    // ------------------------------------------------------------------
+
+    fun openCredentialDialog(serviceId: String, serviceName: String, authAlias: String?) {
+        _uiState.update {
+            it.copy(
+                credentialDialogServiceId = serviceId,
+                credentialDialogServiceName = serviceName,
+                credentialDialogAuthAlias = authAlias,
+                credentialInput = ""
+            )
+        }
+    }
+
+    fun updateCredentialInput(value: String) {
+        _uiState.update { it.copy(credentialInput = value) }
+    }
+
+    fun closeCredentialDialog() {
+        _uiState.update {
+            it.copy(
+                credentialDialogServiceId = null,
+                credentialDialogServiceName = "",
+                credentialDialogAuthAlias = null,
+                credentialInput = "",
+                isSavingCredential = false
+            )
+        }
+    }
+
+    /**
+     * Stores the entered secret under the service's authAlias (or the service
+     * id as the storage key) and immediately runs a real connection test so
+     * the user gets honest feedback that the key works.
+     */
+    fun submitCredential() {
+        val state = _uiState.value
+        val serviceId = state.credentialDialogServiceId ?: return
+        val authAlias = state.credentialDialogAuthAlias ?: serviceId
+        val secret = state.credentialInput.trim()
+        if (secret.isEmpty()) return
+
+        _uiState.update { it.copy(isSavingCredential = true) }
+        viewModelScope.launch {
+            when (val outcome = providerControlPlaneService.storeSecret(authAlias, secret)) {
+                is Outcome.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            isSavingCredential = false,
+                            diagnosticBanner = "تم حفظ المفتاح بنجاح. جاري التحقق من الاتصال..."
+                        )
+                    }
+                    closeCredentialDialog()
+                    // Explicit validation right after storing the key —
+                    // honest feedback instead of silent "saved".
+                    val config = providerControlPlaneService.getCurrentConfigurationForService(serviceId)
+                    if (config != null) {
+                        testServiceConnection(config.id)
+                    }
+                }
+                is Outcome.Error -> {
+                    _uiState.update {
+                        it.copy(isSavingCredential = false, errorMessage = outcome.diagnosticMessage)
+                    }
+                }
+                else -> _uiState.update { it.copy(isSavingCredential = false) }
+            }
+        }
+    }
+
     fun clearProviderTestResult() {
         _uiState.update { it.copy(testingProviderId = null) }
     }
@@ -738,7 +824,19 @@ class MainViewModel(
 
     fun advanceCandidateStage(candidateId: String, nextStage: EvolutionStage) {
         viewModelScope.launch {
-            intelligenceRadarPipeline.advanceEvolutionStage(candidateId, nextStage)
+            // FIX F-10: surface the governance gate's verdict honestly instead
+            // of silently ignoring a rejected promotion.
+            when (val outcome = intelligenceRadarPipeline.advanceEvolutionStage(candidateId, nextStage)) {
+                is Outcome.Success -> {
+                    _uiState.update {
+                        it.copy(diagnosticBanner = "تمت ترقية المرشح إلى ${nextStage.displayName}.")
+                    }
+                }
+                is Outcome.Error -> {
+                    _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                }
+                else -> Unit
+            }
         }
     }
 
@@ -757,7 +855,10 @@ class MainViewModel(
         if (title.isEmpty() || content.isEmpty()) return
 
         viewModelScope.launch {
-            ragPipelineService.ingestDocument(title, content, "workspace://docs/$title.md")
+            // FIX P0-8 (audit c03919d): sanitize the title so it cannot inject
+            // path separators into the workspace:// source URI.
+            val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+            ragPipelineService.ingestDocument(safeTitle, content, "workspace://docs/$safeTitle.md")
             _uiState.update { it.copy(newDocTitle = "", newDocContent = "") }
         }
     }
@@ -807,6 +908,15 @@ class MainViewModel(
                 is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage, isFileLoading = false) }
             }
         }
+    }
+
+    /**
+     * FIX P0-5 (audit c03919d): proper editor close. Previously the editor's
+     * back button called openFile("") which attempted to READ a file with an
+     * empty relative path; now the editor state is cleared directly.
+     */
+    fun closeFileEditor() {
+        _uiState.update { it.copy(selectedFilePath = null, selectedFileContent = null) }
     }
 
     fun saveFile(relativePath: String, content: String) {

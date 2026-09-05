@@ -121,6 +121,15 @@ data class UiState(
     val testingProviderId: String? = null,
     val isAddProviderDialogOpen: Boolean = false,
 
+    // FIX F-4 (audit c03919d): credential input dialog state — previously the
+    // dialog flag was set with no reader; now the ProviderServiceManager screen
+    // renders a real AlertDialog bound to these fields.
+    val credentialDialogServiceId: String? = null,
+    val credentialDialogServiceName: String = "",
+    val credentialDialogAuthAlias: String? = null,
+    val credentialInput: String = "",
+    val isSavingCredential: Boolean = false,
+
     // Memory & Knowledge RAG
     val memoryQuery: String = "",
     val retrievedMemories: List<ScoredMemoryRecord> = emptyList(),

@@ -27,6 +27,7 @@ import com.example.infrastructure.persistence.dao.SessionDao
 import com.example.infrastructure.persistence.dao.TaskDao
 import com.example.infrastructure.persistence.dao.UserResourcePreferenceDao
 import com.example.infrastructure.persistence.dao.WorkspaceDao
+import com.example.infrastructure.persistence.dao.MdpQValueDao
 import com.example.infrastructure.persistence.entities.DecisionCaseEntity
 import com.example.infrastructure.persistence.entities.DocumentChunkEntity
 import com.example.infrastructure.persistence.entities.EvolutionCandidateEntity
@@ -48,6 +49,7 @@ import com.example.infrastructure.persistence.entities.SessionEntity
 import com.example.infrastructure.persistence.entities.TaskEntity
 import com.example.infrastructure.persistence.entities.UserResourcePreferenceEntity
 import com.example.infrastructure.persistence.entities.WorkspaceEntity
+import com.example.infrastructure.persistence.entities.MdpQValueEntity
 
 /**
  * AI-V0 Ultimate — Room Database
@@ -68,6 +70,13 @@ import com.example.infrastructure.persistence.entities.WorkspaceEntity
  *   1. Bump `version` below when adding columns/tables.
  *   2. Add a new `MIGRATION_N_TO_N1` Migration object to `ALL_MIGRATIONS`.
  *   3. Set `exportSchema = true` once the schemas/ directory is wired in build.gradle.
+ *
+ * FIX R-3 (audit c03919d): the migration chain now starts at v1 (1→2→3→4→5→6→7)
+ * so ANY historically shipped database upgrades cleanly.
+ *
+ * P1 (real intelligence, audit c03919d): v6 → v7 adds the `mdp_q_values` table —
+ * the persistent tabular-MDP Q-table backing the CBR-MDP engine (fixes D-1/D-4:
+ * per-(region, action) values + transition rates that survive restarts).
  */
 @Database(
     entities = [
@@ -93,9 +102,11 @@ import com.example.infrastructure.persistence.entities.WorkspaceEntity
         ServiceHealthRecordEntity::class,
         ServiceOfferingEntity::class,
         UserResourcePreferenceEntity::class,
-        ResourceRecordEntity::class
+        ResourceRecordEntity::class,
+        // P1 — tabular MDP Q-table (CBR-MDP real learning)
+        MdpQValueEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -125,9 +136,141 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun userResourcePreferenceDao(): UserResourcePreferenceDao
     abstract fun resourceRecordDao(): ResourceRecordDao
 
+    // P1 — tabular MDP Q-table (CBR-MDP real learning)
+    abstract fun mdpQValueDao(): MdpQValueDao
+
     companion object {
         @Volatile
         private var INSTANCE: AppDatabase? = null
+
+        /**
+         * FIX R-3 (audit c03919d): Migration v1 → v2. Users who installed the
+         * very first build (projects/sessions/memory/execution_logs only)
+         * previously CRASHED on upgrade ("A migration from 1 to 6 was required
+         * but not found") because the migration chain only started at v3.
+         * This migration creates the five v2-era tables with their exact
+         * historical schemas (no indices — matching the v2 entity definitions).
+         */
+        private val MIGRATION_1_TO_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        assignedAgentId TEXT NOT NULL,
+                        rawPrompt TEXT NOT NULL,
+                        lifecycleState TEXT NOT NULL,
+                        autonomyPolicy TEXT NOT NULL,
+                        resultSummary TEXT,
+                        totalTokensConsumed INTEGER NOT NULL,
+                        durationMs INTEGER NOT NULL,
+                        isDegraded INTEGER NOT NULL,
+                        degradedReason TEXT,
+                        errorMessage TEXT,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS decision_cases (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        featuresJson TEXT NOT NULL,
+                        actionType TEXT NOT NULL,
+                        targetId TEXT,
+                        outcomeReward REAL NOT NULL,
+                        taskType TEXT NOT NULL,
+                        timestampEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS radar_items (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        sourceUrl TEXT NOT NULL,
+                        sourceName TEXT NOT NULL,
+                        relevanceScore REAL NOT NULL,
+                        confidence REAL NOT NULL,
+                        provenance TEXT NOT NULL,
+                        tagsJson TEXT NOT NULL,
+                        extractedCapabilityJson TEXT,
+                        discoveredTimestampEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS evolution_candidates (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        radarItemId TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        stage TEXT NOT NULL,
+                        targetType TEXT NOT NULL,
+                        evaluationNotes TEXT NOT NULL,
+                        securityAuditPassed INTEGER NOT NULL,
+                        governanceApproved INTEGER NOT NULL,
+                        confidence REAL NOT NULL,
+                        provenanceUrl TEXT NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS extension_configs (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        type TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        endpointOrConfig TEXT NOT NULL,
+                        isEnabled INTEGER NOT NULL,
+                        isConnected INTEGER NOT NULL,
+                        healthStatus TEXT NOT NULL,
+                        authMetadataJson TEXT,
+                        lastVerifiedEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * FIX R-3 (audit c03919d): Migration v2 → v3 — adds the provider_configs
+         * table (exact historical v3 schema; the table was dropped from the
+         * current entity graph later but remains in the schema for migration
+         * chain integrity). Users on v2 previously crashed on upgrade.
+         */
+        private val MIGRATION_2_TO_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS provider_configs (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        flavor TEXT NOT NULL,
+                        endpointUrl TEXT NOT NULL,
+                        defaultModelId TEXT NOT NULL,
+                        isEnabled INTEGER NOT NULL,
+                        isDefault INTEGER NOT NULL,
+                        healthStatus TEXT NOT NULL,
+                        lastValidatedEpochMs INTEGER NOT NULL,
+                        lastLatencyMs INTEGER NOT NULL,
+                        lastErrorMessage TEXT,
+                        extraHeadersJson TEXT,
+                        timeoutSeconds INTEGER NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
 
         /**
          * Migration v3 → v4: add full-fidelity TaskEntity columns needed by
@@ -397,10 +540,38 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * P1 — Migration v6 → v7: adds the `mdp_q_values` table for the
+         * persistent tabular-MDP Q-table (per-(region, action) value + visit /
+         * success counts). Purely additive — no existing table altered.
+         */
+        private val MIGRATION_6_TO_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS mdp_q_values (
+                        regionKey TEXT NOT NULL,
+                        actionType TEXT NOT NULL,
+                        qValue REAL NOT NULL,
+                        visitCount INTEGER NOT NULL,
+                        successCount INTEGER NOT NULL,
+                        lastUpdatedEpochMs INTEGER NOT NULL,
+                        PRIMARY KEY(regionKey, actionType)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
+            // FIX R-3: complete the chain from the earliest shipped schema (v1)
+            // so upgrades never crash with "migration not found".
+            MIGRATION_1_TO_2,
+            MIGRATION_2_TO_3,
             MIGRATION_3_TO_4,
             MIGRATION_4_TO_5,
             MIGRATION_5_TO_6,
+            MIGRATION_6_TO_7,
         )
 
 

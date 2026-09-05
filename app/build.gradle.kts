@@ -25,18 +25,21 @@ android {
 
   signingConfigs {
     create("release") {
+      // Release signing comes exclusively from environment variables
+      // (CI secret store). Documented in docs/RELEASE-SIGNING.md.
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
       storeFile = file(keystorePath)
       storePassword = System.getenv("STORE_PASSWORD")
       keyAlias = "upload"
       keyPassword = System.getenv("KEY_PASSWORD")
     }
-    create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
-    }
+    // FIX F-12 (audit c03919d): the debug build type previously pointed at
+    // ${rootDir}/debug.keystore — a file that is .gitignored and therefore
+    // MISSING on every clean clone, breaking `./gradlew assembleDebug` until
+    // someone manually generated a keystore. We now use the standard AGP
+    // debug signing config: Android tooling auto-generates the debug keystore
+    // at ~/.android/debug.keystore when absent, so a clean clone builds out
+    // of the box with zero manual steps.
   }
 
   buildTypes {
@@ -46,7 +49,10 @@ android {
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
+    debug {
+      // Standard AGP debug signing (auto-generated keystore) — see FIX F-12.
+      signingConfig = signingConfigs.getByName("debug")
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
