@@ -5,21 +5,19 @@ import com.google.firebase.FirebaseApp
 
 /**
  * ============================================================================
- * GeminiBootstrap — Phase 4 (REAL initialization)
+ * GeminiBootstrap — OPTIONAL Firebase options detection
  * ============================================================================
  *
- * Ensures the Firebase AI SDK backend for Gemini is initialized BEFORE the
- * DecisionService attempts to select Gemini-backed LLM candidates.
+ * STATUS (fix "firebase not initiated"): this class is NO LONGER a runtime
+ * dependency of Gemini generation. GeminiLlmAdapter now talks to the
+ * Generative Language REST API directly with the user's stored key, so the
+ * app runs perfectly WITHOUT google-services.json / FirebaseApp.
  *
- * What actually happens:
- *   1. If no FirebaseApp exists for this application, one is initialized from
- *      the bundled google-services.json / default options (when present).
- *   2. `isReady()` reports honestly: Firebase initialized AND an API key
- *      available in the default options. No fabricated success.
- *
- * If initialization fails (no google-services.json, missing options), the
- * failure is captured and exposed — the system degrades gracefully but never
- * pretends Gemini is available.
+ * What remains here is opportunistic key discovery: IF a Firebase project is
+ * bundled later (google-services.json present), `apiKeyFromOptions()` can
+ * surface the API key from the Firebase default options so validation can
+ * use it. When Firebase is absent everything degrades honestly — the last
+ * error is captured for diagnostics and the REST path is unaffected.
  */
 class GeminiBootstrap(private val context: Context) {
 

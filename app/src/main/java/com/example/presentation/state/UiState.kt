@@ -32,13 +32,13 @@ import com.example.domain.core.workflow.WorkflowExecutionReport
 import com.example.domain.core.workspace.ResourceGraph
 
 enum class ActiveNavigationTab(val displayName: String, val iconName: String) {
-    STUDIO("المشغل الذكي (Studio)", "ic_studio"),
+    STUDIO("الاستوديو", "ic_studio"),
     TASKS_WORKFLOWS("المهام وخطط العمل", "ic_workflow"),
     DECISION_INTELLIGENCE("ذكاء القرار (CBR-MDP)", "ic_decision"),
-    RADAR_EVOLUTION("رادار التطور والقدرات", "ic_radar"),
-    EXTENSIONS("الملحقات وMCP والمهارات", "ic_extensions"),
-    MODELS_CAPABILITIES("النماذج والمزودين", "ic_models"),
-    KNOWLEDGE_RAG("المعرفة والوثائق (RAG)", "ic_knowledge"),
+    RADAR_EVOLUTION("رادار التطور", "ic_radar"),
+    EXTENSIONS("الملحقات والمهارات", "ic_extensions"),
+    MODELS_CAPABILITIES("المزودون والنماذج", "ic_models"),
+    KNOWLEDGE_RAG("المعرفة (RAG)", "ic_knowledge"),
     FILES("ملفات مساحة العمل", "ic_files")
 }
 
@@ -120,6 +120,15 @@ data class UiState(
     val isTestingProvider: Boolean = false,
     val testingProviderId: String? = null,
     val isAddProviderDialogOpen: Boolean = false,
+
+    // "Connect Provider" wizard — the guided full-chain path that ends with a
+    // usable ENABLED resource (fix: user could add a provider but never use it).
+    val isConnectWizardOpen: Boolean = false,
+    val wizardRunning: Boolean = false,
+    val wizardStep: Int = 0,
+    val wizardStepLabel: String? = null,
+    val wizardResult: String? = null,
+    val wizardResultIsSuccess: Boolean = true,
 
     // FIX F-4 (audit c03919d): credential input dialog state — previously the
     // dialog flag was set with no reader; now the ProviderServiceManager screen

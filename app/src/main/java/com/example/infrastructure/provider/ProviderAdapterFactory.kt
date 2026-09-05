@@ -41,7 +41,8 @@ class ProviderAdapterFactory(
     fun createLlmAdapter(config: ProviderConfiguration, apiKeyProvider: () -> String?): LlmProviderPort {
         return when (config.flavor) {
             ProviderFlavor.GEMINI -> GeminiLlmAdapter(
-                defaultModelName = config.defaultModelId.ifBlank { "gemini-2.5-flash" }
+                defaultModelName = config.defaultModelId.ifBlank { "gemini-2.5-flash" },
+                apiKeyProvider = { apiKeyProvider() }
             )
             ProviderFlavor.OPENAI_COMPATIBLE, ProviderFlavor.OLLAMA -> OpenAiCompatibleAdapter(
                 providerId = config.id,

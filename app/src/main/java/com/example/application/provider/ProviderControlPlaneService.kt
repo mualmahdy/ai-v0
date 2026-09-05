@@ -198,6 +198,16 @@ class ProviderControlPlaneService(
         serviceRepository.toggleService(id, isEnabled)
 
     /**
+     * Register (insert-or-replace) a ServiceOffering explicitly — the user-driven
+     * path used by the "Connect Provider" wizard when the offering (model/endpoint)
+     * is chosen manually rather than discovered from the network.
+     */
+    suspend fun registerOffering(offering: ServiceOffering): Outcome<Unit, String> {
+        offeringRepository.registerOffering(offering)
+        return Outcome.Success(Unit)
+    }
+
+    /**
      * Save (insert-or-replace) a ServiceConfiguration. Pure persistence — no
      * network calls (Correction #10). The repository bumps `configurationVersion`
      * atomically (Correction #3) and verifies the service exists.
