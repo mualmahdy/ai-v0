@@ -614,6 +614,175 @@ object CriticalFindingsRegister {
             """.trimIndent(),
             fix = "Phase 7: replace flat nav with Workspace drawer > Project selector > Task list > Conversation surface.",
         ),
+        // ────────────────────────────────────────────────────────────────────
+        // Phase 5 — P0/P1 Intelligence Layer remediation findings
+        // ────────────────────────────────────────────────────────────────────
+        // Each finding below closes one of the 16 gaps identified in the
+        // "تقرير الفجوات المتبقية — AI-V0 main" audit. All are FIXED in this
+        // commit; the corresponding production code lives under
+        // `application/{observability,memory,workspace,tools,search,rag,agent,
+        // workflow,task,resilience,security,evolution,provider,decision,extension}/`
+        // and `infrastructure/observability/`.
+        Finding(
+            id = "P5-P0-01",
+            severity = Severity.P0,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Observability — ExecutionLogDao declared but never called; no metrics, no audit trail, no execution trace persistence",
+            file = "infrastructure/persistence/dao/Daos.kt (ExecutionLogDao)",
+            description = "The audit found ExecutionLogEntity existed in Room but was never called by any production code; events were streamed to the UI but never persisted. No MetricsCollector, no per-provider/tool/agent call counts, no latency histograms, no cost tracking, no health dashboard.",
+            fix = "Phase 5: added TelemetryPort + TelemetryService + RoomTelemetryRepository wiring ExecutionLogDao into production. Added metric_events, audit_trail, health_probes, execution_trace_nodes tables (MIGRATION_7_TO_8). TelemetryService.subscribeToExecutionEvents turns the orchestrator's event flow into durable trace nodes + metric samples."
+        ),
+        Finding(
+            id = "P5-P0-02",
+            severity = Severity.P0,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Memory Intelligence — only 4 memory types; no decay/consolidation/ranking/forgetting lifecycle; no workspace/agent scoping",
+            file = "domain/core/memory/MemoryModels.kt + infrastructure/memory/RoomVectorStoreAdapter.kt",
+            description = "Only PREFERENCE/FACTUAL_INSIGHT/CASE_EXAMPLE/CONVERSATION_SUMMARY existed. No working/episodic/semantic/procedural/workspace/agent memory types. No decay function. No consolidation. Ranking was pure cosine similarity. MemoryEntity had no workspace_id or agent_id columns.",
+            fix = "Phase 5: extended MemoryType taxonomy to 11 cognitive types. Added MemoryLifecycleService with applyDecay/consolidate/rank/forget/ensureNamespace/storeScoped/retrieveScoped. Migration 7→8 adds memoryType/importance/decayScore/workspaceId/agentId/tagsJson columns."
+        ),
+        Finding(
+            id = "P5-P0-03",
+            severity = Severity.P0,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Workspace Intelligence — ResourceGraph always empty; ResourceEdgeDao never called; no WorkspaceContextEngine; no proactive suggestions",
+            file = "application/workspace/WorkspaceRuntimeService.kt",
+            description = "Workspace.resourceGraph was always ResourceGraph() populated nowhere. ResourceEdgeDao was declared in AppDatabase but never called by any service. No workspace event stream. No proactive suggestions.",
+            fix = "Phase 5: added WorkspaceContextEngine that maintains a live ResourceGraph per workspace, wires ResourceEdgeDao into production, emits WorkspaceEvent SharedFlow, builds WorkspaceContextSnapshot, generates ProactiveSuggestion cards."
+        ),
+        Finding(
+            id = "P5-P0-04",
+            severity = Severity.P0,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Tool Ecosystem — no full lifecycle; no versioning; no per-tool timeout/retry/cancel; no health monitor; no audit trail",
+            file = "domain/core/tools/ToolModels.kt + application/execution/ExecutionService.kt",
+            description = "Only register→execute→observe existed. No validate/authorize/audit/revoke. ToolDeclaration had no version field. No per-tool timeoutMs/retryPolicy. ToolHealthMonitor didn't exist. requiredPermissions unchecked.",
+            fix = "Phase 5: added ToolLifecyclePort + ToolLifecycleService implementing full state machine. Added ToolVersion, ToolExecutionPolicy, ToolHealthSnapshot with circuit breaker, ToolAuditEntry persisted to tool_audit_log, ToolPermissionGrant via permission_grants."
+        ),
+        Finding(
+            id = "P5-P0-05",
+            severity = Severity.P0,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Search Intelligence — single query verbatim; no decomposition, no intent classification, no source selection, no dedup, no ranking, no evidence scoring, no citation provenance",
+            file = "domain/core/search/SearchModels.kt + infrastructure/search/MultiSourceSearchAdapter.kt",
+            description = "Single SearchQuery.query string passed verbatim. No SearchIntent enum. Hardcoded provider order. No URL/title dedup. Used provider's score (often null). No citation chain.",
+            fix = "Phase 5: added SearchIntelligenceService with decompose, SearchIntent classifier (7 intents), SourceSelection policy, parallel multi-query execution, canonicalDedupKey (SHA-256), multi-dimensional ranking, CitationChain provenance."
+        ),
+        Finding(
+            id = "P5-P0-06",
+            severity = Severity.P0,
+            verdict = Verdict.PARTIAL,
+            status = FixStatus.FIXED,
+            title = "RAG Intelligence — single-pass hybrid score; no RRF fusion; no reranking; no token-budget assembly; no metadata filtering; no evidence confidence calibration",
+            file = "application/rag/RagPipelineService.kt",
+            description = "Single-pass combined score over one chunk list. No separate lexical + semantic indices. No second-stage cross-encoder. AssembledRagContext just concatenated chunks. metadata never used as filter. relevanceScore was raw similarity.",
+            fix = "Phase 5: added RagIntelligenceService with runSemanticIndex + runLexicalIndex (BM25), rrfFuse (k=60), rerank (feature-based), assembleContext (token-budget packing with citations), metadataFilters, calibrated evidenceConfidence."
+        ),
+        Finding(
+            id = "P5-P0-07",
+            severity = Severity.P0,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Agent Intelligence — no lifecycle state machine; no versioning; no per-agent memory namespace; no budget enforcement; no autonomy policy enforcement; no pre-deploy validation/dry-run",
+            file = "domain/core/agent/AgentModels.kt + application/orchestration/AgentOrchestrator.kt",
+            description = "AgentDefinition.enabled was a boolean. AgentBudget.isDepleted never checked. AutonomyPolicy enum never gated execution. All agents shared global MemoryRepositoryPort. No AgentDefinitionHistory. No AgentTestRunner.",
+            fix = "Phase 5: added AgentLifecycleService with CREATED→INITIALIZED→READY→RUNNING→PAUSED→TERMINATED state machine, AgentVersion with parent pointer, ensureMemoryNamespace, evaluateAutonomy, evaluateBudget, validateForDeployment, dryRun."
+        ),
+        Finding(
+            id = "P5-P1-08",
+            severity = Severity.P1,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Workflow Intelligence — no persistence; no resume after process death; no durable checkpoints; no compensation actions; no cancellation propagation",
+            file = "application/orchestration/WorkflowEngine.kt",
+            description = "WorkflowPlan and WorkflowExecutionReport were NOT persisted. State was in-memory only. No WorkflowEntity. FAN_OUT_PARALLEL ran sequentially. No cancel API.",
+            fix = "Phase 5: added WorkflowPersistenceService with start/checkpoint/markStepStatus/markStepCompensated/complete/fail/cancel/resumable. New workflow_executions + workflow_step_states tables."
+        ),
+        Finding(
+            id = "P5-P1-09",
+            severity = Severity.P1,
+            verdict = Verdict.PARTIAL,
+            status = FixStatus.FIXED,
+            title = "Task Intelligence — no multi-level decomposition; no dependency graph; no scheduling; priorities ignored; deadlines not enforced; no startup resume",
+            file = "domain/core/task/TaskModels.kt",
+            description = "TaskDefinition had no parentTaskId/subtaskIds. TaskPriority ignored (FIFO). TaskConstraints.timeoutMs not enforced. resumeTask never called on startup.",
+            fix = "Phase 5: added TaskDecompositionService with decompose, TaskDependency DAG, computeSchedule (Kahn's algorithm with parallel batches), enforceDeadline, pendingResumableTasks."
+        ),
+        Finding(
+            id = "P5-P1-10",
+            severity = Severity.P1,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Production Resilience — no circuit breakers; no provider failover; no resource quotas; no network reconnection",
+            file = "application/execution/ExecutionService.kt + application/decision/DecisionService.kt",
+            description = "No CircuitBreaker class. ComponentRegistry never re-opened after 3 strikes. No automatic failover. No per-workspace quota enforcement.",
+            fix = "Phase 5: added CircuitBreakerService (CLOSED/OPEN/HALF_OPEN), FailoverDecision, ResourceQuota + QuotaUsage, ProviderRoutingService.selectFallback."
+        ),
+        Finding(
+            id = "P5-P1-11",
+            severity = Severity.P1,
+            verdict = Verdict.PARTIAL,
+            status = FixStatus.FIXED,
+            title = "Security Governance — global single policy; no per-agent/tool permissions; no capability-based security; no audit trail; no secret rotation",
+            file = "application/security/SecurityGuardService.kt",
+            description = "SecurityPolicy was global. authorityLevel was a String. requiredPermissions unchecked. No AuditLog entity. No rotation API.",
+            fix = "Phase 5: added PermissionGrantService with per-principal per-resource per-permission grants, AuditTrailService persisting every security decision, SecretRotationRequest/Result model."
+        ),
+        Finding(
+            id = "P5-P1-12",
+            severity = Severity.P1,
+            verdict = Verdict.MISSING,
+            status = FixStatus.FIXED,
+            title = "Evolution/Self-Improvement — no policy versioning; no offline replay; no regression detection; no safe promotion; no rollback",
+            file = "domain/core/evolution/EvolutionModels.kt",
+            description = "No PolicyVersion entity. No history of policy changes. No offline evaluation script. No regression detection. No staging/canary. No rollback. explorationCoefficient hardcoded.",
+            fix = "Phase 5: added PolicyVersionService with createVersion, promote, rollback, detectRegression, decidePromotion. policy_versions table persists everything."
+        ),
+        Finding(
+            id = "P5-P1-13",
+            severity = Severity.P1,
+            verdict = Verdict.PARTIAL,
+            status = FixStatus.FIXED,
+            title = "MCP/Extensions — only toggle* and registerNewMcpServer; no install/update/remove; no version compatibility; no capability negotiation; no periodic health monitoring",
+            file = "application/extension/ExtensionManager.kt",
+            description = "Only toggle* existed. version strings with no compatibility check. MCP initialize sent fixed capabilities:{}. trustLevel existed but no sandboxing. pingAndDiscoverMcpServer was on-demand only.",
+            fix = "Phase 5: added ExtensionLifecycleService with full lifecycle (INSTALLED→CONFIGURED→CONNECTED→HEALTHY→DEGRADED→DISABLED→REMOVED), install/update/remove with version compatibility, negotiateCapabilities, periodicHealthMonitorLoop."
+        ),
+        Finding(
+            id = "P5-P1-14",
+            severity = Severity.P1,
+            verdict = Verdict.PARTIAL,
+            status = FixStatus.FIXED,
+            title = "Provider Ecosystem — no routing policies; no cost/latency/quality/capability-aware routing; no dynamic load balancing; no automatic failover",
+            file = "application/decision/DecisionService.kt",
+            description = "DecisionService produced one candidate per action. No RoutingPolicy enum. pricingInputTokensPerMillion and latencyScoreMs never read. No per-provider load tracker. No automatic failover.",
+            fix = "Phase 5: added ProviderRoutingService with score (7 strategies), selectFallback, incrementInFlight/decrementInFlight, LoadBalancerSnapshot StateFlow."
+        ),
+        Finding(
+            id = "P5-P1-15",
+            severity = Severity.P1,
+            verdict = Verdict.PARTIAL,
+            status = FixStatus.FIXED,
+            title = "Decision Intelligence — myopic 1-step Q lookup; no richer state; no policy evaluation; no offline evaluation; no uncertainty calibration; no long-horizon planning",
+            file = "domain/core/decision/CbrMdpEngine.kt",
+            description = "CbrMdpEngine was myopic (1-step γ·maxQ(r')). uncertaintyScore hand-tuned (*0.7/*1.3). No offline script. No multi-step lookahead.",
+            fix = "Phase 5: added DecisionIntelligenceService with evaluatePolicy, lookahead (N-step with discount γ), calibrateUncertainty (blends raw uncertainty with empirical prediction error)."
+        ),
+        Finding(
+            id = "P5-P1-16",
+            severity = Severity.P1,
+            verdict = Verdict.PARTIAL,
+            status = FixStatus.FIXED,
+            title = "Smart Workspace UI — navigation-centric (8 siloed tabs); no unified activity surface; no proactive suggestion cards; flat log instead of structured trace",
+            file = "presentation/ui/MainAppScreen.kt + presentation/ui/screens/*",
+            description = "8 siloed tabs. No single timeline showing what the agent is doing. No proactive suggestions. Events shown as flat log not structured trace.",
+            fix = "Phase 5: added UnifiedActivityFeedScreen rendering three sections: Proactive Suggestions, Execution Trace, Recent Audit Events. MainViewModel exposes activeSuggestions/activeExecutionTrace/recentAuditEvents StateFlows."
+        ),
     )
 
     // ────────────────────────────────────────────────────────────────────────

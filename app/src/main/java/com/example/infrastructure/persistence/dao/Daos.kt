@@ -68,20 +68,75 @@ interface MemoryDao {
     @Query("SELECT * FROM memory_records WHERE isArchived = 0")
     suspend fun getAllActiveMemories(): List<MemoryEntity>
 
+    @Query("SELECT * FROM memory_records WHERE isArchived = 0 AND workspaceId IS :workspaceId")
+    suspend fun getActiveForWorkspace(workspaceId: String?): List<MemoryEntity>
+
+    @Query("SELECT * FROM memory_records WHERE isArchived = 0 AND workspaceId IS :workspaceId AND (agentId IS :agentId OR agentId IS NULL)")
+    suspend fun getActiveForWorkspaceAndAgent(workspaceId: String?, agentId: String?): List<MemoryEntity>
+
+    @Query("SELECT * FROM memory_records WHERE isArchived = 0 AND agentId IS :agentId")
+    suspend fun getActiveForAgent(agentId: String?): List<MemoryEntity>
+
+    @Query("SELECT * FROM memory_records WHERE isArchived = 0 AND memoryType IN (:types)")
+    suspend fun getActiveByTypes(types: List<String>): List<MemoryEntity>
+
+    @Query("SELECT * FROM memory_records WHERE isArchived = 0 AND workspaceId IS :workspaceId AND memoryType IN (:types) AND (agentId IS :agentId OR agentId IS NULL)")
+    suspend fun getActiveForWorkspaceAndAgentAndTypes(
+        workspaceId: String?,
+        agentId: String?,
+        types: List<String>
+    ): List<MemoryEntity>
+
+    @Query("SELECT * FROM memory_records WHERE lastDecayEvaluatedAtEpochMs < :cutoff AND isArchived = 0")
+    suspend fun getMemoriesDueForDecay(cutoff: Long): List<MemoryEntity>
+
+    @Query("SELECT * FROM memory_records WHERE decayScore < :threshold AND isArchived = 0")
+    suspend fun getMemoriesBelowDecay(threshold: Float): List<MemoryEntity>
+
+    @Query("SELECT * FROM memory_records WHERE isArchived = 1 AND lastAccessedEpochMs < :cutoff")
+    suspend fun getArchivedOlderThan(cutoff: Long): List<MemoryEntity>
+
     @Query("SELECT * FROM memory_records WHERE id = :id LIMIT 1")
     suspend fun getMemoryById(id: String): MemoryEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMemory(memory: MemoryEntity)
 
-    @Query("UPDATE memory_records SET lastAccessedEpochMs = :now, accessCount = accessCount + 1 WHERE id = :id")
-    suspend fun touchMemory(id: String, now: Long)
+    @Query("UPDATE memory_records SET lastAccessedEpochMs = :now, accessCount = accessCount + 1, decayScore = MIN(1.0, decayScore + :accessBoost) WHERE id = :id")
+    suspend fun touchMemory(id: String, now: Long, accessBoost: Float = 0.2f)
+
+    @Query("UPDATE memory_records SET decayScore = :decayScore, lastDecayEvaluatedAtEpochMs = :now WHERE id = :id")
+    suspend fun updateDecayScore(id: String, decayScore: Float, now: Long)
+
+    @Query("UPDATE memory_records SET isArchived = 1 WHERE id = :id")
+    suspend fun archive(id: String)
+
+    @Query("UPDATE memory_records SET content = :content, confidence = :confidence, memoryType = :type WHERE id = :id")
+    suspend fun mergeContent(id: String, content: String, confidence: Float, type: String)
 
     @Query("DELETE FROM memory_records WHERE id = :id")
     suspend fun deleteMemory(id: String)
 
     @Query("DELETE FROM memory_records")
     suspend fun clearAll()
+
+    @Query("DELETE FROM memory_records WHERE isArchived = 1 AND lastAccessedEpochMs < :cutoff")
+    suspend fun deleteArchivedOlderThan(cutoff: Long): Int
+
+    @Query("SELECT COUNT(*) FROM memory_records WHERE isArchived = 0 AND workspaceId IS :workspaceId")
+    suspend fun activeCountForWorkspace(workspaceId: String?): Int
+
+    @Query("SELECT COUNT(*) FROM memory_records WHERE isArchived = 0 AND agentId IS :agentId")
+    suspend fun activeCountForAgent(agentId: String?): Int
+
+    @Query("SELECT COUNT(*) FROM memory_records WHERE isArchived = 0")
+    suspend fun activeCountGlobal(): Int
+
+    @Query("SELECT * FROM memory_records WHERE isArchived = 0 AND workspaceId IS :workspaceId ORDER BY lastAccessedEpochMs ASC LIMIT :limit")
+    suspend fun leastRecentlyUsedForWorkspace(workspaceId: String?, limit: Int): List<MemoryEntity>
+
+    @Query("SELECT * FROM memory_records WHERE isArchived = 0 ORDER BY lastAccessedEpochMs ASC LIMIT :limit")
+    suspend fun leastRecentlyUsedGlobal(limit: Int): List<MemoryEntity>
 }
 
 @Dao

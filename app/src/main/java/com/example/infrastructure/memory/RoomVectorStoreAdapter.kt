@@ -123,6 +123,8 @@ class RoomVectorStoreAdapter(
             createLexicalSparseVector(entry.content)
         }
 
+        // Phase 5: storeMemory is now workspace/agent agnostic (legacy global path).
+        // Use the dedicated MemoryLifecycleService.storeScoped() for workspace-scoped writes.
         val record = VectorStoreRecord(
             id = entry.id,
             vector = vector,
@@ -132,7 +134,29 @@ class RoomVectorStoreAdapter(
                 "confidence" to entry.confidence.toString()
             )
         )
-        upsert(record)
+        val entity = MemoryEntity(
+            id = record.id,
+            text = record.payloadText,
+            vectorDimension = record.vector.dimension,
+            vectorJson = JSONArray().also { arr -> record.vector.values.forEach { arr.put(it.toDouble()) } }.toString(),
+            source = record.metadata["source"] ?: "USER_INPUT",
+            confidence = record.metadata["confidence"]?.toFloatOrNull() ?: 1.0f,
+            createdAtEpochMs = System.currentTimeMillis(),
+            lastAccessedEpochMs = System.currentTimeMillis(),
+            memoryType = entry.type.name,
+            importance = entry.importance,
+            decayScore = 1.0f,
+            workspaceId = null,
+            agentId = null,
+            tagsJson = "[]",
+            lastDecayEvaluatedAtEpochMs = System.currentTimeMillis()
+        )
+        try {
+            memoryDao.insertMemory(entity)
+            Outcome.Success(Unit)
+        } catch (e: Exception) {
+            Outcome.Error(VectorStoreFailure.StorageWriteError("فشل حفظ الذاكرة: ${e.localizedMessage}"))
+        }
     }
 
     override suspend fun retrieveMemories(

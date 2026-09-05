@@ -63,6 +63,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -79,7 +80,11 @@ class MainViewModel(
     private val ragPipelineService: RagPipelineService,
     private val providerControlPlaneService: ProviderControlPlaneService,
     // Phase 2 — workspace runtime service for multi-workspace support
-    private val workspaceRuntimeService: WorkspaceRuntimeService
+    private val workspaceRuntimeService: WorkspaceRuntimeService,
+    // Phase 5 — intelligence services for the Unified Activity Feed
+    private val telemetryService: com.example.application.observability.TelemetryService? = null,
+    private val workspaceContextEngine: com.example.application.workspace.WorkspaceContextEngine? = null,
+    private val telemetryPort: com.example.domain.ports.observability.TelemetryPort? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UiState())
@@ -92,6 +97,28 @@ class MainViewModel(
         workspaceRuntimeService.allWorkspaces
 
     private var currentExecutionJob: Job? = null
+
+    // Phase 5 — Unified Activity Feed state flows. These power the new
+    // UnifiedActivityFeedScreen which renders a single timeline of
+    // suggestions + execution trace + audit events.
+    val activeSuggestions: StateFlow<List<com.example.domain.core.workspace.context.ProactiveSuggestion>> =
+        workspaceContextEngine?.suggestions?.let { flow ->
+            kotlinx.coroutines.flow.mapNotNull(flow) { map ->
+                map.flatMap { it.value }
+            }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
+        } ?: MutableStateFlow(emptyList<com.example.domain.core.workspace.context.ProactiveSuggestion>()).asStateFlow()
+
+    val activeExecutionTrace: StateFlow<List<com.example.domain.core.observability.ExecutionTraceNode>> =
+        telemetryPort?.let { port ->
+            kotlinx.coroutines.flow.mapNotNull(port.traceForExecution("")) { it }
+                .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
+        } ?: MutableStateFlow(emptyList<com.example.domain.core.observability.ExecutionTraceNode>()).asStateFlow()
+
+    val recentAuditEvents: StateFlow<List<com.example.domain.core.observability.AuditEvent>> =
+        telemetryPort?.let { port ->
+            kotlinx.coroutines.flow.mapNotNull(port.auditEvents(100)) { it }
+                .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
+        } ?: MutableStateFlow(emptyList<com.example.domain.core.observability.AuditEvent>()).asStateFlow()
 
     init {
         initializeAgents()

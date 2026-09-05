@@ -40,7 +40,16 @@ data class MemoryEntity(
     val createdAtEpochMs: Long,
     val lastAccessedEpochMs: Long,
     val accessCount: Int = 1,
-    val isArchived: Boolean = false
+    val isArchived: Boolean = false,
+    // ---- Phase 5 (Memory Intelligence): full taxonomy + workspace/agent scoping ----
+    // See MIGRATION_7_TO_8 — all new columns have defaults so existing rows migrate cleanly.
+    val memoryType: String = "FACTUAL_INSIGHT", // WORKING, EPISODIC, SEMANTIC, PROCEDURAL, PREFERENCE, FACTUAL_INSIGHT, CASE_EXAMPLE, CONVERSATION_SUMMARY, WORKSPACE, AGENT
+    val importance: Float = 1.0f,
+    val decayScore: Float = 1.0f, // starts at 1.0 (full strength), decays over time
+    val workspaceId: String? = null,
+    val agentId: String? = null,
+    val tagsJson: String = "[]",
+    val lastDecayEvaluatedAtEpochMs: Long = System.currentTimeMillis()
 )
 
 @Entity(tableName = "execution_logs")
