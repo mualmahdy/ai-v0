@@ -23,7 +23,9 @@ import com.example.infrastructure.search.MultiSourceSearchAdapter
  * concrete runtime adapter. Every branch returns a REAL working adapter
  * (previously these were empty private stub classes — replaced).
  *
- * GEMINI_NATIVE      → GeminiLlmAdapter (Firebase AI SDK, bootstrapped first)
+ * GEMINI_NATIVE      → GeminiLlmAdapter (Generative Language REST API with the
+ *                       user's stored key — NO Firebase/google-services.json
+ *                       dependency; fixes "firebase not initiated" on real devices)
  * OPENAI_COMPATIBLE  → OpenAiCompatibleLlmAdapter (${endpoint}/chat/completions)
  * OPENAI_NATIVE      → OpenAiCompatibleLlmAdapter
  * OLLAMA_NATIVE      → OpenAiCompatibleLlmAdapter (Ollama /v1 compat layer)
@@ -34,7 +36,9 @@ import com.example.infrastructure.search.MultiSourceSearchAdapter
  * ADAPTER_CREATION_FAILED (no silent fallback).
  */
 class ProtocolAdapterFactory(
-    private val geminiBootstrap: GeminiBootstrap
+    // Optional: only used for opportunistic Firebase-options key discovery.
+    // The Gemini REST path itself needs no Firebase (fix: firebase not initiated).
+    private val geminiBootstrap: GeminiBootstrap? = null
 ) {
 
     fun createLlmAdapter(
@@ -46,9 +50,15 @@ class ProtocolAdapterFactory(
     ): LlmProviderPort? {
         return when (protocolId) {
             ServiceProtocolId.GEMINI_NATIVE -> {
-                geminiBootstrap.ensureInitialized()
+                // FIX (firebase not initiated): the Gemini adapter now speaks the
+                // Generative Language REST API directly with the vault-backed key,
+                // so it no longer requires FirebaseApp/google-services.json at
+                // runtime. GeminiBootstrap stays only for optional Firebase-options
+                // key discovery (apiKeyFromOptions) used by the validator.
                 GeminiLlmAdapter(
-                    defaultModelName = offeringModelId ?: config.defaultOfferingId.ifBlank { "gemini-2.5-flash" }
+                    defaultModelName = offeringModelId ?: config.defaultOfferingId.ifBlank { "gemini-2.5-flash" },
+                    apiKeyProvider = apiKeyProvider,
+                    baseUrl = config.endpointUrl.ifBlank { "https://generativelanguage.googleapis.com" }
                 )
             }
             ServiceProtocolId.OPENAI_COMPATIBLE,

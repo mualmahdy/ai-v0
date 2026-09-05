@@ -12,130 +12,287 @@ import com.example.domain.core.llm.MessageRole
 import com.example.domain.core.llm.SafeProviderMetadata
 import com.example.domain.core.llm.TokenUsage
 import com.example.domain.ports.llm.LlmProviderPort
-import com.google.firebase.Firebase
-import com.google.firebase.ai.GenerativeModel
-import com.google.firebase.ai.ai
-import com.google.firebase.ai.type.Content
-import com.google.firebase.ai.type.content
-import com.google.firebase.ai.type.generationConfig
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.util.concurrent.TimeUnit
 
 /**
- * Clean Infrastructure Adapter for Official Gemini AI via Firebase AI SDK.
+ * ============================================================================
+ * GeminiLlmAdapter — REST-native Gemini adapter (fix: "firebase not initiated")
+ * ============================================================================
  *
- * Implements strict error mapping to Domain LlmFailure and emits first-class ExecutionEvents.
+ * Speaks the Generative Language REST API directly:
+ *
+ *   POST {baseUrl}/v1beta/models/{model}:generateContent
+ *   POST {baseUrl}/v1beta/models/{model}:streamGenerateContent?alt=sse
+ *
+ * Why REST instead of the Firebase AI SDK:
+ *   1. The Firebase AI SDK REQUIRES a bundled google-services.json (a real
+ *      Firebase project + config file). Without it every call failed with
+ *      "FirebaseApp initialization unsuccessful" — the exact crash users saw
+ *      on real devices ("firebase not initiated").
+ *   2. The SDK path never consumed the user's stored API key — the key the
+ *      user entered was validated against the REST endpoint but then ignored
+ *      at generation time. Here the vault key IS the execution key.
+ *
+ * The key is read lazily via [apiKeyProvider] (vault-backed) and sent in the
+ * `x-goog-api-key` header (never in the URL). SYSTEM messages are passed as
+ * `systemInstruction` — the REST-native mechanism. All network work runs on
+ * Dispatchers.IO. Errors map honestly onto the domain LlmFailure taxonomy.
  */
 class GeminiLlmAdapter(
-    private val defaultModelName: String = "gemini-2.5-flash"
+    private val defaultModelName: String = "gemini-2.5-flash",
+    private val apiKeyProvider: suspend () -> String? = { null },
+    private val baseUrl: String = "https://generativelanguage.googleapis.com",
+    override val providerId: String = "gemini",
+    private val client: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
+        .build()
 ) : LlmProviderPort {
-
-    override val providerId: String = "gemini"
 
     override val metadata: SafeProviderMetadata
         get() = SafeProviderMetadata(
             id = providerId,
-            name = "Google Gemini AI",
-            providerType = "OFFICIAL_FIREBASE_AI",
+            name = "Google Gemini (REST)",
+            providerType = "GEMINI_REST",
             defaultModel = defaultModelName,
             isConfigured = true,
             isOnline = true,
             isLocal = false,
-            supportedCapabilities = listOf("llm_generation", "streaming", "multimodal", "tool_calling")
+            supportedCapabilities = listOf("llm_generation", "streaming", "reasoning")
         )
 
-    private fun getModel(modelName: String = defaultModelName, systemInstruction: String? = null): GenerativeModel {
-        // FIX INF-P0-12 + INF-P0-15: Previously the generation config was hardcoded
-        // (temperature=0.7, topP=0.95, maxOutputTokens=4096) ignoring request.config,
-        // AND system instructions were never passed to the model. Now we accept a
-        // systemInstruction parameter and pass it to GenerativeModel(systemInstruction=...).
-        // The per-request generation config is still hardcoded here because the
-        // Firebase AI SDK's generationConfig DSL needs to be evaluated at model
-        // construction; threading request.config through is a follow-up (tracked
-        // separately — Phase 4 model runtime work).
-        return if (systemInstruction.isNullOrBlank()) {
-            Firebase.ai.generativeModel(
-                modelName = modelName,
-                generationConfig = generationConfig {
-                    temperature = 0.7f
-                    topP = 0.95f
-                    maxOutputTokens = 4096
-                }
-            )
-        } else {
-            Firebase.ai.generativeModel(
-                modelName = modelName,
-                systemInstruction = content { text(systemInstruction) },
-                generationConfig = generationConfig {
-                    temperature = 0.7f
-                    topP = 0.95f
-                    maxOutputTokens = 4096
-                }
-            )
-        }
-    }
+    // ------------------------------------------------------------------
+    // Request building (shared by generate + stream)
+    // ------------------------------------------------------------------
 
-    override suspend fun generate(request: LlmRequest): Outcome<LlmResponse, LlmFailure> {
-        val startTime = System.currentTimeMillis()
-        return try {
-            val prompt = buildPromptContents(request.messages)
-            val model = getModel(systemInstruction = prompt.systemInstruction)
-            val promptContents = prompt.contents
-
-            val response = model.generateContent(promptContents)
-            val duration = System.currentTimeMillis() - startTime
-            val text = response.text ?: ""
-
-            val estimatedPromptTokens = request.messages.sumOf { it.content.length / 4 }
-            val estimatedCompletionTokens = text.length / 4
-
-            Outcome.Success(
-                value = LlmResponse(
-                    text = text,
-                    usage = TokenUsage(
-                        promptTokens = estimatedPromptTokens,
-                        completionTokens = estimatedCompletionTokens
-                    ),
-                    finishReason = "STOP",
-                    modelId = defaultModelName
-                ),
-                metadata = OutcomeMetadata(
-                    durationMs = duration,
-                    tokensConsumed = estimatedPromptTokens + estimatedCompletionTokens,
-                    providerId = providerId
+    /** REST payload of the non-system conversation turns. */
+    private fun buildContents(messages: List<LlmMessage>): JSONArray {
+        val contents = JSONArray()
+        messages
+            .filter { it.role != MessageRole.SYSTEM }
+            .forEach { msg ->
+                val role = if (msg.role == MessageRole.ASSISTANT) "model" else "user"
+                contents.put(
+                    JSONObject()
+                        .put("role", role)
+                        .put(
+                            "parts",
+                            JSONArray().put(JSONObject().put("text", msg.content))
+                        )
                 )
-            )
-        } catch (e: Exception) {
-            mapExceptionToFailure(e)
-        }
+            }
+        return contents
     }
 
-    override fun stream(request: LlmRequest, executionId: String): Flow<ExecutionEvent> = flow {
-        val startTime = System.currentTimeMillis()
-        try {
-            val prompt = buildPromptContents(request.messages)
-            val model = getModel(systemInstruction = prompt.systemInstruction)
-            val promptContents = prompt.contents
-            var sequenceIndex = 0
-            val fullText = StringBuilder()
+    private fun buildSystemInstruction(messages: List<LlmMessage>): JSONObject? {
+        val systemText = messages.filter { it.role == MessageRole.SYSTEM }
+            .joinToString(separator = "\n\n") { it.content }
+            .takeIf { it.isNotBlank() } ?: return null
+        return JSONObject()
+            .put("parts", JSONArray().put(JSONObject().put("text", systemText)))
+    }
 
-            model.generateContentStream(promptContents).collect { chunk ->
-                val delta = chunk.text ?: ""
-                if (delta.isNotEmpty()) {
-                    fullText.append(delta)
-                    emit(
-                        ExecutionEvent.ContentChunk(
-                            executionId = executionId,
-                            deltaText = delta,
-                            sequenceIndex = sequenceIndex++
+    private fun buildRequestBody(request: LlmRequest, stream: Boolean): String {
+        val body = JSONObject()
+            .put("contents", buildContents(request.messages))
+            .put(
+                "generationConfig",
+                JSONObject()
+                    .put("temperature", request.config.temperature.toDouble())
+                    .put("topP", 0.95)
+                    .put("maxOutputTokens", request.config.maxOutputTokens)
+            )
+        buildSystemInstruction(request.messages)?.let { body.put("systemInstruction", it) }
+        if (stream) body.put("stream", true) // informational only for REST; alt=sse drives it
+        return body.toString()
+    }
+
+    private suspend fun requestWithKey(url: String, body: String, stream: Boolean): Request {
+        val key = apiKeyProvider()?.trim()
+        if (key.isNullOrBlank()) {
+            throw MissingGeminiKeyException()
+        }
+        val builder = Request.Builder()
+            .url(url)
+            .header("x-goog-api-key", key) // header, never the URL (P0-8)
+            .post(body.toRequestBody("application/json".toMediaType()))
+        return builder.build()
+    }
+
+    // ------------------------------------------------------------------
+    // generate (single-shot)
+    // ------------------------------------------------------------------
+
+    override suspend fun generate(request: LlmRequest): Outcome<LlmResponse, LlmFailure> =
+        withContext(Dispatchers.IO) {
+            val start = System.currentTimeMillis()
+            val model = defaultModelName
+            try {
+                val url = "$baseUrl/v1beta/models/$model:generateContent"
+                val call = client.newCall(requestWithKey(url, buildRequestBody(request, stream = false), stream = false))
+                call.execute().use { response ->
+                    if (!response.isSuccessful) {
+                        return@withContext httpFailure(response.code, url)
+                    }
+                    val text = response.body?.string()
+                        ?: return@withContext Outcome.Error(
+                            LlmFailure.ProviderUnavailable(providerId, "Empty body"),
+                            "Empty response body from $url"
+                        )
+                    val json = JSONObject(text)
+                    val candidate = json.optJSONArray("candidates")?.optJSONObject(0)
+                    val parts = candidate?.optJSONObject("content")?.optJSONArray("parts")
+                    val sb = StringBuilder()
+                    if (parts != null) {
+                        for (i in 0 until parts.length()) {
+                            sb.append(parts.optJSONObject(i)?.optString("text", "") ?: "")
+                        }
+                    }
+                    val usageJson = json.optJSONObject("usageMetadata")
+                    val usage = TokenUsage(
+                        promptTokens = usageJson?.optInt("promptTokenCount", 0) ?: 0,
+                        completionTokens = usageJson?.optInt("candidatesTokenCount", 0) ?: 0
+                    )
+                    val finish = candidate?.optString("finishReason") ?: "STOP"
+                    Outcome.Success(
+                        LlmResponse(
+                            text = sb.toString(),
+                            usage = usage,
+                            finishReason = finish,
+                            modelId = json.optString("modelVersion", model)
+                        ),
+                        OutcomeMetadata(
+                            durationMs = System.currentTimeMillis() - start,
+                            tokensConsumed = usage.promptTokens + usage.completionTokens,
+                            providerId = providerId
                         )
                     )
                 }
+            } catch (e: MissingGeminiKeyException) {
+                Outcome.Error(
+                    LlmFailure.AuthenticationFailed(
+                        providerId,
+                        "لا يوجد مفتاح Gemini API — أدخل المفتاح من شاشة المزودين ثم أعد المحاولة"
+                    ),
+                    "No stored Gemini API key"
+                )
+            } catch (e: java.net.SocketTimeoutException) {
+                Outcome.Error(
+                    LlmFailure.NetworkTimeout(providerId, 180_000L),
+                    "Request timed out against $baseUrl: ${e.message}"
+                )
+            } catch (e: java.io.IOException) {
+                Outcome.Error(
+                    LlmFailure.ProviderUnavailable(providerId, e.message ?: "io error"),
+                    "Transport failure: ${e.message}"
+                )
+            } catch (e: Exception) {
+                Outcome.Error(
+                    LlmFailure.ProviderUnavailable(providerId, e.message ?: "error"),
+                    "Generation failed: ${e.message}"
+                )
+            }
+        }
+
+    // ------------------------------------------------------------------
+    // stream (SSE)
+    // ------------------------------------------------------------------
+
+    override fun stream(request: LlmRequest, executionId: String): Flow<ExecutionEvent> = flow {
+        val start = System.currentTimeMillis()
+        val model = defaultModelName
+        val url = "$baseUrl/v1beta/models/$model:streamGenerateContent?alt=sse"
+        try {
+            val call = client.newCall(requestWithKey(url, buildRequestBody(request, stream = true), stream = true))
+            var sequence = 0
+            val fullText = StringBuilder()
+            var promptTokens = 0
+            var completionTokens = 0
+
+            // The whole builder runs on Dispatchers.IO via flowOn below — blocking
+            // line reads and vault lookups are safe, emissions stay in-context.
+            call.execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw IOExceptionWithCode(response.code, "HTTP ${response.code} from Gemini stream")
+                }
+                val reader = response.body?.byteStream()
+                    ?.bufferedReader(Charsets.UTF_8)
+                    ?: throw IOExceptionWithCode(-1, "Empty stream body from Gemini")
+                val pending = StringBuilder()
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (line.isBlank()) {
+                        // End of an SSE event — flush the accumulated data payload.
+                        val payload = pending.toString().trim()
+                        pending.setLength(0)
+                        if (payload.startsWith("data:")) {
+                            val json = payload.removePrefix("data:").trim()
+                            if (json.isNotBlank() && json != "[DONE]") {
+                                val delta = extractDelta(json)
+                                if (delta.isNotEmpty()) {
+                                    fullText.append(delta)
+                                    emit(
+                                        ExecutionEvent.ContentChunk(
+                                            executionId = executionId,
+                                            deltaText = delta,
+                                            sequenceIndex = sequence++
+                                        )
+                                    )
+                                }
+                                readUsage(json)?.let { (p, c) ->
+                                    promptTokens = p
+                                    completionTokens = c
+                                }
+                            }
+                        }
+                    } else {
+                        pending.appendLine(line)
+                    }
+                }
             }
 
-            val duration = System.currentTimeMillis() - startTime
-            val promptTokens = request.messages.sumOf { it.content.length / 4 }
-            val completionTokens = fullText.length / 4
+            if (fullText.isBlank()) {
+                // SSE produced nothing (some regions / proxies strip it) — fall back
+                // to the single-shot endpoint and emit one chunk. Honest, visible.
+                val fallback = generate(request)
+                when (fallback) {
+                    is Outcome.Success -> {
+                        fullText.append(fallback.value.text)
+                        emit(
+                            ExecutionEvent.ContentChunk(
+                                executionId = executionId,
+                                deltaText = fallback.value.text,
+                                sequenceIndex = sequence++
+                            )
+                        )
+                    }
+                    else -> {
+                        val diag = (fallback as? Outcome.Error)?.diagnosticMessage
+                            ?: (fallback as? Outcome.Degraded)?.diagnosticMessage
+                            ?: "Gemini generation failed"
+                        emit(
+                            ExecutionEvent.Error(
+                                executionId = executionId,
+                                failureCode = "LLM_ERROR",
+                                message = diag
+                            )
+                        )
+                        return@flow
+                    }
+                }
+            }
 
             emit(
                 ExecutionEvent.UsageBudgetUpdate(
@@ -146,92 +303,92 @@ class GeminiLlmAdapter(
                     remainingBudgetTokens = 30000 - (promptTokens + completionTokens)
                 )
             )
-
             emit(
                 ExecutionEvent.Completed(
                     executionId = executionId,
                     finalText = fullText.toString(),
-                    totalDurationMs = duration
+                    totalDurationMs = System.currentTimeMillis() - start
                 )
             )
-        } catch (e: Exception) {
-            val failure = mapExceptionToFailure<Unit>(e)
-            val failureCode = if (failure is Outcome.Error) failure.failure::class.simpleName ?: "LLM_ERROR" else "LLM_ERROR"
+        } catch (e: MissingGeminiKeyException) {
             emit(
                 ExecutionEvent.Error(
                     executionId = executionId,
-                    failureCode = failureCode,
-                    message = e.localizedMessage ?: "حدث خطأ أثناء البث التدفقي لنموذج Gemini."
+                    failureCode = "AUTHENTICATION_FAILED",
+                    message = "لا يوجد مفتاح Gemini API — أضفه من شاشة المزودين (مفتاح API) ثم أعد المحاولة"
+                )
+            )
+        } catch (e: Exception) {
+            emit(
+                ExecutionEvent.Error(
+                    executionId = executionId,
+                    failureCode = "LLM_ERROR",
+                    message = e.message ?: "حدث خطأ أثناء البث التدفقي لنموذج Gemini"
                 )
             )
         }
+    }.flowOn(Dispatchers.IO)
+
+    /** Extracts the concatenated text delta from one SSE data payload. */
+    private fun extractDelta(json: String): String {
+        return runCatching {
+            val obj = JSONObject(json)
+            val parts = obj.optJSONArray("candidates")?.optJSONObject(0)
+                ?.optJSONObject("content")?.optJSONArray("parts") ?: return ""
+            val sb = StringBuilder()
+            for (i in 0 until parts.length()) {
+                sb.append(parts.optJSONObject(i)?.optString("text", "") ?: "")
+            }
+            sb.toString()
+        }.getOrDefault("")
     }
 
-    /**
-     * FIX INF-P0-12: Previously mapped MessageRole.SYSTEM -> "system" role string, but
-     * Gemini's `content(role)` API only accepts "user", "model", and "function". The
-     * "system" role is silently mishandled — likely treated as user content or rejected
-     * by the SDK. The correct way to send system instructions in the Firebase AI SDK is
-     * via `GenerativeModel(systemInstruction = ...)` at construction time.
-     *
-     * This builder now extracts SYSTEM messages from the message list and returns them
-     * separately so getModel() can pass them as systemInstruction. The remaining
-     * USER/ASSISTANT/TOOL messages are returned as a List<Content>.
-     *
-     * For TOOL messages, we still map them to "user" role because Gemini's chat history
-     * does not have a separate tool-response role in the content API — the function
-     * response is a separate Content type. This is a known limitation; for now we accept
-     * the lossy mapping and document it. A proper fix would use `Content.functionResponse()`.
-     */
-    private data class BuiltPrompt(
-        val systemInstruction: String?,
-        val contents: List<Content>
-    )
+    private fun readUsage(json: String): Pair<Int, Int>? {
+        return runCatching {
+            val obj = JSONObject(json)
+            val usage = obj.optJSONObject("usageMetadata") ?: return null
+            Pair(
+                usage.optInt("promptTokenCount", 0),
+                usage.optInt("candidatesTokenCount", 0)
+            )
+        }.getOrNull()
+    }
 
-    private fun buildPromptContents(messages: List<LlmMessage>): BuiltPrompt {
-        val systemParts = messages.filter { it.role == MessageRole.SYSTEM }
-            .joinToString(separator = "\n\n") { it.content }
-            .takeIf { it.isNotBlank() }
-
-        val nonSystemContents = messages
-            .filter { it.role != MessageRole.SYSTEM }
-            .map { msg ->
-                val roleStr = when (msg.role) {
-                    MessageRole.USER -> "user"
-                    MessageRole.ASSISTANT -> "model"
-                    // TOOL messages have no native Gemini role in the content() DSL;
-                    // they go to "user" with a functionResponse marker in a proper
-                    // implementation. For now we keep the existing mapping for backwards
-                    // compatibility but document that this loses tool-response fidelity.
-                    MessageRole.TOOL -> "user"
-                    MessageRole.SYSTEM -> error("unreachable — SYSTEM filtered above")
-                }
-                content(roleStr) {
-                    text(msg.content)
-                }
-            }
-
-        return BuiltPrompt(
-            systemInstruction = systemParts,
-            contents = nonSystemContents
+    /** Maps a non-2xx HTTP code onto the domain failure taxonomy. */
+    private fun <T> httpFailure(code: Int, url: String): Outcome<T, LlmFailure> = when (code) {
+        400 -> Outcome.Error(
+            LlmFailure.ProviderUnavailable(providerId, "HTTP 400 — طلب غير صالح (راجع اسم النموذج)"),
+            "Bad request: HTTP 400 from $url"
+        )
+        401, 403 -> Outcome.Error(
+            LlmFailure.AuthenticationFailed(providerId, "HTTP $code — مفتاح Gemini غير صالح أو غير مصرّح"),
+            "Authentication rejected by $url"
+        )
+        404 -> Outcome.Error(
+            LlmFailure.ProviderUnavailable(providerId, "HTTP 404 — النموذج $defaultModelName غير موجود"),
+            "Model not found: $defaultModelName"
+        )
+        429 -> Outcome.Degraded(
+            partialValue = null,
+            reason = DegradedReason.RATE_LIMIT_BACKOFF,
+            diagnosticMessage = "Rate limited by $url (HTTP 429)",
+            underlyingFailure = LlmFailure.RateLimitExceeded(providerId, null, "HTTP 429")
+        )
+        503 -> Outcome.Degraded(
+            partialValue = null,
+            reason = DegradedReason.PROVIDER_UNREACHABLE,
+            diagnosticMessage = "Gemini temporarily overloaded (HTTP 503)",
+            underlyingFailure = LlmFailure.ProviderUnavailable(providerId, "HTTP 503 overloaded")
+        )
+        else -> Outcome.Error(
+            LlmFailure.ProviderUnavailable(providerId, "HTTP $code"),
+            "Request failed: HTTP $code from $url"
         )
     }
 
-    private fun <T> mapExceptionToFailure(e: Exception): Outcome<T, LlmFailure> {
-        val msg = e.localizedMessage ?: e.message ?: "Unknown Error"
-        val lower = msg.lowercase()
+    /** Thrown when no API key is available — mapped to an honest auth failure. */
+    private class MissingGeminiKeyException : Exception("No Gemini API key stored")
 
-        val failure = when {
-            lower.contains("unauthenticated") || lower.contains("api key") || lower.contains("permission") ->
-                LlmFailure.AuthenticationFailed(providerId, "فشل المصادقة مع خدمة Gemini AI.")
-            lower.contains("quota") || lower.contains("rate limit") || lower.contains("429") ->
-                LlmFailure.RateLimitExceeded(providerId, 60000L, "تم تجاوز حد الطلبات في Gemini.")
-            lower.contains("timeout") || lower.contains("deadline") ->
-                LlmFailure.NetworkTimeout(providerId, 30000L)
-            else ->
-                LlmFailure.ProviderUnavailable(providerId, msg)
-        }
-
-        return Outcome.Error(failure = failure, diagnosticMessage = msg)
-    }
+    /** Carries an HTTP code through the SSE loop. */
+    private class IOExceptionWithCode(val code: Int, message: String) : Exception(message)
 }

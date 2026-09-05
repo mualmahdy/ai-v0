@@ -39,6 +39,7 @@ import com.example.domain.core.provider.ProviderService
 import com.example.domain.core.provider.ServiceConfiguration
 import com.example.domain.core.provider.ServiceType
 import com.example.domain.core.provider.ServiceValidationResult
+import com.example.domain.core.provider.offering.OfferingType
 import com.example.domain.core.provider.offering.ServiceOffering
 import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceRecord
@@ -57,6 +58,7 @@ import com.example.domain.core.workspace.ResourceType
 import com.example.domain.ports.storage.SessionRepositoryPort
 import com.example.presentation.state.ActiveNavigationTab
 import com.example.presentation.state.UiState
+import com.example.presentation.ui.screens.ProviderPreset
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -696,6 +698,236 @@ class MainViewModel(
     }
 
     // ------------------------------------------------------------------
+    // "Connect Provider" wizard — the FULL CHAIN in one guided action.
+    // Fix (user feedback: adding a provider left it unusable): previously the
+    // add-dialog persisted a bare Provider row with no Service/Config/Offering,
+    // so no resource could ever be materialized from it. The wizard walks:
+    //
+    //   1 Provider → 2 Service → 3 Configuration + vault key →
+    //   4 Offering → 5 Materialize → 6 Validate → (auto-ENABLED on success)
+    //
+    // Every step reports honest progress; a failure stops the chain and
+    // surfaces the real diagnostic (no fabricated success).
+    // ------------------------------------------------------------------
+
+    fun openConnectWizard() {
+        _uiState.update {
+            it.copy(
+                isConnectWizardOpen = true,
+                wizardRunning = false,
+                wizardStep = 0,
+                wizardStepLabel = null,
+                wizardResult = null
+            )
+        }
+    }
+
+    fun closeConnectWizard() {
+        if (_uiState.value.wizardRunning) return // no canceling mid-chain from the dialog
+        _uiState.update {
+            it.copy(
+                isConnectWizardOpen = false,
+                wizardStep = 0,
+                wizardStepLabel = null,
+                wizardResult = null,
+                wizardResultIsSuccess = true
+            )
+        }
+    }
+
+    fun connectProviderFullChain(
+        preset: ProviderPreset,
+        providerName: String,
+        endpointUrl: String,
+        modelName: String,
+        apiKey: String?
+    ) {
+        if (preset.requiresApiKey && apiKey.isNullOrBlank()) {
+            _uiState.update {
+                it.copy(
+                    wizardResult = "هذا المزوّد يتطلب مفتاح API — أدخل المفتاح ثم أعد المحاولة",
+                    wizardResultIsSuccess = false
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(wizardRunning = true, wizardStep = 1, wizardStepLabel = "إنشاء المزوّد…", wizardResult = null)
+            }
+
+            val providerId = "prov_${System.currentTimeMillis()}"
+            val serviceId = "${providerId}_${preset.serviceType.code}"
+            val authAlias = "${providerId}_key"
+            val offeringId = when (preset.serviceType) {
+                ServiceType.SEARCH -> "${providerId}_search"
+                else -> "${providerId}_${modelName.replace(Regex("[^A-Za-z0-9._-]"), "_")}"
+            }
+
+            // 1. Provider
+            val provider = Provider(
+                id = providerId,
+                name = providerName,
+                description = "${preset.displayName} — ${preset.description}",
+                websiteUrl = preset.websiteUrl,
+                isLocal = preset.isLocal,
+                isEnabled = true
+            )
+            when (val r = providerControlPlaneService.createProvider(provider)) {
+                is Outcome.Error -> {
+                    failWizard("تعذر إنشاء المزوّد: ${r.diagnosticMessage}"); return@launch
+                }
+                else -> Unit
+            }
+
+            // 2. Service
+            _uiState.update { it.copy(wizardStep = 2, wizardStepLabel = "تسجيل الخدمة (${preset.serviceType.displayName})…") }
+            val service = ProviderService(
+                id = serviceId,
+                providerId = providerId,
+                name = "${preset.displayName} — ${preset.serviceType.displayName}",
+                serviceType = preset.serviceType,
+                supportedProtocolIds = listOf(preset.protocolId.code),
+                isEnabled = true
+            )
+            when (val r = providerControlPlaneService.addService(service)) {
+                is Outcome.Error -> {
+                    failWizard("تعذر تسجيل الخدمة: ${r.diagnosticMessage}"); return@launch
+                }
+                else -> Unit
+            }
+
+            // 3. Configuration (+ vault key)
+            _uiState.update { it.copy(wizardStep = 3, wizardStepLabel = "حفظ الإعدادات و المفتاح…") }
+            val config = ServiceConfiguration(
+                id = "cfg_${serviceId}",
+                serviceId = serviceId,
+                protocolId = preset.protocolId,
+                endpointUrl = endpointUrl,
+                defaultOfferingId = modelName,
+                authAlias = authAlias,
+                isEnabled = true,
+                isDefault = true
+            )
+            when (val r = providerControlPlaneService.saveConfiguration(config)) {
+                is Outcome.Error -> {
+                    failWizard("تعذر حفظ الإعدادات: ${r.diagnosticMessage}"); return@launch
+                }
+                else -> Unit
+            }
+            if (!apiKey.isNullOrBlank()) {
+                when (val r = providerControlPlaneService.storeSecret(authAlias, apiKey)) {
+                    is Outcome.Error -> {
+                        failWizard("تعذر حفظ المفتاح في القبو المشفّر: ${r.diagnosticMessage}"); return@launch
+                    }
+                    else -> Unit
+                }
+            }
+
+            // 4. Offering
+            _uiState.update { it.copy(wizardStep = 4, wizardStepLabel = "تسجيل النموذج/النقطة…") }
+            val offering = ServiceOffering(
+                id = offeringId,
+                serviceId = serviceId,
+                offeringType = when (preset.serviceType) {
+                    ServiceType.SEARCH -> OfferingType.ENDPOINT
+                    else -> OfferingType.MODEL
+                },
+                name = modelName.ifBlank { preset.displayName },
+                description = preset.description,
+                contextWindowTokens = preset.contextWindowTokens,
+                supportedCapabilities = when (preset.serviceType) {
+                    ServiceType.LLM -> setOf(
+                        CapabilityType.LLM_GENERATION,
+                        CapabilityType.REASONING,
+                        CapabilityType.STREAMING
+                    )
+                    ServiceType.EMBEDDING -> setOf(
+                        CapabilityType.EMBEDDING,
+                        CapabilityType.MEMORY_RETRIEVAL
+                    )
+                    else -> setOf(CapabilityType.SEARCH)
+                },
+                isLocal = preset.isLocal,
+                isAvailable = true,
+                discoverySource = "USER_CONNECT_WIZARD"
+            )
+            when (val r = providerControlPlaneService.registerOffering(offering)) {
+                is Outcome.Error -> {
+                    failWizard("تعذر تسجيل النموذج: ${r.diagnosticMessage}"); return@launch
+                }
+                else -> Unit
+            }
+
+            // 5. Materialize
+            _uiState.update { it.copy(wizardStep = 5, wizardStepLabel = "تهيئة المورد التشغيلي…") }
+            val resourceId = when (
+                val r = providerControlPlaneService.materializeResource(providerId, serviceId, offeringId)
+            ) {
+                is Outcome.Success -> r.value.resourceId
+                is Outcome.Error -> {
+                    failWizard("تعذر تهيئة المورد: ${r.diagnosticMessage}"); return@launch
+                }
+                else -> return@launch
+            }
+
+            // 6. Validate (network check with the stored key)
+            _uiState.update {
+                it.copy(
+                    wizardStep = 6,
+                    wizardStepLabel = "التحقق الفعلي من الاتصال بمفتاحك… (طلب شبكة واحد)"
+                )
+            }
+            when (val r = providerControlPlaneService.validateResource(resourceId)) {
+                is Outcome.Success -> {
+                    val result = r.value
+                    if (result.isSuccess) {
+                        // validateResource auto-promoted the record to ENABLED.
+                        _uiState.update {
+                            it.copy(
+                                wizardRunning = false,
+                                wizardStep = 7,
+                                wizardStepLabel = null,
+                                wizardResult = "تم ربط «${preset.displayName}» بنجاح — المورد مُفعّل وجاهز للاستخدام (${result.message})",
+                                wizardResultIsSuccess = true,
+                                diagnosticBanner = "تم تفعيل ${preset.displayName} بنجاح"
+                            )
+                        }
+                        refreshCapabilities()
+                    } else {
+                        _uiState.update {
+                            it.copy(
+                                wizardRunning = false,
+                                wizardStep = 6,
+                                wizardStepLabel = null,
+                                wizardResult = "تم الحفظ لكن التحقق فشل: ${result.message}\n" +
+                                    "راجع المفتاح/العنوان ثم اضغط «إعادة التحقق» في بطاقة المورد.",
+                                wizardResultIsSuccess = false
+                            )
+                        }
+                        refreshCapabilities()
+                    }
+                }
+                is Outcome.Error -> {
+                    failWizard("فشل التحقق: ${r.diagnosticMessage}")
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    private fun failWizard(message: String) {
+        _uiState.update {
+            it.copy(
+                wizardRunning = false,
+                wizardStepLabel = null,
+                wizardResult = message,
+                wizardResultIsSuccess = false
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------
     // FIX F-4 (audit c03919d): credential input dialog — a real user path to
     // store an API key for a service configuration. Previously there was NO
     // way to enter a key (the flag existed but nothing read it), so every
@@ -757,6 +989,16 @@ class MainViewModel(
                     val config = providerControlPlaneService.getCurrentConfigurationForService(serviceId)
                     if (config != null) {
                         testServiceConnection(config.id)
+                    }
+                    // FIX (usable-provider flow): also promote the materialized
+                    // resource(s) of this service — validateResource runs the real
+                    // protocol check and flips the record to ENABLED/HEALTHY, so
+                    // entering the key on the seeded Gemini provider ACTIVATES it
+                    // for the Studio instead of leaving it at REGISTERED.
+                    val resourcesForService = _uiState.value.materializedResources
+                        .filter { it.serviceId == serviceId }
+                    for (resource in resourcesForService) {
+                        validateResource(resource.resourceId.value)
                     }
                 }
                 is Outcome.Error -> {

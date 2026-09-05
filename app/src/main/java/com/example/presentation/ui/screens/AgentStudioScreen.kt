@@ -117,6 +117,59 @@ fun AgentStudioScreen(
             )
         }
 
+        // Smart-workspace CTA: no active LLM → guide the user to connect one.
+        val hasActiveLlm = state.materializedResources.any {
+            it.resourceType == com.example.domain.core.resource.ResourceType.LLM &&
+                it.lifecycleState == com.example.domain.core.resource.ResourceLifecycleState.ENABLED
+        }
+        if (!hasActiveLlm) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .testTag("studio_connect_llm_banner"),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Psychology,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "اربط نموذج ذكاء لتشغيل الاستوديو",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                        Text(
+                            text = "لا يوجد مورد LLM مفعّل. اذهب إلى المزوّدين واربط Gemini أو غيره بمفتاح واحد.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = { viewModel.selectTab(com.example.presentation.state.ActiveNavigationTab.MODELS_CAPABILITIES) },
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("ربط")
+                    }
+                }
+            }
+        }
+
         // Active Workspace Card
         Card(
             modifier = Modifier
