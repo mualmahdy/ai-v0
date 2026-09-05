@@ -153,8 +153,13 @@ object DiscoveryAdapterFactory {
                             "Gemini discovery requires an API key"
                         )
                     }
-                    val url = "https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey"
-                    val response = httpClient.newCall(Request.Builder().url(url).build()).execute()
+                    // FIX P0-8 (audit c03919d): the API key is sent in the
+                    // x-goog-api-key HEADER instead of a ?key= URL query param
+                    // (previously the key leaked into URLs/proxy logs).
+                    val url = "https://generativelanguage.googleapis.com/v1beta/models"
+                    val response = httpClient.newCall(
+                        Request.Builder().url(url).header("x-goog-api-key", apiKey).build()
+                    ).execute()
                     if (!response.isSuccessful) {
                         return Outcome.Error(
                             "HTTP_${response.code}",

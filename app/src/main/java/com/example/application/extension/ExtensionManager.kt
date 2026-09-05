@@ -86,44 +86,21 @@ class ExtensionManager(
                 state = SkillState.ENABLED,
                 isVerified = true,
                 installedTimestampMs = System.currentTimeMillis()
-            ),
-            SkillManifest(
-                id = "skill_automated_testing",
-                name = "أتمتة اختبارات الوحدة والعقود (Contract Test Generator)",
-                version = "1.0.0",
-                description = "بناء اختبارات الوحدة الشاملة للمنافذ والمحولات البرمجية.",
-                category = "TESTING",
-                requiredCapabilities = setOf(CapabilityType.LLM_GENERATION),
-                state = SkillState.AVAILABLE
             )
+            // FIX F-11: `skill_automated_testing` was a manifest with NO backing
+            // executable skill (executing it always failed "غير مسجلة") — removed.
         )
 
-        // 2. Plugins
-        _plugins.value = listOf(
-            PluginManifest(
-                id = "plugin_git_workspace",
-                name = "حزمة Git & Workspace Versioning",
-                version = "1.1.0",
-                description = "أدوات تتبع التغييرات وإنشاء لقطات الأكواد داخل مساحة العمل المعزولة.",
-                declaredTools = listOf("git_status", "git_diff", "git_commit"),
-                requiredPermissions = listOf("WORKSPACE_READ", "WORKSPACE_WRITE"),
-                state = PluginState.VERIFIED,
-                trustLevel = "VERIFIED",
-                installedTimestampMs = System.currentTimeMillis()
-            ),
-            PluginManifest(
-                id = "plugin_data_viz_engine",
-                name = "حزمة الرسوم البيانية التفاعلية (Data Visualization)",
-                version = "1.0.4",
-                description = "توليد الرسوم البيانية والمخططات الهندسية من مخرجات الأدوات.",
-                declaredTools = listOf("chart_generator"),
-                state = PluginState.INSTALLED,
-                trustLevel = "SANDBOXED",
-                installedTimestampMs = System.currentTimeMillis()
-            )
-        )
+        // 2. Plugins — FIX F-11 (audit c03919d): the two fabricated plugin
+        // manifests (git tools and a chart generator that NEVER existed as
+        // executable code) are REMOVED. A plugin manifest whose declaredTools
+        // have no real implementation is a UI illusion, not an extension.
+        _plugins.value = emptyList()
 
-        // 3. MCP Servers
+        // 3. MCP Servers — FIX F-11 (audit c03919d): descriptors describe
+        // *potential* servers. Their declared tools are NOT registered into the
+        // runtime registry until a REAL discovery/handshake succeeds
+        // (see registerMcpToolsInRegistry: HEALTHY-only gate).
         _mcpServers.value = listOf(
             McpServerDescriptor(
                 id = "mcp_local_bridge",
@@ -147,10 +124,7 @@ class ExtensionManager(
                 transportType = McpTransportType.SSE,
                 health = HealthStatus.UNKNOWN,
                 isEnabled = true,
-                exposedTools = listOf(
-                    McpDiscoveredTool("read_file", "قراءة محتوى ملف محدد", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}"),
-                    McpDiscoveredTool("list_directory", "استعراض محتويات المجلد", "{\"type\":\"object\",\"properties\":{\"dir\":{\"type\":\"string\"}}}")
-                )
+                exposedTools = emptyList()
             ),
             McpServerDescriptor(
                 id = "mcp_github_context",
@@ -159,9 +133,7 @@ class ExtensionManager(
                 transportType = McpTransportType.HTTP_STREAM,
                 health = HealthStatus.UNKNOWN,
                 isEnabled = true,
-                exposedTools = listOf(
-                    McpDiscoveredTool("search_repositories", "بحث المستودعات البرمجية", "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}")
-                )
+                exposedTools = emptyList()
             )
         )
 
@@ -223,12 +195,23 @@ class ExtensionManager(
     }
 
     /**
-     * Registers real MCP tools in ComponentRegistry with actual JSON-RPC 2.0 network/in-process invocation.
+     * Registers REAL MCP tools in ComponentRegistry with actual JSON-RPC 2.0 network/in-process invocation.
+     *
+     * FIX F-11 (audit c03919d): tools are registered ONLY for servers whose
+     * health is HEALTHY — i.e. after a successful real MCP handshake/
+     * discovery (or the genuinely-local in-process bridge). Previously the
+     * pre-declared tools of UNKNOWN-health servers were registered instantly,
+     * fabricating capabilities that were never verified to exist.
      */
     private fun registerMcpToolsInRegistry() {
         for (server in _mcpServers.value) {
-            if (server.isEnabled) {
-                for (mcpTool in server.exposedTools) {
+            if (!server.isEnabled) continue
+            if (server.health != HealthStatus.HEALTHY) {
+                // Unverified server — its declared tools stay UNREGISTERED
+                // until pingAndDiscoverMcpServer() completes a real handshake.
+                continue
+            }
+            for (mcpTool in server.exposedTools) {
                     val inferredCaps = when {
                         mcpTool.name.contains("read") || mcpTool.name.contains("list") -> setOf(CapabilityType.FILE_STORAGE, CapabilityType.FILE_READ, CapabilityType.MCP_INVOCATION, CapabilityType.TOOL_EXECUTION)
                         mcpTool.name.contains("diag") || mcpTool.name.contains("system") -> setOf(CapabilityType.SYSTEM_EXECUTION, CapabilityType.MCP_INVOCATION, CapabilityType.TOOL_EXECUTION)
@@ -249,7 +232,6 @@ class ExtensionManager(
                     }
                     componentRegistry.registerTool(toolAdapter)
                 }
-            }
         }
     }
 
@@ -369,6 +351,10 @@ class ExtensionManager(
     }
 
     fun registerNewMcpServer(name: String, endpointUri: String, transport: McpTransportType = McpTransportType.SSE) {
+        // FIX F-11 (audit c03919d): a newly registered server starts with NO
+        // exposed tools and UNKNOWN health. Previously it was instantly given
+        // a fake "custom_mcp_query" tool as if it had been discovered. Real
+        // tools appear only after a successful ping/discovery handshake.
         val newServer = McpServerDescriptor(
             id = "mcp_${System.currentTimeMillis()}",
             name = name,
@@ -376,9 +362,7 @@ class ExtensionManager(
             transportType = transport,
             health = if (endpointUri.startsWith("inprocess://")) HealthStatus.HEALTHY else HealthStatus.UNKNOWN,
             isEnabled = true,
-            exposedTools = listOf(
-                McpDiscoveredTool("custom_mcp_query", "أداة مخصصة مستكشفة من خادم $name")
-            )
+            exposedTools = emptyList()
         )
         _mcpServers.update { it + newServer }
         registerMcpToolsInRegistry()

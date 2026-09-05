@@ -5,10 +5,14 @@ import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.ports.resource.ResourceRecordRepository
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * ============================================================================
@@ -31,19 +35,38 @@ import kotlinx.coroutines.runBlocking
  * but the failure is never silently reported as success.
  */
 class DurableResourceRegistryService(
-    private val repository: ResourceRecordRepository? = null
+    private val repository: ResourceRecordRepository? = null,
+    /**
+     * FIX R-1 (audit c03919d): async mirror scope. Every non-suspend write is
+     * mirrored to Room on Dispatchers.IO WITHOUT blocking the calling thread
+     * (previously mirrorPersist used runBlocking on the MAIN thread during
+     * graph construction and every registerTool call).
+     */
+    private val mirrorScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 ) : ResourceRegistryService() {
 
-    init {
-        // Eagerly load persisted records so restart survival works. Blocking is
-        // acceptable: this runs once at graph construction (AppContainer lazy).
-        val repo = repository
-        if (repo != null) {
-            runCatching {
-                runBlocking(Dispatchers.IO) { repo.getAllResources() }
-            }.getOrDefault(emptyList()).forEach { record ->
-                super.registerResource(record)
-            }
+    /**
+     * FIX R-1: persisted records are now loaded via the explicit suspend
+     * [eagerLoad] (called from the bootstrap coroutine) instead of a blocking
+     * runBlocking inside init that froze the main thread during construction.
+     */
+    private val loadMutex = Mutex()
+    @Volatile
+    private var eagerLoadAttempted = false
+
+    /**
+     * Loads persisted records into memory exactly once. Safe to call from any
+     * coroutine; repeated calls are no-ops. Called by AppContainer.bootstrapRuntime()
+     * BEFORE any resource resolution is expected.
+     */
+    suspend fun eagerLoad() {
+        val repo = repository ?: return
+        loadMutex.withLock {
+            if (eagerLoadAttempted) return
+            eagerLoadAttempted = true
+            runCatching { repo.getAllResources() }
+                .getOrDefault(emptyList())
+                .forEach { record -> super.registerResource(record) }
         }
     }
 
@@ -135,12 +158,10 @@ class DurableResourceRegistryService(
         mirrorPersist { it.deleteResource(resourceId) }
     }
 
-    /** Best-effort synchronous mirror for non-suspend call sites. */
+    /** Best-effort asynchronous mirror for non-suspend call sites (FIX R-1: no runBlocking). */
     private fun mirrorPersist(block: suspend (ResourceRecordRepository) -> Unit) {
         val repo = repository ?: return
-        runCatching {
-            runBlocking(Dispatchers.IO) { block(repo) }
-        }
+        mirrorScope.launch { runCatching { block(repo) } }
     }
 }
 
@@ -159,11 +180,17 @@ class RegistryBackedResourceRecordRepository(
         durableRegistry.saveResource(record)
     }
 
-    override suspend fun getResourceById(resourceId: ResourceId): ResourceRecord? =
-        durableRegistry.getResourceById(resourceId)
+    override suspend fun getResourceById(resourceId: ResourceId): ResourceRecord? {
+        // FIX R-1: first repository access triggers the one-shot persisted-record
+        // load (replaces the old blocking init block).
+        durableRegistry.eagerLoad()
+        return durableRegistry.getResourceById(resourceId)
+    }
 
-    override suspend fun getAllResources(): List<ResourceRecord> =
-        durableRegistry.listResources()
+    override suspend fun getAllResources(): List<ResourceRecord> {
+        durableRegistry.eagerLoad()
+        return durableRegistry.listResources()
+    }
 
     override fun observeAllResources(): Flow<List<ResourceRecord>> =
         durableRegistry.observeAllResources()

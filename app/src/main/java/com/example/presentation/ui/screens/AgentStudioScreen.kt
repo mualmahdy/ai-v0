@@ -30,6 +30,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.History
@@ -51,6 +52,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -305,6 +307,28 @@ fun AgentStudioScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("تنفيذ المهمة")
+                        }
+                    }
+
+                    // FIX P0-5 (audit c03919d): a real CANCEL button. Previously
+                    // there was NO way to stop a running stream — the user had to
+                    // wait for the whole execution to finish (or kill the app).
+                    // This cancels the execution Job, which also aborts the
+                    // in-flight network stream.
+                    if (state.isExecuting) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = { viewModel.cancelExecution() },
+                            modifier = Modifier.testTag("cancel_execution_button"),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "إلغاء",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("إلغاء")
                         }
                     }
                 }

@@ -24,19 +24,29 @@ import java.util.concurrent.TimeUnit
  * Genuine Model Context Protocol (MCP) JSON-RPC 2.0 Client.
  *
  * Implements real JSON-RPC 2.0 calls over:
- * 1. HTTP / SSE streams.
- * 2. In-Process Local standard tools bridge (inprocess://).
+ * 1. HTTP / SSE streams — including the mandatory `initialize` handshake
+ *    before `tools/list` (FIX F-8: previously tools/list was sent cold, and
+ *    tools were "discovered" without any protocol capability negotiation).
+ * 2. In-Process Local standard tools bridge (inprocess://) backed by REAL
+ *    injected executors (FIX F-8: previously returned canned text).
  */
 class McpClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    /**
+     * FIX F-8: real executors for the in-process bridge tools. Keys are tool
+     * names; the AppContainer wires real implementations (workspace file
+     * listing, runtime diagnostics). Previously the bridge returned hardcoded
+     * canned strings — an illusion of capability.
+     */
+    private val inProcessTools: Map<String, suspend (Map<String, Any?>) -> Outcome<ToolOutput, ToolFailure>> = emptyMap()
 ) {
 
     /**
-     * Executes the MCP protocol handshake (initialize, tools/list, resources/list)
+     * Executes the MCP protocol handshake (initialize → initialized → tools/list)
      * and returns the updated descriptor with real discovered capabilities.
      */
     suspend fun discoverServer(server: McpServerDescriptor): Outcome<McpServerDescriptor, String> = withContext(Dispatchers.IO) {
@@ -44,27 +54,35 @@ class McpClient(
             return@withContext Outcome.Error("خادم MCP معطل حالياً: ${server.name}")
         }
 
-        // If local in-process standard bridge, evaluate directly
+        // If local in-process standard bridge, evaluate directly — the bridge
+        // tools that actually have REAL executors are exposed; the rest are
+        // honestly absent (previously two canned tools were always claimed).
         if (server.endpointUri.startsWith("inprocess://")) {
-            val tools = listOf(
+            val available = listOfNotNull(
+                // Real workspace summary executor wired by the composition root.
+                "workspace_summary".takeIf { inProcessTools.containsKey(it) },
+                // Real diagnostics are always computable locally.
+                "system_diagnostics"
+            )
+            val tools = available.map { name ->
                 McpDiscoveredTool(
-                    name = "workspace_summary",
-                    description = "استعراض ملخص ملفات مساحة العمل الحالية وحجم التخزين",
-                    inputSchemaJson = "{\"type\":\"object\"}"
-                ),
-                McpDiscoveredTool(
-                    name = "system_diagnostics",
-                    description = "فحص موارد الذاكرة والنظام المحلية في بيئة أندرويد",
+                    name = name,
+                    description = when (name) {
+                        "workspace_summary" -> "استعراض ملخص ملفات مساحة العمل الحالية وحجم التخزين"
+                        else -> "فحص موارد الذاكرة والنظام المحلية في بيئة أندرويد"
+                    },
                     inputSchemaJson = "{\"type\":\"object\"}"
                 )
-            )
-            val resources = listOf(
-                McpDiscoveredResource(
-                    uri = "workspace://manifest.json",
-                    name = "ملف إعدادات المشروع",
-                    mimeType = "application/json"
+            }
+            val resources = if (inProcessTools.containsKey("workspace_summary")) {
+                listOf(
+                    McpDiscoveredResource(
+                        uri = "workspace://manifest.json",
+                        name = "ملف إعدادات المشروع",
+                        mimeType = "application/json"
+                    )
                 )
-            )
+            } else emptyList()
             return@withContext Outcome.Success(
                 server.copy(
                     health = HealthStatus.HEALTHY,
@@ -74,8 +92,63 @@ class McpClient(
             )
         }
 
-        // Remote HTTP / SSE discovery
+        // Remote HTTP / SSE discovery — with a REAL MCP handshake (FIX F-8):
+        //   initialize → notifications/initialized → tools/list
         try {
+            // Step 1: initialize handshake (capability negotiation).
+            val initPayload = JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("id", UUID.randomUUID().toString())
+                put("method", "initialize")
+                put("params", JSONObject().apply {
+                    put("protocolVersion", "2024-11-05")
+                    put("capabilities", JSONObject())
+                    put("clientInfo", JSONObject().apply {
+                        put("name", "AI-V0-MCP-Client")
+                        put("version", "1.0")
+                    })
+                })
+            }
+            val initRequest = Request.Builder()
+                .url(server.endpointUri)
+                .post(initPayload.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+                .header("Accept", "application/json, text/event-stream")
+                .header("User-Agent", "AI-V0-MCP-Client/1.0")
+                .build()
+
+            // FIX R-4: responses are closed on every path (.use).
+            val initOk = client.newCall(initRequest).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: "{}"
+                    val json = JSONObject(body)
+                    // A compliant MCP server replies with result.serverInfo; a
+                    // non-MCP endpoint (404 HTML, proxies…) won't — refuse to
+                    // "discover" tools from a non-MCP response.
+                    json.optJSONObject("result")?.has("serverInfo") == true
+                } else false
+            }
+            if (!initOk) {
+                return@withContext Outcome.Error(
+                    failure = "MCP initialize handshake failed for ${server.name} (${server.endpointUri})",
+                    diagnosticMessage = "خادم ${server.name} لم يُكمل مصافحة MCP (initialize) — لا يمكن اكتشاف أدواته بأمان."
+                )
+            }
+
+            // Step 2: notifications/initialized (per spec, before requests).
+            val initializedPayload = JSONObject().apply {
+                put("jsonrpc", "2.0")
+                put("method", "notifications/initialized")
+                put("params", JSONObject())
+            }
+            client.newCall(
+                Request.Builder()
+                    .url(server.endpointUri)
+                    .post(initializedPayload.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+                    .header("Accept", "application/json, text/event-stream")
+                    .build()
+            ).execute().use { /* notification — no response body expected */ }
+
+            // Step 3: tools/list (real discovery after capability negotiation).
             val listToolsPayload = JSONObject().apply {
                 put("jsonrpc", "2.0")
                 put("id", UUID.randomUUID().toString())
@@ -90,46 +163,42 @@ class McpClient(
                 .header("User-Agent", "AI-V0-MCP-Client/1.0")
                 .build()
 
+            // FIX R-4: response closed on every path.
             val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: "{}"
-                val json = JSONObject(body)
-                val resultObj = json.optJSONObject("result") ?: json
-                val toolsArr = resultObj.optJSONArray("tools") ?: JSONArray()
+            response.use {
+                if (it.isSuccessful) {
+                    val body = it.body?.string() ?: "{}"
+                    val json = JSONObject(body)
+                    val resultObj = json.optJSONObject("result") ?: json
+                    val toolsArr = resultObj.optJSONArray("tools") ?: JSONArray()
 
-                val discoveredTools = mutableListOf<McpDiscoveredTool>()
-                for (i in 0 until toolsArr.length()) {
-                    val toolObj = toolsArr.getJSONObject(i)
-                    discoveredTools.add(
-                        McpDiscoveredTool(
-                            name = toolObj.optString("name", "unnamed_tool"),
-                            description = toolObj.optString("description", ""),
-                            inputSchemaJson = toolObj.optJSONObject("inputSchema")?.toString() ?: "{}"
+                    val discoveredTools = mutableListOf<McpDiscoveredTool>()
+                    for (i in 0 until toolsArr.length()) {
+                        val toolObj = toolsArr.getJSONObject(i)
+                        discoveredTools.add(
+                            McpDiscoveredTool(
+                                name = toolObj.optString("name", "unnamed_tool"),
+                                description = toolObj.optString("description", ""),
+                                inputSchemaJson = toolObj.optJSONObject("inputSchema")?.toString() ?: "{}"
+                            )
+                        )
+                    }
+
+                    Outcome.Success(
+                        server.copy(
+                            health = HealthStatus.HEALTHY,
+                            exposedTools = discoveredTools
                         )
                     )
-                }
-
-                Outcome.Success(
-                    server.copy(
-                        health = HealthStatus.HEALTHY,
-                        exposedTools = discoveredTools
+                } else {
+                    val code = it.code
+                    Outcome.Error(
+                        failure = "MCP discovery HTTP $code for ${server.name} (${server.endpointUri})",
+                        diagnosticMessage = "خادم MCP ${server.name} أعاد رمز HTTP $code أثناء محاولة الاكتشاف."
                     )
-                )
-            } else {
-                // FIX INF-P0-11: Previously returned Outcome.Success(server.copy(health = DEGRADED))
-                // on HTTP non-200, masking the failure as success. Callers could not distinguish
-                // "discovered but unhealthy" from "discovery HTTP error". Now we return Outcome.Error
-                // with the HTTP code so the caller can branch on the failure type.
-                val code = response.code
-                Outcome.Error(
-                    failure = "MCP discovery HTTP $code for ${server.name} (${server.endpointUri})",
-                    diagnosticMessage = "خادم MCP ${server.name} أعاد رمز HTTP $code أثناء محاولة الاكتشاف."
-                )
+                }
             }
         } catch (e: Exception) {
-            // FIX INF-P0-11: Previously returned Outcome.Success(server.copy(health = UNAVAILABLE))
-            // on exceptions, masking transport errors as success. Callers could not distinguish
-            // "discovered but unavailable" from "discovery crashed". Now we surface the exception.
             Outcome.Error(
                 failure = "MCP discovery failed for ${server.name}: ${e::class.java.simpleName} - ${e.message}",
                 diagnosticMessage = "تعذّر الوصول إلى خادم MCP ${server.name}: ${e.localizedMessage ?: e.message ?: "خطأ غير معروف"}"
@@ -243,25 +312,23 @@ class McpClient(
         }
     }
 
-    private fun executeInProcessTool(
+    private suspend fun executeInProcessTool(
         toolName: String,
         arguments: Map<String, Any?>,
         startTime: Long
     ): Outcome<ToolOutput, ToolFailure> {
         val duration = System.currentTimeMillis() - startTime
+
+        // FIX F-8: prefer a REAL injected executor (wired by AppContainer —
+        // e.g. actual workspace file statistics from the sandbox storage).
+        val realExecutor = inProcessTools[toolName]
+        if (realExecutor != null) {
+            return realExecutor(arguments)
+        }
+
         return when (toolName) {
-            "workspace_summary" -> {
-                val summary = """
-                    [MCP Local Bridge: workspace_summary]
-                    - مساحة العمل: معزولة ونشطة
-                    - نظام التخزين: Sandbox Local Storage
-                    - حالة الاتصال: جاهز للعمل المحلي المتكامل
-                """.trimIndent()
-                Outcome.Success(
-                    value = ToolOutput(content = summary, rawBytesCount = summary.toByteArray().size.toLong()),
-                    metadata = OutcomeMetadata(durationMs = duration, providerId = "mcp_local_bridge")
-                )
-            }
+            // system_diagnostics computes REAL runtime statistics locally —
+            // no external dependency needed, so it stays a genuine in-process tool.
             "system_diagnostics" -> {
                 val runtime = Runtime.getRuntime()
                 val usedMemMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
@@ -279,10 +346,12 @@ class McpClient(
                 )
             }
             else -> {
+                // FIX F-8: honest explicit failure — no canned "workspace summary"
+                // illusion when no real executor is wired.
                 Outcome.Error(
                     failure = ToolFailure.CapabilityUnavailable(
                         capabilityName = toolName,
-                        message = "الأداة المحلية غير مدعومة: $toolName"
+                        message = "الأداة المحلية غير مزوّدة بمنفذ حقيقي: $toolName"
                     )
                 )
             }

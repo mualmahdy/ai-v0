@@ -170,3 +170,23 @@ data class ProviderConfigEntity(
     val updatedAtEpochMs: Long
 )
 
+
+/**
+ * FIX D-1 / D-4 (audit c03919d): tabular MDP Q-table cell.
+ * One row per (state-region, action) pair — stores the learned Q value and
+ * transition statistics so the CBR-MDP engine accumulates REAL experience
+ * across sessions (previously estimates were in-memory per-action-type only
+ * and were wiped on every restart).
+ */
+@Entity(
+    tableName = "mdp_q_values",
+    primaryKeys = ["regionKey", "actionType"]
+)
+data class MdpQValueEntity(
+    val regionKey: String,
+    val actionType: String,
+    val qValue: Float,
+    val visitCount: Int,
+    val successCount: Int,
+    val lastUpdatedEpochMs: Long
+)

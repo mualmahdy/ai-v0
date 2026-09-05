@@ -17,12 +17,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -31,6 +34,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTag
 import androidx.compose.ui.unit.dp
@@ -128,6 +133,147 @@ fun ProviderServiceManagerScreen(state: UiState, viewModel: MainViewModel) {
             ResourceRecordCard(resource = resource, viewModel = viewModel)
         }
     }
+
+    // FIX F-4 (audit c03919d): the real credential input dialog — the missing
+    // user path for entering API keys. Rendered whenever the dialog state is set.
+    if (state.credentialDialogServiceId != null) {
+        CredentialInputDialog(
+            serviceName = state.credentialDialogServiceName,
+            authAlias = state.credentialDialogAuthAlias,
+            inputValue = state.credentialInput,
+            isSaving = state.isSavingCredential,
+            onValueChange = viewModel::updateCredentialInput,
+            onConfirm = viewModel::submitCredential,
+            onDismiss = viewModel::closeCredentialDialog
+        )
+    }
+
+    // FIX F-4 (phantom dialog): isAddProviderDialogOpen was set but NO dialog
+    // was ever rendered — the "+" button was a no-op. Now a real dialog exists.
+    if (state.isAddProviderDialogOpen) {
+        AddProviderDialog(
+            onDismiss = viewModel::closeAddProviderDialog,
+            onConfirm = { name, description, websiteUrl, isLocal ->
+                viewModel.createProvider(name, description, websiteUrl, isLocal)
+            }
+        )
+    }
+}
+
+/**
+ * FIX F-4: dialog for creating a new Provider (previously a phantom flag).
+ */
+@Composable
+private fun AddProviderDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (name: String, description: String, websiteUrl: String?, isLocal: Boolean) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var websiteUrl by remember { mutableStateOf("") }
+    var isLocal by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("إضافة مزوّد جديد") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("اسم المزوّد") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().semantics { testTag = "new_provider_name" }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("الوصف") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = websiteUrl,
+                    onValueChange = { websiteUrl = it },
+                    label = { Text("رابط الموقع (اختياري)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = isLocal, onCheckedChange = { isLocal = it })
+                    Spacer(modifier = Modifier.size(4.dp))
+                    Text("مزوّد محلي (بدون شبكة)", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(name.trim(), description.trim(), websiteUrl.trim().ifBlank { null }, isLocal) },
+                enabled = name.isNotBlank()
+            ) { Text("إنشاء") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("إلغاء") }
+        }
+    )
+}
+
+/**
+ * FIX F-4: dialog for entering a provider API key. The key is stored in the
+ * EncryptedSecretStorage vault and immediately validated with a real
+ * connection test.
+ */
+@Composable
+private fun CredentialInputDialog(
+    serviceName: String,
+    authAlias: String?,
+    inputValue: String,
+    isSaving: Boolean,
+    onValueChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { if (!isSaving) onDismiss() },
+        title = { Text("إدخال مفتاح API — $serviceName") },
+        text = {
+            Column {
+                Text(
+                    text = "سيُحفظ المفتاح مشفراً في قبو الاعتمادات" +
+                        (if (authAlias != null) " (المعرّف: $authAlias)" else "") +
+                        " ثم يُختبر الاتصال فوراً.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = inputValue,
+                    onValueChange = onValueChange,
+                    label = { Text("مفتاح API") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().semantics { testTag = "credential_input_field" }
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                enabled = !isSaving && inputValue.isNotBlank(),
+                modifier = Modifier.semantics { testTag = "credential_confirm_button" }
+            ) {
+                if (isSaving) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                } else {
+                    Text("حفظ واختبار")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isSaving) { Text("إلغاء") }
+        }
+    )
 }
 
 @Composable
@@ -170,6 +316,7 @@ private fun ProviderCard(
             // Services
             services.forEach { service ->
                 ServiceRow(
+                    provider = provider,
                     service = service,
                     config = configurations.firstOrNull { it.serviceId == service.id },
                     offerings = offerings.filter { it.serviceId == service.id },
@@ -185,6 +332,7 @@ private fun ProviderCard(
 
 @Composable
 private fun ServiceRow(
+    provider: com.example.domain.core.provider.Provider,
     service: com.example.domain.core.provider.ProviderService,
     config: com.example.domain.core.provider.ServiceConfiguration?,
     offerings: List<com.example.domain.core.provider.offering.ServiceOffering>,
@@ -235,12 +383,33 @@ private fun ServiceRow(
                         Spacer(modifier = Modifier.size(4.dp))
                         Text("Discover")
                     }
+                    // FIX F-4: real path to enter the API key for this service —
+                    // opens the credential dialog bound to the vault.
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.openCredentialDialog(
+                                serviceId = service.id,
+                                serviceName = service.name,
+                                authAlias = config.authAlias ?: service.id
+                            )
+                        },
+                        modifier = Modifier.padding(end = 4.dp).semantics { testTag = "btn_enter_api_key_" + service.id }
+                    ) {
+                        Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.size(4.dp))
+                        Text("API Key")
+                    }
                 }
             }
 
             // Offerings
             offerings.forEach { offering ->
-                OfferingRow(offering = offering, resources = resources, viewModel = viewModel)
+                OfferingRow(
+                    provider = provider,
+                    offering = offering,
+                    resources = resources,
+                    viewModel = viewModel
+                )
             }
         }
     }
@@ -248,6 +417,7 @@ private fun ServiceRow(
 
 @Composable
 private fun OfferingRow(
+    provider: com.example.domain.core.provider.Provider,
     offering: com.example.domain.core.provider.offering.ServiceOffering,
     resources: List<com.example.domain.core.resource.ResourceRecord>,
     viewModel: MainViewModel
@@ -263,12 +433,20 @@ private fun OfferingRow(
                 modifier = Modifier.weight(1f)
             )
             if (!isMaterialized) {
+                // FIX F-5 (audit c03919d): the Materialize button is now actually
+                // wired — previously onClick was an empty body with a TODO-style
+                // comment, so no resource could ever be created from the UI.
                 Button(
                     onClick = {
-                        // For materialization we need providerId/serviceId — extract from resources first
-                        // (in a real UI, the screen would track the parent provider)
+                        viewModel.materializeResource(
+                            providerId = provider.id,
+                            serviceId = offering.serviceId,
+                            offeringId = offering.id
+                        )
                     },
-                    modifier = Modifier.padding(horizontal = 4.dp)
+                    modifier = Modifier.padding(horizontal = 4.dp).semantics {
+                        testTag = "btn_materialize_" + offering.id
+                    }
                 ) {
                     Text("Materialize")
                 }

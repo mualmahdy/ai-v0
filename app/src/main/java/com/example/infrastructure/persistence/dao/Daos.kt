@@ -10,6 +10,7 @@ import com.example.infrastructure.persistence.entities.EvolutionCandidateEntity
 import com.example.infrastructure.persistence.entities.ExecutionLogEntity
 import com.example.infrastructure.persistence.entities.ExtensionConfigEntity
 import com.example.infrastructure.persistence.entities.MemoryEntity
+import com.example.infrastructure.persistence.entities.MdpQValueEntity
 import com.example.infrastructure.persistence.entities.ProjectEntity
 import com.example.infrastructure.persistence.entities.ProviderConfigEntity
 import com.example.infrastructure.persistence.entities.RadarItemEntity
@@ -222,3 +223,15 @@ interface ProviderConfigDao {
     suspend fun updateHealth(id: String, healthStatus: String, validatedMs: Long, latencyMs: Long, error: String?, now: Long)
 }
 
+
+@Dao
+interface MdpQValueDao {
+    @Query("SELECT * FROM mdp_q_values")
+    suspend fun getAll(): List<MdpQValueEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(entries: List<MdpQValueEntity>)
+
+    @Query("DELETE FROM mdp_q_values WHERE lastUpdatedEpochMs < :cutoffEpochMs")
+    suspend fun pruneStale(cutoffEpochMs: Long)
+}

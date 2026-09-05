@@ -8,17 +8,24 @@ import com.example.domain.ports.provider.SecureCredentialStoragePort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.security.KeyStore
-import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * Robust, secure credential storage adapter.
  * Uses AES-GCM (Galois/Counter Mode) encryption to guarantee confidentiality and authenticity.
- * Keys and initialization vectors are isolated from Room and plain-text application memory.
+ * Keys live EXCLUSIVELY in the Android Keystore — the ciphertext on disk is
+ * useless without the hardware-backed key.
+ *
+ * FIX S-2 (audit c03919d): the previous implementation stored a FALLBACK
+ * SOFTWARE KEY (random 32 bytes, base64) in the SAME SharedPreferences file
+ * as the ciphertext. Anyone with the prefs file (backup, root, adb backup)
+ * obtained key + ciphertext together — the encryption was decorative.
+ * The fallback path is now REMOVED: if the Android Keystore is unavailable,
+ * storeSecret/getSecret return an explicit Outcome.Error instead of silently
+ * downgrading to the vulnerable software-key scheme.
  */
 class EncryptedSecretStorageAdapter(
     private val context: Context,
@@ -56,38 +63,24 @@ class EncryptedSecretStorageAdapter(
                 keyGen.generateKey()
             }
         } catch (_: Exception) {
-            // In unit testing / simulated environments where AndroidKeyStore might be stubbed,
-            // fallback software key handling is seamlessly used.
+            // Keystore unavailable in this environment (e.g. JVM unit tests).
+            // FIX S-2: NO software fallback is created — operations that need the
+            // key fail explicitly via getSecretKey() throwing SecurityException.
         }
     }
 
+    /**
+     * FIX S-2: returns the Keystore-backed key or throws SecurityException.
+     * The old path silently generated a software key stored next to the
+     * ciphertext (critical vulnerability) — removed.
+     */
     private fun getSecretKey(): SecretKey {
-        return try {
-            val ks = KeyStore.getInstance(androidKeyStore)
-            ks.load(null)
-            if (ks.containsAlias(keyAlias)) {
-                (ks.getEntry(keyAlias, null) as KeyStore.SecretKeyEntry).secretKey
-            } else {
-                getOrCreateFallbackKey()
-            }
-        } catch (_: Exception) {
-            getOrCreateFallbackKey()
+        val ks = KeyStore.getInstance(androidKeyStore)
+        ks.load(null)
+        if (ks.containsAlias(keyAlias)) {
+            return (ks.getEntry(keyAlias, null) as KeyStore.SecretKeyEntry).secretKey
         }
-    }
-
-    private fun getOrCreateFallbackKey(): SecretKey {
-        val fallbackAlias = "fallback_master_seed"
-        val existingSeed = prefs.getString(fallbackAlias, null)
-        val rawKeyBytes = if (existingSeed != null) {
-            Base64.decode(existingSeed, Base64.NO_WRAP)
-        } else {
-            val randomBytes = ByteArray(32)
-            SecureRandom().nextBytes(randomBytes)
-            val encoded = Base64.encodeToString(randomBytes, Base64.NO_WRAP)
-            prefs.edit().putString(fallbackAlias, encoded).apply()
-            randomBytes
-        }
-        return SecretKeySpec(rawKeyBytes, "AES")
+        throw SecurityException("Android Keystore key unavailable — refusing to fall back to an insecure software key.")
     }
 
     override suspend fun storeSecret(alias: String, secret: String): Outcome<Unit, String> = withContext(Dispatchers.IO) {
@@ -111,6 +104,12 @@ class EncryptedSecretStorageAdapter(
             prefs.edit().putString("secret_$alias", base64Value).apply()
 
             Outcome.Success(Unit)
+        } catch (e: SecurityException) {
+            // FIX S-2: explicit failure — never silently downgrade security.
+            Outcome.Error(
+                "فشل الحفظ: مخزن مفاتيح الجهاز (Android Keystore) غير متاح، " +
+                    "ولن يتم استخدام مفتاح برمجي غير آمن. لا يمكن تخزين الأسرار في هذه البيئة."
+            )
         } catch (e: Exception) {
             Outcome.Error("فشل تشفير وحفظ المفتاح السري بأمان: ${e.localizedMessage}")
         }
@@ -138,6 +137,11 @@ class EncryptedSecretStorageAdapter(
             val plainText = String(decryptedBytes, Charsets.UTF_8)
 
             Outcome.Success(plainText)
+        } catch (e: SecurityException) {
+            // FIX S-2: explicit failure — never silently downgrade security.
+            Outcome.Error(
+                "فشل الاسترجاع: مخزن مفاتيح الجهاز غير متاح — رُفض استخدام بديل برمجي غير آمن."
+            )
         } catch (e: Exception) {
             Outcome.Error("فشل فك تشفير المفتاح السري: ${e.localizedMessage}")
         }

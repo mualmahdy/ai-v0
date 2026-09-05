@@ -254,16 +254,65 @@ class IntelligenceRadarPipeline(
         }
     }
 
-    suspend fun advanceEvolutionStage(candidateId: String, nextStage: EvolutionStage) = withContext(Dispatchers.IO) {
+    /**
+     * FIX F-10 (audit c03919d): REAL governance gates over the evolution stage
+     * machine. Previously `advanceEvolutionStage(candidateId, nextStage)`
+     * accepted ANY stage jump (e.g. DISCOVERED → INTEGRATED in one click),
+     * bypassing the entire 9-stage security/governance pipeline. Now:
+     *
+     *   1. Only single-step forward progression is allowed (plus REJECTED
+     *      from anywhere).
+     *   2. INTEGRATED and beyond REQUIRE securityAuditPassed AND
+     *      governanceApproved — integration without both approvals is
+     *      rejected explicitly.
+     */
+    suspend fun advanceEvolutionStage(candidateId: String, nextStage: EvolutionStage): Outcome<EvolutionCandidate, String> = withContext(Dispatchers.IO) {
+        val current = _evolutionCandidates.value.firstOrNull { it.id == candidateId }
+            ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
+
+        // Gate 1 — no stage skipping (single forward step or rejection).
+        val order = listOf(
+            EvolutionStage.DISCOVERED,
+            EvolutionStage.UNDERSTOOD,
+            EvolutionStage.CLASSIFIED,
+            EvolutionStage.EVALUATED,
+            EvolutionStage.CANDIDATE,
+            EvolutionStage.APPROVAL_PENDING,
+            EvolutionStage.INTEGRATED,
+            EvolutionStage.VERIFIED,
+            EvolutionStage.REGISTERED
+        )
+        val currentIndex = order.indexOf(current.stage)
+        val targetIndex = order.indexOf(nextStage)
+        val isSingleForwardStep = currentIndex >= 0 && targetIndex == currentIndex + 1
+        val isRejection = nextStage == EvolutionStage.REJECTED
+        if (!isSingleForwardStep && !isRejection) {
+            return@withContext Outcome.Error(
+                "GATE_STAGE_ORDER",
+                "رفض الترقية: الانتقال من ${current.stage.displayName} إلى ${nextStage.displayName} " +
+                    "يتخطى مراحل الحوكمة. مسموح فقط بترقية مرحلة واحدة أمامية أو الرفض."
+            )
+        }
+
+        // Gate 2 — integration requires BOTH security audit and governance approval.
+        val integrationOrBeyond = targetIndex >= order.indexOf(EvolutionStage.INTEGRATED)
+        if (integrationOrBeyond && (!current.securityAuditPassed || !current.governanceApproved)) {
+            return@withContext Outcome.Error(
+                "GATE_GOVERNANCE_APPROVAL",
+                "رفض الترقية إلى ${nextStage.displayName}: يجب اجتياز التدقيق الأمني " +
+                    "(securityAuditPassed=${current.securityAuditPassed}) وموافقة الحوكمة " +
+                    "(governanceApproved=${current.governanceApproved}) قبل الدمج."
+            )
+        }
+
         var candidateToPersist: EvolutionCandidate? = null
         _evolutionCandidates.update { list ->
             list.map { candidate ->
                 if (candidate.id == candidateId) {
-                    // FIX APP-P3-29: Do not auto-approve governance or security audits without explicit audit evidence.
-                    // Preserve existing audit and governance flags honestly.
+                    // FIX APP-P3-29: preserve audit/governance flags honestly.
                     val updated = candidate.copy(
                         stage = nextStage,
-                        evaluationNotes = "تم تحديث مرحلة التطور إلى ${nextStage.name}."
+                        evaluationNotes = "تم تحديث مرحلة التطور إلى ${nextStage.name} عبر بوابة حوكمة فعلية."
                     )
                     candidateToPersist = updated
                     updated
@@ -281,6 +330,7 @@ class IntelligenceRadarPipeline(
                 )
             } catch (_: Exception) {}
         }
+        return@withContext Outcome.Success(candidateToPersist!!)
     }
 
     private fun persistRadarItems(items: List<RadarItem>) {
