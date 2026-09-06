@@ -18,30 +18,41 @@ import com.example.infrastructure.persistence.entities.WorkflowStepStateEntity
 import com.example.infrastructure.persistence.entities.AgentMemoryNamespaceEntity
 import kotlinx.coroutines.flow.Flow
 
+/**
+ * ============================================================================
+ * Telemetry / Observability / Governance DAOs (Phase 5 entities)
+ * ============================================================================
+ *
+ * FIX (audit 2026): every @Query now references the REAL Room column names.
+ * The entities declare camelCase properties (no @ColumnInfo renaming) and
+ * MIGRATION_7_TO_8 creates the tables with camelCase columns, so all SQL
+ * must use camelCase — the previous snake_case references made KSP fail
+ * ("no such column") and left the whole observability layer uncompilable.
+ */
 @Dao
 interface MetricEventDao {
-    @Query("SELECT * FROM metric_events WHERE metric_type = :type ORDER BY recorded_at_epoch_ms DESC LIMIT :limit")
+    @Query("SELECT * FROM metric_events WHERE metricType = :type ORDER BY recordedAtEpochMs DESC LIMIT :limit")
     suspend fun getByType(type: String, limit: Int = 200): List<MetricEventEntity>
 
-    @Query("SELECT * FROM metric_events WHERE execution_id = :executionId ORDER BY recorded_at_epoch_ms ASC")
+    @Query("SELECT * FROM metric_events WHERE executionId = :executionId ORDER BY recordedAtEpochMs ASC")
     fun forExecution(executionId: String): Flow<List<MetricEventEntity>>
 
-    @Query("SELECT * FROM metric_events ORDER BY recorded_at_epoch_ms DESC LIMIT :limit")
+    @Query("SELECT * FROM metric_events ORDER BY recordedAtEpochMs DESC LIMIT :limit")
     fun recent(limit: Int = 200): Flow<List<MetricEventEntity>>
 
-    @Query("SELECT metric_type, dimensions_key, COUNT(*) as cnt, SUM(value) as sum, MIN(value) as mn, MAX(value) as mx FROM metric_events GROUP BY metric_type, dimensions_key")
+    @Query("SELECT metricType AS metricType, dimensionsKey AS dimensionsKey, COUNT(*) as cnt, SUM(value) as sum, MIN(value) as mn, MAX(value) as mx FROM metric_events GROUP BY metricType, dimensionsKey")
     suspend fun aggregateBuckets(): List<MetricBucketRow>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(events: List<MetricEventEntity>)
 
-    @Query("DELETE FROM metric_events WHERE recorded_at_epoch_ms < :cutoff")
+    @Query("DELETE FROM metric_events WHERE recordedAtEpochMs < :cutoff")
     suspend fun pruneOlderThan(cutoff: Long): Int
 }
 
 data class MetricBucketRow(
-    val metric_type: String,
-    val dimensions_key: String,
+    val metricType: String,
+    val dimensionsKey: String,
     val cnt: Long,
     val sum: Long,
     val mn: Long,
@@ -50,31 +61,31 @@ data class MetricBucketRow(
 
 @Dao
 interface AuditTrailDao {
-    @Query("SELECT * FROM audit_trail ORDER BY occurred_at_epoch_ms DESC LIMIT :limit")
+    @Query("SELECT * FROM audit_trail ORDER BY occurredAtEpochMs DESC LIMIT :limit")
     fun recent(limit: Int = 100): Flow<List<AuditTrailEntity>>
 
-    @Query("SELECT * FROM audit_trail WHERE resource_type = :type AND resource_id = :id ORDER BY occurred_at_epoch_ms DESC")
+    @Query("SELECT * FROM audit_trail WHERE resourceType = :type AND resourceId = :id ORDER BY occurredAtEpochMs DESC")
     suspend fun forResource(type: String, id: String): List<AuditTrailEntity>
 
-    @Query("SELECT * FROM audit_trail WHERE workspace_id = :workspaceId ORDER BY occurred_at_epoch_ms DESC LIMIT :limit")
+    @Query("SELECT * FROM audit_trail WHERE workspaceId = :workspaceId ORDER BY occurredAtEpochMs DESC LIMIT :limit")
     suspend fun forWorkspace(workspaceId: String, limit: Int = 100): List<AuditTrailEntity>
 
-    @Query("SELECT * FROM audit_trail WHERE severity = :severity ORDER BY occurred_at_epoch_ms DESC LIMIT :limit")
+    @Query("SELECT * FROM audit_trail WHERE severity = :severity ORDER BY occurredAtEpochMs DESC LIMIT :limit")
     suspend fun forSeverity(severity: String, limit: Int = 100): List<AuditTrailEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(event: AuditTrailEntity): Long
 
-    @Query("DELETE FROM audit_trail WHERE occurred_at_epoch_ms < :cutoff")
+    @Query("DELETE FROM audit_trail WHERE occurredAtEpochMs < :cutoff")
     suspend fun pruneOlderThan(cutoff: Long): Int
 }
 
 @Dao
 interface HealthProbeDao {
-    @Query("SELECT * FROM health_probes WHERE resource_id = :resourceId ORDER BY probed_at_epoch_ms DESC LIMIT :limit")
+    @Query("SELECT * FROM health_probes WHERE resourceId = :resourceId ORDER BY probedAtEpochMs DESC LIMIT :limit")
     suspend fun forResource(resourceId: String, limit: Int = 50): List<HealthProbeEntity>
 
-    @Query("SELECT * FROM health_probes ORDER BY probed_at_epoch_ms DESC LIMIT :limit")
+    @Query("SELECT * FROM health_probes ORDER BY probedAtEpochMs DESC LIMIT :limit")
     fun recent(limit: Int = 100): Flow<List<HealthProbeEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -83,14 +94,14 @@ interface HealthProbeDao {
 
 @Dao
 interface ExecutionTraceDao {
-    @Query("SELECT * FROM execution_trace_nodes WHERE execution_id = :executionId ORDER BY step_index ASC")
+    @Query("SELECT * FROM execution_trace_nodes WHERE executionId = :executionId ORDER BY stepIndex ASC")
     fun forExecution(executionId: String): Flow<List<ExecutionTraceNodeEntity>>
 
-    @Query("SELECT * FROM execution_trace_nodes ORDER BY started_at_epoch_ms DESC LIMIT :limit")
+    @Query("SELECT * FROM execution_trace_nodes ORDER BY startedAtEpochMs DESC LIMIT :limit")
     fun recent(limit: Int = 200): Flow<List<ExecutionTraceNodeEntity>>
 
-    @Query("SELECT * FROM execution_trace_nodes WHERE workspace_id IS :workspaceId ORDER BY started_at_epoch_ms DESC LIMIT :limit")
-    fun forWorkspace(workspaceId: String?, limit: Int = 200): Flow<List<ExecutionTraceNodeEntity>>
+    @Query("SELECT * FROM execution_trace_nodes ORDER BY startedAtEpochMs DESC LIMIT :limit")
+    fun forWorkspace(limit: Int = 200): Flow<List<ExecutionTraceNodeEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(node: ExecutionTraceNodeEntity): Long
@@ -98,43 +109,43 @@ interface ExecutionTraceDao {
 
 @Dao
 interface ToolAuditDao {
-    @Query("SELECT * FROM tool_audit_log WHERE tool_name = :toolName ORDER BY occurred_at_epoch_ms DESC LIMIT :limit")
+    @Query("SELECT * FROM tool_audit_log WHERE toolName = :toolName ORDER BY occurredAtEpochMs DESC LIMIT :limit")
     suspend fun forTool(toolName: String, limit: Int = 100): List<ToolAuditEntity>
 
-    @Query("SELECT * FROM tool_audit_log WHERE execution_id = :executionId ORDER BY occurred_at_epoch_ms ASC")
+    @Query("SELECT * FROM tool_audit_log WHERE executionId = :executionId ORDER BY occurredAtEpochMs ASC")
     fun forExecution(executionId: String): Flow<List<ToolAuditEntity>>
 
-    @Query("SELECT * FROM tool_audit_log ORDER BY occurred_at_epoch_ms DESC LIMIT :limit")
+    @Query("SELECT * FROM tool_audit_log ORDER BY occurredAtEpochMs DESC LIMIT :limit")
     fun recent(limit: Int = 200): Flow<List<ToolAuditEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: ToolAuditEntity): Long
 
-    @Query("SELECT COUNT(*) FROM tool_audit_log WHERE tool_name = :toolName AND outcome = 'SUCCESS'")
+    @Query("SELECT COUNT(*) FROM tool_audit_log WHERE toolName = :toolName AND outcome = 'SUCCESS'")
     suspend fun successCountForTool(toolName: String): Int
 
-    @Query("SELECT COUNT(*) FROM tool_audit_log WHERE tool_name = :toolName AND outcome = 'FAILURE'")
+    @Query("SELECT COUNT(*) FROM tool_audit_log WHERE toolName = :toolName AND outcome = 'FAILURE'")
     suspend fun failureCountForTool(toolName: String): Int
 }
 
 @Dao
 interface ToolLifecycleDao {
-    @Query("SELECT * FROM tool_lifecycle_states WHERE tool_name = :toolName LIMIT 1")
+    @Query("SELECT * FROM tool_lifecycle_states WHERE toolName = :toolName LIMIT 1")
     suspend fun byName(toolName: String): ToolLifecycleStateEntity?
 
-    @Query("SELECT * FROM tool_lifecycle_states WHERE lifecycle_state != 'REVOKED' AND is_enabled = 1")
+    @Query("SELECT * FROM tool_lifecycle_states WHERE lifecycleState != 'REVOKED' AND isEnabled = 1")
     suspend fun active(): List<ToolLifecycleStateEntity>
 
-    @Query("SELECT * FROM tool_lifecycle_states ORDER BY registered_at_epoch_ms DESC")
+    @Query("SELECT * FROM tool_lifecycle_states ORDER BY registeredAtEpochMs DESC")
     fun allFlow(): Flow<List<ToolLifecycleStateEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(state: ToolLifecycleStateEntity)
 
-    @Query("UPDATE tool_lifecycle_states SET lifecycle_state = :state, last_validated_at_epoch_ms = :now WHERE tool_id = :id")
+    @Query("UPDATE tool_lifecycle_states SET lifecycleState = :state, lastValidatedAtEpochMs = :now WHERE toolId = :id")
     suspend fun updateLifecycle(id: String, state: String, now: Long)
 
-    @Query("UPDATE tool_lifecycle_states SET lifecycle_state = 'REVOKED', is_enabled = 0, revoked_at_epoch_ms = :now, revoke_reason = :reason WHERE tool_id = :id")
+    @Query("UPDATE tool_lifecycle_states SET lifecycleState = 'REVOKED', isEnabled = 0, revokedAtEpochMs = :now, revokeReason = :reason WHERE toolId = :id")
     suspend fun revoke(id: String, reason: String, now: Long)
 }
 
@@ -143,22 +154,22 @@ interface ToolHealthDao {
     @Query("SELECT * FROM tool_health_snapshots")
     suspend fun all(): List<ToolHealthSnapshotEntity>
 
-    @Query("SELECT * FROM tool_health_snapshots WHERE tool_id = :toolId LIMIT 1")
+    @Query("SELECT * FROM tool_health_snapshots WHERE toolId = :toolId LIMIT 1")
     suspend fun byTool(toolId: String): ToolHealthSnapshotEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(snapshot: ToolHealthSnapshotEntity)
 
-    @Query("UPDATE tool_health_snapshots SET circuit_state = :state, opened_at_epoch_ms = :openedAt WHERE tool_id = :toolId")
+    @Query("UPDATE tool_health_snapshots SET circuitState = :state, openedAtEpochMs = :openedAt WHERE toolId = :toolId")
     suspend fun updateCircuitState(toolId: String, state: String, openedAt: Long?)
 }
 
 @Dao
 interface PermissionGrantDao {
-    @Query("SELECT * FROM permission_grants WHERE principal_type = :principalType AND principal_id = :principalId")
+    @Query("SELECT * FROM permission_grants WHERE principalType = :principalType AND principalId = :principalId")
     suspend fun forPrincipal(principalType: String, principalId: String): List<PermissionGrantEntity>
 
-    @Query("SELECT * FROM permission_grants WHERE principal_type = :principalType AND principal_id = :principalId AND resource_type = :resourceType AND resource_id = :resourceId AND permission = :permission LIMIT 1")
+    @Query("SELECT * FROM permission_grants WHERE principalType = :principalType AND principalId = :principalId AND resourceType = :resourceType AND resourceId = :resourceId AND permission = :permission LIMIT 1")
     suspend fun lookup(
         principalType: String,
         principalId: String,
@@ -176,69 +187,69 @@ interface PermissionGrantDao {
 
 @Dao
 interface PolicyVersionDao {
-    @Query("SELECT * FROM policy_versions WHERE policy_kind = :kind AND is_promoted = 1 ORDER BY promoted_at_epoch_ms DESC LIMIT 1")
+    @Query("SELECT * FROM policy_versions WHERE policyKind = :kind AND isPromoted = 1 ORDER BY promotedAtEpochMs DESC LIMIT 1")
     suspend fun activeFor(kind: String): PolicyVersionEntity?
 
-    @Query("SELECT * FROM policy_versions WHERE policy_kind = :kind ORDER BY created_at_epoch_ms DESC")
+    @Query("SELECT * FROM policy_versions WHERE policyKind = :kind ORDER BY createdAtEpochMs DESC")
     fun historyFor(kind: String): Flow<List<PolicyVersionEntity>>
 
-    @Query("SELECT * FROM policy_versions ORDER BY created_at_epoch_ms DESC")
+    @Query("SELECT * FROM policy_versions ORDER BY createdAtEpochMs DESC")
     fun allFlow(): Flow<List<PolicyVersionEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: PolicyVersionEntity)
 
-    @Query("UPDATE policy_versions SET is_promoted = 0 WHERE policy_kind = :kind")
+    @Query("UPDATE policy_versions SET isPromoted = 0 WHERE policyKind = :kind")
     suspend fun demoteAll(kind: String)
 
-    @Query("UPDATE policy_versions SET is_promoted = 1, promoted_at_epoch_ms = :now, promoted_by = :actor WHERE version_id = :id")
+    @Query("UPDATE policy_versions SET isPromoted = 1, promotedAtEpochMs = :now, promotedBy = :actor WHERE versionId = :id")
     suspend fun promote(id: String, actor: String, now: Long)
 }
 
 @Dao
 interface WorkflowExecutionDao {
-    @Query("SELECT * FROM workflow_executions WHERE lifecycle_state IN ('RUNNING', 'PAUSED', 'COMPENSATING') ORDER BY started_at_epoch_ms DESC")
+    @Query("SELECT * FROM workflow_executions WHERE lifecycleState IN ('RUNNING', 'PAUSED', 'COMPENSATING') ORDER BY startedAtEpochMs DESC")
     suspend fun resumable(): List<WorkflowExecutionEntity>
 
-    @Query("SELECT * FROM workflow_executions WHERE workspace_id = :workspaceId ORDER BY started_at_epoch_ms DESC")
+    @Query("SELECT * FROM workflow_executions WHERE workspaceId = :workspaceId ORDER BY startedAtEpochMs DESC")
     fun forWorkspace(workspaceId: String): Flow<List<WorkflowExecutionEntity>>
 
-    @Query("SELECT * FROM workflow_executions WHERE workflow_id = :id LIMIT 1")
+    @Query("SELECT * FROM workflow_executions WHERE workflowId = :id LIMIT 1")
     suspend fun byId(id: String): WorkflowExecutionEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: WorkflowExecutionEntity)
 
-    @Query("UPDATE workflow_executions SET lifecycle_state = :state, current_step_index = :step, last_checkpoint_at_epoch_ms = :now WHERE workflow_id = :id")
+    @Query("UPDATE workflow_executions SET lifecycleState = :state, currentStepIndex = :step, lastCheckpointAtEpochMs = :now WHERE workflowId = :id")
     suspend fun checkpoint(id: String, state: String, step: Int, now: Long)
 
-    @Query("UPDATE workflow_executions SET lifecycle_state = :state, completed_at_epoch_ms = :now, failure_reason = :reason WHERE workflow_id = :id")
+    @Query("UPDATE workflow_executions SET lifecycleState = :state, completedAtEpochMs = :now, failureReason = :reason WHERE workflowId = :id")
     suspend fun terminate(id: String, state: String, now: Long, reason: String?)
 }
 
 @Dao
 interface WorkflowStepStateDao {
-    @Query("SELECT * FROM workflow_step_states WHERE workflow_id = :workflowId ORDER BY step_index ASC")
+    @Query("SELECT * FROM workflow_step_states WHERE workflowId = :workflowId ORDER BY stepIndex ASC")
     suspend fun forWorkflow(workflowId: String): List<WorkflowStepStateEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(states: List<WorkflowStepStateEntity>)
 
-    @Query("UPDATE workflow_step_states SET status = :status, output_summary = :summary, duration_ms = :duration, completed_at_epoch_ms = :now WHERE workflow_id = :workflowId AND step_id = :stepId")
+    @Query("UPDATE workflow_step_states SET status = :status, outputSummary = :summary, durationMs = :duration, completedAtEpochMs = :now WHERE workflowId = :workflowId AND stepId = :stepId")
     suspend fun updateStepStatus(workflowId: String, stepId: String, status: String, summary: String?, duration: Long?, now: Long)
 }
 
 @Dao
 interface AgentMemoryNamespaceDao {
-    @Query("SELECT * FROM agent_memory_namespaces WHERE agent_id = :agentId AND workspace_id = :workspaceId AND is_active = 1 LIMIT 1")
+    @Query("SELECT * FROM agent_memory_namespaces WHERE agentId = :agentId AND workspaceId = :workspaceId AND isActive = 1 LIMIT 1")
     suspend fun forAgentInWorkspace(agentId: String, workspaceId: String): AgentMemoryNamespaceEntity?
 
-    @Query("SELECT * FROM agent_memory_namespaces WHERE workspace_id = :workspaceId AND is_active = 1")
+    @Query("SELECT * FROM agent_memory_namespaces WHERE workspaceId = :workspaceId AND isActive = 1")
     suspend fun forWorkspace(workspaceId: String): List<AgentMemoryNamespaceEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: AgentMemoryNamespaceEntity)
 
-    @Query("UPDATE agent_memory_namespaces SET is_active = 0 WHERE namespace_id = :id")
+    @Query("UPDATE agent_memory_namespaces SET isActive = 0 WHERE namespaceId = :id")
     suspend fun deactivate(id: String)
 }

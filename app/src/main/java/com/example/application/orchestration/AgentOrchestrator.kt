@@ -30,13 +30,20 @@ import com.example.domain.core.task.VerificationStrategy
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.infrastructure.persistence.dao.TaskDao
 import com.example.infrastructure.persistence.entities.TaskEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import org.json.JSONArray
+import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Core Orchestrator coordinating Closed-Loop Autonomous Execution:
@@ -58,6 +65,21 @@ class AgentOrchestrator(
     private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
     private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 ) {
+
+    /**
+     * Observability bus (audit 2026 fix): every emitted execution event is also
+     * published here so TelemetryService can persist traces/metrics WITHOUT
+     * the orchestrator depending on the telemetry layer. Fire-and-forget
+     * (DROP_OLDEST) — observability must never backpressure the runtime.
+     */
+    private val _executionEventPublisher = MutableSharedFlow<ExecutionEvent>(
+        extraBufferCapacity = 256,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
+    )
+    val executionEventPublisher: SharedFlow<ExecutionEvent> = _executionEventPublisher.asSharedFlow()
+
+    /** Guards concurrent auto-resume sweeps on startup. */
+    private val resumeSweepRunning = AtomicBoolean(false)
 
     /**
      * Executes a task synchronously returning a comprehensive Outcome for workflow engines.
@@ -116,7 +138,78 @@ class AgentOrchestrator(
     }
 
     /**
+     * Durable-execution checkpoint payload (audit 2026 fix): the resumable
+     * state of the closed loop, serialized into `tasks.checkpointJson`.
+     */
+    data class TaskCheckpoint(
+        val stepIndex: Int,
+        val tokensConsumed: Int,
+        val accumulatedOutput: String,
+        val evidence: Map<String, Any?> = emptyMap()
+    ) {
+        fun toJson(): String {
+            val obj = JSONObject()
+            obj.put("stepIndex", stepIndex)
+            obj.put("tokensConsumed", tokensConsumed)
+            obj.put("accumulatedOutput", accumulatedOutput)
+            val ev = JSONObject()
+            evidence.forEach { (k, v) ->
+                when (v) {
+                    null -> Unit
+                    is Number, is Boolean -> ev.put(k, v)
+                    is String -> ev.put(k, v)
+                    is Collection<*> -> ev.put(k, JSONArray(v.map { it?.toString() ?: "" }))
+                    else -> ev.put(k, v.toString())
+                }
+            }
+            obj.put("evidence", ev)
+            return obj.toString()
+        }
+
+        companion object {
+            fun fromJson(json: String?): TaskCheckpoint? {
+                if (json.isNullOrBlank()) return null
+                return try {
+                    val obj = JSONObject(json)
+                    val ev = mutableMapOf<String, Any?>()
+                    obj.optJSONObject("evidence")?.let { e ->
+                        for (k in e.keys()) {
+                            // Convert JSONArrays back to Kotlin Lists — downstream
+                            // evidence injection checks `is List<*>`; a raw
+                            // org.json.JSONArray would silently break restored
+                            // search/memory evidence (caught by GoldenPathTest).
+                            val v = e.get(k)
+                            ev[k] = if (v is org.json.JSONArray) {
+                                (0 until v.length()).map { i ->
+                                    val item = v.get(i)
+                                    if (item == JSONObject.NULL) null else item.toString()
+                                }
+                            } else v
+                        }
+                    }
+                    TaskCheckpoint(
+                        stepIndex = obj.optInt("stepIndex", 0),
+                        tokensConsumed = obj.optInt("tokensConsumed", 0),
+                        accumulatedOutput = obj.optString("accumulatedOutput", ""),
+                        evidence = ev
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+    }
+
+    /**
      * Executes an agent task via the autonomous closed loop governed by CBR-MDP Decision Intelligence.
+     *
+     * Audit 2026 fixes in this loop:
+     *  - every event is mirrored to [executionEventPublisher] for persistent tracing;
+     *  - the loop checkpoint (step, evidence, output, tokens) is persisted after
+     *    every step so process death RESUMES instead of re-running;
+     *  - a cancelled task is persisted as CANCELLED (previously the row stayed
+     *    RUNNING forever, producing zombie resumable tasks);
+     *  - delegation depth flows through the task parameters for the depth guard.
      */
     fun executeTaskStream(
         agent: AgentDefinition,
@@ -125,8 +218,64 @@ class AgentOrchestrator(
         preferredProviderId: String? = null,
         networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
         isNetworkAvailable: Boolean = true,
-        includeWebSearch: Boolean = false
+        includeWebSearch: Boolean = false,
+        restoredCheckpoint: TaskCheckpoint? = null
     ): Flow<ExecutionEvent> = flow {
+        try {
+            executeTaskLoop(
+                agent = agent,
+                task = task,
+                conversationHistory = conversationHistory,
+                preferredProviderId = preferredProviderId,
+                networkPolicy = networkPolicy,
+                isNetworkAvailable = isNetworkAvailable,
+                includeWebSearch = includeWebSearch,
+                restoredCheckpoint = restoredCheckpoint
+            )
+        } catch (e: CancellationException) {
+            // Truthful cancellation (audit 2026 fix): persist CANCELLED so the
+            // task does not linger as a zombie RUNNING row that auto-resume
+            // would re-launch on the next startup.
+            val dao = taskDao
+            if (dao != null) {
+                runCatching {
+                    dao.updateTaskStatus(
+                        id = task.id.value,
+                        state = "CANCELLED",
+                        summary = "تم إلغاء المهمة بواسطة المستخدم أو النظام.",
+                        tokens = restoredCheckpoint?.tokensConsumed ?: 0,
+                        duration = 0L,
+                        isDegraded = false,
+                        degradedReason = null,
+                        errorMsg = "CANCELLED",
+                        now = System.currentTimeMillis()
+                    )
+                }
+            }
+            emit(
+                ExecutionEvent.Cancelled(
+                    executionId = task.id.value,
+                    reason = "أُلغيت المهمة بواسطة المستخدم أو بسبب انقطاع البيئة."
+                )
+            )
+            throw e
+        }
+    }.onEach { event ->
+        // Mirror every event to the observability bus (fire-and-forget).
+        _executionEventPublisher.tryEmit(event)
+    }
+
+    /** The actual closed-loop body, extracted for cancellation-safe wrapping. */
+    private suspend fun kotlinx.coroutines.flow.FlowCollector<ExecutionEvent>.executeTaskLoop(
+        agent: AgentDefinition,
+        task: TaskDefinition,
+        conversationHistory: List<LlmMessage>,
+        preferredProviderId: String?,
+        networkPolicy: NetworkPolicy,
+        isNetworkAvailable: Boolean,
+        includeWebSearch: Boolean,
+        restoredCheckpoint: TaskCheckpoint?
+    ) {
         val executionId = UUID.randomUUID().toString()
         val startTime = System.currentTimeMillis()
 
@@ -135,11 +284,15 @@ class AgentOrchestrator(
         persistTaskInitial(currentTask, agent)
 
         val maxSteps = (task.constraints.maxRetries + 4).coerceIn(3, 8)
-        var stepIndex = 0
+
+        // Restore durable state from the checkpoint when resuming after
+        // process death — otherwise start a fresh loop.
+        var stepIndex = restoredCheckpoint?.stepIndex ?: 0
         var consecutiveFailures = 0
-        var accumulatedTokens = 0
-        val accumulatedOutputText = StringBuilder()
+        var accumulatedTokens = restoredCheckpoint?.tokensConsumed ?: 0
+        val accumulatedOutputText = StringBuilder(restoredCheckpoint?.accumulatedOutput.orEmpty())
         val accumulatedEvidence = mutableMapOf<String, Any?>()
+        restoredCheckpoint?.evidence?.let { restored -> accumulatedEvidence.putAll(restored) }
         val decisionHistory = mutableListOf<DecisionResult>()
         val observationHistory = mutableListOf<EnvironmentObservation>()
 
@@ -268,7 +421,7 @@ class AgentOrchestrator(
                     )
                 )
                 isTerminal = true
-                return@flow
+                return
             }
 
             emit(
@@ -379,6 +532,18 @@ class AgentOrchestrator(
                 errorMsg = if (!execResult.isSuccess) execResult.errorDescription else null
             )
 
+            // Durable checkpoint (audit 2026 fix): persist the loop state after
+            // EVERY step so process death resumes from here instead of re-running.
+            persistCheckpoint(
+                taskId = currentTask.id.value,
+                checkpoint = TaskCheckpoint(
+                    stepIndex = stepIndex,
+                    tokensConsumed = accumulatedTokens,
+                    accumulatedOutput = accumulatedOutputText.toString(),
+                    evidence = accumulatedEvidence
+                )
+            )
+
             val isTerminalCondition = outcomeService.isTerminalConditionReached(
                 task = currentTask,
                 stepCount = stepIndex,
@@ -401,7 +566,7 @@ class AgentOrchestrator(
                         )
                     )
                     persistTaskFinal(currentTask.id.value, "FAILED", null, accumulatedTokens, System.currentTimeMillis() - startTime, isDegraded, degradedReason?.name, failureMsg)
-                    return@flow
+                    return
                 }
             }
         }
@@ -428,7 +593,7 @@ class AgentOrchestrator(
                     isFatal = true
                 )
             )
-            return@flow
+            return
         }
 
         val stateStr = if (isDegraded || !isFinalObjectiveMet) "DEGRADED" else "COMPLETED"
@@ -533,7 +698,61 @@ class AgentOrchestrator(
             return@flow
         }
 
-        executeTaskStream(assignedAgent, taskDef).collect { emit(it) }
+        // Durable resume (audit 2026 fix): restore the persisted closed-loop
+        // checkpoint (step, evidence, output, tokens) instead of silently
+        // re-running the task from step 0.
+        val restoredCheckpoint = TaskCheckpoint.fromJson(taskEntity.checkpointJson)
+        executeTaskStream(assignedAgent, taskDef, restoredCheckpoint = restoredCheckpoint).collect { emit(it) }
+    }
+
+    /**
+     * Startup recovery sweep (audit 2026 fix): resumes tasks left RUNNING by
+     * process death. Called once from AppContainer.bootstrapRuntime(). Only
+     * top-level (non-delegated) tasks are auto-resumed, bounded by [maxTasks]
+     * to avoid resume storms; a sweep never runs concurrently with itself.
+     *
+     * Returns the ids of the tasks that were re-launched.
+     */
+    fun resumeInterruptedTasks(maxTasks: Int = 3): List<String> {
+        if (!resumeSweepRunning.compareAndSet(false, true)) return emptyList()
+        val resumedIds = mutableListOf<String>()
+        coroutineScope.launch {
+            try {
+                val dao = taskDao ?: return@launch
+                val interrupted = dao.getAllTasks()
+                    .filter {
+                        it.lifecycleState == "RUNNING" &&
+                            it.parentTaskId == null &&
+                            it.delegationDepth == 0
+                    }
+                    .take(maxTasks)
+                for (entity in interrupted) {
+                    resumedIds.add(entity.id)
+                    launch {
+                        resumeTask(entity.id).collect { /* events flow through telemetry bus */ }
+                    }
+                }
+            } finally {
+                resumeSweepRunning.set(false)
+            }
+        }
+        return resumedIds
+    }
+
+    /** Persists the durable loop checkpoint; failures never break execution. */
+    private suspend fun persistCheckpoint(taskId: String, checkpoint: TaskCheckpoint) {
+        val dao = taskDao ?: return
+        try {
+            dao.updateCheckpoint(
+                id = taskId,
+                stepIndex = checkpoint.stepIndex,
+                checkpointJson = checkpoint.toJson(),
+                tokens = checkpoint.tokensConsumed,
+                now = System.currentTimeMillis()
+            )
+        } catch (_: Exception) {
+            // Safe fallback — checkpointing is best-effort by design.
+        }
     }
 
     /**
@@ -594,7 +813,11 @@ class AgentOrchestrator(
                     requiredCapabilitiesJson = null, // Set<CapabilityType> not serializable here; deferred to Phase 2
                     requiredEvidenceKeysJson = encodeStringArray(task.successCriteria.requiredEvidenceKeys),
                     requiredOutputKeysJson = encodeStringArray(task.successCriteria.requiredOutputKeys),
-                    executionLogJson = encodeStringArray(task.executionLog)
+                    executionLogJson = encodeStringArray(task.executionLog),
+                    // Delegation lineage (audit 2026 fix) — child tasks carry
+                    // their parent id and nesting depth for tracing + guards.
+                    parentTaskId = task.input.parameters["parentTaskId"]?.toString(),
+                    delegationDepth = task.input.parameters["delegationDepth"]?.toString()?.toIntOrNull() ?: 0
                 )
             )
         } catch (_: Exception) {

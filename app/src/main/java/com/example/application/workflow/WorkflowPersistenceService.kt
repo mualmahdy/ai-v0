@@ -227,7 +227,11 @@ class WorkflowPersistenceService(
         // just enough to know which step is next. The full plan is rebuilt
         // by the WorkflowEngine from the task definitions.
         val obj = JSONObject(json)
-        return WorkflowPlan(steps = emptyList())
+        return WorkflowPlan(
+            id = WorkflowId(obj.optString("workflowId", obj.optString("id", "unknown"))),
+            goal = obj.optString("goal", ""),
+            steps = emptyList()
+        )
     }
 }
 

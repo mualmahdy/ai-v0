@@ -73,6 +73,31 @@ class ToolLifecycleService(
     private val circuitLock = Mutex()
     private val circuitConfig = CircuitBreakerConfig()
 
+    /**
+     * Audit 2026 fix: declarations registered through the lifecycle service
+     * are cached here — previously `validate`/`authorize` depended entirely
+     * on the external `declarationProvider`, whose AppContainer wiring used
+     * fragile substring parsing and returned null on real ids, making
+     * validate/authorize unusable for every tool registered through this
+     * service.
+     */
+    private val declarationCache = java.util.concurrent.ConcurrentHashMap<String, ToolDeclaration>()
+
+    /**
+     * Registers/updates a declaration for an ALREADY-NAMED tool id. Used by
+     * the composition root for in-app tools so `validate`/`authorize` resolve
+     * their declarations without string parsing.
+     */
+    fun cacheDeclaration(toolId: String, declaration: ToolDeclaration) {
+        declarationCache[toolId] = declaration
+    }
+
+    /** Resolves the declaration for a tool id: cache first, then the provider. */
+    private suspend fun resolveDeclaration(toolId: String): ToolDeclaration? {
+        declarationCache[toolId]?.let { return it }
+        return declarationProvider(toolId)
+    }
+
     override suspend fun register(
         declaration: ToolDeclaration,
         version: String,
@@ -81,6 +106,7 @@ class ToolLifecycleService(
         val toolId = "tool_${declaration.name}_${UUID.randomUUID().toString().take(8)}"
         val now = System.currentTimeMillis()
         val parsedVersion = ToolVersion.parse(version) ?: ToolVersion.INITIAL
+        declarationCache[toolId] = declaration
         toolLifecycleDao.upsert(
             ToolLifecycleStateEntity(
                 toolId = toolId,
@@ -131,7 +157,7 @@ class ToolLifecycleService(
             )
         }
 
-        val declaration = declarationProvider(toolId)
+        val declaration = resolveDeclaration(toolId)
         if (declaration == null) {
             return@withContext ToolValidationResult(
                 isValid = false,
@@ -207,7 +233,7 @@ class ToolLifecycleService(
                 reason = "الأداة غير موجودة أو غير مفعلة"
             )
         }
-        val declaration = declarationProvider(toolId)
+        val declaration = resolveDeclaration(toolId)
         if (declaration == null) {
             return@withContext ToolAuthorizationResult(
                 isAuthorized = false,

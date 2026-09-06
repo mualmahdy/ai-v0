@@ -95,7 +95,15 @@ data class TaskEntity(
     val requiredCapabilitiesJson: String? = null, // JSON array of CapabilityType names
     val requiredEvidenceKeysJson: String? = null, // JSON array of evidence keys
     val requiredOutputKeysJson: String? = null,   // JSON array of output keys
-    val executionLogJson: String? = null          // JSON array of log entries
+    val executionLogJson: String? = null,         // JSON array of log entries
+    // ---- Durable execution (audit 2026 fix, MIGRATION_8_TO_9) ----
+    // Parent task for delegated child tasks (NULL for top-level tasks).
+    val parentTaskId: String? = null,
+    // Delegation nesting depth (0 = top-level). Guards against runaway recursion.
+    val delegationDepth: Int = 0,
+    // JSON checkpoint of the closed-loop state (step index, accumulated
+    // evidence, accumulated output, consumed tokens) — the resume payload.
+    val checkpointJson: String? = null
 )
 
 @Entity(tableName = "decision_cases")

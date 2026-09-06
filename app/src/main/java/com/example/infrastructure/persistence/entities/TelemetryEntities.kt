@@ -25,10 +25,10 @@ import androidx.room.PrimaryKey
 @Entity(
     tableName = "metric_events",
     indices = [
-        Index("metric_type"),
-        Index("dimensions_key"),
-        Index("recorded_at_epoch_ms"),
-        Index("execution_id")
+        Index("metricType"),
+        Index("dimensionsKey"),
+        Index("recordedAtEpochMs"),
+        Index("executionId")
     ]
 )
 data class MetricEventEntity(
@@ -60,10 +60,10 @@ data class MetricEventEntity(
     indices = [
         Index("severity"),
         Index("actor"),
-        Index("resource_type"),
-        Index("resource_id"),
-        Index("workspace_id"),
-        Index("occurred_at_epoch_ms")
+        Index("resourceType"),
+        Index("resourceId"),
+        Index("workspaceId"),
+        Index("occurredAtEpochMs")
     ]
 )
 data class AuditTrailEntity(
@@ -88,9 +88,9 @@ data class AuditTrailEntity(
 @Entity(
     tableName = "health_probes",
     indices = [
-        Index("resource_id"),
-        Index("resource_type"),
-        Index("probed_at_epoch_ms")
+        Index("resourceId"),
+        Index("resourceType"),
+        Index("probedAtEpochMs")
     ]
 )
 data class HealthProbeEntity(
@@ -112,9 +112,9 @@ data class HealthProbeEntity(
 @Entity(
     tableName = "execution_trace_nodes",
     indices = [
-        Index("execution_id"),
-        Index("step_index"),
-        Index("started_at_epoch_ms")
+        Index("executionId"),
+        Index("stepIndex"),
+        Index("startedAtEpochMs")
     ]
 )
 data class ExecutionTraceNodeEntity(
@@ -143,9 +143,9 @@ data class ExecutionTraceNodeEntity(
 @Entity(
     tableName = "workflow_executions",
     indices = [
-        Index("workspace_id"),
-        Index("lifecycle_state"),
-        Index("started_at_epoch_ms")
+        Index("workspaceId"),
+        Index("lifecycleState"),
+        Index("startedAtEpochMs")
     ]
 )
 data class WorkflowExecutionEntity(
@@ -171,8 +171,8 @@ data class WorkflowExecutionEntity(
 @Entity(
     tableName = "workflow_step_states",
     indices = [
-        Index("workflow_id"),
-        Index("step_id"),
+        Index("workflowId"),
+        Index("stepId"),
         Index("status")
     ]
 )
@@ -199,11 +199,11 @@ data class WorkflowStepStateEntity(
 @Entity(
     tableName = "tool_audit_log",
     indices = [
-        Index("tool_name"),
-        Index("execution_id"),
-        Index("caller_agent_id"),
+        Index("toolName"),
+        Index("executionId"),
+        Index("callerAgentId"),
         Index("outcome"),
-        Index("occurred_at_epoch_ms")
+        Index("occurredAtEpochMs")
     ]
 )
 data class ToolAuditEntity(
@@ -229,10 +229,10 @@ data class ToolAuditEntity(
 @Entity(
     tableName = "permission_grants",
     indices = [
-        Index("principal_type"),
-        Index("principal_id"),
-        Index("resource_type"),
-        Index("resource_id")
+        Index("principalType"),
+        Index("principalId"),
+        Index("resourceType"),
+        Index("resourceId")
     ]
 )
 data class PermissionGrantEntity(
@@ -260,9 +260,9 @@ data class PermissionGrantEntity(
 @Entity(
     tableName = "policy_versions",
     indices = [
-        Index("policy_kind"),
-        Index("is_promoted"),
-        Index("created_at_epoch_ms")
+        Index("policyKind"),
+        Index("isPromoted"),
+        Index("createdAtEpochMs")
     ]
 )
 data class PolicyVersionEntity(
@@ -290,9 +290,9 @@ data class PolicyVersionEntity(
 @Entity(
     tableName = "agent_memory_namespaces",
     indices = [
-        Index("workspace_id"),
-        Index("agent_id"),
-        Index("is_active")
+        Index("workspaceId"),
+        Index("agentId"),
+        Index("isActive")
     ]
 )
 data class AgentMemoryNamespaceEntity(
@@ -313,9 +313,9 @@ data class AgentMemoryNamespaceEntity(
 @Entity(
     tableName = "tool_lifecycle_states",
     indices = [
-        Index("tool_name"),
-        Index("lifecycle_state"),
-        Index("is_enabled")
+        Index("toolName"),
+        Index("lifecycleState"),
+        Index("isEnabled")
     ]
 )
 data class ToolLifecycleStateEntity(
@@ -342,8 +342,11 @@ data class ToolLifecycleStateEntity(
 @Entity(
     tableName = "tool_health_snapshots",
     indices = [
-        Index("tool_id"),
-        Index("is_healthy")
+        Index("toolId"),
+        // Matches MIGRATION_7_TO_8: "CREATE INDEX index_tool_health_snapshots_isHealthy
+        // ON tool_health_snapshots(circuitState)" — the healthy flag is derived from
+        // circuitState + failure rates, so the named index covers that column.
+        Index(value = ["circuitState"], name = "index_tool_health_snapshots_isHealthy")
     ]
 )
 data class ToolHealthSnapshotEntity(

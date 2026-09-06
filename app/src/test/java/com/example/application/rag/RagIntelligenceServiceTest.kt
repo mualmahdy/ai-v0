@@ -138,6 +138,17 @@ class RagIntelligenceServiceTest {
     }
 
     private class StubEmbeddingProvider : EmbeddingProviderPort {
+        override val providerId: String = "stub_embedding"
+        override val dimension: Int = 128
+        override val metadata: com.example.domain.core.memory.SafeEmbeddingProviderMetadata =
+            com.example.domain.core.memory.SafeEmbeddingProviderMetadata(
+                id = "stub_embedding",
+                name = "Stub",
+                providerType = "STUB",
+                dimension = 128,
+                isLocal = true,
+                isEnabled = true
+            )
         override suspend fun generateEmbeddings(texts: List<String>): Outcome<List<EmbeddingVector>, EmbeddingFailure> {
             return Outcome.Success(texts.map { EmbeddingVector(FloatArray(128) { 0.5f }, 128) })
         }

@@ -207,7 +207,7 @@ class SearchIntelligenceService(
             is Outcome.Success -> result.value.items.mapIndexed { _, item ->
                 toRanked(item, preference.providerId, subQueryIndex, subQuery.weight)
             }
-            is Outcome.Degraded -> result.value?.items?.mapIndexed { _, item ->
+            is Outcome.Degraded -> result.partialValue?.items?.mapIndexed { _, item ->
                 toRanked(item, preference.providerId, subQueryIndex, subQuery.weight * 0.7f)
             } ?: emptyList()
             is Outcome.Error -> emptyList()
@@ -264,18 +264,25 @@ class SearchIntelligenceService(
     private fun computeRecencyScore(publishedDate: String?): Float {
         if (publishedDate.isNullOrBlank()) return 0.5f
         return try {
-            val patterns = listOf(
-                java.time.format.DateTimeFormatter.ISO_INSTANT,
-                java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME,
-                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd")
+            // Audit 2026 fix: the previous parser list used ISO_INSTANT with
+            // ZonedDateTime.parse — which ALWAYS throws (an Instant has no
+            // zone), so every ISO date silently degraded to the neutral 0.5
+            // and TEMPORAL ranking never saw recency differences.
+            val parsers = listOf<(String) -> java.time.ZonedDateTime>(
+                { java.time.ZonedDateTime.parse(it, java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME) },
+                { java.time.ZonedDateTime.parse(it, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME) },
+                { java.time.LocalDate.parse(it).atStartOfDay(java.time.ZoneOffset.UTC) },
+                { java.time.Instant.ofEpochMilli(it.toLongOrNull() ?: Long.MIN_VALUE).atZone(java.time.ZoneOffset.UTC) }
             )
-            for (p in patterns) {
+            for (p in parsers) {
                 try {
-                    val parsed = java.time.ZonedDateTime.parse(publishedDate, p)
-                    val ageDays = java.time.Duration.between(parsed, java.time.ZonedDateTime.now()).toDays()
-                    val score = Math.pow(0.5, ageDays.toDouble() / 30.0).toFloat()
-                    return score.coerceIn(0f, 1f)
-                } catch (_: Throwable) { /* try next pattern */ }
+                    val parsed = p(publishedDate.trim())
+                    if (parsed.year >= 1970) { // guard: epoch sentinel for bad ms parsing
+                        val ageDays = java.time.Duration.between(parsed, java.time.ZonedDateTime.now()).toDays()
+                        val score = Math.pow(0.5, ageDays.toDouble() / 30.0).toFloat()
+                        return score.coerceIn(0f, 1f)
+                    }
+                } catch (_: Throwable) { /* try next parser */ }
             }
             0.5f
         } catch (_: Throwable) {
@@ -331,20 +338,34 @@ class SearchIntelligenceService(
         }
 
         return items.map { item ->
+            // Audit 2026 fix: authority/recency are RECOMPUTED from the source
+            // item's url/publishedDate inside rank() — previously the values
+            // were trusted as-is, so items constructed outside toRanked (or
+            // stale items) were scored against placeholder authority/recency.
+            // For pipeline-produced items this is idempotent (same URL/date →
+            // same scores).
+            val authority = computeAuthorityScore(item.item.url)
+            val recency = computeRecencyScore(item.item.publishedDate)
+
             // Evidence score = harmonic mean of the three dimensions — if
             // any one is very low, evidence drops sharply. This is what we
             // want: a high-recency low-authority tweet should NOT count as
             // strong evidence.
-            val evidence = if (item.relevanceScore > 0 && item.authorityScore > 0 && item.recencyScore > 0) {
-                3f / (1f / item.relevanceScore + 1f / item.authorityScore + 1f / item.recencyScore)
+            val evidence = if (item.relevanceScore > 0 && authority > 0 && recency > 0) {
+                3f / (1f / item.relevanceScore + 1f / authority + 1f / recency)
             } else 0f
 
             val finalScore = item.relevanceScore * weights.relevance +
-                item.authorityScore * weights.authority +
-                item.recencyScore * weights.recency +
+                authority * weights.authority +
+                recency * weights.recency +
                 evidence * weights.evidence
 
-            item.copy(evidenceScore = evidence, finalScore = finalScore)
+            item.copy(
+                authorityScore = authority,
+                recencyScore = recency,
+                evidenceScore = evidence,
+                finalScore = finalScore
+            )
         }.sortedByDescending { it.finalScore }
     }
 

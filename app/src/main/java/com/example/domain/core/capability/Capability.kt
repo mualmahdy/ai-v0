@@ -75,6 +75,7 @@ enum class CapabilityType(
     CODE_ENGINEERING("code_engineering", "توليد وهندسة هياكل البرمجيات", CapabilityCategory.CODE_ENGINEERING, NetworkRequirement.LOCAL_ONLY, Locality.LOCAL_ON_DEVICE, SideEffectClassification.STATE_MUTATION),
     SECURITY_AUDIT("security_audit", "الفحص الأمني واكتشاف الثغرات", CapabilityCategory.SECURITY_GOVERNANCE, NetworkRequirement.LOCAL_ONLY, Locality.LOCAL_ON_DEVICE, SideEffectClassification.READ_ONLY),
     MCP_INVOCATION("mcp_invocation", "استدعاء بروتوكول MCP المعياري", CapabilityCategory.TOOL_OPERATION, NetworkRequirement.HYBRID, Locality.LOCAL_ON_DEVICE, SideEffectClassification.STATE_MUTATION),
+    AGENT_DELEGATION("agent_delegation", "تفويض المهام وتنسيق وكلاء فرعيين", CapabilityCategory.TOOL_OPERATION, NetworkRequirement.LOCAL_ONLY, Locality.LOCAL_ON_DEVICE, SideEffectClassification.STATE_MUTATION),
     INTEGRATION_SYNC("integration_sync", "المزامنة مع الخدمات الخارجية", CapabilityCategory.NETWORK_IO, NetworkRequirement.ONLINE_ONLY, Locality.REMOTE_CLOUD, SideEffectClassification.STATE_MUTATION),
     HASH_COMPUTATION("hash_computation", "حساب البصمات والتحقق الرقمي", CapabilityCategory.SYSTEM_EXECUTION, NetworkRequirement.LOCAL_ONLY, Locality.LOCAL_ON_DEVICE, SideEffectClassification.READ_ONLY);
 

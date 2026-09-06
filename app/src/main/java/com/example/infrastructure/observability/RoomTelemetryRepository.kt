@@ -102,11 +102,11 @@ class RoomTelemetryRepository(
             if (buckets.isEmpty()) return
             val newCache = mutableMapOf<String, MetricSnapshot>()
             for (row in buckets) {
-                val type = MetricType.fromCode(row.metric_type) ?: continue
-                val key = "${type.code}|${row.dimensions_key}"
+                val type = MetricType.fromCode(row.metricType) ?: continue
+                val key = "${type.code}|${row.dimensionsKey}"
                 newCache[key] = MetricSnapshot(
                     type = type,
-                    dimensions = MetricDimensions(extras = mapOf("dimensions_key" to row.dimensions_key)),
+                    dimensions = MetricDimensions(extras = mapOf("dimensionsKey" to row.dimensionsKey)),
                     count = row.cnt,
                     sum = row.sum,
                     min = row.mn,

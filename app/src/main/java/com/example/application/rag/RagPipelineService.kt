@@ -96,6 +96,26 @@ class RagPipelineService(
         _documents.update { docs }
     }
 
+    /**
+     * Audit 2026 fix: delegates to the local embedding router so the ONNX
+     * semantic model can be provisioned on demand. When the fallback provider
+     * is not a LocalSemanticEmbeddingRouter, this is an honest no-op error
+     * (no semantic provisioning path exists in this configuration).
+     */
+    suspend fun provisionSemanticModel(): Outcome<Unit, String> {
+        val router = fallbackEmbeddingProvider as? com.example.infrastructure.memory.semantic.LocalSemanticEmbeddingRouter
+            ?: return Outcome.Error("لا يوجد مسار تضمين دلالي محلي في هذا التكوين.")
+        return router.provision()
+    }
+
+    /**
+     * TRUE when the on-device semantic model (ONNX MiniLM) is provisioned and
+     * will be used for local semantic retrieval.
+     */
+    val isLocalSemanticModelReady: Boolean
+        get() = (fallbackEmbeddingProvider as? com.example.infrastructure.memory.semantic.LocalSemanticEmbeddingRouter)
+            ?.isSemantic ?: false
+
     private fun bootstrapDefaultKnowledge() {
         val initialDocs = listOf(
             KnowledgeDocument(
@@ -171,7 +191,18 @@ class RagPipelineService(
             if (vector == null) {
                 vector = generateLexicalVector(chunk.text)
             }
-            embeddedChunks.add(chunk.copy(vector = vector))
+            // Provenance (audit 2026 fix): record WHICH embedding source produced
+            // the vector so retrieval can enforce the compatibility boundary for
+            // real (previously the boundary was claimed but never persisted).
+            embeddedChunks.add(
+                chunk.copy(
+                    vector = vector,
+                    metadata = chunk.metadata + mapOf(
+                        "embeddingResourceId" to (usedResourceId?.value ?: "local_lexical"),
+                        "embeddingSemantic" to isProviderSemantic(embeddingProvider).toString()
+                    )
+                )
+            )
         }
 
         val completedDoc = doc.copy(totalChunks = embeddedChunks.size)
@@ -263,13 +294,21 @@ class RagPipelineService(
     /**
      * Semantic and keyword hybrid search over chunked knowledge base.
      *
-     * Per Phase 4: the embedding adapter is resolved via the resource pipeline.
-     * Per Section 8: if the current embedding resource differs from the one
-     * used to embed the chunks, the chunks are filtered out (compatibility
-     * boundary), and `RetrievalMode.EMBEDDING_COMPATIBILITY_BOUNDARY` is set.
+     * Audit 2026 fixes:
+     *  - retrieval mode is HONEST: a hash-based fallback embedding is labeled
+     *    LEXICAL_FALLBACK, not HYBRID (previously any non-null provider was
+     *    mislabeled HYBRID even when it produced deterministic hash vectors);
+     *  - embedding-compatibility boundary is enforced from chunk metadata
+     *    (chunks embedded by a different resource are excluded from semantic
+     *    scoring and re-scored lexically instead of silently mixed);
+     *  - Arabic normalization applied to queries and lexical scoring;
+     *  - proper hybrid fusion: normalized semantic + lexical overlap score,
+     *    followed by a lexical rerank of the top candidates.
      */
     suspend fun retrieveRelevantContext(query: String, topK: Int = 4, maxTokenBudget: Int = 2000): AssembledRagContext = withContext(Dispatchers.Default) {
         val (embeddingProvider, usedResourceId) = resolveEmbeddingProvider()
+
+        val providerIsSemantic = isProviderSemantic(embeddingProvider)
 
         val queryVector = if (embeddingProvider != null) {
             val outcome = embeddingProvider.generateEmbeddings(listOf(query))
@@ -279,18 +318,49 @@ class RagPipelineService(
             generateLexicalVector(query)
         }
 
-        // Per Section 8: enforce embedding-compatibility boundary. If the chunks
-        // were embedded by a different resource, mark the retrieval mode as
-        // EMBEDDING_COMPATIBILITY_BOUNDARY. For Phase 4 we simplify: chunks
-        // don't yet carry the `embeddingResourceId` field on DocumentChunk
-        // (the existing model is unchanged for compatibility). The retrieval
-        // mode is determined by whether an embedding resource was available.
-        val retrievalMode = if (embeddingProvider != null) RetrievalMode.HYBRID else RetrievalMode.LEXICAL_FALLBACK
+        val retrievalMode = when {
+            embeddingProvider == null -> RetrievalMode.LEXICAL_FALLBACK
+            providerIsSemantic -> RetrievalMode.HYBRID
+            else -> RetrievalMode.LEXICAL_FALLBACK // hash fallback — honestly labeled
+        }
+
+        val normalizedQuery = com.example.infrastructure.memory.semantic.ArabicTextNormalizer.normalize(query)
+        val queryTokens = normalizedQuery.lowercase()
+            .split(Regex("[^\\w\\d\\u0600-\\u06FF]+")).filter { it.isNotBlank() }.toSet()
 
         val scoredChunks = chunks.map { chunk ->
-            val sim = computeCosineSimilarity(queryVector.values, chunk.vector?.values ?: generateLexicalVector(chunk.text).values)
-            val lexicalMatch = if (chunk.text.contains(query, ignoreCase = true)) 0.3f else 0.0f
-            val combinedScore = (sim * 0.7f + lexicalMatch * 0.3f).coerceIn(0.0f, 1.0f)
+            val chunkEmbeddingId = chunk.metadata["embeddingResourceId"]
+            // Compatibility boundary: chunks embedded by a DIFFERENT embedding
+            // resource than the active one cannot be compared semantically.
+            val vectorCompatible = chunkEmbeddingId == null ||
+                usedResourceId == null ||
+                chunkEmbeddingId == usedResourceId.value ||
+                chunkEmbeddingId == "local_lexical"
+
+            val chunkVector = chunk.vector
+                ?: generateLexicalVector(chunk.text).also { /* lazy lexical for legacy chunks */ }
+
+            val sim = if (vectorCompatible) {
+                computeCosineSimilarity(queryVector.values, chunkVector.values)
+            } else 0.0f
+
+            // Arabic-normalized lexical overlap (token-level F1 score).
+            val normalizedChunk = com.example.infrastructure.memory.semantic.ArabicTextNormalizer
+                .normalize(chunk.text).lowercase()
+            val chunkTokens = normalizedChunk
+                .split(Regex("[^\\w\\d\\u0600-\\u06FF]+")).filter { it.isNotBlank() }.toSet()
+            val overlap = if (queryTokens.isEmpty() || chunkTokens.isEmpty()) 0.0f
+            else {
+                val common = queryTokens.intersect(chunkTokens).size.toFloat()
+                val precision = common / chunkTokens.size
+                val recall = common / queryTokens.size
+                if (precision + recall > 0f) 2f * precision * recall / (precision + recall) else 0f
+            }
+
+            val semanticWeight = if (vectorCompatible && providerIsSemantic) 0.6f else 0.0f
+            val lexicalWeight = 1.0f - semanticWeight
+            val combinedScore = (sim * semanticWeight + overlap * lexicalWeight).coerceIn(0.0f, 1.0f)
+
             RetrievedContextChunk(
                 chunk = chunk,
                 relevanceScore = combinedScore,
@@ -298,7 +368,18 @@ class RagPipelineService(
                 snippet = chunk.text
             )
         }
-            .filter { it.relevanceScore > 0.15f }
+            .filter { it.relevanceScore > 0.05f }
+            .sortedByDescending { it.relevanceScore }
+            .take(topK * 2)
+            // Lexical rerank pass: boost candidates whose text actually
+            // contains the (normalized) query tokens verbatim.
+            .map { scored ->
+                val containsBoost = if (scored.chunk.text.contains(query, ignoreCase = true) ||
+                    com.example.infrastructure.memory.semantic.ArabicTextNormalizer
+                        .normalize(scored.chunk.text).contains(normalizedQuery, ignoreCase = true)
+                ) 0.1f else 0.0f
+                scored.copy(relevanceScore = (scored.relevanceScore + containsBoost).coerceAtMost(1.0f))
+            }
             .sortedByDescending { it.relevanceScore }
             .take(topK)
 
@@ -318,6 +399,16 @@ class RagPipelineService(
             totalTokensEstimated = assembledText.length / 4,
             isTruncated = false
         )
+    }
+
+    /**
+     * TRUE only when the embedding provider actually produces semantic
+     * vectors (a trained model — e.g. ONNX MiniLM or a cloud embedding API).
+     * The deterministic hash fallback is NOT semantic and is labeled as such.
+     */
+    private fun isProviderSemantic(provider: EmbeddingProviderPort?): Boolean {
+        if (provider == null) return false
+        return (provider as? com.example.infrastructure.memory.semantic.EmbeddingQualityMarker)?.isSemantic ?: true
     }
 
     private fun generateLexicalVector(text: String): EmbeddingVector {

@@ -11,14 +11,27 @@ import kotlinx.coroutines.withContext
 import kotlin.math.sqrt
 
 /**
- * Built-in Local High-Dimensional Deterministic Semantic Embedding Adapter.
- * Generates 128-dimensional normalized dense vectors directly on-device with zero external API calls.
- * Ensures the RAG pipeline always has a real, functional embedding provider.
+ * Built-in Local Lexical Fallback "Embedding" Adapter.
+ *
+ * HONESTY NOTE (audit 2026 fix): this adapter produces deterministic
+ * hash-based bag-of-subwords vectors — it is a LEXICAL similarity source,
+ * NOT a semantic embedding model. It now declares that via
+ * `EmbeddingQualityMarker.isSemantic = false` so the RAG pipeline labels its
+ * retrieval results LEXICAL_FALLBACK instead of pretending HYBRID semantic
+ * retrieval. The REAL local semantic path is `OnnxSemanticEmbeddingAdapter`
+ * (a trained sentence-transformer served through ONNX Runtime).
+ *
+ * Generates 128-dimensional normalized dense vectors directly on-device with
+ * zero external API calls, with Arabic orthography normalization so Arabic
+ * lexical retrieval is reliable.
  */
 class LocalDeterministicEmbeddingAdapter(
     override val providerId: String = "local_embedding_engine",
     override val dimension: Int = 128
-) : EmbeddingProviderPort {
+) : EmbeddingProviderPort, com.example.infrastructure.memory.semantic.EmbeddingQualityMarker {
+
+    /** A trained model this is NOT — honest lexical fallback labeling. */
+    override val isSemantic: Boolean = false
 
     override val metadata: SafeEmbeddingProviderMetadata
         get() = SafeEmbeddingProviderMetadata(
@@ -56,7 +69,8 @@ class LocalDeterministicEmbeddingAdapter(
 
     private fun computeDenseVector(text: String, dim: Int): EmbeddingVector {
         val vector = FloatArray(dim) { 0.0f }
-        val cleanText = text.lowercase().trim()
+        val cleanText = com.example.infrastructure.memory.semantic.ArabicTextNormalizer
+            .normalize(text.lowercase().trim())
         if (cleanText.isEmpty()) {
             return EmbeddingVector(dimension = dim, values = vector)
         }

@@ -65,7 +65,13 @@ class DecisionService(
     val resourceCapabilityGraph: ResourceCapabilityGraph,
     private val securityGuard: SecurityGuardService,
     private val userPreferenceRepository: UserPreferenceRepository? = null,
-    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy()
+    private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
+    /**
+     * Catalog of registered agents used to generate REAL delegation candidates
+     * (audit 2026 fix). Wired by the AppContainer from ComponentRegistry. When
+     * null, no DELEGATE candidates are proposed (an honest empty catalog).
+     */
+    private val agentCatalog: () -> List<AgentDefinition> = { emptyList() }
 ) {
 
     /**
@@ -215,6 +221,48 @@ class DecisionService(
                     estimatedLatencyMs = 50L
                 )
             )
+        }
+
+        // 0.5 REAL Delegation Candidates (audit 2026 fix — previously the CBR
+        // loop could never actually delegate: the only DELEGATE execution was a
+        // fake success string). When the current agent lacks a required
+        // capability but another REGISTERED agent declares it, propose a
+        // DELEGATE action to that agent. The CBR-MDP engine ranks the
+        // delegation against the other candidates; execution goes through
+        // ExecutionService.executeDelegation with real budgets/depth limits.
+        val delegationDepth = task.input.parameters["delegationDepth"]?.toString()?.toIntOrNull() ?: 0
+        val currentAgentDef = agentCatalog()
+            .firstOrNull { it.identity.id.value.equals(task.assignedAgentId.value, ignoreCase = true) }
+        if (delegationDepth < com.example.application.execution.ExecutionService.MAX_DELEGATION_DEPTH &&
+            currentStep >= 1 &&
+            currentAgentDef != null
+        ) {
+            val currentAgentCaps = currentAgentDef.allowedCapabilities
+            val missingForDelegation = requiredCaps.filter { it !in currentAgentCaps }
+            val optionalMissing = optionalCaps.filter { it !in currentAgentCaps }
+            val candidateNeeds = (missingForDelegation + optionalMissing).toSet()
+            if (candidateNeeds.isNotEmpty()) {
+                for (otherAgent in agentCatalog()) {
+                    if (otherAgent.identity.id.value.equals(currentAgentDef.identity.id.value, ignoreCase = true)) continue
+                    val covered = candidateNeeds.filter { it in otherAgent.allowedCapabilities }
+                    if (covered.isEmpty()) continue
+                    candidates.add(
+                        DecisionAction(
+                            type = DecisionActionType.DELEGATE,
+                            targetId = otherAgent.identity.id.value,
+                            payload = mapOf(
+                                "agentId" to otherAgent.identity.id.value,
+                                "goal" to (task.goal.ifBlank { task.input.rawPrompt }),
+                                "task" to task.input.rawPrompt,
+                                "delegationDepth" to "$delegationDepth",
+                                "coveredCapabilities" to covered.joinToString(",") { it.code }
+                            ),
+                            estimatedLatencyMs = 1500L,
+                            estimatedCost = 0.002
+                        )
+                    )
+                }
+            }
         }
 
         // 1. Tool Candidates from ResourceCapabilityGraph

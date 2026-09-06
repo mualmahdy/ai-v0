@@ -7,7 +7,7 @@ import com.example.domain.core.memory.MemoryType
 import com.example.domain.core.memory.RetrievalMode
 import com.example.domain.core.memory.lifecycle.CognitiveMemoryType
 import com.example.domain.core.memory.lifecycle.ForgettingPolicy
-import com.example.domain.core.memory.lifecycle.ForgetResult
+import com.example.domain.ports.memory.ForgetResult
 import com.example.domain.core.memory.lifecycle.MemoryConsolidationRequest
 import com.example.domain.core.memory.lifecycle.MemoryDecayPolicy
 import com.example.domain.core.memory.lifecycle.MemoryNamespace

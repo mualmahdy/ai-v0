@@ -154,7 +154,7 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         ToolLifecycleStateEntity::class,
         ToolHealthSnapshotEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -931,6 +931,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v8 → v9 — Durable execution (audit 2026 fix).
+         *
+         * Adds to `tasks`:
+         *  - parentTaskId / delegationDepth — real multi-agent delegation lineage
+         *    (children persist their own rows and can be traced to the parent).
+         *  - checkpointJson — the closed-loop checkpoint (step, evidence, output,
+         *    tokens) so a task that survives process death can be RESUMED
+         *    instead of silently re-run from step 0.
+         */
+        private val MIGRATION_8_TO_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tasks ADD COLUMN parentTaskId TEXT")
+                db.execSQL("ALTER TABLE tasks ADD COLUMN delegationDepth INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tasks ADD COLUMN checkpointJson TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_tasks_parentTaskId ON tasks(parentTaskId)")
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -941,6 +960,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_5_TO_6,
             MIGRATION_6_TO_7,
             MIGRATION_7_TO_8,
+            MIGRATION_8_TO_9,
         )
 
 

@@ -27,6 +27,7 @@ import com.example.domain.core.tools.ToolFailure
 import com.example.domain.core.tools.ToolInput
 import com.example.domain.ports.tools.ToolPort
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
 /**
@@ -94,7 +95,25 @@ class ExecutionService(
      * directly — semantic RAG retrieval over provider-backed embedding
      * resources is handled by RagPipelineService.
      */
-    private val memoryRepositoryProvider: () -> com.example.domain.ports.memory.MemoryRepositoryPort? = { null }
+    private val memoryRepositoryProvider: () -> com.example.domain.ports.memory.MemoryRepositoryPort? = { null },
+    /**
+     * Security governance (audit 2026 fix): fine-grained permission
+     * enforcement. Wired by the AppContainer. When present, sensitive tool /
+     * MCP / delegation executions REQUIRE an explicit grant — a deny produces
+     * a blocked execution + an audit event, not a log line that nothing
+     * enforces.
+     */
+    var permissionGrantService: com.example.application.security.PermissionGrantService? = null,
+
+    /**
+     * RAG knowledge retrieval (audit 2026 fix): wired by the AppContainer so
+     * RETRIEVE_KNOWLEDGE actions during the agent loop actually consult the
+     * document knowledge base (parse → chunk → embed → retrieve → rerank).
+     * Previously the RAG pipeline was ONLY reachable through a manual UI
+     * query — the agent's "استرجاع المعرفة" action silently degraded to a
+     * memory lookup, breaking the grounded-answer chain.
+     */
+    var ragRetrievalProvider: (suspend (query: String, topK: Int) -> com.example.domain.core.rag.AssembledRagContext?)? = null
 ) {
 
     companion object {
@@ -103,6 +122,121 @@ class ExecutionService(
          * requesting tools cannot loop indefinitely.
          */
         private const val MAX_TOOL_ROUNDS = 2
+
+        /** Maximum nesting depth for agent→agent delegation (child of child of child …). */
+        const val MAX_DELEGATION_DEPTH = 2
+    }
+
+    /**
+     * Parses the model's tool-call JSON arguments into the tool's declared
+     * parameter map. Only declared parameter names are forwarded (plus any
+     * extra keys, preserved for tools that accept free-form arguments).
+     * Malformed JSON yields an explicit InvalidParameters failure instead of
+     * silently executing the tool with empty arguments.
+     */
+    private fun parseToolArguments(
+        argumentsJson: String,
+        declaration: com.example.domain.core.tools.ToolDeclaration
+    ): Map<String, Any?> {
+        val trimmed = argumentsJson.trim()
+        if (trimmed.isBlank() || trimmed == "null") return emptyMap()
+        val parsed = try {
+            val obj = org.json.JSONObject(trimmed)
+            val map = mutableMapOf<String, Any?>()
+            for (key in obj.keys()) {
+                map[key] = when (val v = obj.get(key)) {
+                    is org.json.JSONObject -> v.toString()
+                    is org.json.JSONArray -> v.toString()
+                    else -> v
+                }
+            }
+            map
+        } catch (_: Exception) {
+            null
+        }
+        if (parsed == null) {
+            throw ToolArgumentsParseException(argumentsJson.take(200))
+        }
+        return parsed
+    }
+
+    /** Thrown when a model's tool-call arguments are not valid JSON. */
+    class ToolArgumentsParseException(rawSnippet: String) :
+        Exception("Tool-call arguments are not valid JSON: $rawSnippet")
+
+    /**
+     * Security enforcement boundary (audit 2026 fix).
+     *
+     * For SENSITIVE tools (declaration.isSensitive / requiresHumanConsent, or
+     * destructive shell tools) and MCP tools, an explicit permission grant for
+     * (AGENT:<agentId> → TOOL:<toolName> → EXECUTE) is REQUIRED. Without the
+     * grant the execution is BLOCKED and the decision is audited — previously
+     * `PermissionGrantService` existed but was never consulted by any
+     * execution path, so "permission denied" could be recorded while the
+     * operation still ran (a security failure, not a security feature).
+     *
+     * Non-sensitive in-app tools (read-only diagnostics, workspace file
+     * listing) execute without a grant but still pass the SecurityGuard.
+     */
+    private suspend fun enforcePermissions(
+        agent: AgentDefinition,
+        toolName: String,
+        actionType: String,
+        executionId: String,
+        isMcp: Boolean
+    ): ExecutionResult? {
+        val service = permissionGrantService ?: return null // enforcement unavailable → SecurityGuard still applies
+        val declaration = runtimeAdapterResolver.listToolDeclarations()
+            .firstOrNull { it.name.equals(toolName, ignoreCase = true) }
+        val isSensitive = isMcp ||
+            (declaration?.isSensitive ?: false) ||
+            (declaration?.requiresHumanConsent ?: false)
+        if (!isSensitive) return null
+
+        val allowed = try {
+            service.check(
+                principalType = com.example.domain.core.security.governance.PrincipalType.AGENT,
+                principalId = agent.identity.id.value,
+                resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
+                resourceId = toolName,
+                permission = com.example.domain.core.security.governance.Permission.EXECUTE
+            )
+        } catch (_: Exception) {
+            false // enforcement failure must fail CLOSED, never open
+        }
+
+        if (allowed) {
+            runCatching {
+                service.recordSecurityDecision(
+                    severity = com.example.domain.core.security.governance.AuditSeverity.INFO,
+                    actor = "agent:${agent.identity.id.value}",
+                    action = actionType,
+                    resourceType = "TOOL",
+                    resourceId = toolName,
+                    decision = "ALLOW",
+                    reason = "إذن صريح قائم لتنفيذ الأداة الحساسة."
+                )
+            }
+            return null
+        }
+
+        runCatching {
+            service.recordSecurityDecision(
+                severity = com.example.domain.core.security.governance.AuditSeverity.WARN,
+                actor = "agent:${agent.identity.id.value}",
+                action = actionType,
+                resourceType = "TOOL",
+                resourceId = toolName,
+                decision = "DENY",
+                reason = "رُفض تنفيذ الأداة الحساسة '$toolName': لا يوجد منح إذن EXECUTE للوكيل ${agent.identity.id.value}."
+            )
+        }
+        return ExecutionResult(
+            isSuccess = false,
+            errorDescription = "PERMISSION_DENIED: الأداة '$toolName' حساسة ولا يملك الوكيل ${agent.identity.name} " +
+                "إذن التنفيذ عليها. اطلب منح الإذن ثم أعد المحاولة.",
+            latencyMs = 0L
+        )
     }
 
     /**
@@ -126,8 +260,11 @@ class ExecutionService(
             DecisionActionType.SEARCH -> {
                 executeSearch(action, context, startTime, onEvent, executionId)
             }
-            DecisionActionType.RETRIEVE_MEMORY, DecisionActionType.RETRIEVE_KNOWLEDGE -> {
+            DecisionActionType.RETRIEVE_MEMORY -> {
                 executeMemoryRetrieval(action, context, startTime, onEvent, executionId)
+            }
+            DecisionActionType.RETRIEVE_KNOWLEDGE -> {
+                executeKnowledgeRetrieval(action, context, startTime, onEvent, executionId)
             }
             DecisionActionType.EXECUTE_TOOL, DecisionActionType.SELECT_TOOL -> {
                 executeTool(action, context, agent, startTime, onEvent, executionId)
@@ -173,13 +310,29 @@ class ExecutionService(
                 )
             }
             DecisionActionType.SELECT_AGENT, DecisionActionType.DELEGATE -> {
-                val targetAgentId = action.targetId
-                ExecutionResult(
-                    isSuccess = true,
-                    outputText = "تم تعيين وتوجيه المهمة إلى الوكيل المتخصص: $targetAgentId",
-                    outputData = mapOf("selectedAgentId" to targetAgentId),
-                    latencyMs = System.currentTimeMillis() - startTime
-                )
+                // SELECT_AGENT at step 0 targets the agent already assigned to
+                // the task — an explicit no-op (previously it returned a fake
+                // "تم تعيين وتوجيه المهمة..." success string implying real
+                // multi-agent execution that never happened).
+                if (action.type == DecisionActionType.SELECT_AGENT &&
+                    (action.targetId.equals(agent.identity.id.value, ignoreCase = true) ||
+                        action.targetId.isNullOrBlank())
+                ) {
+                    ExecutionResult(
+                        isSuccess = true,
+                        outputText = "الوكيل المنفّذ للمهمة: ${agent.identity.name} (${agent.identity.id.value}).",
+                        outputData = mapOf("selectedAgentId" to agent.identity.id.value),
+                        latencyMs = System.currentTimeMillis() - startTime
+                    )
+                } else {
+                    // REAL multi-agent delegation (audit 2026 fix): previously this
+                    // branch returned a fake success string containing the target id
+                    // and never ran any child agent. Now the target agent is
+                    // resolved, a child task is created under the parent's budget,
+                    // executed through the orchestrator, and its real outcome is
+                    // propagated back to the parent loop.
+                    executeDelegation(action, context, agent, conversationHistory, executionId, startTime, onEvent)
+                }
             }
             else -> {
                 ExecutionResult(
@@ -601,6 +754,49 @@ class ExecutionService(
         }
     }
 
+    /**
+     * REAL knowledge retrieval (audit 2026 fix): RETRIEVE_KNOWLEDGE now
+     * consults the RagPipelineService knowledge base (chunks → embedding
+     * resource → hybrid retrieval → rerank → assembled grounded context) and
+     * merges the assembled evidence into the loop's evidence map, where the
+     * LLM step injects it as untrusted `<retrieved_knowledge_evidence>`.
+     * Falls back to the scoped memory repository only when the pipeline is
+     * unavailable — never fabricates knowledge.
+     */
+    private suspend fun executeKnowledgeRetrieval(
+        action: DecisionAction,
+        context: DecisionContext,
+        startTime: Long,
+        onEvent: suspend (ExecutionEvent) -> Unit,
+        executionId: String
+    ): ExecutionResult {
+        val query = action.payload["query"] ?: context.task.input.rawPrompt
+
+        val ragContext = try {
+            ragRetrievalProvider?.invoke(query, 4)
+        } catch (_: Exception) {
+            null // retrieval failure must not crash the loop — fall through honestly
+        }
+
+        if (ragContext != null && ragContext.retrievedChunks.isNotEmpty()) {
+            return ExecutionResult(
+                isSuccess = true,
+                outputText = "تم استرجاع ${ragContext.retrievedChunks.size} مقطع معرفي من قاعدة المعرفة " +
+                    "(الوضع: ${ragContext.retrievedChunks.firstOrNull()?.retrievalMode?.name ?: "—"}).",
+                outputData = mapOf(
+                    "memorySnippets" to ragContext.retrievedChunks.map { it.chunk.text },
+                    "ragContextFormatted" to ragContext.formattedContextText,
+                    "ragChunksCount" to ragContext.retrievedChunks.size,
+                    "ragSources" to ragContext.retrievedChunks.map { it.chunk.documentTitle }
+                ),
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        // Honest degradation: pipeline unavailable or returned nothing.
+        return executeMemoryRetrieval(action, context, startTime, onEvent, executionId)
+    }
+
     private suspend fun executeMemoryRetrieval(
         action: DecisionAction,
         context: DecisionContext,
@@ -729,6 +925,12 @@ class ExecutionService(
             )
         }
 
+        // Fine-grained permission enforcement (audit 2026 fix): sensitive
+        // tools require an explicit grant — a denial BLOCKS the execution.
+        enforcePermissions(agent, toolName, "EXECUTE_TOOL", executionId, isMcp = false)?.let {
+            return it
+        }
+
         val toolInput = ToolInput(
             toolName = toolName,
             arguments = action.payload,
@@ -854,6 +1056,9 @@ class ExecutionService(
                 latencyMs = System.currentTimeMillis() - startTime
             )
         }
+
+        // Fine-grained permission enforcement — ALL MCP tools are sensitive.
+        enforcePermissions(agent, toolName, "EXECUTE_MCP", executionId, isMcp = true)?.let { return it }
 
         val outcome = tool.execute(toolInput)
         return when (outcome) {
@@ -1064,6 +1269,204 @@ class ExecutionService(
         )
     }
 
+    // ========================================================================
+    // REAL MULTI-AGENT DELEGATION
+    // ========================================================================
+    // Closes the delegation chain:
+    //   parent agent → delegation decision → authorization → child creation
+    //   → context transfer → child execution (child tools/models) → child
+    //   result → parent observation → parent reasoning continuation.
+    //
+    // Guarantees:
+    //  - authorization: the child must exist AND the parent must hold
+    //    CapabilityType.AGENT_DELEGATION (if the agent declares capabilities),
+    //    and the child must be allowed the capabilities it needs.
+    //  - budgets: the child's token budget is carved out of the parent's
+    //    remaining budget and can never exceed it.
+    //  - depth: nested delegation is bounded by MAX_DELEGATION_DEPTH.
+    //  - cancellation: the child runs inside the caller's coroutine context —
+    //    cancelling the parent cancels the child.
+    //  - failure propagation: a failed child is an honest failed step; the
+    //    parent's CBR-MDP loop decides retry/replan.
+    //  - traceability: child executions keep the SAME executionId lineage via
+    //    the parentExecutionId prefix and persist their own task row.
+
+    /**
+     * Handles DELEGATE / SELECT_AGENT actions by actually executing a child
+     * agent on a child task and returning its real output.
+     */
+    private suspend fun executeDelegation(
+        action: DecisionAction,
+        context: DecisionContext,
+        parentAgent: AgentDefinition,
+        conversationHistory: List<LlmMessage>,
+        executionId: String,
+        startTime: Long,
+        onEvent: suspend (ExecutionEvent) -> Unit
+    ): ExecutionResult {
+        val targetAgentId = action.targetId
+            ?: action.payload["agentId"]?.toString()
+            ?: action.payload["targetAgentId"]?.toString()
+
+        if (targetAgentId.isNullOrBlank()) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "DELEGATE_REJECTED: لا يوجد وكيل هدف محدد في الإجراء.",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        // Self-delegation is a cycle — reject explicitly.
+        if (targetAgentId.equals(parentAgent.identity.id.value, ignoreCase = true)) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "DELEGATE_REJECTED: الوكيل $targetAgentId لا يمكنه تفويض المهمة لنفسه.",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        // Depth guard: delegationDepth flows through action.payload (set by the
+        // orchestrator when re-entering executeTaskStream for a child task).
+        val depth = (action.payload["delegationDepth"]?.toString()?.toIntOrNull()) ?: context.task.input.parameters["delegationDepth"]?.toString()?.toIntOrNull() ?: 0
+        if (depth >= MAX_DELEGATION_DEPTH) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "DELEGATE_REJECTED: تجاوز عمق التفويض المتداخل الحد المسموح ($MAX_DELEGATION_DEPTH).",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        val childAgent = registryAgentResolver?.invoke(targetAgentId)
+        if (childAgent == null) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "DELEGATE_REJECTED: الوكيل الهدف '$targetAgentId' غير مسجل في ComponentRegistry.",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        // Authorization: parent must be allowed to delegate, child must be
+        // allowed to run at all. The delegation permission is implied when the
+        // parent has no explicit capability list (e.g. workflow agents).
+        if (parentAgent.allowedCapabilities.isNotEmpty() &&
+            !parentAgent.allowedCapabilities.contains(com.example.domain.core.capability.CapabilityType.AGENT_DELEGATION)
+        ) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "DELEGATE_REJECTED: الوكيل ${parentAgent.identity.name} لا يملك صلاحية تفويض المهام لوكلاء آخرين.",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        // Budget: carve the child's budget out of the parent's remaining budget.
+        val parentRemaining = (context.task.budget.tokenLimit - context.task.budget.consumedTokens)
+            .coerceAtLeast(context.task.budget.tokenLimit / 4)
+            .coerceAtLeast(1000)
+        val childBudget = com.example.domain.core.task.TaskBudget(
+            tokenLimit = minOf(parentRemaining / 2, 15000)
+        )
+
+        val childTask = com.example.domain.core.task.TaskDefinition(
+            id = com.example.domain.core.task.TaskId("delegated_${context.task.id.value}_$targetAgentId"),
+            assignedAgentId = childAgent.identity.id,
+            goal = action.payload["goal"]?.toString()
+                ?: action.payload["task"]?.toString()
+                ?: context.task.goal.ifBlank { context.task.input.rawPrompt },
+            input = com.example.domain.core.task.TaskInput(
+                rawPrompt = action.payload["task"]?.toString()
+                    ?: action.payload["goal"]?.toString()
+                    ?: context.task.input.rawPrompt,
+                parameters = mapOf(
+                    "delegationDepth" to "${depth + 1}",
+                    "parentTaskId" to context.task.id.value,
+                    "parentExecutionId" to executionId
+                )
+            ),
+            budget = childBudget,
+            constraints = context.task.constraints.copy(
+                timeoutMs = minOf(context.task.constraints.timeoutMs, 60_000L)
+            )
+        )
+
+        val delegateExecutor = delegationExecutor
+        if (delegateExecutor == null) {
+            return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "DELEGATE_REJECTED: منفذ التفويض غير مهيأ (delegationExecutor == null).",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+
+        onEvent(
+            ExecutionEvent.ActionStarted(
+                executionId = executionId,
+                action = action,
+                stepIndex = context.task.currentStepIndex
+            )
+        )
+
+        return try {
+            // The child executes with structured concurrency: cancelling the
+            // parent's coroutine cancels the child at the next suspension point.
+            val childOutcome = withTimeoutOrNull(context.task.constraints.timeoutMs.coerceAtLeast(1_000L)) {
+                delegateExecutor(childAgent, childTask)
+            }
+            when (childOutcome) {
+                null -> ExecutionResult(
+                    isSuccess = false,
+                    errorDescription = "CHILD_TIMEOUT: تجاوز الوكيل الابن '$targetAgentId' المهلة المخصصة (${childTask.constraints.timeoutMs}ms).",
+                    tokensConsumed = 0,
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+                else -> {
+                    val isFailure = childOutcome is Outcome.Error
+                    val childText = when (childOutcome) {
+                        is Outcome.Success -> childOutcome.value
+                        is Outcome.Degraded -> childOutcome.partialValue ?: ""
+                        is Outcome.Error -> childOutcome.failure
+                    }
+                    ExecutionResult(
+                        isSuccess = !isFailure,
+                        outputText = childText,
+                        outputData = mapOf(
+                            "delegatedToAgentId" to targetAgentId,
+                            "childTaskId" to childTask.id.value,
+                            "childOutput" to childText,
+                            "delegationDepth" to (depth + 1)
+                        ),
+                        tokensConsumed = childText.length / 4,
+                        errorDescription = (childOutcome as? Outcome.Error)?.failure,
+                        isDegraded = childOutcome is Outcome.Degraded,
+                        degradedReason = (childOutcome as? Outcome.Degraded)?.reason,
+                        latencyMs = System.currentTimeMillis() - startTime
+                    )
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ExecutionResult(
+                isSuccess = false,
+                errorDescription = "CHILD_EXECUTION_ERROR: فشل تنفيذ الوكيل الابن '$targetAgentId': ${e.message}",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+        }
+    }
+
+    /**
+     * Resolver for the child agent definition. Wired from the AppContainer /
+     * ComponentRegistry so the execution layer stays decoupled from the
+     * registry implementation.
+     */
+    var registryAgentResolver: ((String) -> AgentDefinition?)? = null
+
+    /**
+     * Executes a child agent task through the orchestrator. Wired from the
+     * AppContainer (AgentOrchestrator::executeTask) — keeps ExecutionService
+     * free of a hard dependency on the orchestration layer.
+     */
+    var delegationExecutor: (suspend (AgentDefinition, com.example.domain.core.task.TaskDefinition) -> Outcome<String, String>)? = null
+
     private suspend fun handleToolExecution(
         executionId: String,
         callId: String,
@@ -1095,9 +1498,31 @@ class ExecutionService(
             )
         }
 
+        // FIX (audit 2026): the model's JSON arguments are now PARSED and passed
+        // to the tool as real declared parameters (previously they were passed as
+        // a single "rawJson" string the tools never read, so e.g. FileSystemTool
+        // silently defaulted to the "list" action regardless of the request).
+        // Malformed model output surfaces as an explicit ToolResult error the
+        // model can recover from — it must not crash the whole step.
+        val parsedArguments: Map<String, Any?> = try {
+            parseToolArguments(argumentsJson, tool.declaration)
+        } catch (e: ToolArgumentsParseException) {
+            return ExecutionEvent.ToolResult(
+                executionId = executionId,
+                callId = callId,
+                toolName = toolName,
+                outcome = Outcome.Error(
+                    failure = ToolFailure.InvalidParameters(
+                        missingOrInvalidKeys = tool.declaration.parameters.map { it.name },
+                        reason = e.message ?: "invalid JSON arguments"
+                    ),
+                    diagnosticMessage = "فشل تحليل وسائط الأداة المرسلة من النموذج: ${e.message}"
+                )
+            )
+        }
         val toolInput = ToolInput(
             toolName = toolName,
-            arguments = mapOf("rawJson" to argumentsJson),
+            arguments = parsedArguments,
             executionId = executionId
         )
 
@@ -1113,6 +1538,23 @@ class ExecutionService(
                         message = "تم حظر استدعاء الأداة وفقاً لسياسة الأمان: ${secEvaluation.explanation}"
                     ),
                     diagnosticMessage = secEvaluation.explanation
+                )
+            )
+        }
+
+        // Fine-grained permission enforcement for model-initiated tool calls.
+        val permissionResult = enforcePermissions(agent, toolName, "MODEL_TOOL_CALL", executionId, isMcp = false)
+        if (permissionResult != null) {
+            return ExecutionEvent.ToolResult(
+                executionId = executionId,
+                callId = callId,
+                toolName = toolName,
+                outcome = Outcome.Error(
+                    failure = ToolFailure.PermissionDenied(
+                        pathOrResource = toolName,
+                        message = permissionResult.errorDescription ?: "PERMISSION_DENIED"
+                    ),
+                    diagnosticMessage = permissionResult.errorDescription ?: "PERMISSION_DENIED"
                 )
             )
         }

@@ -111,7 +111,7 @@ interface MemoryDao {
     @Query("UPDATE memory_records SET isArchived = 1 WHERE id = :id")
     suspend fun archive(id: String)
 
-    @Query("UPDATE memory_records SET content = :content, confidence = :confidence, memoryType = :type WHERE id = :id")
+    @Query("UPDATE memory_records SET text = :content, confidence = :confidence, memoryType = :type WHERE id = :id")
     suspend fun mergeContent(id: String, content: String, confidence: Float, type: String)
 
     @Query("DELETE FROM memory_records WHERE id = :id")
@@ -174,6 +174,14 @@ interface TaskDao {
         errorMsg: String?,
         now: Long
     )
+
+    /**
+     * Durable-execution checkpoint (audit 2026 fix): persists the closed-loop
+     * state (current step, accumulated evidence/output, token count) so a
+     * task that survives process death can be RESUMED instead of re-run.
+     */
+    @Query("UPDATE tasks SET currentStepIndex = :stepIndex, checkpointJson = :checkpointJson, totalTokensConsumed = :tokens, updatedAtEpochMs = :now WHERE id = :id")
+    suspend fun updateCheckpoint(id: String, stepIndex: Int, checkpointJson: String, tokens: Int, now: Long)
 }
 
 @Dao

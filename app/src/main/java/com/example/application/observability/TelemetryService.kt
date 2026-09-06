@@ -226,17 +226,17 @@ class TelemetryService(
                 )
             }
             is ExecutionEvent.DecisionMade -> {
-                incrementCounter("DECISION_MADE", dims.copy(actionType = event.decision.selectedAction.type.name))
+                incrementCounter("DECISION_MADE", dims.copy(actionType = event.decision.chosenAction.type.name))
                 recordTraceNode(
                     executionId = event.executionId,
                     stepIndex = -1,
                     actionType = "DECISION",
                     agentId = null,
-                    targetResourceId = event.decision.selectedAction.targetResourceId,
+                    targetResourceId = event.decision.chosenAction.targetId,
                     startedAtEpochMs = event.timestampMs,
                     completedAtEpochMs = event.timestampMs,
                     outcome = "DECISION",
-                    summary = "قرار: ${event.decision.selectedAction.type.name} → ${event.decision.selectedAction.targetResourceId ?: "-"}"
+                    summary = "قرار: ${event.decision.chosenAction.type.name} → ${event.decision.chosenAction.targetId ?: "-"}"
                 )
             }
             is ExecutionEvent.ActionStarted -> {
@@ -244,34 +244,33 @@ class TelemetryService(
             }
             is ExecutionEvent.ActionCompleted -> {
                 incrementCounter("ACTION_COMPLETED", dims.copy(actionType = event.action.type.name))
-                val durationMs = event.timestampMs - event.timestampMs // approximated; the orchestrator emits timestamps
-                recordLatency(dims.copy(actionType = event.action.type.name), 0L)
+                recordLatency(dims.copy(actionType = event.action.type.name), event.observation.actualLatencyMs)
                 recordTraceNode(
                     executionId = event.executionId,
-                    stepIndex = event.stepIndex,
+                    stepIndex = event.observation.stepIndex,
                     actionType = event.action.type.name,
                     agentId = null,
-                    targetResourceId = event.action.targetResourceId,
-                    startedAtEpochMs = event.timestampMs,
+                    targetResourceId = event.action.targetId,
+                    startedAtEpochMs = event.timestampMs - event.observation.actualLatencyMs,
                     completedAtEpochMs = event.timestampMs,
                     outcome = "SUCCESS",
                     summary = event.outputSummary,
-                    observationSummary = event.observation.rewardedActionType?.name
+                    observationSummary = event.observation.action.type.code
                 )
             }
             is ExecutionEvent.ActionFailed -> {
                 recordFailure(dims.copy(actionType = event.action.type.name), "ACTION_FAILED")
                 recordTraceNode(
                     executionId = event.executionId,
-                    stepIndex = event.stepIndex,
+                    stepIndex = event.observation.stepIndex,
                     actionType = event.action.type.name,
                     agentId = null,
-                    targetResourceId = event.action.targetResourceId,
-                    startedAtEpochMs = event.timestampMs,
+                    targetResourceId = event.action.targetId,
+                    startedAtEpochMs = event.timestampMs - event.observation.actualLatencyMs,
                     completedAtEpochMs = event.timestampMs,
                     outcome = "FAILURE",
                     summary = event.errorDescription,
-                    observationSummary = event.observation.rewardedActionType?.name
+                    observationSummary = event.observation.action.type.code
                 )
             }
             is ExecutionEvent.ObservationRecorded -> {

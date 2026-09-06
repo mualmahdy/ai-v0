@@ -11,6 +11,7 @@ import com.example.domain.core.llm.LlmResponse
 import com.example.domain.core.llm.MessageRole
 import com.example.domain.core.llm.SafeProviderMetadata
 import com.example.domain.core.llm.TokenUsage
+import com.example.domain.core.llm.ToolCallRequest
 import com.example.domain.ports.llm.LlmProviderPort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -70,7 +71,7 @@ class GeminiLlmAdapter(
             isConfigured = true,
             isOnline = true,
             isLocal = false,
-            supportedCapabilities = listOf("llm_generation", "streaming", "reasoning")
+            supportedCapabilities = listOf("llm_generation", "streaming", "reasoning", "tool_calling", "function_calling")
         )
 
     // ------------------------------------------------------------------
@@ -83,15 +84,39 @@ class GeminiLlmAdapter(
         messages
             .filter { it.role != MessageRole.SYSTEM }
             .forEach { msg ->
-                val role = if (msg.role == MessageRole.ASSISTANT) "model" else "user"
-                contents.put(
-                    JSONObject()
-                        .put("role", role)
-                        .put(
-                            "parts",
-                            JSONArray().put(JSONObject().put("text", msg.content))
+                when (msg.role) {
+                    MessageRole.TOOL -> {
+                        // Gemini round-trips tool results as a `functionResponse` part.
+                        val responseJson = runCatching { JSONObject(msg.content) }
+                            .getOrElse { JSONObject().put("result", msg.content) }
+                        contents.put(
+                            JSONObject()
+                                .put("role", "function")
+                                .put(
+                                    "parts",
+                                    JSONArray().put(
+                                        JSONObject().put(
+                                            "functionResponse",
+                                            JSONObject()
+                                                .put("name", msg.name ?: "tool")
+                                                .put("response", responseJson)
+                                        )
+                                    )
+                                )
                         )
-                )
+                    }
+                    else -> {
+                        val role = if (msg.role == MessageRole.ASSISTANT) "model" else "user"
+                        contents.put(
+                            JSONObject()
+                                .put("role", role)
+                                .put(
+                                    "parts",
+                                    JSONArray().put(JSONObject().put("text", msg.content))
+                                )
+                        )
+                    }
+                }
             }
         return contents
     }
@@ -102,6 +127,40 @@ class GeminiLlmAdapter(
             .takeIf { it.isNotBlank() } ?: return null
         return JSONObject()
             .put("parts", JSONArray().put(JSONObject().put("text", systemText)))
+    }
+
+    /**
+     * Builds `tools: [{ functionDeclarations: [...] }]` from the domain
+     * ToolDeclarations so the model can actually request tools. Previously
+     * the adapter silently DROPPED request.availableTools — the advertised
+     * capability did not match the real protocol support (broken chain).
+     */
+    private fun buildToolDeclarations(request: LlmRequest): JSONArray? {
+        if (request.availableTools.isEmpty()) return null
+        val declarations = JSONArray()
+        for (tool in request.availableTools) {
+            val parameters = JSONObject().put("type", "object")
+            val properties = JSONObject()
+            val required = JSONArray()
+            for (param in tool.parameters) {
+                val prop = JSONObject().put("type", param.type.ifBlank { "string" })
+                if (param.description.isNotBlank()) prop.put("description", param.description)
+                if (param.enumValues.isNotEmpty()) {
+                    prop.put("enum", JSONArray(param.enumValues))
+                }
+                properties.put(param.name, prop)
+                if (param.isRequired) required.put(param.name)
+            }
+            parameters.put("properties", properties)
+            if (required.length() > 0) parameters.put("required", required)
+            declarations.put(
+                JSONObject()
+                    .put("name", tool.name)
+                    .put("description", tool.description)
+                    .put("parameters", parameters)
+            )
+        }
+        return JSONArray().put(JSONObject().put("functionDeclarations", declarations))
     }
 
     private fun buildRequestBody(request: LlmRequest, stream: Boolean): String {
@@ -115,6 +174,7 @@ class GeminiLlmAdapter(
                     .put("maxOutputTokens", request.config.maxOutputTokens)
             )
         buildSystemInstruction(request.messages)?.let { body.put("systemInstruction", it) }
+        buildToolDeclarations(request)?.let { body.put("tools", it) }
         if (stream) body.put("stream", true) // informational only for REST; alt=sse drives it
         return body.toString()
     }
@@ -155,9 +215,22 @@ class GeminiLlmAdapter(
                     val candidate = json.optJSONArray("candidates")?.optJSONObject(0)
                     val parts = candidate?.optJSONObject("content")?.optJSONArray("parts")
                     val sb = StringBuilder()
+                    val toolCalls = mutableListOf<ToolCallRequest>()
                     if (parts != null) {
                         for (i in 0 until parts.length()) {
-                            sb.append(parts.optJSONObject(i)?.optString("text", "") ?: "")
+                            val part = parts.optJSONObject(i) ?: continue
+                            sb.append(part.optString("text", "") ?: "")
+                            // REAL protocol support: parse functionCall parts into
+                            // domain ToolCallRequests (previously ignored entirely).
+                            part.optJSONObject("functionCall")?.let { fn ->
+                                toolCalls.add(
+                                    ToolCallRequest(
+                                        callId = fn.optString("name", "call_${System.currentTimeMillis()}"),
+                                        toolName = fn.optString("name", ""),
+                                        argumentsJson = fn.optJSONObject("args")?.toString() ?: "{}"
+                                    )
+                                )
+                            }
                         }
                     }
                     val usageJson = json.optJSONObject("usageMetadata")
@@ -169,6 +242,7 @@ class GeminiLlmAdapter(
                     Outcome.Success(
                         LlmResponse(
                             text = sb.toString(),
+                            toolCalls = toolCalls,
                             usage = usage,
                             finishReason = finish,
                             modelId = json.optString("modelVersion", model)
@@ -248,6 +322,18 @@ class GeminiLlmAdapter(
                                             executionId = executionId,
                                             deltaText = delta,
                                             sequenceIndex = sequence++
+                                        )
+                                    )
+                                }
+                                // REAL protocol support: surface streamed functionCall
+                                // parts as ToolRequested events (previously dropped).
+                                extractToolCalls(json).forEach { call ->
+                                    emit(
+                                        ExecutionEvent.ToolRequested(
+                                            executionId = executionId,
+                                            callId = call.callId,
+                                            toolName = call.toolName,
+                                            argumentsJson = call.argumentsJson
                                         )
                                     )
                                 }
@@ -341,6 +427,34 @@ class GeminiLlmAdapter(
             }
             sb.toString()
         }.getOrDefault("")
+    }
+
+    /**
+     * Extracts functionCall parts from one SSE data payload as domain
+     * ToolCallRequests. Missing/invalid fields yield no calls rather than
+     * fabricated ones.
+     */
+    private fun extractToolCalls(json: String): List<ToolCallRequest> {
+        return runCatching {
+            val obj = JSONObject(json)
+            val parts = obj.optJSONArray("candidates")?.optJSONObject(0)
+                ?.optJSONObject("content")?.optJSONArray("parts") ?: return emptyList()
+            val calls = mutableListOf<ToolCallRequest>()
+            for (i in 0 until parts.length()) {
+                val part = parts.optJSONObject(i) ?: continue
+                val fn = part.optJSONObject("functionCall") ?: continue
+                val name = fn.optString("name", "")
+                if (name.isBlank()) continue
+                calls.add(
+                    ToolCallRequest(
+                        callId = fn.optString("name", "call_${System.currentTimeMillis()}_$i"),
+                        toolName = name,
+                        argumentsJson = fn.optJSONObject("args")?.toString() ?: "{}"
+                    )
+                )
+            }
+            calls
+        }.getOrDefault(emptyList())
     }
 
     private fun readUsage(json: String): Pair<Int, Int>? {

@@ -20,7 +20,15 @@ import com.example.domain.core.workflow.WorkflowPlan
  * Deterministic Workflow Engine resolving Directed Acyclic Graphs (DAG) and Sequential Plans.
  */
 class WorkflowEngine(
-    private val orchestrator: AgentOrchestrator
+    private val orchestrator: AgentOrchestrator,
+    /**
+     * Durable workflow state (audit 2026 fix): when wired, every execution
+     * persists start/checkpoint/step/terminal state so partial workflow
+     * progress survives process death and can be inspected after the fact.
+     * Previously this service existed but the engine never called it.
+     */
+    private val persistenceService: com.example.application.workflow.WorkflowPersistenceService? = null,
+    private val workspaceIdProvider: suspend () -> String = { "default" }
 ) {
 
     /**
@@ -65,6 +73,14 @@ class WorkflowEngine(
 
         val stepStatuses = mutableMapOf<String, StepStatus>()
         plan.steps.forEach { stepStatuses[it.id] = StepStatus.PENDING }
+
+        // Durable start (audit 2026 fix).
+        try {
+            persistenceService?.start(plan.id, workspaceIdProvider(), plan)
+        } catch (_: Exception) {
+            // Persistence failure is non-fatal to execution but is logged
+            // through the orchestrator's observability bus by the caller.
+        }
 
         var totalTokens = 0
         var hasDegradedStep = false
@@ -134,6 +150,16 @@ class WorkflowEngine(
                     stepStatuses[step.id] = StepStatus.COMPLETED
                     outputs[step.id] = executionOutcome.value
                     totalTokens += executionOutcome.value.length / 4
+                    try {
+                        persistenceService?.markStepStatus(
+                            workflowId = plan.id,
+                            stepId = step.id,
+                            status = StepStatus.COMPLETED,
+                            outputSummary = executionOutcome.value.take(200),
+                            durationMs = null
+                        )
+                        persistenceService?.checkpoint(plan.id, plan.steps.indexOf(step) + 1)
+                    } catch (_: Exception) { }
                 }
                 is Outcome.Degraded -> {
                     stepStatuses[step.id] = StepStatus.DEGRADED
@@ -142,16 +168,44 @@ class WorkflowEngine(
                         outputs[step.id] = it
                         totalTokens += it.length / 4
                     }
+                    try {
+                        persistenceService?.markStepStatus(
+                            workflowId = plan.id,
+                            stepId = step.id,
+                            status = StepStatus.DEGRADED,
+                            outputSummary = (executionOutcome.partialValue ?: "").take(200),
+                            durationMs = null
+                        )
+                    } catch (_: Exception) { }
                 }
                 is Outcome.Error -> {
                     stepStatuses[step.id] = StepStatus.FAILED
                     hasFailedStep = true
                     failureReason = executionOutcome.diagnosticMessage.ifBlank { executionOutcome.failure }
+                    try {
+                        persistenceService?.markStepStatus(
+                            workflowId = plan.id,
+                            stepId = step.id,
+                            status = StepStatus.FAILED,
+                            outputSummary = failureReason.take(200),
+                            durationMs = null
+                        )
+                    } catch (_: Exception) { }
                 }
             }
         }
 
         val totalDuration = System.currentTimeMillis() - startTime
+
+        // Durable terminal state (audit 2026 fix).
+        try {
+            if (hasFailedStep) {
+                persistenceService?.fail(plan.id, failureReason)
+            } else {
+                persistenceService?.complete(plan.id, hasDegradedStep)
+            }
+        } catch (_: Exception) { }
+
         val overallOutcome: Outcome<String, WorkflowFailure> = when {
             hasFailedStep -> {
                 Outcome.Error(

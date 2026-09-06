@@ -1,6 +1,7 @@
 package com.example.application.search
 
 import com.example.domain.core.Outcome
+import com.example.domain.core.search.SafeSearchProviderMetadata
 import com.example.domain.core.search.SearchFailure
 import com.example.domain.core.search.SearchQuery
 import com.example.domain.core.search.SearchResultItem
@@ -124,6 +125,15 @@ class SearchIntelligenceServiceTest {
     }
 
     private class StubProvider : SearchProviderPort {
+        override val providerId: String = "stub_search"
+        override val metadata: SafeSearchProviderMetadata = SafeSearchProviderMetadata(
+            id = "stub_search",
+            name = "Stub",
+            providerType = "STUB",
+            isConfigured = true,
+            isEnabled = true,
+            priority = 1
+        )
         override suspend fun search(query: SearchQuery): Outcome<SearchResultSet, SearchFailure> {
             return Outcome.Success(
                 SearchResultSet(

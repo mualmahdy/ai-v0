@@ -106,6 +106,14 @@ class AppContainer(context: Context) {
      */
     val applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * Real connectivity monitor (audit 2026 fix) — single source of truth for
+     * `isNetworkAvailable` consumed by the orchestrator via the ViewModel.
+     */
+    val networkMonitor: com.example.infrastructure.network.NetworkMonitor by lazy {
+        com.example.infrastructure.network.NetworkMonitor(appContext).also { it.start() }
+    }
+
     // --- Persistence (Room Database) ---
     val database: AppDatabase by lazy { AppDatabase.getInstance(appContext) }
 
@@ -140,10 +148,32 @@ class AppContainer(context: Context) {
         LocalDeterministicEmbeddingAdapter(providerId = "local_embedding_engine", dimension = 128)
     }
 
+    /**
+     * REAL on-device semantic embedding (audit 2026 fix): a trained
+     * sentence-transformer (MiniLM-L6, int8 ONNX) run locally via ONNX
+     * Runtime. The model is provisioned lazily (one-time ~23MB download);
+     * before provisioning the adapter reports honest unavailability and the
+     * router falls back to the lexical adapter (honestly labeled).
+     */
+    val onnxSemanticEmbeddingAdapter: com.example.infrastructure.memory.semantic.OnnxSemanticEmbeddingAdapter by lazy {
+        com.example.infrastructure.memory.semantic.OnnxSemanticEmbeddingAdapter(appContext)
+    }
+
+    /**
+     * Single local embedding resource: routes to the ONNX semantic model when
+     * provisioned, otherwise to the lexical fallback with honest labeling.
+     */
+    val localEmbeddingRouter: com.example.infrastructure.memory.semantic.LocalSemanticEmbeddingRouter by lazy {
+        com.example.infrastructure.memory.semantic.LocalSemanticEmbeddingRouter(
+            semanticAdapter = onnxSemanticEmbeddingAdapter,
+            lexicalFallback = defaultEmbeddingAdapter
+        )
+    }
+
     val memoryVectorStore: RoomVectorStoreAdapter by lazy {
         RoomVectorStoreAdapter(
             memoryDao = database.memoryDao(),
-            embeddingProvider = defaultEmbeddingAdapter
+            embeddingProvider = localEmbeddingRouter
         )
     }
 
@@ -243,7 +273,8 @@ class AppContainer(context: Context) {
                         com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
                         com.example.domain.core.capability.CapabilityType.STREAMING,
                         com.example.domain.core.capability.CapabilityType.SEARCH,
-                        com.example.domain.core.capability.CapabilityType.MEMORY_RETRIEVAL
+                        com.example.domain.core.capability.CapabilityType.MEMORY_RETRIEVAL,
+                        com.example.domain.core.capability.CapabilityType.AGENT_DELEGATION
                     ),
                     budget = com.example.domain.core.agent.AgentBudget()
                 )
@@ -413,7 +444,7 @@ class AppContainer(context: Context) {
         RagPipelineService(
             resourceRegistry = durableResourceRegistryService,
             runtimeAdapterResolver = componentRegistry.runtimeAdapterResolver,
-            fallbackEmbeddingProvider = defaultEmbeddingAdapter,
+            fallbackEmbeddingProvider = localEmbeddingRouter,
             persistenceService = knowledgePersistenceService,
             workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
         )
@@ -425,7 +456,10 @@ class AppContainer(context: Context) {
             cbrMdpEngine = cbrMdpEngine,
             resourceCapabilityGraph = componentRegistry.resourceCapabilityGraph,
             securityGuard = securityGuardService,
-            userPreferenceRepository = generalizedUserPreferenceRepository
+            userPreferenceRepository = generalizedUserPreferenceRepository,
+            // REAL delegation candidates: the planner consults the registered
+            // agent catalog when the current agent lacks required capabilities.
+            agentCatalog = { componentRegistry.listAgents() }
         )
     }
 
@@ -436,7 +470,13 @@ class AppContainer(context: Context) {
             securityGuard = securityGuardService,
             extensionManager = extensionManager,
             memoryRepositoryProvider = { componentRegistry.getMemoryRepository() }
-        )
+        ).apply {
+            // REAL multi-agent delegation wiring (audit 2026 fix): the
+            // execution layer resolves child agents through the registry and
+            // executes them through the orchestrator with structured
+            // concurrency (parent cancellation cancels the child).
+            registryAgentResolver = { agentId -> componentRegistry.getAgent(agentId) }
+        }
     }
 
     val observationService: ObservationService by lazy { ObservationService() }
@@ -451,12 +491,38 @@ class AppContainer(context: Context) {
             observationService = observationService,
             outcomeService = outcomeService,
             taskDao = database.taskDao()
-        )
+        ).also { orchestrator ->
+            // Delegation executor: child tasks run through the same closed
+            // loop (DECIDE → EXECUTE → OBSERVE), so children persist their
+            // own task rows, emit their own traces, and honour the same
+            // cancellation scope as the parent.
+            executionService.delegationExecutor = { childAgent, childTask ->
+                orchestrator.executeTask(childAgent, childTask)
+            }
+            // RAG wiring (audit 2026 fix): RETRIEVE_KNOWLEDGE actions in the
+            // agent loop now query the real document knowledge base.
+            executionService.ragRetrievalProvider = { query, topK ->
+                ragPipelineService.retrieveRelevantContext(query, topK)
+            }
+            // Observability wiring (audit 2026 fix): every execution event
+            // becomes a persisted trace node + metric sample — the trace
+            // previously vanished when the in-memory stream ended.
+            telemetryService.subscribeToExecutionEvents(
+                orchestrator.executionEventPublisher
+            )
+            // Security governance wiring (audit 2026 fix): tool/MCP/delegation
+            // permission checks are enforced through the permission service.
+            executionService.permissionGrantService = permissionGrantService
+        }
     }
 
-    // Workflow Engine
+    // Workflow Engine — now durably persisted (audit 2026 fix).
     val workflowEngine: WorkflowEngine by lazy {
-        WorkflowEngine(orchestrator = agentOrchestrator)
+        WorkflowEngine(
+            orchestrator = agentOrchestrator,
+            persistenceService = workflowPersistenceService,
+            workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+        )
     }
 
     // Use Cases
@@ -513,7 +579,7 @@ class AppContainer(context: Context) {
             memoryDao = database.memoryDao(),
             namespaceDao = database.agentMemoryNamespaceDao(),
             memoryRepository = memoryVectorStore,
-            embeddingProvider = defaultEmbeddingAdapter
+            embeddingProvider = localEmbeddingRouter
         )
     }
 
@@ -531,13 +597,22 @@ class AppContainer(context: Context) {
             toolAuditDao = database.toolAuditDao(),
             permissionGrantDao = database.permissionGrantDao(),
             declarationProvider = { toolId ->
-                // Look up the live ToolDeclaration from ComponentRegistry.
+                // Audit 2026 fix: robust resolution by SUFFIX match on the
+                // declaration name (the previous substring hack
+                // `substringAfter("tool_").substringBefore("_")` mis-parsed
+                // most real ids). The service's own declaration cache is
+                // consulted first; this provider covers in-app tools.
                 runCatching {
                     componentRegistry.runtimeAdapterResolver.listToolDeclarations()
-                        .firstOrNull { it.name == toolId.substringAfter("tool_").substringBefore("_") }
+                        .firstOrNull { toolId.endsWith(it.name) || toolId.contains(it.name) }
                 }.getOrNull()
             }
-        )
+        ).apply {
+            // Pre-cache in-app tool declarations so lifecycle state machine
+            // (validate/authorize/expose) works for them from the start.
+            cacheDeclaration("tool_workspace_file_tool", fileSystemTool.declaration)
+            cacheDeclaration("tool_safe_diagnostics_tool", safeDiagnosticsTool.declaration)
+        }
     }
 
     val searchIntelligenceService: SearchIntelligenceService by lazy {
@@ -549,7 +624,7 @@ class AppContainer(context: Context) {
     val ragIntelligenceService: RagIntelligenceService by lazy {
         RagIntelligenceService(
             documentChunkDao = database.documentChunkDao(),
-            embeddingProvider = defaultEmbeddingAdapter
+            embeddingProvider = localEmbeddingRouter
         )
     }
 
@@ -597,15 +672,12 @@ class AppContainer(context: Context) {
     /**
      * First-run bootstrap (parity with the legacy default providers): seeds
      * local embedding + multi-source search + Gemini provider records, then
-     * validates ONLY the zero-network in-process resources. Called once from
-     * the MainViewModel init scope.
+     * validates ONLY the zero-network in-process resources.
      *
-     * FIX R-1 + F-1 + D-4: runs on the application IO scope — eagerly loads
-     * persisted resources AND the CBR-MDP Q-table (no runBlocking on main)
-     * and restores runtime adapters for every persisted ENABLED resource.
-     *
-     * Phase 5: also applies memory decay + resumes pending workflows + tasks
-     * on startup so the runtime reconstructs its pre-crash state.
+     * Audit 2026 fix — this function was previously DEAD CODE (never called
+     * from anywhere): adapter restore, MDP Q-table load, memory decay, and
+     * task resumption never ran. It is now invoked once from MainActivity
+     * (application scope, never the main thread).
      */
     fun bootstrapRuntime() {
         applicationScope.launch {
@@ -616,7 +688,11 @@ class AppContainer(context: Context) {
             // Phase 5 — memory decay + workflow/task resume on startup.
             runCatching { memoryLifecycleService.applyDecay() }
             runCatching { memoryLifecycleService.consolidate() }
-            runCatching { taskDecompositionService.pendingResumableTasks() }
+            // Process-death recovery (audit 2026 fix): actually RESUME tasks
+            // left RUNNING by a crashed/killed process — previously the
+            // resumable list was computed and then discarded.
+            runCatching { agentOrchestrator.resumeInterruptedTasks() }
+            runCatching { workflowPersistenceService.resumable() } // surfaces resumable workflows for the UI/log
         }
     }
 }
@@ -643,7 +719,9 @@ class MainViewModelFactory(
                 // Unified Activity Feed + proactive suggestion surface.
                 telemetryService = appContainer.telemetryService,
                 workspaceContextEngine = appContainer.workspaceContextEngine,
-                telemetryPort = appContainer.telemetryPort
+                telemetryPort = appContainer.telemetryPort,
+                networkMonitorProvider = appContainer.networkMonitor,
+                appContext = appContainer.appContext
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

@@ -87,7 +87,9 @@ class RagIntelligenceService(
 
         // 3. Run semantic + lexical indices separately.
         val semanticCandidates = if (request.enableSemanticIndex && queryVec != null) {
-            runSemanticIndex(allChunks, queryVec, request.topK)
+            // minScoreThreshold applies in SIMILARITY space (cosine), where
+            // it actually means something (audit 2026 fix).
+            runSemanticIndex(allChunks, queryVec, request.topK, request.minScoreThreshold)
         } else emptyList()
 
         val lexicalCandidates = if (request.enableLexicalIndex) {
@@ -102,7 +104,13 @@ class RagIntelligenceService(
         val fused = rrfFuse(semanticCandidates, lexicalCandidates)
 
         // 5. Filter by minimum fused score.
-        val filtered = fused.filter { it.fusedScore >= request.minScoreThreshold }
+        // Audit 2026 fix: `minScoreThreshold` is a SIMILARITY-space bar (0..1).
+        // RRF produces RANK-space scores (~0.001..0.03) — filtering those
+        // against 0.2 dropped EVERY candidate, so the v2 RAG pipeline could
+        // never return results at all (caught by RagIntelligenceServiceTest).
+        // RRF entries exist only because at least one index matched them,
+        // so the correct fused-space bar is fusedScore > 0.
+        val filtered = fused.filter { it.fusedScore > 0f }
 
         // 6. Rerank.
         val reranked = if (request.enableReranking) rerank(filtered, request.query) else filtered.map { c ->
@@ -139,11 +147,13 @@ class RagIntelligenceService(
     private fun runSemanticIndex(
         chunks: List<DocumentChunk>,
         queryVec: EmbeddingVector,
-        topK: Int
+        topK: Int,
+        minSimilarity: Float = 0f
     ): List<RetrievalCandidate> {
         return chunks.mapNotNull { chunk ->
             val v = chunk.vector ?: return@mapNotNull null
             val sim = cosine(queryVec.values, v.values)
+            if (sim < minSimilarity) return@mapNotNull null
             RetrievalCandidate(chunk = chunk, score = sim, rank = 0, source = RetrievalSource.SEMANTIC)
         }
             .sortedByDescending { it.score }

@@ -36,6 +36,10 @@ class MainActivity : ComponentActivity() {
             WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_SECURE
         )
+        // Audit 2026 fix: actually RUN the runtime bootstrap (previously dead
+        // code) — adapter restore, MDP Q-table load, memory decay, and
+        // process-death task recovery now happen on every app start.
+        appContainer.bootstrapRuntime()
         setContent {
             MyApplicationTheme {
                 Surface(

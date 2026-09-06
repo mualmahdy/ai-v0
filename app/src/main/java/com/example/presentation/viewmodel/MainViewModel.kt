@@ -63,6 +63,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -84,7 +85,16 @@ class MainViewModel(
     // Phase 5 — intelligence services for the Unified Activity Feed
     private val telemetryService: com.example.application.observability.TelemetryService? = null,
     private val workspaceContextEngine: com.example.application.workspace.WorkspaceContextEngine? = null,
-    private val telemetryPort: com.example.domain.ports.observability.TelemetryPort? = null
+    private val telemetryPort: com.example.domain.ports.observability.TelemetryPort? = null,
+    /**
+     * Real connectivity state (audit 2026 fix): replaces the previous
+     * hardcoded `isNetworkAvailable = true` that made the OFFLINE policy
+     * unreachable in practice. Injected from the AppContainer; nullable so
+     * existing constructor call sites remain source-compatible.
+     */
+    private val networkMonitorProvider: com.example.infrastructure.network.NetworkMonitor? = null,
+    /** App context for the foreground execution shell (audit 2026 fix). */
+    private val appContext: android.content.Context? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UiState())
@@ -103,20 +113,20 @@ class MainViewModel(
     // suggestions + execution trace + audit events.
     val activeSuggestions: StateFlow<List<com.example.domain.core.workspace.context.ProactiveSuggestion>> =
         workspaceContextEngine?.suggestions?.let { flow ->
-            kotlinx.coroutines.flow.mapNotNull(flow) { map ->
+            flow.mapNotNull { map ->
                 map.flatMap { it.value }
             }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
         } ?: MutableStateFlow(emptyList<com.example.domain.core.workspace.context.ProactiveSuggestion>()).asStateFlow()
 
     val activeExecutionTrace: StateFlow<List<com.example.domain.core.observability.ExecutionTraceNode>> =
         telemetryPort?.let { port ->
-            kotlinx.coroutines.flow.mapNotNull(port.traceForExecution("")) { it }
+            port.traceForExecution("")
                 .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
         } ?: MutableStateFlow(emptyList<com.example.domain.core.observability.ExecutionTraceNode>()).asStateFlow()
 
     val recentAuditEvents: StateFlow<List<com.example.domain.core.observability.AuditEvent>> =
         telemetryPort?.let { port ->
-            kotlinx.coroutines.flow.mapNotNull(port.auditEvents(100)) { it }
+            port.auditEvents(100)
                 .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
         } ?: MutableStateFlow(emptyList<com.example.domain.core.observability.AuditEvent>()).asStateFlow()
 
@@ -191,6 +201,28 @@ class MainViewModel(
     fun updateWorkspaceNetworkPolicy(policy: NetworkPolicy) {
         viewModelScope.launch {
             workspaceRuntimeService.updateNetworkPolicy(policy)
+        }
+    }
+
+    /**
+     * Local-first semantic RAG provisioning (audit 2026 fix): downloads the
+     * on-device sentence-transformer ONCE (~23MB int8). Idempotent — no-ops
+     * when already provisioned, and fails honestly (offline, network error)
+     * without ever fabricating a "semantic" mode.
+     */
+    fun provisionLocalSemanticModel() {
+        viewModelScope.launch {
+            runCatching {
+                when (val r = ragPipelineService.provisionSemanticModel()) {
+                    is Outcome.Success -> _uiState.update {
+                        it.copy(diagnosticBanner = "النموذج الدلالي المحلي جاهز — استرجاع دلالي حقيقي على الجهاز.")
+                    }
+                    is Outcome.Error -> _uiState.update {
+                        it.copy(diagnosticBanner = "تعذر تجهيز النموذج الدلالي المحلي: ${r.failure}")
+                    }
+                    else -> Unit
+                }
+            }
         }
     }
 
@@ -347,8 +379,12 @@ class MainViewModel(
     }
 
     fun cancelExecution() {
+        com.example.application.execution.ExecutionHost.cancelCurrent()
         currentExecutionJob?.cancel()
         currentExecutionJob = null
+        appContext?.let {
+            com.example.application.execution.AgentExecutionForegroundService.stop(it)
+        }
         _uiState.update {
             it.copy(
                 isExecuting = false,
@@ -376,13 +412,20 @@ class MainViewModel(
             )
         }
 
-        currentExecutionJob = viewModelScope.launch {
+        // Audit 2026 fix: the execution now runs in the APPLICATION scope
+        // (ExecutionHost) instead of viewModelScope — leaving the screen no
+        // longer kills a live task, and the foreground service shell keeps
+        // the process priority high while the agent loop is running.
+        com.example.application.execution.ExecutionHost.launch {
             try {
+                // Audit 2026 fix: real connectivity state (previously hardcoded true),
+                // so OFFLINE / DEGRADED policies engage honestly on real networks.
+                val netAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: true
                 executeAgentTaskUseCase(
                     agent = agent,
                     prompt = prompt,
                     networkPolicy = current.networkPolicy,
-                    isNetworkAvailable = true,
+                    isNetworkAvailable = netAvailable,
                     includeWebSearch = false
                 ).collect { event ->
                     _uiState.update { state ->
@@ -451,6 +494,12 @@ class MainViewModel(
                     )
                 }
             }
+        }
+
+        // Raise the process to foreground priority for the duration of the
+        // execution (durability aid — no-ops when the platform disallows it).
+        appContext?.let {
+            com.example.application.execution.AgentExecutionForegroundService.start(it)
         }
     }
 

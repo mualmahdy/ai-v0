@@ -36,7 +36,7 @@ class AgentLifecycleServiceTest {
     }
 
     @Test
-    fun `transition from CREATED to INITIALIZED is valid; from CREATED to RUNNING is invalid`() = kotlinx.coroutines.runBlocking {
+    fun `transition from CREATED to INITIALIZED is valid but to RUNNING is invalid`() = kotlinx.coroutines.runBlocking {
         service.registerOrUpdate(makeDefinition("agent_test_2"))
         val valid = service.transition(AgentId("agent_test_2"), com.example.domain.core.agent.lifecycle.AgentLifecycleState.INITIALIZED)
         assertTrue(valid)
