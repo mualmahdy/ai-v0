@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
@@ -25,7 +26,9 @@ import androidx.compose.material.icons.filled.DataObject
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Paid
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -282,7 +285,35 @@ fun ExecutionEventTimelineItem(
                 Icons.Default.Bolt,
                 MaterialTheme.colorScheme.primary,
                 "تحديث استهلاك التوكنز",
-                "الاستهلاك: ${event.promptTokens + event.completionTokens} | المتبقي: ${event.remainingBudgetTokens}"
+                "الاستهلاك: ${event.promptTokens + event.completionTokens}" +
+                    (if (event.providerId != null) " | المزود: ${event.providerId}" else "") +
+                    (if (event.remainingBudgetTokens >= 0) " | المتبقي: ${event.remainingBudgetTokens}" else " | المتبقي: غير معروف")
+            )
+        }
+        is ExecutionEvent.BudgetGateDecision -> {
+            Quadruple(
+                Icons.Default.AccountBalance,
+                MaterialTheme.colorScheme.tertiary,
+                "بوابة الميزانية: ${event.decision}",
+                event.reason.take(80)
+            )
+        }
+        is ExecutionEvent.CostRecorded -> {
+            Quadruple(
+                Icons.Default.Paid,
+                MaterialTheme.colorScheme.secondary,
+                "قيد تكلفة مسجّل (${event.billingClass})",
+                "توكنز: ${event.totalTokens} | التكلفة: " +
+                    (event.costAmountMicro?.let { "%.6f".format(it / 1_000_000.0) + " " + event.currency }
+                        ?: "غير معروفة (${event.costStatus})")
+            )
+        }
+        is ExecutionEvent.RateLimitEncountered -> {
+            Quadruple(
+                Icons.Default.Speed,
+                MaterialTheme.colorScheme.error,
+                "حد المعدل (${event.scopeKey})",
+                "إعادة المحاولة بعد ${event.retryAfterMs ?: "?"}ms"
             )
         }
         is ExecutionEvent.Cancelled -> {

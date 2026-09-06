@@ -142,6 +142,14 @@ sealed interface ExecutionEvent {
 
     /**
      * Real-time telemetry update for token expenditure and budget tracking.
+     *
+     * GOVERNANCE PHASE SEMANTICS FIX: `remainingBudgetTokens` was previously
+     * fabricated by the LLM adapters from a hard-coded 30000 baseline. Now
+     * adapters report MEASURED USAGE ONLY and set remaining to
+     * [REMAINING_UNKNOWN]; ExecutionService enriches the event with the REAL
+     * task-budget-derived remaining before it reaches consumers.
+     * Attribution fields (provider/model/total/cached) are populated when
+     * the provider reports them — never invented.
      */
     data class UsageBudgetUpdate(
         override val executionId: String,
@@ -149,6 +157,71 @@ sealed interface ExecutionEvent {
         val completionTokens: Int,
         val totalSessionTokens: Int,
         val remainingBudgetTokens: Int,
+        val cachedTokens: Int = 0,
+        val totalTokens: Int = promptTokens + completionTokens,
+        val providerId: String? = null,
+        val modelId: String? = null,
+        /** True when the provider reported usage; false when a chars/4
+         *  heuristic substituted for it. */
+        val isEstimatedUsage: Boolean = false,
+        override val timestampMs: Long = System.currentTimeMillis()
+    ) : ExecutionEvent {
+        companion object {
+            /** Sentinel: the emitter cannot know the remaining budget. */
+            const val REMAINING_UNKNOWN: Int = -1
+        }
+    }
+
+    /**
+     * GOVERNANCE PHASE — pre-execution economic gate verdict (budget /
+     * rate-limit policy). Emitted on the SAME event bus the telemetry and
+     * radar subscribe to; no second bus.
+     */
+    data class BudgetGateDecision(
+        override val executionId: String,
+        /** EconomicGateDecision.name (ALLOWED / WARNED / DENIED / DOWNGRADE /
+         * LOCAL_FALLBACK / APPROVAL_REQUIRED). */
+        val decision: String,
+        val reason: String,
+        val providerId: String? = null,
+        val modelId: String? = null,
+        override val timestampMs: Long = System.currentTimeMillis()
+    ) : ExecutionEvent
+
+    /**
+     * GOVERNANCE PHASE — one cost-ledger accounting record reached the bus
+     * after execution (usage + resolved cost; cost is null when UNKNOWN).
+     */
+    data class CostRecorded(
+        override val executionId: String,
+        val inputTokens: Int,
+        val outputTokens: Int,
+        val cachedTokens: Int,
+        val totalTokens: Int,
+        /** Micro currency units; null = cost unknown (never fabricated). */
+        val costAmountMicro: Long?,
+        val currency: String,
+        /** CostStatus.name (ESTIMATED / ACTUAL / UNKNOWN). */
+        val costStatus: String,
+        /** BillingClass.name (FREE / PAID / TRIAL / CREDIT / LOCAL / UNKNOWN). */
+        val billingClass: String,
+        val providerId: String? = null,
+        val modelId: String? = null,
+        override val timestampMs: Long = System.currentTimeMillis()
+    ) : ExecutionEvent
+
+    /**
+     * GOVERNANCE PHASE — the runtime encountered a provider rate limit
+     * (HTTP 429 / Retry-After); the RPM/TPM governor closed the window.
+     */
+    data class RateLimitEncountered(
+        override val executionId: String,
+        val scopeKey: String,
+        val providerId: String? = null,
+        val modelId: String? = null,
+        /** Resource type name (LLM / SEARCH / EMBEDDING / TOOL). */
+        val resourceType: String,
+        val retryAfterMs: Long? = null,
         override val timestampMs: Long = System.currentTimeMillis()
     ) : ExecutionEvent
 

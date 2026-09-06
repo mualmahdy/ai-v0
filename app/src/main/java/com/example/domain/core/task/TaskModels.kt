@@ -150,9 +150,23 @@ data class TaskConstraints(
 
 /**
  * Dedicated budget allocated specifically for a task.
+ *
+ * GOVERNANCE PHASE SEMANTICS MIGRATION (tokenBudget audit):
+ *   - [tokenLimit] is the TOKEN EXECUTION QUOTA (an execution limit — NOT a
+ *     monetary budget). It is now ENFORCED by the orchestrator's
+ *     pre-execution quota gate: further paid steps stop once consumed
+ *     tokens reach the limit.
+ *   - [consumedTokens] is updated LIVE during the run (legacy defect: never
+ *     incremented, so delegation carve-outs always saw the full quota).
+ *   - [maxCostEstimatedUsd] is a DEPRECATED monetary hint — the authoritative
+ *     monetary budget now lives in the economic governance subsystem
+ *     (budget_allocations, TASK/WORKSPACE/AGENT/... scopes). It is kept for
+ *     source compatibility and is NOT silently reinterpreted as an
+ *     allocation.
  */
 data class TaskBudget(
     val tokenLimit: Int = 30000,
+    @Deprecated("Monetary authority moved to BudgetAllocation (economic governance). Legacy hint only.")
     val maxCostEstimatedUsd: Double = 0.10,
     val consumedTokens: Int = 0
 )

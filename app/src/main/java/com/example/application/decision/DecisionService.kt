@@ -2,7 +2,11 @@ package com.example.application.decision
 
 import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
+import com.example.application.budget.EconomicGovernanceService
+import com.example.application.radar.CapabilityRadarService
 import com.example.domain.core.agent.AgentDefinition
+import com.example.domain.core.budget.EconomicAuthorizationRequest
+import com.example.domain.core.budget.EconomicGateDecision
 import com.example.domain.core.capability.CapabilityEvidenceRegistry
 import com.example.domain.core.capability.CapabilityPrerequisites
 import com.example.domain.core.capability.CapabilityResourceGraph
@@ -18,6 +22,7 @@ import com.example.domain.core.decision.DecisionState
 import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.provider.ServiceType
+import com.example.domain.core.radar.OperationalCapabilityState
 import com.example.domain.ports.provider.UserPreferenceRepository
 import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceType
@@ -71,7 +76,20 @@ class DecisionService(
      * (audit 2026 fix). Wired by the AppContainer from ComponentRegistry. When
      * null, no DELEGATE candidates are proposed (an honest empty catalog).
      */
-    private val agentCatalog: () -> List<AgentDefinition> = { emptyList() }
+    private val agentCatalog: () -> List<AgentDefinition> = { emptyList() },
+    /**
+     * GOVERNANCE PHASE — pre-execution economic gate (budget + rate limits).
+     * When null the gate is absent (legacy behavior); when present the
+     * chosen action is authorized BEFORE execution so paid consumption can
+     * be prevented, downgraded, locally fallen back, or routed to approval.
+     */
+    private val economicGovernance: EconomicGovernanceService? = null,
+    /**
+     * GOVERNANCE PHASE — operational capability check against the evidence-
+     * derived radar state. When null, capability gating falls back to the
+     * registry-backed resource graph only (legacy behavior).
+     */
+    private val capabilityRadar: CapabilityRadarService? = null
 ) {
 
     /**
@@ -92,7 +110,6 @@ class DecisionService(
         userPreferenceRepository = null,
         defaultSecurityPolicy = defaultSecurityPolicy
     )
-
     /**
      * Builds the complete multi-dimensional DecisionContext by aggregating Workspace,
      * Resource Graph, Tool/Capability states, Memory, and Environment telemetry.
@@ -574,6 +591,14 @@ class DecisionService(
      * Executes the CBR-MDP decision evaluation over the given DecisionContext,
      * scoring all candidate actions against historical cases and expected MDP utility,
      * and enforcing deterministic security/governance constraints.
+     *
+     * GOVERNANCE PHASE — the authorization order is now explicit:
+     *   1. Permission / Policy  (enforceGovernance — security FIRST, unchanged)
+     *   2. Capability           (radar evidence-derived state)
+     *   3. Budget               (economic gate: allocation + policy)
+     *   4. Rate limits          (RPM/TPM governor, inside the economic gate)
+     *   5. Risk                (CBR-MDP score — already applied upstream)
+     * A budget approval NEVER grants a permission the security layer denied.
      */
     suspend fun evaluate(context: DecisionContext): DecisionResult {
         val state = context.toDecisionState()
@@ -582,8 +607,14 @@ class DecisionService(
         // 1. Evaluate through CBR-MDP Engine
         val rawDecision = cbrMdpEngine.evaluateAndSelectAction(state, candidateActions)
 
-        // 2. Deterministic Governance & Security Validation
-        val validatedAction = enforceGovernance(rawDecision.chosenAction, context)
+        // 2. Deterministic Governance & Security Validation (PERMISSION/POLICY FIRST)
+        val governedAction = enforceGovernance(rawDecision.chosenAction, context)
+
+        // 3. GOVERNANCE PHASE — Capability check (radar-derived, evidence-based)
+        val capabilityCheckedAction = applyCapabilityGate(governedAction, context)
+
+        // 4. GOVERNANCE PHASE — Economic authorization (BUDGET + RATE)
+        val validatedAction = applyEconomicGate(capabilityCheckedAction, context)
 
         val candidateEvals = rawDecision.evaluatedAlternatives.mapNotNull { scored ->
             scored.action.decisionRecord?.let {
@@ -607,15 +638,160 @@ class DecisionService(
             validatedAction
         }
 
+        val governanceApplied = validatedAction != rawDecision.chosenAction
         return rawDecision.copy(
             chosenAction = enrichedAction,
             decisionRecord = enrichedAction.decisionRecord,
-            rationale = if (validatedAction != rawDecision.chosenAction) {
-                "${rawDecision.rationale} [تم تطبيق سياسة الحوكمة والأمان لمنع الإجراء غير المسموح به]"
-            } else {
-                rawDecision.rationale
+            rationale = when {
+                governanceApplied ->
+                    "${rawDecision.rationale} [تم تطبيق سياسة الحوكمة والأمان والقدرات والميزانية لمنع أو تعديل الإجراء غير المصرّح به]"
+                else -> rawDecision.rationale
             }
         )
+    }
+
+    /**
+     * GOVERNANCE PHASE — capability gate: checks the radar's evidence-derived
+     * operational state for the capability an action depends on.
+     *
+     * BLOCKED / FAILED capabilities produce an explicit REPLAN (the loop will
+     * re-decide with different candidates — no silent execution); DEGRADED
+     * capabilities proceed (the loop's degraded paths are real fallbacks).
+     */
+    private suspend fun applyCapabilityGate(
+        action: DecisionAction,
+        context: DecisionContext
+    ): DecisionAction {
+        val radar = capabilityRadar ?: return action
+        if (action.type !in CAPABILITY_GATED_ACTION_TYPES) return action
+
+        val requiredCapability = capabilityGatedBy(action) ?: return action
+        val workspaceId = context.task.input.parameters["workspaceId"]?.toString()
+        val check = radar.checkCapability(requiredCapability, workspaceId)
+
+        return when (check.state) {
+            OperationalCapabilityState.BLOCKED, OperationalCapabilityState.FAILED -> {
+                DecisionAction(
+                    type = DecisionActionType.REPLAN,
+                    targetId = "capability_gate_${requiredCapability.code}",
+                    payload = mapOf(
+                        "reason" to "CAPABILITY_${check.state.name}",
+                        "capability" to requiredCapability.code,
+                        "capabilityState" to check.state.name,
+                        "detail" to check.rationale
+                    )
+                )
+            }
+            else -> action // AVAILABLE / DEGRADED / PARTIAL / UNKNOWN proceed
+        }
+    }
+
+    /**
+     * GOVERNANCE PHASE — the economic authorization gate (BUDGET + RATE).
+     *
+     * Verdict mapping (policy semantics, enforced — not decorative):
+     *   DENIED            -> REPLAN with BUDGET_DENIED reason (no spend).
+     *   APPROVAL_REQUIRED -> ASK_USER (pause for human approval, never a
+     *                        silent spend).
+     *   DOWNGRADE / LOCAL_FALLBACK -> REPLAN with an explicit reason so the
+     *                        re-decided loop picks a cheaper/local candidate.
+     *   WARNED / ALLOWED  -> proceed.
+     */
+    private suspend fun applyEconomicGate(
+        action: DecisionAction,
+        context: DecisionContext
+    ): DecisionAction {
+        val economics = economicGovernance ?: return action
+        // Only actions that actually consume billable capacity need the gate.
+        if (action.type !in ECONOMICALLY_GATED_ACTION_TYPES) return action
+
+        val record = action.decisionRecord
+        val workspaceId = context.task.input.parameters["workspaceId"]?.toString()
+        val request = EconomicAuthorizationRequest(
+            executionId = "pre_${context.task.id.value}_${context.task.currentStepIndex}",
+            workspaceId = workspaceId,
+            agentId = context.task.assignedAgentId.value,
+            taskId = context.task.id.value,
+            providerId = record?.providerId,
+            serviceId = record?.serviceId,
+            modelId = action.payload["modelId"],
+            resourceId = record?.selectedResourceId?.value,
+            isLocalResource = isLocalCandidate(action, context),
+            expectedTotalTokens = (context.remainingTokenBudget / 4).coerceAtMost(4000),
+            actionTypeCode = action.type.code
+        )
+
+        val result = economics.authorize(request)
+
+        return when (result.decision) {
+            EconomicGateDecision.ALLOWED, EconomicGateDecision.WARNED -> action
+            EconomicGateDecision.DENIED -> DecisionAction(
+                type = DecisionActionType.REPLAN,
+                targetId = "economic_gate_denied",
+                payload = mapOf(
+                    "reason" to "BUDGET_DENIED",
+                    "detail" to result.reason,
+                    "policy" to (result.appliedPolicy?.name ?: "UNKNOWN")
+                )
+            )
+            EconomicGateDecision.APPROVAL_REQUIRED -> DecisionAction(
+                type = DecisionActionType.ASK_USER,
+                targetId = "economic_gate_approval",
+                payload = mapOf(
+                    "reason" to "BUDGET_APPROVAL_REQUIRED: ${result.reason}",
+                    "estimatedCostMicro" to (result.estimate.expectedCost?.amountMicro?.toString() ?: "UNKNOWN"),
+                    "currency" to (result.estimate.expectedCost?.currency ?: "UNKNOWN")
+                )
+            )
+            EconomicGateDecision.DOWNGRADE, EconomicGateDecision.LOCAL_FALLBACK -> DecisionAction(
+                type = DecisionActionType.REPLAN,
+                targetId = if (result.decision == EconomicGateDecision.DOWNGRADE)
+                    "economic_gate_downgrade" else "economic_gate_local_fallback",
+                payload = mapOf(
+                    "reason" to if (result.decision == EconomicGateDecision.DOWNGRADE)
+                        "BUDGET_AUTO_DOWNGRADE" else "BUDGET_AUTO_LOCAL_FALLBACK",
+                    "detail" to result.reason,
+                    "preferLocal" to "true"
+                )
+            )
+        }
+    }
+
+    /** Resolves whether the action's selected LLM resource is local. */
+    private fun isLocalCandidate(action: DecisionAction, context: DecisionContext): Boolean {
+        val record = action.decisionRecord ?: return false
+        return resourceCapabilityGraph.findCandidatesByType(
+            com.example.domain.core.resource.ResourceType.LLM,
+            context.networkPolicy,
+            context.isNetworkAvailable
+        ).any { it.resourceId.value == record.selectedResourceId.value && it.isLocal }
+    }
+
+    private val CAPABILITY_GATED_ACTION_TYPES = setOf(
+        DecisionActionType.EXECUTE_STEP,
+        DecisionActionType.SELECT_MODEL,
+        DecisionActionType.SEARCH,
+        DecisionActionType.RETRIEVE_KNOWLEDGE,
+        DecisionActionType.EXECUTE_TOOL,
+        DecisionActionType.SELECT_TOOL,
+        DecisionActionType.EXECUTE_MCP
+    )
+
+    private val ECONOMICALLY_GATED_ACTION_TYPES = setOf(
+        DecisionActionType.EXECUTE_STEP,
+        DecisionActionType.SELECT_MODEL,
+        DecisionActionType.SEARCH,
+        DecisionActionType.RETRIEVE_KNOWLEDGE,
+        DecisionActionType.DELEGATE
+    )
+
+    private fun capabilityGatedBy(action: DecisionAction): CapabilityType? = when (action.type) {
+        DecisionActionType.EXECUTE_STEP, DecisionActionType.SELECT_MODEL -> CapabilityType.LLM_GENERATION
+        DecisionActionType.SEARCH -> CapabilityType.SEARCH
+        DecisionActionType.RETRIEVE_KNOWLEDGE -> CapabilityType.EMBEDDING
+        DecisionActionType.EXECUTE_TOOL, DecisionActionType.SELECT_TOOL -> CapabilityType.TOOL_EXECUTION
+        DecisionActionType.EXECUTE_MCP -> CapabilityType.MCP_INVOCATION
+        else -> null
     }
 
     /**

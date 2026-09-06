@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
@@ -63,6 +64,7 @@ import com.example.presentation.ui.screens.AgentStudioScreen
 import com.example.presentation.ui.screens.DecisionIntelligenceScreen
 import com.example.presentation.ui.screens.ExtensionsScreen
 import com.example.presentation.ui.screens.FilesWorkspaceScreen
+import com.example.presentation.ui.screens.GovernanceObservatoryScreen
 import com.example.presentation.ui.screens.KnowledgeRagScreen
 import com.example.presentation.ui.screens.ProviderServiceManagerScreen
 import com.example.presentation.ui.screens.RadarEvolutionScreen
@@ -206,6 +208,7 @@ fun MainAppScreen(
                 ActiveNavigationTab.TASKS_WORKFLOWS -> TasksWorkflowsScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.DECISION_INTELLIGENCE -> DecisionIntelligenceScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.RADAR_EVOLUTION -> RadarEvolutionScreen(state = state, viewModel = viewModel)
+                ActiveNavigationTab.GOVERNANCE -> GovernanceObservatoryScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.EXTENSIONS -> ExtensionsScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.MODELS_CAPABILITIES -> ProviderServiceManagerScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.KNOWLEDGE_RAG -> KnowledgeRagScreen(state = state, viewModel = viewModel)
@@ -250,6 +253,15 @@ fun MainAppScreen(
                 tag = "more_tab_radar"
             ) {
                 viewModel.selectTab(ActiveNavigationTab.RADAR_EVOLUTION)
+                moreSheetOpen = false
+            }
+            MoreDestination(
+                icon = Icons.Default.Verified,
+                label = "مرصد الحوكمة والاستدامة",
+                description = "حالة القدرات المشتقة من الأدلة + الميزانية والتكلفة وحدود المعدل",
+                tag = "more_tab_governance"
+            ) {
+                viewModel.selectTab(ActiveNavigationTab.GOVERNANCE)
                 moreSheetOpen = false
             }
             MoreDestination(

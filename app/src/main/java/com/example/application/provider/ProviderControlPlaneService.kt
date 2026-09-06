@@ -91,6 +91,21 @@ class ProviderControlPlaneService(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + Job())
 ) {
 
+    /**
+     * GOVERNANCE PHASE — capability radar evidence sink. Late-bound by the
+     * AppContainer (same late-bound-var pattern as delegationExecutor): the
+     * control plane turns provider/resource lifecycle transitions into REAL
+     * radar evidence — no second event bus, no fabricated observations.
+     */
+    var radarEvidenceSink: ((com.example.domain.core.radar.CapabilityEvidence) -> Unit)? = null
+
+    /**
+     * GOVERNANCE PHASE — economic governance bridge: offering pricing
+     * discovered/persisted here becomes a versioned PricingEntry (MODEL
+     * scope overrides provider/service). Late-bound by the AppContainer.
+     */
+    var pricingPublisher: ((com.example.domain.core.budget.PricingEntry) -> Unit)? = null
+
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 
@@ -317,6 +332,25 @@ class ProviderControlPlaneService(
                     val offerings = discovery.value
                     for (o in offerings) {
                         offeringRepository.registerOffering(o)
+                        // GOVERNANCE PHASE: discovery evidence + pricing entries
+                        // for every offering that publishes prices.
+                        registerOfferingPricing(o, service.providerId, service.id)
+                    }
+                    // Model discovery evidence for the service's capability class
+                    val cap = when (service.serviceType) {
+                        ServiceType.LLM -> CapabilityType.LLM_GENERATION
+                        ServiceType.EMBEDDING -> CapabilityType.EMBEDDING
+                        else -> null
+                    }
+                    if (cap != null && offerings.isNotEmpty()) {
+                        emitRadarEvidence(
+                            capability = cap,
+                            source = com.example.domain.core.radar.EvidenceSource.MODEL_DISCOVERY,
+                            outcome = com.example.domain.core.radar.EvidenceOutcome.SUCCESS,
+                            providerId = service.providerId,
+                            serviceId = service.id,
+                            detail = "اكتُشف ${offerings.size} عرضاً للمزود."
+                        )
                     }
                     Outcome.Success(offerings)
                 }
@@ -425,6 +459,22 @@ class ProviderControlPlaneService(
             configurationVersion = config.configurationVersion
         )
         resourceRecordRepository.saveResource(record)
+
+        // GOVERNANCE PHASE: (a) radar evidence for every capability the new
+        // resource contributes (NEUTRAL — provisioning observed, not success);
+        // (b) pricing entry when the offering carries published prices.
+        record.capabilities.forEach { cap ->
+            emitRadarEvidence(
+                capability = cap,
+                source = com.example.domain.core.radar.EvidenceSource.RESOURCE_LIFECYCLE,
+                outcome = com.example.domain.core.radar.EvidenceOutcome.NEUTRAL,
+                providerId = provider.id,
+                serviceId = service.id,
+                resourceId = resourceId.value,
+                detail = "تم تجسيد المورد من العرض '${offering.name}' (REGISTERED)."
+            )
+        }
+        registerOfferingPricing(offering, provider.id, service.id)
         return Outcome.Success(record)
     }
 
@@ -477,6 +527,21 @@ class ProviderControlPlaneService(
             runtimeSupported = newRuntimeSupported,
             healthStatus = newHealth
         )
+
+        // GOVERNANCE PHASE: validation is a REAL runtime observation — it is
+        // exactly the runtime-validated dimension the radar derives from.
+        record.capabilities.forEach { cap ->
+            emitRadarEvidence(
+                capability = cap,
+                source = com.example.domain.core.radar.EvidenceSource.HEALTH_CHECK,
+                outcome = if (result.isSuccess) com.example.domain.core.radar.EvidenceOutcome.SUCCESS
+                    else com.example.domain.core.radar.EvidenceOutcome.FAILURE,
+                providerId = record.providerId,
+                serviceId = record.serviceId,
+                resourceId = resourceId.value,
+                detail = "تحقق المورد: ${if (result.isSuccess) "ناجح" else "فاشل"} — ${result.message.take(120)}"
+            )
+        }
         return Outcome.Success(result)
     }
 
@@ -497,6 +562,18 @@ class ProviderControlPlaneService(
         // the resolver can no longer resolve it (previously the stale adapter stayed).
         adapters.remove(resourceId)
         runtimeAdapterResolver?.unregister(resourceId)
+        // GOVERNANCE PHASE: explicit operator action = DISABLED evidence.
+        record.capabilities.forEach { cap ->
+            emitRadarEvidence(
+                capability = cap,
+                source = com.example.domain.core.radar.EvidenceSource.OPERATOR_ACTION,
+                outcome = com.example.domain.core.radar.EvidenceOutcome.NEUTRAL,
+                providerId = record.providerId,
+                serviceId = record.serviceId,
+                resourceId = resourceId.value,
+                detail = "عطّل المشغّل المورد (DISABLED)."
+            )
+        }
         return Outcome.Success(Unit)
     }
 
@@ -545,6 +622,71 @@ class ProviderControlPlaneService(
         runtimeAdapterResolver?.unregister(resourceId)
         resourceRecordRepository.deleteResource(resourceId)
         return Outcome.Success(Unit)
+    }
+
+    /**
+     * GOVERNANCE PHASE — emits one real radar evidence observation through the
+     * late-bound sink (no-op when unwired, e.g. in unit tests).
+     */
+    private fun emitRadarEvidence(
+        capability: CapabilityType,
+        source: com.example.domain.core.radar.EvidenceSource,
+        outcome: com.example.domain.core.radar.EvidenceOutcome,
+        providerId: String?,
+        serviceId: String?,
+        resourceId: String? = null,
+        detail: String
+    ) {
+        val sink = radarEvidenceSink ?: return
+        sink(
+            com.example.domain.core.radar.CapabilityEvidence(
+                id = "ev_${java.util.UUID.randomUUID()}",
+                capabilityKey = capability.code,
+                source = source,
+                outcome = outcome,
+                timestampEpochMs = System.currentTimeMillis(),
+                confidence = 0.85f,
+                providerId = providerId,
+                serviceId = serviceId,
+                resourceId = resourceId,
+                detail = detail
+            )
+        )
+    }
+
+    /**
+     * GOVERNANCE PHASE — publishes an offering's published prices as a
+     * MODEL-scope PricingEntry (micro-USD per million tokens, provenance
+     * MODEL_DISCOVERY). Offerings without prices publish NOTHING (billing
+     * class stays UNKNOWN — never guessed).
+     */
+    private fun registerOfferingPricing(
+        offering: ServiceOffering,
+        providerId: String,
+        serviceId: String
+    ) {
+        val publisher = pricingPublisher ?: return
+        val inputUsdPerMillion = offering.pricingInputTokensPerMillion ?: return
+        val outputUsdPerMillion = offering.pricingOutputTokensPerMillion ?: inputUsdPerMillion
+        publisher(
+            com.example.domain.core.budget.PricingEntry(
+                id = "price:${providerId}:${serviceId}:${offering.id}:${offering.discoveredEpochMs}",
+                scope = com.example.domain.core.budget.PricingScope.MODEL,
+                providerId = providerId,
+                serviceId = serviceId,
+                modelId = offering.id,
+                inputPricePerMillion = com.example.domain.core.budget.MoneyAmount.of(
+                    (inputUsdPerMillion * 1_000_000.0).toLong(), "USD"
+                ),
+                outputPricePerMillion = com.example.domain.core.budget.MoneyAmount.of(
+                    (outputUsdPerMillion * 1_000_000.0).toLong(), "USD"
+                ),
+                billingClass = com.example.domain.core.budget.BillingClass.UNKNOWN,
+                pricingVersion = "discovery-${offering.discoveredEpochMs}",
+                effectiveFromEpochMs = offering.discoveredEpochMs,
+                provenance = offering.discoverySource
+            )
+        )
     }
 
     /**

@@ -129,7 +129,14 @@ class OpenAiCompatibleLlmAdapter(
                     val usageJson = json.optJSONObject("usage")
                     val usage = TokenUsage(
                         promptTokens = usageJson?.optInt("prompt_tokens", 0) ?: 0,
-                        completionTokens = usageJson?.optInt("completion_tokens", 0) ?: 0
+                        completionTokens = usageJson?.optInt("completion_tokens", 0) ?: 0,
+                        // GOVERNANCE PHASE: cached + provider-total capture
+                        // (prompt_tokens_details.cached_tokens / total_tokens).
+                        cachedTokens = usageJson?.optJSONObject("prompt_tokens_details")
+                            ?.optInt("cached_tokens", 0) ?: 0,
+                        totalTokens = usageJson?.takeIf { it.has("total_tokens") }
+                            ?.optInt("total_tokens", 0)
+                            ?: ((usageJson?.optInt("prompt_tokens", 0) ?: 0) + (usageJson?.optInt("completion_tokens", 0) ?: 0))
                     )
                     Outcome.Success(
                         LlmResponse(
@@ -174,6 +181,10 @@ class OpenAiCompatibleLlmAdapter(
         val fullText = StringBuilder()
         var promptTokens = 0
         var completionTokens = 0
+        // GOVERNANCE PHASE: cached + provider-total capture + estimate marker.
+        var cachedTokens = 0
+        var providerTotalTokens: Int? = null
+        var usageWasReported = false
         try {
             val body = buildJsonBody(request, stream = true)
             val url = normalizeBaseUrl(baseUrl) + "/chat/completions"
@@ -259,22 +270,38 @@ class OpenAiCompatibleLlmAdapter(
                             }
                         }
                         chunk.optJSONObject("usage")?.let { u ->
+                            usageWasReported = true
                             promptTokens = u.optInt("prompt_tokens", promptTokens)
                             completionTokens = u.optInt("completion_tokens", completionTokens)
+                            cachedTokens = u.optJSONObject("prompt_tokens_details")
+                                ?.optInt("cached_tokens", cachedTokens) ?: cachedTokens
+                            if (u.has("total_tokens")) providerTotalTokens = u.optInt("total_tokens", 0)
                         }
                     }
                 }
 
+                // Heuristic fallback ONLY when the provider reported nothing —
+                // and marked as estimated (never presented as measured usage).
+                val isEstimated = !usageWasReported
                 if (promptTokens == 0) promptTokens = request.messages.sumOf { it.content.length / 4 }
                 if (completionTokens == 0) completionTokens = fullText.length / 4
 
+                // GOVERNANCE PHASE FIX: measured usage only — the fabricated
+                // `30000 - consumed` remaining is gone (REMAINING_UNKNOWN);
+                // ExecutionService enriches with the REAL task budget.
+                val measuredTotal = providerTotalTokens ?: (promptTokens + completionTokens + cachedTokens)
                 emit(
                     ExecutionEvent.UsageBudgetUpdate(
                         executionId = executionId,
                         promptTokens = promptTokens,
                         completionTokens = completionTokens,
-                        totalSessionTokens = promptTokens + completionTokens,
-                        remainingBudgetTokens = 30000 - (promptTokens + completionTokens)
+                        totalSessionTokens = measuredTotal,
+                        remainingBudgetTokens = ExecutionEvent.UsageBudgetUpdate.REMAINING_UNKNOWN,
+                        cachedTokens = cachedTokens,
+                        totalTokens = measuredTotal,
+                        providerId = providerId,
+                        modelId = defaultModel,
+                        isEstimatedUsage = isEstimated
                     )
                 )
                 emit(

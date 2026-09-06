@@ -56,7 +56,20 @@ data class FailoverAttempt(
 /**
  * Resource quota per workspace. Prevents runaway agents from
  * exhausting the global token budget.
+ *
+ * GOVERNANCE PHASE MIGRATION NOTE: this model was never instantiated by any
+ * production code (audit finding). Its concepts are now owned by the
+ * first-class economic governance subsystem and kept ONLY for source
+ * compatibility:
+ *   - monetary ceiling  -> BudgetAllocation (budget_allocations, Room v10)
+ *   - RPM/TPM capacity  -> RateLimitGovernor
+ *   - token execution limits -> TaskBudget.tokenLimit (enforced by the
+ *     orchestrator pre-execution quota gate)
+ * Do NOT build new features on this model.
  */
+@Deprecated(
+    "Superseded by the economic governance subsystem (BudgetAllocation + RateLimitGovernor + TaskBudget). Never instantiated in production."
+)
 data class ResourceQuota(
     val workspaceId: String,
     val maxTokensPerHour: Long = 200_000L,
@@ -68,7 +81,10 @@ data class ResourceQuota(
 
 /**
  * Current quota usage snapshot.
+ *
+ * GOVERNANCE PHASE MIGRATION NOTE: superseded — see [ResourceQuota].
  */
+@Deprecated("Superseded by BudgetStatus / RateLimitStatus from the economic governance subsystem.")
 data class QuotaUsage(
     val workspaceId: String,
     val tokensUsedThisHour: Long,
@@ -80,4 +96,5 @@ data class QuotaUsage(
     val recommendedAction: QuotaAction
 )
 
+@Deprecated("Superseded by BudgetPolicyAction / EconomicGateDecision.")
 enum class QuotaAction { PROCEED, THROTTLE, BLOCK }

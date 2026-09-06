@@ -283,7 +283,16 @@ class RoomTelemetryRepository(
     override fun dimensionSummaries(): Flow<List<DimensionSummary>> =
         snapshotsFlow.map { snapshotMap ->
             snapshotMap.values
-                .filter { it.type == MetricType.LATENCY_HISTOGRAM || it.type == MetricType.COUNTER }
+                // GOVERNANCE PHASE FIX: TOKEN_USAGE and COST_USD snapshots were
+                // previously FILTERED OUT here, so totalPromptTokens /
+                // totalCompletionTokens / totalCostUsd were structurally always 0.
+                .filter {
+                    it.type == MetricType.LATENCY_HISTOGRAM ||
+                        it.type == MetricType.COUNTER ||
+                        it.type == MetricType.TOKEN_USAGE ||
+                        it.type == MetricType.COST_USD ||
+                        it.type == MetricType.FAILURE_RATE
+                }
                 .groupBy { it.dimensions.toKey() }
                 .map { (_, snapshots) ->
                     val first = snapshots.first()
@@ -312,7 +321,11 @@ class RoomTelemetryRepository(
                         p99LatencyMs = p99,
                         totalPromptTokens = snapshots.firstOrNull { it.type == MetricType.TOKEN_USAGE && it.dimensions.actionType == "PROMPT" }?.sum ?: 0L,
                         totalCompletionTokens = snapshots.firstOrNull { it.type == MetricType.TOKEN_USAGE && it.dimensions.actionType == "COMPLETION" }?.sum ?: 0L,
-                        totalCostUsd = (snapshots.firstOrNull { it.type == MetricType.COST_USD }?.sum ?: 0L) / 10000.0,
+                        // GOVERNANCE PHASE FIX: COST_USD samples are stored in
+                        // micro-USD (1e-6 USD per TelemetryService.recordCost
+                        // contract) — the previous divisor was 10000.0, which
+                        // mis-scaled every cost by a factor of 100.
+                        totalCostUsd = (snapshots.firstOrNull { it.type == MetricType.COST_USD }?.sum ?: 0L) / 1_000_000.0,
                         lastUpdatedEpochMs = snapshots.maxOf { it.lastUpdatedEpochMs }
                     )
                 }

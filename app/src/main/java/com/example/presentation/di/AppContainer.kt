@@ -173,7 +173,10 @@ class AppContainer(context: Context) {
     val memoryVectorStore: RoomVectorStoreAdapter by lazy {
         RoomVectorStoreAdapter(
             memoryDao = database.memoryDao(),
-            embeddingProvider = localEmbeddingRouter
+            embeddingProvider = localEmbeddingRouter,
+            // GOVERNANCE PHASE: workspace-scoped memory writes AND reads
+            // (fixes the cross-workspace memory leak — see adapter KDoc).
+            workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
         )
     }
 
@@ -339,7 +342,20 @@ class AppContainer(context: Context) {
             // FIX F-1: bridge materialized/validated adapters into the SAME
             // RuntimeAdapterResolver consumed by ExecutionService & RAG.
             runtimeAdapterResolver = componentRegistry.runtimeAdapterResolver
-        )
+        ).also { controlPlane ->
+            // GOVERNANCE PHASE: provider/resource lifecycle transitions emit
+            // REAL radar evidence through the late-bound sink (no second bus).
+            controlPlane.radarEvidenceSink = { evidence ->
+                capabilityRadarService.recordEvidence(evidence)
+            }
+            // GOVERNANCE PHASE: offering pricing discovered by the control
+            // plane becomes versioned MODEL-scope pricing entries.
+            controlPlane.pricingPublisher = { entry ->
+                applicationScope.launch {
+                    runCatching { economicGovernanceService.upsertPricing(entry) }
+                }
+            }
+        }
     }
 
     // --- CBR-MDP Decision Intelligence ---
@@ -450,6 +466,65 @@ class AppContainer(context: Context) {
         )
     }
 
+    // ========================================================================
+    // Governance Phase — Capability Radar + Economic Budget (first-class
+    // domain subsystems: persistence -> services -> runtime -> decision ->
+    // telemetry -> workspace -> UI; the observatory screen is the LAST hop.)
+    // ========================================================================
+
+    /** Radar persistence (Room v10: evidence, states, changes, recommendations). */
+    val capabilityRadarPersistence: com.example.domain.ports.radar.CapabilityRadarPersistencePort by lazy {
+        com.example.infrastructure.persistence.radar.RoomCapabilityRadarStore(
+            evidenceDao = database.capabilityEvidenceDao(),
+            stateDao = database.radarCapabilityStateDao(),
+            changeDao = database.capabilityChangeDao(),
+            recommendationDao = database.radarRecommendationDao()
+        )
+    }
+
+    /** Economic persistence (Room v10: pricing, cost ledger, allocations). */
+    val economicPersistence: com.example.infrastructure.persistence.budget.RoomEconomicStore by lazy {
+        com.example.infrastructure.persistence.budget.RoomEconomicStore(
+            pricingDao = database.pricingEntryDao(),
+            ledgerDao = database.costLedgerEntryDao(),
+            allocationDao = database.budgetAllocationDao()
+        )
+    }
+
+    /**
+     * The operational Capability & Evolution Radar: evidence-derived states,
+     * persisted, event-driven from the SAME execution bus telemetry uses.
+     */
+    val capabilityRadarService: com.example.application.radar.CapabilityRadarService by lazy {
+        com.example.application.radar.CapabilityRadarService(
+            persistence = capabilityRadarPersistence,
+            resourceSnapshotProvider = { durableResourceRegistryService.listResources() },
+            embeddingSemanticProvisioned = { onnxSemanticEmbeddingAdapter.isProvisioned },
+            scope = applicationScope
+        )
+    }
+
+    /** RPM/TPM governor (in-memory windows; limits from config/discovery). */
+    val rateLimitGovernor: com.example.application.budget.RateLimitGovernor by lazy {
+        com.example.application.budget.RateLimitGovernor()
+    }
+
+    /**
+     * The economic governance facade: pricing resolution, cost ledger,
+     * hierarchical budgets with enforceable policies, rate-limit gate,
+     * pre-execution authorization and post-execution accounting.
+     */
+    val economicGovernanceService: com.example.application.budget.EconomicGovernanceService by lazy {
+        com.example.application.budget.EconomicGovernanceService(
+            pricingRepository = economicPersistence,
+            costLedger = economicPersistence,
+            allocationRepository = economicPersistence,
+            rateLimitGovernor = rateLimitGovernor,
+            telemetry = telemetryService,
+            scope = applicationScope
+        )
+    }
+
     // --- Decision & Execution ---
     val decisionService: DecisionService by lazy {
         DecisionService(
@@ -459,7 +534,10 @@ class AppContainer(context: Context) {
             userPreferenceRepository = generalizedUserPreferenceRepository,
             // REAL delegation candidates: the planner consults the registered
             // agent catalog when the current agent lacks required capabilities.
-            agentCatalog = { componentRegistry.listAgents() }
+            agentCatalog = { componentRegistry.listAgents() },
+            // GOVERNANCE PHASE: pre-execution economic + capability gates.
+            economicGovernance = economicGovernanceService,
+            capabilityRadar = capabilityRadarService
         )
     }
 
@@ -490,8 +568,14 @@ class AppContainer(context: Context) {
             executionService = executionService,
             observationService = observationService,
             outcomeService = outcomeService,
-            taskDao = database.taskDao()
+            taskDao = database.taskDao(),
+            // GOVERNANCE PHASE: economic governance (token quota gate +
+            // usage accounting into the cost ledger).
+            economicGovernanceService = economicGovernanceService
         ).also { orchestrator ->
+            // GOVERNANCE PHASE: workspace scoping for accounting/evidence/
+            // decision context.
+            orchestrator.workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
             // Delegation executor: child tasks run through the same closed
             // loop (DECIDE → EXECUTE → OBSERVE), so children persist their
             // own task rows, emit their own traces, and honour the same
@@ -510,6 +594,18 @@ class AppContainer(context: Context) {
             telemetryService.subscribeToExecutionEvents(
                 orchestrator.executionEventPublisher
             )
+            // GOVERNANCE PHASE: the radar subscribes to the SAME bus (no
+            // second event bus) — execution outcomes become capability
+            // evidence.
+            capabilityRadarService.subscribeToExecutionEvents(
+                orchestrator.executionEventPublisher
+            )
+            capabilityRadarService.workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+            // GOVERNANCE PHASE: rate-limit encounters from the execution
+            // layer close the RPM/TPM windows in the governor.
+            executionService.rateLimitRecorder = { providerId, modelId, resourceId, _, retryAfterMs ->
+                economicGovernanceService.recordRateLimitEncounter(providerId, modelId, resourceId, retryAfterMs)
+            }
             // Security governance wiring (audit 2026 fix): tool/MCP/delegation
             // permission checks are enforced through the permission service.
             executionService.permissionGrantService = permissionGrantService
@@ -572,7 +668,13 @@ class AppContainer(context: Context) {
         )
     }
 
-    val telemetryService: TelemetryService by lazy { TelemetryService(telemetryPort) }
+    val telemetryService: TelemetryService by lazy {
+        TelemetryService(telemetryPort).also { service ->
+            // GOVERNANCE PHASE: every metric row carries the real workspace
+            // attribution (previously always NULL — global metrics).
+            service.workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+        }
+    }
 
     val memoryLifecycleService: MemoryLifecycleService by lazy {
         MemoryLifecycleService(
@@ -693,6 +795,35 @@ class AppContainer(context: Context) {
             // resumable list was computed and then discarded.
             runCatching { agentOrchestrator.resumeInterruptedTasks() }
             runCatching { workflowPersistenceService.resumable() } // surfaces resumable workflows for the UI/log
+            // GOVERNANCE PHASE: derive the initial radar snapshot AFTER the
+            // registry is eager-loaded (persisted capability states survive
+            // restarts; this refreshes them against live resource facts).
+            runCatching {
+                capabilityRadarService.deriveSnapshot(
+                    workspaceId = workspaceRuntimeService.requireActiveWorkspaceId(),
+                    networkPolicy = com.example.domain.core.network.NetworkPolicy.HYBRID,
+                    isNetworkAvailable = networkMonitor.isNetworkAvailable.value
+                )
+            }
+            // GOVERNANCE PHASE: ensure a SYSTEM-scope budget policy exists so
+            // budget governance has defined (non-fabricated) semantics. NO
+            // monetary amount is seeded — an allocation with UNKNOWN amount
+            // means "track cost, no spending authority configured" until the
+            // operator sets one from the observatory screen.
+            runCatching {
+                val systemScope = com.example.domain.core.budget.BudgetScope(
+                    com.example.domain.core.budget.BudgetScopeType.SYSTEM, "platform"
+                )
+                if (economicGovernanceService.budgetStatusFor(systemScope).allocation == null) {
+                    economicGovernanceService.setAllocation(
+                        scope = systemScope,
+                        allocated = com.example.domain.core.budget.MoneyAmount.unknown("USD"),
+                        policy = com.example.domain.core.budget.BudgetPolicy(
+                            actions = listOf(com.example.domain.core.budget.BudgetPolicyAction.SOFT_LIMIT)
+                        )
+                    )
+                }
+            }
         }
     }
 }
@@ -721,7 +852,11 @@ class MainViewModelFactory(
                 workspaceContextEngine = appContainer.workspaceContextEngine,
                 telemetryPort = appContainer.telemetryPort,
                 networkMonitorProvider = appContainer.networkMonitor,
-                appContext = appContainer.appContext
+                appContext = appContainer.appContext,
+                // GOVERNANCE PHASE — radar + economic governance surfaces for
+                // the GovernanceObservatoryScreen.
+                capabilityRadarService = appContainer.capabilityRadarService,
+                economicGovernanceService = appContainer.economicGovernanceService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

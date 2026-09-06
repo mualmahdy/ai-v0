@@ -94,7 +94,17 @@ class MainViewModel(
      */
     private val networkMonitorProvider: com.example.infrastructure.network.NetworkMonitor? = null,
     /** App context for the foreground execution shell (audit 2026 fix). */
-    private val appContext: android.content.Context? = null
+    private val appContext: android.content.Context? = null,
+    /**
+     * GOVERNANCE PHASE — the operational capability radar (evidence-derived,
+     * persisted). Nullable keeps existing constructor call sites compatible.
+     */
+    private val capabilityRadarService: com.example.application.radar.CapabilityRadarService? = null,
+    /**
+     * GOVERNANCE PHASE — economic governance facade (pricing, ledger,
+     * budgets, rate limits). Nullable keeps existing call sites compatible.
+     */
+    private val economicGovernanceService: com.example.application.budget.EconomicGovernanceService? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UiState())
@@ -135,9 +145,138 @@ class MainViewModel(
         observeSubsystems()
         loadInitialData()
         observeWorkspace()
+        // GOVERNANCE PHASE: subscribe the observatory to the backend-truth
+        // radar flows (Room-backed, survive process death).
+        observeGovernance()
+        refreshGovernance()
         // Phase 4 — first-run bootstrap: seeds local embedding + multi-source
         // search + Gemini provider records (idempotent, no network for in-process).
         providerControlPlaneService.launchBootstrapDefaults()
+    }
+
+    /**
+     * GOVERNANCE PHASE — observatory data sources: radar statuses /
+     * recommendations / changes flow straight from Room; budget + ledger
+     * refresh on demand (suspend queries). All backend truth, no fabrication.
+     */
+    private fun observeGovernance() {
+        val radar = capabilityRadarService ?: return
+        viewModelScope.launch {
+            runCatching {
+                workspaceRuntimeService.activeWorkspace.collect { workspace ->
+                    val wsId = workspace?.id
+                    radar.observeCapabilityStatuses(wsId).collect { statuses ->
+                        _uiState.update { it.copy(radarCapabilityStatuses = statuses) }
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            runCatching {
+                workspaceRuntimeService.activeWorkspace.collect { workspace ->
+                    val wsId = workspace?.id
+                    radar.observeRecommendations(wsId).collect { recos ->
+                        _uiState.update { it.copy(radarRecommendations = recos) }
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            runCatching {
+                workspaceRuntimeService.activeWorkspace.collect { workspace ->
+                    val wsId = workspace?.id
+                    radar.observeChanges(wsId).collect { changes ->
+                        _uiState.update { it.copy(radarChanges = changes) }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * GOVERNANCE PHASE — on-demand refresh: derives a fresh radar snapshot
+     * (evidence + registry facts) and reloads the budget/ledger summaries
+     * for the active workspace.
+     */
+    fun refreshGovernance() {
+        viewModelScope.launch {
+            val wsId = workspaceRuntimeService.requireActiveWorkspaceId()
+            val netAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: true
+            runCatching {
+                val snapshot = capabilityRadarService?.deriveSnapshot(
+                    workspaceId = wsId,
+                    networkPolicy = _uiState.value.networkPolicy,
+                    isNetworkAvailable = netAvailable
+                )
+                if (snapshot != null) {
+                    _uiState.update {
+                        it.copy(
+                            radarCapabilityStatuses = snapshot.capabilities,
+                            radarRecommendations = snapshot.recommendations,
+                            radarChanges = snapshot.changes,
+                            radarSnapshotTakenAtMs = snapshot.takenAtEpochMs
+                        )
+                    }
+                }
+            }
+            runCatching {
+                val economics = economicGovernanceService ?: return@launch
+                val status = economics.workspaceBudgetSummary(wsId)
+                val recent = economics.recentLedgerForWorkspace(wsId, limit = 25)
+                val tokens = economics.tokensConsumedForWorkspace(wsId)
+                _uiState.update {
+                    it.copy(
+                        workspaceBudgetStatus = status,
+                        costLedgerRecent = recent,
+                        workspaceTokensConsumed = tokens
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * GOVERNANCE PHASE — set the workspace monetary budget allocation (USD).
+     * Policy: HARD_LIMIT + warn at 80% (enforced by the decision gate).
+     */
+    fun setWorkspaceBudgetAllocationUsd(amountUsd: Double) {
+        val economics = economicGovernanceService ?: return
+        _uiState.update { it.copy(isSavingBudgetAllocation = true) }
+        viewModelScope.launch {
+            runCatching {
+                val scope = com.example.domain.core.budget.BudgetScope(
+                    com.example.domain.core.budget.BudgetScopeType.WORKSPACE,
+                    workspaceRuntimeService.requireActiveWorkspaceId()
+                )
+                economics.setAllocation(
+                    scope = scope,
+                    allocated = com.example.domain.core.budget.MoneyAmount.of(
+                        (amountUsd * 1_000_000.0).toLong(), "USD"
+                    ),
+                    policy = com.example.domain.core.budget.BudgetPolicy(
+                        actions = listOf(
+                            com.example.domain.core.budget.BudgetPolicyAction.HARD_LIMIT,
+                            com.example.domain.core.budget.BudgetPolicyAction.AUTO_LOCAL_FALLBACK
+                        ),
+                        warnThresholdRatio = 0.8f
+                    )
+                )
+            }
+            _uiState.update {
+                it.copy(
+                    isSavingBudgetAllocation = false,
+                    budgetAllocationInputUsd = "%.2f".format(amountUsd)
+                )
+            }
+            refreshGovernance()
+        }
+    }
+
+    /** Dismisses a radar recommendation (persisted). */
+    fun dismissRadarRecommendation(id: String) {
+        viewModelScope.launch {
+            runCatching { capabilityRadarService?.dismissRecommendation(id) }
+        }
     }
 
     /**

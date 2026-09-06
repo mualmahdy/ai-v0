@@ -46,11 +46,19 @@ data class LlmRequest(
 
 /**
  * Exact token count telemetry.
+ *
+ * GOVERNANCE PHASE: `cachedTokens` and an explicit `totalTokens` (the
+ * provider's own figure when published) are now captured where the provider
+ * reports them. `isEstimatedUsage` marks a chars/4 heuristic substitution.
+ * `estimatedCostUsd` remains a legacy display hint — authoritative cost
+ * lives in the economic governance cost ledger, never here.
  */
 data class TokenUsage(
     val promptTokens: Int = 0,
     val completionTokens: Int = 0,
-    val totalTokens: Int = promptTokens + completionTokens,
+    val cachedTokens: Int = 0,
+    val totalTokens: Int = promptTokens + completionTokens + cachedTokens,
+    val isEstimatedUsage: Boolean = false,
     val estimatedCostUsd: Double = 0.0
 )
 

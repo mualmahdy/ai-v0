@@ -109,13 +109,22 @@ class OpenAiCompatibleAdapter(
                 }
 
                 val usageObj = json.optJSONObject("usage")
+                val usageWasReported = usageObj != null
                 val promptTokens = usageObj?.optInt("prompt_tokens") ?: (request.messages.sumOf { it.content.length / 4 })
                 val completionTokens = usageObj?.optInt("completion_tokens") ?: (text.length / 4)
 
                 Outcome.Success(
                     value = LlmResponse(
                         text = text,
-                        usage = TokenUsage(promptTokens, completionTokens),
+                        usage = TokenUsage(
+                            promptTokens = promptTokens,
+                            completionTokens = completionTokens,
+                            cachedTokens = usageObj?.optJSONObject("prompt_tokens_details")
+                                ?.optInt("cached_tokens", 0) ?: 0,
+                            totalTokens = usageObj?.takeIf { it.has("total_tokens") }
+                                ?.optInt("total_tokens", 0) ?: (promptTokens + completionTokens),
+                            isEstimatedUsage = !usageWasReported
+                        ),
                         modelId = modelName
                     ),
                     metadata = OutcomeMetadata(durationMs = duration, tokensConsumed = promptTokens + completionTokens, providerId = providerId)
@@ -148,6 +157,10 @@ class OpenAiCompatibleAdapter(
         val fullText = StringBuilder()
         var promptTokens = 0
         var completionTokens = 0
+        // GOVERNANCE PHASE: cached/total capture + estimate marker.
+        var cachedTokens = 0
+        var providerTotalTokens: Int? = null
+        var usageWasReported = false
 
         try {
             val jsonBody = buildJsonBody(request, stream = true)
@@ -213,8 +226,12 @@ class OpenAiCompatibleAdapter(
                             }
                             // Some endpoints stream usage in the final chunk
                             chunkJson.optJSONObject("usage")?.let { u ->
+                                usageWasReported = true
                                 promptTokens = u.optInt("prompt_tokens", promptTokens)
                                 completionTokens = u.optInt("completion_tokens", completionTokens)
+                                cachedTokens = u.optJSONObject("prompt_tokens_details")
+                                    ?.optInt("cached_tokens", cachedTokens) ?: cachedTokens
+                                if (u.has("total_tokens")) providerTotalTokens = u.optInt("total_tokens", 0)
                             }
                         } catch (_: org.json.JSONException) {
                             // Skip malformed chunks — common with some providers
@@ -222,15 +239,25 @@ class OpenAiCompatibleAdapter(
                     }
                 }
 
+                val isEstimated = !usageWasReported
                 if (promptTokens == 0) promptTokens = request.messages.sumOf { it.content.length / 4 }
                 if (completionTokens == 0) completionTokens = fullText.length / 4
 
+                // GOVERNANCE PHASE FIX: measured usage only; remaining budget is
+                // enriched downstream from the REAL task budget (no fabricated
+                // 30000 baseline anymore).
+                val measuredTotal = providerTotalTokens ?: (promptTokens + completionTokens + cachedTokens)
                 emit(ExecutionEvent.UsageBudgetUpdate(
                     executionId = executionId,
                     promptTokens = promptTokens,
                     completionTokens = completionTokens,
-                    totalSessionTokens = promptTokens + completionTokens,
-                    remainingBudgetTokens = 30000 - (promptTokens + completionTokens)
+                    totalSessionTokens = measuredTotal,
+                    remainingBudgetTokens = ExecutionEvent.UsageBudgetUpdate.REMAINING_UNKNOWN,
+                    cachedTokens = cachedTokens,
+                    totalTokens = measuredTotal,
+                    providerId = providerId,
+                    modelId = modelName,
+                    isEstimatedUsage = isEstimated
                 ))
 
                 val duration = System.currentTimeMillis() - startTime

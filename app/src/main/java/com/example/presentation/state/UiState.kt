@@ -21,6 +21,12 @@ import com.example.domain.core.provider.ProviderService
 import com.example.domain.core.provider.ServiceConfiguration
 import com.example.domain.core.provider.offering.ServiceOffering
 import com.example.domain.core.radar.RadarItem
+import com.example.domain.core.radar.CapabilityChangeRecord
+import com.example.domain.core.radar.RadarCapabilityStatus
+import com.example.domain.core.radar.RadarRecommendation
+import com.example.domain.core.budget.BudgetStatus
+import com.example.domain.core.budget.UsageCostRecord
+import com.example.domain.core.radar.RadarSnapshot
 import com.example.domain.core.rag.AssembledRagContext
 import com.example.domain.core.rag.KnowledgeDocument
 import com.example.domain.core.resource.ResourceRecord
@@ -36,6 +42,7 @@ enum class ActiveNavigationTab(val displayName: String, val iconName: String) {
     TASKS_WORKFLOWS("المهام وخطط العمل", "ic_workflow"),
     DECISION_INTELLIGENCE("ذكاء القرار (CBR-MDP)", "ic_decision"),
     RADAR_EVOLUTION("رادار التطور", "ic_radar"),
+    GOVERNANCE("مرصد الحوكمة والاستدامة", "ic_governance"),
     EXTENSIONS("الملحقات والمهارات", "ic_extensions"),
     MODELS_CAPABILITIES("المزودون والنماذج", "ic_models"),
     KNOWLEDGE_RAG("المعرفة (RAG)", "ic_knowledge"),
@@ -103,6 +110,19 @@ data class UiState(
     val radarItems: List<RadarItem> = emptyList(),
     val evolutionCandidates: List<EvolutionCandidate> = emptyList(),
     val isRadarRefreshing: Boolean = false,
+
+    // GOVERNANCE PHASE — Capability Radar + Economic Budget observatory.
+    // Every field below is backend-truth (Room-backed flows); nothing here
+    // is fabricated or UI-assumed.
+    val radarCapabilityStatuses: List<RadarCapabilityStatus> = emptyList(),
+    val radarRecommendations: List<RadarRecommendation> = emptyList(),
+    val radarChanges: List<CapabilityChangeRecord> = emptyList(),
+    val radarSnapshotTakenAtMs: Long? = null,
+    val workspaceBudgetStatus: BudgetStatus? = null,
+    val costLedgerRecent: List<UsageCostRecord> = emptyList(),
+    val workspaceTokensConsumed: Long = 0L,
+    val budgetAllocationInputUsd: String = "",
+    val isSavingBudgetAllocation: Boolean = false,
 
     // Extensions & Ecosystem
     val skills: List<SkillManifest> = emptyList(),

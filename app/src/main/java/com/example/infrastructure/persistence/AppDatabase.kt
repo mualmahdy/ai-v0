@@ -112,6 +112,17 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
  * last_decay_evaluated_at_epoch_ms) so the new MemoryLifecycleService can
  * decay / consolidate / scope memories per workspace and per agent.
  * Purely additive — no existing column type changed, so v7 data survives.
+ *
+ * Governance Phase (Intelligence Governance & Sustainability): v9 → v10 adds
+ * SEVEN new tables for the two first-class domain subsystems:
+ *   - Capability & Evolution Radar: capability_evidence (append-only real
+ *     observations), radar_capability_states (derived state per workspace),
+ *     capability_changes (evolution log), radar_recommendations.
+ *   - Token/Economic Budget Governance: pricing_entries (versioned unit
+ *     prices at provider/service/model scopes), cost_ledger_entries
+ *     (usage+cost accounting with full attribution), budget_allocations
+ *     (monetary spending authority with enforceable policies).
+ * Purely additive — no existing table is altered.
  */
 @Database(
     entities = [
@@ -152,9 +163,17 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         PolicyVersionEntity::class,
         AgentMemoryNamespaceEntity::class,
         ToolLifecycleStateEntity::class,
-        ToolHealthSnapshotEntity::class
+        ToolHealthSnapshotEntity::class,
+        // Governance Phase — Capability Radar + Economic Budget
+        com.example.infrastructure.persistence.entities.CapabilityEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.RadarCapabilityStateEntity::class,
+        com.example.infrastructure.persistence.entities.CapabilityChangeEntity::class,
+        com.example.infrastructure.persistence.entities.RadarRecommendationEntity::class,
+        com.example.infrastructure.persistence.entities.PricingEntryEntity::class,
+        com.example.infrastructure.persistence.entities.CostLedgerEntryEntity::class,
+        com.example.infrastructure.persistence.entities.BudgetAllocationEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -208,6 +227,17 @@ abstract class AppDatabase : RoomDatabase() {
 
     // Phase 5 — Agent memory namespaces
     abstract fun agentMemoryNamespaceDao(): AgentMemoryNamespaceDao
+
+    // Governance Phase — Capability Radar persistence
+    abstract fun capabilityEvidenceDao(): com.example.infrastructure.persistence.dao.CapabilityEvidenceDao
+    abstract fun radarCapabilityStateDao(): com.example.infrastructure.persistence.dao.RadarCapabilityStateDao
+    abstract fun capabilityChangeDao(): com.example.infrastructure.persistence.dao.CapabilityChangeDao
+    abstract fun radarRecommendationDao(): com.example.infrastructure.persistence.dao.RadarRecommendationDao
+
+    // Governance Phase — Economic budget persistence
+    abstract fun pricingEntryDao(): com.example.infrastructure.persistence.dao.PricingEntryDao
+    abstract fun costLedgerEntryDao(): com.example.infrastructure.persistence.dao.CostLedgerEntryDao
+    abstract fun budgetAllocationDao(): com.example.infrastructure.persistence.dao.BudgetAllocationDao
 
     companion object {
         @Volatile
@@ -950,6 +980,179 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v9 → v10 — Governance Phase (Capability Radar + Economic Budget).
+         *
+         * Adds seven tables (all additive; existing v9 data untouched):
+         *   capability_evidence, radar_capability_states, capability_changes,
+         *   radar_recommendations, pricing_entries, cost_ledger_entries,
+         *   budget_allocations.
+         */
+        private val MIGRATION_9_TO_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS capability_evidence (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        capabilityKey TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        confidence REAL NOT NULL,
+                        providerId TEXT,
+                        serviceId TEXT,
+                        modelId TEXT,
+                        resourceId TEXT,
+                        executionId TEXT,
+                        workspaceId TEXT,
+                        agentId TEXT,
+                        detail TEXT,
+                        timestampEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capability_evidence_capabilityKey_timestampEpochMs ON capability_evidence(capabilityKey, timestampEpochMs)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capability_evidence_workspaceId ON capability_evidence(workspaceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capability_evidence_executionId ON capability_evidence(executionId)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS radar_capability_states (
+                        capabilityKey TEXT NOT NULL,
+                        workspaceId TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        dimensionsJson TEXT NOT NULL,
+                        health TEXT NOT NULL,
+                        trend TEXT NOT NULL,
+                        evidenceCount INTEGER NOT NULL,
+                        lastEvidenceEpochMs INTEGER,
+                        contributingResourceIdsJson TEXT NOT NULL,
+                        rationale TEXT NOT NULL,
+                        derivedAtEpochMs INTEGER NOT NULL,
+                        PRIMARY KEY(capabilityKey, workspaceId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_radar_capability_states_workspaceId ON radar_capability_states(workspaceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_radar_capability_states_state ON radar_capability_states(state)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS capability_changes (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        capabilityKey TEXT NOT NULL,
+                        workspaceId TEXT,
+                        fromState TEXT NOT NULL,
+                        toState TEXT NOT NULL,
+                        changeType TEXT NOT NULL,
+                        evidenceId TEXT,
+                        detail TEXT NOT NULL,
+                        detectedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capability_changes_workspaceId_detectedAtEpochMs ON capability_changes(workspaceId, detectedAtEpochMs)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capability_changes_capabilityKey ON capability_changes(capabilityKey)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS radar_recommendations (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        capabilityKey TEXT NOT NULL,
+                        workspaceId TEXT,
+                        type TEXT NOT NULL,
+                        priority TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        actionHint TEXT,
+                        supportingEvidenceIdsJson TEXT NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        isDismissed INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_radar_recommendations_workspaceId_isDismissed ON radar_recommendations(workspaceId, isDismissed)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_radar_recommendations_capabilityKey ON radar_recommendations(capabilityKey)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS pricing_entries (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        scopeType TEXT NOT NULL,
+                        providerId TEXT NOT NULL,
+                        serviceId TEXT,
+                        modelId TEXT,
+                        inputPriceMicroPerMillion INTEGER,
+                        outputPriceMicroPerMillion INTEGER,
+                        cachedInputPriceMicroPerMillion INTEGER,
+                        currency TEXT NOT NULL,
+                        billingClass TEXT NOT NULL,
+                        pricingVersion TEXT NOT NULL,
+                        effectiveFromEpochMs INTEGER NOT NULL,
+                        effectiveToEpochMs INTEGER,
+                        provenance TEXT NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pricing_entries_providerId ON pricing_entries(providerId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pricing_entries_scopeType_providerId_serviceId_modelId ON pricing_entries(scopeType, providerId, serviceId, modelId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_pricing_entries_effectiveFromEpochMs ON pricing_entries(effectiveFromEpochMs)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS cost_ledger_entries (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        executionId TEXT NOT NULL,
+                        taskId TEXT,
+                        workspaceId TEXT,
+                        agentId TEXT,
+                        providerId TEXT,
+                        serviceId TEXT,
+                        modelId TEXT,
+                        resourceId TEXT,
+                        inputTokens INTEGER NOT NULL,
+                        outputTokens INTEGER NOT NULL,
+                        cachedTokens INTEGER NOT NULL,
+                        totalTokens INTEGER NOT NULL,
+                        isEstimate INTEGER NOT NULL,
+                        appliedInputPriceMicroPerMillion INTEGER,
+                        appliedOutputPriceMicroPerMillion INTEGER,
+                        appliedCachedInputPriceMicroPerMillion INTEGER,
+                        appliedPricingVersion TEXT,
+                        costAmountMicro INTEGER,
+                        currency TEXT NOT NULL,
+                        costStatus TEXT NOT NULL,
+                        billingClass TEXT NOT NULL,
+                        timestampEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cost_ledger_entries_workspaceId_timestampEpochMs ON cost_ledger_entries(workspaceId, timestampEpochMs)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cost_ledger_entries_executionId ON cost_ledger_entries(executionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cost_ledger_entries_providerId ON cost_ledger_entries(providerId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cost_ledger_entries_taskId ON cost_ledger_entries(taskId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cost_ledger_entries_agentId ON cost_ledger_entries(agentId)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS budget_allocations (
+                        scopeType TEXT NOT NULL,
+                        scopeId TEXT NOT NULL,
+                        allocatedAmountMicro INTEGER NOT NULL,
+                        currency TEXT NOT NULL,
+                        policyActionsCsv TEXT NOT NULL,
+                        warnThresholdRatio REAL NOT NULL,
+                        policyNote TEXT,
+                        isActive INTEGER NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL,
+                        PRIMARY KEY(scopeType, scopeId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_budget_allocations_scopeType ON budget_allocations(scopeType)")
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -961,6 +1164,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_6_TO_7,
             MIGRATION_7_TO_8,
             MIGRATION_8_TO_9,
+            MIGRATION_9_TO_10,
         )
 
 

@@ -42,7 +42,13 @@ import java.util.UUID
  */
 class TelemetryService(
     private val telemetryPort: TelemetryPort,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    /**
+     * GOVERNANCE PHASE FIX (workspace isolation): the active workspace id —
+     * previously `MetricDimensions.workspaceId` was NEVER populated, so all
+     * metric rows were globally scoped. Late-bound wiring (AppContainer).
+     */
+    var workspaceIdProvider: (() -> String?)? = null
 ) {
 
     /** Standard counter increment. */
@@ -208,7 +214,9 @@ class TelemetryService(
     private suspend fun handle(event: ExecutionEvent) {
         val dims = MetricDimensions(
             executionId = event.executionId,
-            sessionId = null
+            sessionId = null,
+            // GOVERNANCE PHASE: real workspace attribution on every metric row.
+            workspaceId = runCatching { workspaceIdProvider?.invoke() }.getOrNull()
         )
         when (event) {
             is ExecutionEvent.Started -> {
@@ -330,7 +338,44 @@ class TelemetryService(
                     dims,
                     promptTokens = event.promptTokens,
                     completionTokens = event.completionTokens,
-                    providerId = "unknown"
+                    // GOVERNANCE PHASE FIX: real provider attribution
+                    // (previously the hard-coded string "unknown").
+                    providerId = event.providerId ?: "unknown"
+                )
+            }
+            is ExecutionEvent.BudgetGateDecision -> {
+                incrementCounter(
+                    "BUDGET_GATE_${event.decision}",
+                    dims.copy(providerId = event.providerId)
+                )
+                if (event.decision == "DENIED") {
+                    recordAudit(
+                        AuditSeverity.WARN,
+                        actor = "economic_governance",
+                        action = "budget_gate_denied",
+                        resourceType = "execution",
+                        resourceId = event.executionId,
+                        decision = "DENY",
+                        reason = event.reason,
+                        workspaceId = dims.workspaceId
+                    )
+                }
+            }
+            is ExecutionEvent.CostRecorded -> {
+                // Ledger rows already persisted by EconomicGovernanceService;
+                // here we keep the metrics surface in sync (COST_USD only for
+                // USD — no silent currency normalization).
+                if (event.costAmountMicro != null && event.currency == "USD") {
+                    recordCost(
+                        dims.copy(providerId = event.providerId),
+                        costMicroUsd = event.costAmountMicro
+                    )
+                }
+            }
+            is ExecutionEvent.RateLimitEncountered -> {
+                recordFailure(
+                    dims.copy(providerId = event.providerId, actionType = "RATE_LIMITED"),
+                    "RATE_LIMIT_ENCOUNTERED"
                 )
             }
             is ExecutionEvent.Completed -> {

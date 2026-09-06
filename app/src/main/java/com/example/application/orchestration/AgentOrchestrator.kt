@@ -3,12 +3,14 @@ package com.example.application.orchestration
 import com.example.application.decision.DecisionService
 import com.example.application.execution.ExecutionResult
 import com.example.application.execution.ExecutionService
+import com.example.application.budget.EconomicGovernanceService
 import com.example.application.observation.ObservationService
 import com.example.application.outcome.OutcomeService
 import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
 import com.example.domain.core.DegradedReason
 import com.example.domain.core.Outcome
+import com.example.domain.core.budget.UsageAccountingInput
 import com.example.domain.core.agent.AgentDefinition
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
@@ -63,7 +65,21 @@ class AgentOrchestrator(
     private val outcomeService: OutcomeService = OutcomeService(),
     private val taskDao: TaskDao? = null,
     private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
-    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    /**
+     * GOVERNANCE PHASE — the economic governance facade. When present the
+     * orchestrator (a) enforces the TASK-scope token QUOTA (execution limit,
+     * distinct from monetary budget), (b) accounts every executed action's
+     * usage into the persistent cost ledger, and (c) surfaces budget-gate
+     * verdicts on the event bus. Null = legacy behavior (tests).
+     */
+    private val economicGovernanceService: EconomicGovernanceService? = null,
+    /**
+     * GOVERNANCE PHASE — active workspace provider for correct scoping of
+     * accounting, evidence, and decision context. Late-bound by the
+     * AppContainer (avoids a constructor dependency cycle).
+     */
+    var workspaceIdProvider: (() -> String?)? = null
 ) {
 
     /**
@@ -280,7 +296,20 @@ class AgentOrchestrator(
         val startTime = System.currentTimeMillis()
 
         // 0. Persist Initial Task State in Room DB
-        var currentTask = task.copy(state = TaskLifecycleState.RUNNING)
+        // GOVERNANCE PHASE: stamp the active workspace into the task parameters
+        // so the decision context, economic gate, and radar evidence scope
+        // correctly (previously the workspace never reached this layer).
+        val workspaceId = workspaceIdProvider?.invoke()
+        var currentTask = if (workspaceId != null && task.input.parameters["workspaceId"] == null) {
+            task.copy(
+                state = TaskLifecycleState.RUNNING,
+                input = task.input.copy(
+                    parameters = task.input.parameters + ("workspaceId" to workspaceId)
+                )
+            )
+        } else {
+            task.copy(state = TaskLifecycleState.RUNNING)
+        }
         persistTaskInitial(currentTask, agent)
 
         val maxSteps = (task.constraints.maxRetries + 4).coerceIn(3, 8)
@@ -432,6 +461,95 @@ class AgentOrchestrator(
                 )
             )
 
+            // ------------------------------------------------------------
+            // GOVERNANCE PHASE — PRE-EXECUTION TOKEN QUOTA GATE (execution
+            // limit enforcement). TaskBudget.tokenLimit is the TOKEN QUOTA
+            // (migration of the legacy tokenBudget concept): exceeding it now
+            // STOPS further paid actions instead of silently continuing.
+            // The monetary budget is enforced separately (DecisionService
+            // economic gate). Security's own session ceiling is ALSO enforced
+            // (validateTokenBudget was previously dead code with zero callers).
+            // ------------------------------------------------------------
+            if (chosenAction.type in TOKEN_QUOTA_GATED_ACTIONS &&
+                accumulatedTokens >= currentTask.budget.tokenLimit
+            ) {
+                val quotaMsg = "TOKEN_QUOTA_EXCEEDED: استُهلكت حصة التوكنز للمهمة " +
+                    "(${accumulatedTokens}/${currentTask.budget.tokenLimit}) — توقّف الإنفاق الإضافي."
+                emit(
+                    ExecutionEvent.BudgetGateDecision(
+                        executionId = executionId,
+                        decision = com.example.domain.core.budget.EconomicGateDecision.DENIED.name,
+                        reason = quotaMsg
+                    )
+                )
+                emit(
+                    ExecutionEvent.Degraded(
+                        executionId = executionId,
+                        reason = DegradedReason.BUDGET_APPROACHING_LIMIT,
+                        message = quotaMsg
+                    )
+                )
+                isDegraded = true
+                degradedReason = DegradedReason.BUDGET_APPROACHING_LIMIT
+                accumulatedOutputText.append("\n[حوكمة الاقتصاد]: $quotaMsg")
+                break
+            }
+            if (chosenAction.type in TOKEN_QUOTA_GATED_ACTIONS) {
+                // Security session ceiling (upper safety bound — ordering:
+                // permission/policy BEFORE budget; a budget allow never
+                // overrides this deny). requestedTokens is the ESTIMATED
+                // magnitude of the NEXT single step (not the whole remaining
+                // quota) — the policy compares it against the accumulated
+                // session total.
+                val estimatedNextStepTokens = (currentTask.budget.tokenLimit - accumulatedTokens)
+                    .coerceAtLeast(0)
+                    .coerceAtMost(ESTIMATED_STEP_TOKENS)
+                val sessionCheck = runCatching {
+                    securityGuard.validateTokenBudget(
+                        requestedTokens = estimatedNextStepTokens,
+                        sessionTotalTokens = accumulatedTokens,
+                        policy = defaultSecurityPolicy
+                    )
+                }.getOrNull()
+                if (sessionCheck is Outcome.Error) {
+                    val secMsg = "SECURITY_TOKEN_CEILING: ${sessionCheck.diagnosticMessage ?: "رفضت سياسة الأمان استمرار الإنفاق"}"
+                    emit(
+                        ExecutionEvent.BudgetGateDecision(
+                            executionId = executionId,
+                            decision = com.example.domain.core.budget.EconomicGateDecision.DENIED.name,
+                            reason = secMsg
+                        )
+                    )
+                    emit(
+                        ExecutionEvent.Degraded(
+                            executionId = executionId,
+                            reason = DegradedReason.BUDGET_APPROACHING_LIMIT,
+                            message = secMsg
+                        )
+                    )
+                    isDegraded = true
+                    degradedReason = DegradedReason.BUDGET_APPROACHING_LIMIT
+                    accumulatedOutputText.append("\n[حوكمة الأمان]: $secMsg")
+                    break
+                }
+            }
+
+            // ------------------------------------------------------------
+            // GOVERNANCE PHASE — surface budget-gate verdicts from the
+            // DecisionService economic gate onto the event bus (telemetry +
+            // radar evidence react to them).
+            // ------------------------------------------------------------
+            val budgetGateReason = chosenAction.payload["reason"]
+            if (chosenAction.type == DecisionActionType.REPLAN && budgetGateReason?.startsWith("BUDGET_") == true) {
+                emit(
+                    ExecutionEvent.BudgetGateDecision(
+                        executionId = executionId,
+                        decision = com.example.domain.core.budget.EconomicGateDecision.DOWNGRADE.name,
+                        reason = "${budgetGateReason}: ${chosenAction.payload["detail"] ?: ""}"
+                    )
+                )
+            }
+
             // 3. Execute Action via ExecutionService
             val execResult = executionService.executeAction(
                 action = chosenAction,
@@ -444,6 +562,61 @@ class AgentOrchestrator(
 
             // 4. Update Token and Output Tracking
             accumulatedTokens += execResult.tokensConsumed
+            // GOVERNANCE PHASE: keep the LIVE task budget consumption accurate
+            // (legacy defect: TaskBudget.consumedTokens was never incremented
+            // during a run, so delegation carve-outs and remaining-budget
+            // reporting always saw the full 30000).
+            currentTask = currentTask.copy(
+                budget = currentTask.budget.copy(consumedTokens = accumulatedTokens)
+            )
+
+            // ------------------------------------------------------------
+            // GOVERNANCE PHASE — POST-EXECUTION USAGE ACCOUNTING:
+            // attributed usage -> persistent cost ledger (+ telemetry +
+            // RPM/TPM window) -> CostRecorded event on the bus.
+            // ------------------------------------------------------------
+            val attribution = execResult.usageDetail
+            if (attribution != null && attribution.totalTokens > 0) {
+                val record = runCatching {
+                    economicGovernanceService?.accountUsageSuspend(
+                        UsageAccountingInput(
+                            executionId = executionId,
+                            taskId = currentTask.id.value,
+                            workspaceId = workspaceId,
+                            agentId = agent.identity.id.value,
+                            providerId = attribution.providerId,
+                            serviceId = attribution.serviceId,
+                            modelId = attribution.modelId,
+                            resourceId = attribution.resourceId,
+                            usage = com.example.domain.core.budget.TokenUsageRecord(
+                                inputTokens = attribution.inputTokens,
+                                outputTokens = attribution.outputTokens,
+                                cachedTokens = attribution.cachedTokens,
+                                providerTotalTokens = attribution.totalTokens,
+                                isEstimate = attribution.isEstimated
+                            ),
+                            isActualProviderReport = !attribution.isEstimated
+                        )
+                    )
+                }.getOrNull()
+                if (record != null) {
+                    emit(
+                        ExecutionEvent.CostRecorded(
+                            executionId = executionId,
+                            inputTokens = record.usage.inputTokens,
+                            outputTokens = record.usage.outputTokens,
+                            cachedTokens = record.usage.cachedTokens,
+                            totalTokens = record.usage.totalTokens,
+                            costAmountMicro = record.cost?.amountMicro,
+                            currency = record.cost?.currency ?: "USD",
+                            costStatus = record.costStatus.name,
+                            billingClass = record.billingClass.name,
+                            providerId = record.providerId,
+                            modelId = record.modelId
+                        )
+                    )
+                }
+            }
             if (execResult.outputText.isNotBlank()) {
                 if (accumulatedOutputText.isNotEmpty() && !accumulatedOutputText.endsWith("\n")) {
                     accumulatedOutputText.append("\n")
@@ -620,6 +793,23 @@ class AgentOrchestrator(
             )
         )
     }
+
+    /** Actions that consume the task token quota (execution limit). */
+    private val TOKEN_QUOTA_GATED_ACTIONS = setOf(
+        DecisionActionType.EXECUTE_STEP,
+        DecisionActionType.SELECT_MODEL,
+        DecisionActionType.SEARCH,
+        DecisionActionType.RETRIEVE_KNOWLEDGE,
+        DecisionActionType.DELEGATE,
+        DecisionActionType.RETRY
+    )
+
+    /**
+     * Honest per-step token magnitude estimate for the security session
+     * ceiling check (GenerationConfig.maxOutputTokens = 2048 + context —
+     * 4096 is the documented heuristic bound, labeled as an estimate).
+     */
+    private val ESTIMATED_STEP_TOKENS = 4096
 
     /**
      * Resumes execution of a previously persisted task from Room database.

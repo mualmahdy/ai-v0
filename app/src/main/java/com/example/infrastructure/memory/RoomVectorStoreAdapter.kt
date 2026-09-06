@@ -23,10 +23,21 @@ import kotlin.math.sqrt
  * Clean Infrastructure Adapter for Room-backed Vector Store and Memory Repository.
  *
  * Implements real Cosine Similarity mathematical calculations across normalized embedding vectors.
+ *
+ * GOVERNANCE PHASE FIX (workspace isolation — audit finding): this adapter
+ * previously wrote memories with workspaceId = null and retrieved via
+ * getAllActiveMemories() GLOBALLY — a cross-workspace leak: agent loops in
+ * workspace B retrieved memories stored in workspace A. Now a
+ * [workspaceIdProvider] (wired by the AppContainer to the active workspace)
+ * scopes BOTH writes and reads. When the provider is absent the legacy
+ * global behavior is preserved for pre-governance tests — production always
+ * wires the provider.
  */
 class RoomVectorStoreAdapter(
     private val memoryDao: MemoryDao,
-    private val embeddingProvider: EmbeddingProviderPort? = null
+    private val embeddingProvider: EmbeddingProviderPort? = null,
+    /** Active workspace scope for writes AND reads (null = legacy global). */
+    private val workspaceIdProvider: (() -> String?)? = null
 ) : VectorStorePort, MemoryRepositoryPort {
 
     override suspend fun upsert(record: VectorStoreRecord): Outcome<Unit, VectorStoreFailure> = withContext(Dispatchers.IO) {
@@ -59,7 +70,8 @@ class RoomVectorStoreAdapter(
         minScoreThreshold: Float
     ): Outcome<List<VectorStoreRecord>, VectorStoreFailure> = withContext(Dispatchers.IO) {
         try {
-            val entities = memoryDao.getAllActiveMemories()
+            // GOVERNANCE PHASE: workspace-scoped retrieval (was: global).
+            val entities = scopedActiveMemories()
             if (entities.isEmpty()) {
                 return@withContext Outcome.Success(emptyList())
             }
@@ -125,6 +137,9 @@ class RoomVectorStoreAdapter(
 
         // Phase 5: storeMemory is now workspace/agent agnostic (legacy global path).
         // Use the dedicated MemoryLifecycleService.storeScoped() for workspace-scoped writes.
+        // GOVERNANCE PHASE: when a workspace context IS provided, the write is
+        // scoped to it (previously always workspaceId = null → cross-workspace
+        // read leak downstream).
         val record = VectorStoreRecord(
             id = entry.id,
             vector = vector,
@@ -146,7 +161,7 @@ class RoomVectorStoreAdapter(
             memoryType = entry.type.name,
             importance = entry.importance,
             decayScore = 1.0f,
-            workspaceId = null,
+            workspaceId = workspaceIdProvider?.invoke(),
             agentId = null,
             tagsJson = "[]",
             lastDecayEvaluatedAtEpochMs = System.currentTimeMillis()
@@ -165,7 +180,9 @@ class RoomVectorStoreAdapter(
         minConfidence: Float
     ): Outcome<List<ScoredMemoryRecord>, VectorStoreFailure> = withContext(Dispatchers.IO) {
         try {
-            val entities = memoryDao.getAllActiveMemories()
+            // GOVERNANCE PHASE: workspace-scoped retrieval (was: global —
+            // the cross-workspace memory leak).
+            val entities = scopedActiveMemories()
             if (entities.isEmpty()) return@withContext Outcome.Success(emptyList())
 
             val queryVector = if (embeddingProvider != null) {
@@ -219,7 +236,7 @@ class RoomVectorStoreAdapter(
 
     override suspend fun getAllActiveMemories(): Outcome<List<MemoryEntry>, VectorStoreFailure> = withContext(Dispatchers.IO) {
         try {
-            val list = memoryDao.getAllActiveMemories().map { entity ->
+            val list = scopedActiveMemories().map { entity ->
                 MemoryEntry(
                     id = entity.id,
                     content = entity.text,
@@ -238,6 +255,17 @@ class RoomVectorStoreAdapter(
     override suspend fun deleteMemory(id: String): Outcome<Unit, VectorStoreFailure> = delete(id)
 
     // --- Math & Vector Parsing Helpers ---
+
+    /**
+     * Workspace-scoped active memories: when a workspace context is wired,
+     * only that workspace's (and legacy global workspaceId-null) rows are
+     * visible; without a provider the legacy global behavior applies.
+     */
+    private suspend fun scopedActiveMemories(): List<MemoryEntity> {
+        val workspaceId = runCatching { workspaceIdProvider?.invoke() }.getOrNull()
+            ?: return memoryDao.getAllActiveMemories()
+        return memoryDao.getActiveForWorkspace(workspaceId)
+    }
 
     private fun parseVectorJson(json: String, dimension: Int): EmbeddingVector {
         val array = JSONArray(json)

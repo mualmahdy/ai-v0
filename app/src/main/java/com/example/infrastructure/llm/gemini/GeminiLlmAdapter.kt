@@ -236,7 +236,10 @@ class GeminiLlmAdapter(
                     val usageJson = json.optJSONObject("usageMetadata")
                     val usage = TokenUsage(
                         promptTokens = usageJson?.optInt("promptTokenCount", 0) ?: 0,
-                        completionTokens = usageJson?.optInt("candidatesTokenCount", 0) ?: 0
+                        completionTokens = usageJson?.optInt("candidatesTokenCount", 0) ?: 0,
+                        // GOVERNANCE PHASE: capture the provider's own total
+                        // and cached counts when published (never fabricated).
+                        totalTokens = usageJson?.takeIf { it.has("totalTokenCount") }?.optInt("totalTokenCount", 0) ?: 0
                     )
                     val finish = candidate?.optString("finishReason") ?: "STOP"
                     Outcome.Success(
@@ -294,6 +297,9 @@ class GeminiLlmAdapter(
             val fullText = StringBuilder()
             var promptTokens = 0
             var completionTokens = 0
+            // GOVERNANCE PHASE: cached + provider-total token capture.
+            var cachedTokens = 0
+            var providerTotalTokens: Int? = null
 
             // The whole builder runs on Dispatchers.IO via flowOn below — blocking
             // line reads and vault lookups are safe, emissions stay in-context.
@@ -337,9 +343,11 @@ class GeminiLlmAdapter(
                                         )
                                     )
                                 }
-                                readUsage(json)?.let { (p, c) ->
+                                readUsage(json)?.let { (p, c, cached, total) ->
                                     promptTokens = p
                                     completionTokens = c
+                                    cachedTokens = cached
+                                    providerTotalTokens = total
                                 }
                             }
                         }
@@ -380,13 +388,23 @@ class GeminiLlmAdapter(
                 }
             }
 
+            // GOVERNANCE PHASE FIX: adapters report MEASURED usage only —
+            // the fabricated `30000 - consumed` remaining budget is GONE
+            // (remaining = REMAINING_UNKNOWN sentinel); ExecutionService
+            // enriches it with the REAL task-budget-derived value.
+            val measuredTotal = providerTotalTokens ?: (promptTokens + completionTokens + cachedTokens)
             emit(
                 ExecutionEvent.UsageBudgetUpdate(
                     executionId = executionId,
                     promptTokens = promptTokens,
                     completionTokens = completionTokens,
-                    totalSessionTokens = promptTokens + completionTokens,
-                    remainingBudgetTokens = 30000 - (promptTokens + completionTokens)
+                    totalSessionTokens = measuredTotal,
+                    remainingBudgetTokens = ExecutionEvent.UsageBudgetUpdate.REMAINING_UNKNOWN,
+                    cachedTokens = cachedTokens,
+                    totalTokens = measuredTotal,
+                    providerId = providerId,
+                    modelId = model,
+                    isEstimatedUsage = measuredTotal == 0 && fullText.isNotEmpty()
                 )
             )
             emit(
@@ -457,16 +475,33 @@ class GeminiLlmAdapter(
         }.getOrDefault(emptyList())
     }
 
-    private fun readUsage(json: String): Pair<Int, Int>? {
+    /** Parses usageMetadata (prompt / candidates / cachedContent / total). */
+    private fun readUsage(json: String): QuadrupleUsage? {
         return runCatching {
             val obj = JSONObject(json)
             val usage = obj.optJSONObject("usageMetadata") ?: return null
-            Pair(
+            QuadrupleUsage(
                 usage.optInt("promptTokenCount", 0),
-                usage.optInt("candidatesTokenCount", 0)
+                usage.optInt("candidatesTokenCount", 0),
+                usage.optInt("cachedContentTokenCount", 0),
+                if (usage.has("totalTokenCount")) usage.optInt("totalTokenCount", 0) else null
             )
         }.getOrNull()
     }
+
+    /** Local 4-tuple for readUsage destructuring. */
+    private data class QuadrupleUsage(
+        val prompt: Int,
+        val completion: Int,
+        val cached: Int,
+        val total: Int?
+    )
+
+    private operator fun QuadrupleUsage.component1() = prompt
+    private operator fun QuadrupleUsage.component2() = completion
+    private operator fun QuadrupleUsage.component3() = cached
+    private operator fun QuadrupleUsage.component4() = total
+
 
     /** Maps a non-2xx HTTP code onto the domain failure taxonomy. */
     private fun <T> httpFailure(code: Int, url: String): Outcome<T, LlmFailure> = when (code) {

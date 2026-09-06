@@ -13,6 +13,7 @@ import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
 import com.example.domain.core.decision.DecisionRecord
 import com.example.domain.core.events.ExecutionEvent
+import com.example.domain.core.llm.LlmFailure
 import com.example.domain.core.llm.LlmMessage
 import com.example.domain.core.llm.LlmRequest
 import com.example.domain.core.llm.MessageRole
@@ -41,8 +42,35 @@ data class ExecutionResult(
     val latencyMs: Long = 0L,
     val errorDescription: String? = null,
     val isDegraded: Boolean = false,
-    val degradedReason: DegradedReason? = null
+    val degradedReason: DegradedReason? = null,
+    /**
+     * GOVERNANCE PHASE: full usage attribution for the economic ledger —
+     * which provider/model/resource consumed the tokens, whether the count
+     * is provider-reported or estimated, plus cached-token detail. Null for
+     * non-token actions (search/tool/…) whose cost is not token-metered.
+     */
+    val usageDetail: TokenUsageAttribution? = null
 )
+
+/**
+ * GOVERNANCE PHASE — attributed token usage of one executed action.
+ * Populated ONLY from measured (or honestly heuristics-flagged) data; the
+ * economic governance service turns this into a cost-ledger record.
+ */
+data class TokenUsageAttribution(
+    val providerId: String?,
+    val serviceId: String?,
+    val modelId: String?,
+    val resourceId: String?,
+    val inputTokens: Int,
+    val outputTokens: Int,
+    val cachedTokens: Int,
+    val totalTokens: Int,
+    val isEstimated: Boolean
+)
+
+/** Returns this value when positive, otherwise [fallback]. */
+private fun Int.ifPositiveOr(fallback: Int): Int = if (this > 0) this else fallback
 
 /**
  * ============================================================================
@@ -113,7 +141,15 @@ class ExecutionService(
      * query — the agent's "استرجاع المعرفة" action silently degraded to a
      * memory lookup, breaking the grounded-answer chain.
      */
-    var ragRetrievalProvider: (suspend (query: String, topK: Int) -> com.example.domain.core.rag.AssembledRagContext?)? = null
+    var ragRetrievalProvider: (suspend (query: String, topK: Int) -> com.example.domain.core.rag.AssembledRagContext?)? = null,
+
+    /**
+     * GOVERNANCE PHASE: RPM/TPM rate-limit encounter recorder — wired by
+     * the AppContainer to EconomicGovernanceService.recordRateLimitEncounter.
+     * Late-bound to avoid a hard dependency cycle. Null = no governor
+     * (fail-open on rate tracking, never on security).
+     */
+    var rateLimitRecorder: ((providerId: String?, modelId: String?, resourceId: String?, resourceType: String, retryAfterMs: Long?) -> Unit)? = null
 ) {
 
     companion object {
@@ -511,6 +547,15 @@ class ExecutionService(
         val textAccumulator = StringBuilder()
         var promptTokens = 0
         var completionTokens = 0
+        // GOVERNANCE PHASE: full usage attribution for the economic ledger.
+        var cachedTokens = 0
+        var providerTotalTokens: Int? = null
+        var usageWasProviderReported = false
+        var usageWasHeuristic = false
+        val attributionProviderId = provider.metadata.id
+        val attributionServiceId = decisionRecord!!.serviceId
+        val attributionModelId = provider.metadata.defaultModel ?: decisionRecord.selectedResourceId.value
+        val attributionResourceId = decisionRecord!!.selectedResourceId.value
         var isDegraded = false
         var degradedReason: DegradedReason? = null
         var isSuccess = true
@@ -557,11 +602,50 @@ class ExecutionService(
                     is ExecutionEvent.UsageBudgetUpdate -> {
                         promptTokens = event.promptTokens
                         completionTokens = event.completionTokens
-                        onEvent(event)
+                        cachedTokens = event.cachedTokens
+                        providerTotalTokens = if (event.totalTokens > 0) event.totalTokens else null
+                        usageWasProviderReported = !event.isEstimatedUsage
+                        usageWasHeuristic = event.isEstimatedUsage
+                        // GOVERNANCE PHASE FIX: enrich the adapter's honest
+                        // REMAINING_UNKNOWN with the REAL task-budget-derived
+                        // remaining (token quota — distinct from monetary
+                        // budget). The fabricated `30000 - consumed` baseline
+                        // is gone; this is the only place a remaining value
+                        // is computed.
+                        val tokenLimit = context.task.budget.tokenLimit
+                        val consumedBeforeThisAction = context.task.budget.consumedTokens
+                        val actionSoFar = event.promptTokens + event.completionTokens
+                        val realRemaining = (tokenLimit - consumedBeforeThisAction - actionSoFar).coerceAtLeast(0)
+                        val enriched = event.copy(
+                            remainingBudgetTokens = realRemaining,
+                            totalSessionTokens = event.totalTokens.ifPositiveOr(actionSoFar),
+                            providerId = event.providerId ?: attributionProviderId,
+                            modelId = event.modelId ?: attributionModelId
+                        )
+                        onEvent(enriched)
                     }
                     is ExecutionEvent.Error -> {
                         isSuccess = false
                         errorMessage = event.message
+                        // GOVERNANCE PHASE: a provider 429 closes the RPM/TPM
+                        // window and is surfaced as a RateLimitEncountered
+                        // event for telemetry + radar evidence.
+                        if (event.failureCode == "RATE_LIMITED") {
+                            rateLimitRecorder?.invoke(
+                                attributionProviderId, attributionModelId, attributionResourceId,
+                                "LLM", null
+                            )
+                            onEvent(
+                                ExecutionEvent.RateLimitEncountered(
+                                    executionId = executionId,
+                                    scopeKey = "PROVIDER:$attributionProviderId",
+                                    providerId = attributionProviderId,
+                                    modelId = attributionModelId,
+                                    resourceType = "LLM",
+                                    retryAfterMs = null
+                                )
+                            )
+                        }
                         onEvent(event)
                     }
                     is ExecutionEvent.Completed -> {
@@ -584,15 +668,71 @@ class ExecutionService(
                         textAccumulator.append(genOutcome.value.text)
                         promptTokens = genOutcome.value.usage.promptTokens
                         completionTokens = genOutcome.value.usage.completionTokens
+                        cachedTokens = genOutcome.value.usage.cachedTokens
+                        providerTotalTokens = genOutcome.value.usage.totalTokens
+                        usageWasProviderReported = true
+                        usageWasHeuristic = genOutcome.value.usage.isEstimatedUsage
+                        // Emit the enriched usage event for the generate() path too
+                        val tokenLimit = context.task.budget.tokenLimit
+                        val realRemaining = (tokenLimit - context.task.budget.consumedTokens -
+                            (promptTokens + completionTokens)).coerceAtLeast(0)
+                        onEvent(
+                            ExecutionEvent.UsageBudgetUpdate(
+                                executionId = executionId,
+                                promptTokens = promptTokens,
+                                completionTokens = completionTokens,
+                                totalSessionTokens = providerTotalTokens ?: (promptTokens + completionTokens),
+                                remainingBudgetTokens = realRemaining,
+                                cachedTokens = cachedTokens,
+                                totalTokens = providerTotalTokens ?: (promptTokens + completionTokens),
+                                providerId = attributionProviderId,
+                                modelId = genOutcome.value.modelId.ifBlank { attributionModelId },
+                                isEstimatedUsage = genOutcome.value.usage.isEstimatedUsage
+                            )
+                        )
                     }
                     is Outcome.Degraded -> {
                         isDegraded = true
                         degradedReason = genOutcome.reason
                         genOutcome.partialValue?.text?.let { textAccumulator.append(it) }
+                        // GOVERNANCE PHASE: 429 backoff closes the rate window.
+                        if (genOutcome.reason == DegradedReason.RATE_LIMIT_BACKOFF) {
+                            rateLimitRecorder?.invoke(
+                                attributionProviderId, attributionModelId, attributionResourceId,
+                                "LLM", null
+                            )
+                            onEvent(
+                                ExecutionEvent.RateLimitEncountered(
+                                    executionId = executionId,
+                                    scopeKey = "PROVIDER:$attributionProviderId",
+                                    providerId = attributionProviderId,
+                                    modelId = attributionModelId,
+                                    resourceType = "LLM",
+                                    retryAfterMs = null
+                                )
+                            )
+                        }
                     }
                     is Outcome.Error -> {
                         isSuccess = false
                         errorMessage = genOutcome.diagnosticMessage
+                        val failure = genOutcome.failure
+                        if (failure is LlmFailure.RateLimitExceeded) {
+                            rateLimitRecorder?.invoke(
+                                attributionProviderId, attributionModelId, attributionResourceId,
+                                "LLM", failure.retryAfterMs
+                            )
+                            onEvent(
+                                ExecutionEvent.RateLimitEncountered(
+                                    executionId = executionId,
+                                    scopeKey = "PROVIDER:$attributionProviderId",
+                                    providerId = attributionProviderId,
+                                    modelId = attributionModelId,
+                                    resourceType = "LLM",
+                                    retryAfterMs = failure.retryAfterMs
+                                )
+                            )
+                        }
                     }
                 }
             }
@@ -625,6 +765,8 @@ class ExecutionService(
                         textAccumulator.append(synthesis.value.text)
                         promptTokens += synthesis.value.usage.promptTokens
                         completionTokens += synthesis.value.usage.completionTokens
+                        cachedTokens += synthesis.value.usage.cachedTokens
+                        usageWasProviderReported = usageWasProviderReported || !synthesis.value.usage.isEstimatedUsage
                     }
                     is Outcome.Degraded -> {
                         isDegraded = true
@@ -649,7 +791,8 @@ class ExecutionService(
             errorMessage = e.localizedMessage ?: "حدث استثناء غير متوقع أثناء استدعاء المزود."
         }
 
-        val totalTokens = promptTokens + completionTokens
+        val totalTokens = (providerTotalTokens ?: (promptTokens + completionTokens + cachedTokens))
+            .ifPositiveOr(textAccumulator.length / 4)
         val latency = System.currentTimeMillis() - startTime
 
         return ExecutionResult(
@@ -660,7 +803,21 @@ class ExecutionService(
             latencyMs = latency,
             errorDescription = errorMessage,
             isDegraded = isDegraded,
-            degradedReason = degradedReason
+            degradedReason = degradedReason,
+            // GOVERNANCE PHASE: attributed usage for the cost ledger.
+            usageDetail = if (totalTokens > 0 || promptTokens > 0 || completionTokens > 0) {
+                TokenUsageAttribution(
+                    providerId = attributionProviderId,
+                    serviceId = attributionServiceId,
+                    modelId = attributionModelId,
+                    resourceId = attributionResourceId,
+                    inputTokens = promptTokens,
+                    outputTokens = completionTokens,
+                    cachedTokens = cachedTokens,
+                    totalTokens = totalTokens,
+                    isEstimated = usageWasHeuristic && !usageWasProviderReported
+                )
+            } else null
         )
     }
 
