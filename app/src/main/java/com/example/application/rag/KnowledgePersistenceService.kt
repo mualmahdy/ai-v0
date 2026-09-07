@@ -26,7 +26,7 @@ import org.json.JSONArray
  * is ~3-5x storage bloat vs BLOB but keeps the schema simple for the Phase 2
  * milestone. Phase 4 will migrate to BLOB + sqlite-vec for production scale.
  */
-class KnowledgePersistenceService(
+open class KnowledgePersistenceService(
     private val documentDao: KnowledgeDocumentDao,
     private val chunkDao: DocumentChunkDao
 ) {
@@ -36,7 +36,7 @@ class KnowledgePersistenceService(
      * Returns a Pair of (documents, chunks) ready to be loaded into the
      * RagPipelineService in-memory index.
      */
-    suspend fun loadWorkspaceKnowledge(workspaceId: String): Pair<List<KnowledgeDocument>, List<DocumentChunk>> = withContext(Dispatchers.IO) {
+    open suspend fun loadWorkspaceKnowledge(workspaceId: String): Pair<List<KnowledgeDocument>, List<DocumentChunk>> = withContext(Dispatchers.IO) {
         val docEntities = documentDao.getDocumentsForWorkspace(workspaceId)
         if (docEntities.isEmpty()) return@withContext emptyList<KnowledgeDocument>() to emptyList()
 

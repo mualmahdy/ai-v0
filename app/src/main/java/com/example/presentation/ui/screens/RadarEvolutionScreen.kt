@@ -18,6 +18,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Radar
@@ -176,25 +179,75 @@ fun RadarEvolutionScreen(
                             )
                         }
 
-                        // Advancement Actions
+                        // ------------------------------------------------
+                        // GAP-CLOSURE P1-17: the COMPLETE acquisition loop is
+                        // operable from the UI — audit -> approve -> integrate
+                        // -> verify -> register -> MEASURE -> retire.
+                        // ------------------------------------------------
                         when (candidate.stage) {
                             EvolutionStage.CANDIDATE, EvolutionStage.APPROVAL_PENDING -> {
+                                OutlinedButton(
+                                    onClick = { viewModel.recordCandidateSecurityAudit(candidate.id, true) },
+                                    modifier = Modifier.testTag("btn_audit_${candidate.id}")
+                                ) {
+                                    Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("تدقيق أمني", style = MaterialTheme.typography.labelSmall)
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                                OutlinedButton(
+                                    onClick = { viewModel.recordCandidateGovernanceApproval(candidate.id, true) },
+                                    modifier = Modifier.testTag("btn_governance_${candidate.id}")
+                                ) {
+                                    Icon(Icons.Default.Verified, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("موافقة الحوكمة", style = MaterialTheme.typography.labelSmall)
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
                                 FilledTonalButton(
                                     onClick = { viewModel.advanceCandidateStage(candidate.id, EvolutionStage.INTEGRATED) },
                                     modifier = Modifier.testTag("btn_approve_${candidate.id}")
                                 ) {
                                     Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("موافقة الحوكمة والإدماج", style = MaterialTheme.typography.labelSmall)
+                                    Text("الدمج", style = MaterialTheme.typography.labelSmall)
                                 }
                             }
                             EvolutionStage.INTEGRATED -> {
+                                OutlinedButton(
+                                    onClick = { viewModel.advanceCandidateStage(candidate.id, EvolutionStage.VERIFIED) }
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("تحقق واختبار", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                            EvolutionStage.VERIFIED -> {
                                 OutlinedButton(
                                     onClick = { viewModel.advanceCandidateStage(candidate.id, EvolutionStage.REGISTERED) }
                                 ) {
                                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text("تسجيل بمصفوفة القدرات", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                            EvolutionStage.REGISTERED -> {
+                                OutlinedButton(
+                                    onClick = { viewModel.measureRegisteredCapability(candidate.id) },
+                                    modifier = Modifier.testTag("btn_measure_${candidate.id}")
+                                ) {
+                                    Icon(Icons.Default.Speed, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("قياس الأثر", style = MaterialTheme.typography.labelSmall)
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                                OutlinedButton(
+                                    onClick = { viewModel.retireRegisteredCapability(candidate.id, "قرار المشغل من مرصد التطور") },
+                                    modifier = Modifier.testTag("btn_retire_${candidate.id}")
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("إحالة للتقاعد", style = MaterialTheme.typography.labelSmall)
                                 }
                             }
                             else -> Unit

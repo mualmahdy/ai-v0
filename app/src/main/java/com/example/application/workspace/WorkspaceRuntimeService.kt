@@ -2,7 +2,9 @@ package com.example.application.workspace
 
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.workspace.Workspace
+import com.example.infrastructure.persistence.dao.ProjectDao
 import com.example.infrastructure.persistence.dao.WorkspaceDao
+import com.example.infrastructure.persistence.entities.ProjectEntity
 import com.example.infrastructure.persistence.entities.WorkspaceEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -10,11 +12,23 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
+
+/**
+ * GAP-CLOSURE P0-03: thrown by [WorkspaceRuntimeService.requireActiveWorkspaceId]
+ * when NO workspace is active (bootstrap incomplete or failed). Previously
+ * the method fail-OPENED to the literal "default" — data written before
+ * bootstrap landed in a scope nobody owns. Fail-closed is the honest
+ * contract; scope-less callers should use [activeWorkspaceIdOrNull] (null =
+ * unattributed, never a fabricated id).
+ */
+class NoActiveWorkspaceStateException(message: String) : IllegalStateException(message)
 
 /**
  * Phase 2 — WorkspaceRuntimeService
@@ -45,6 +59,14 @@ import java.util.UUID
  */
 class WorkspaceRuntimeService(
     private val workspaceDao: WorkspaceDao,
+    /**
+     * GAP-CLOSURE P0-04: optional project DAO so every NEW workspace gets its
+     * OWN sandbox project row instead of falling back to the legacy shared
+     * project id=1L (cross-workspace data bleed).
+     */
+    private val projectDao: ProjectDao? = null,
+    /** Resolves the sandbox root directory for a project id (wired from context by AppContainer). */
+    private val projectRootPathResolver: (Long) -> String = { id -> "workspaces/proj_$id" },
     private val coroutineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 ) {
     private val _activeWorkspace = MutableStateFlow<Workspace?>(null)
@@ -104,6 +126,10 @@ class WorkspaceRuntimeService(
     /**
      * Creates a new workspace. Returns the created Workspace domain object.
      * The new workspace becomes the active workspace automatically.
+     *
+     * GAP-CLOSURE P0-04: the workspace gets its OWN dedicated sandbox project
+     * (never the legacy shared projectId=1L). The default workspace (id
+     * "default") is the ONLY workspace entitled to the legacy project 1L.
      */
     suspend fun createWorkspace(
         name: String,
@@ -114,6 +140,28 @@ class WorkspaceRuntimeService(
     ): Workspace = mutex.withLock {
         val now = System.currentTimeMillis()
         val id = "ws_" + UUID.randomUUID().toString().take(12)
+
+        // P0-04: per-workspace sandbox project — real isolation.
+        val ownProjectId: Long? = projectDao?.let { dao ->
+            runCatching {
+                val provisional = ProjectEntity(
+                    name = "مشروع $name",
+                    description = description,
+                    rootPath = "",
+                    createdAtEpochMs = now,
+                    updatedAtEpochMs = now
+                )
+                val generatedId = dao.insertProject(provisional)
+                dao.updateProject(
+                    provisional.copy(
+                        id = generatedId,
+                        rootPath = projectRootPathResolver(generatedId)
+                    )
+                )
+                generatedId
+            }.getOrNull()
+        }
+
         val entity = WorkspaceEntity(
             id = id,
             name = name,
@@ -122,7 +170,7 @@ class WorkspaceRuntimeService(
             autonomyPolicy = autonomyPolicy,
             settingsJson = encodeSettings(settings),
             isActive = true,
-            lastActiveProjectId = null,
+            lastActiveProjectId = ownProjectId,
             createdAtEpochMs = now,
             lastAccessedEpochMs = now
         )
@@ -228,14 +276,45 @@ class WorkspaceRuntimeService(
     }
 
     /**
-     * Returns the workspace id that should be used as the current scope for
-     * RAG persistence, resource edges, and other workspace-scoped data.
+     * GAP-CLOSURE P0-03 — FAIL-CLOSED accessor: the id of the ACTIVE
+     * workspace, or [NoActiveWorkspaceStateException] when none is active
+     * (bootstrap incomplete/failed).
      *
-     * If no workspace is active yet (e.g. during cold start before bootstrap
-     * completes), returns "default" so callers have a stable key to write to.
+     * Previously this method fail-OPENED to the literal `"default"`, so
+     * pre-bootstrap writes landed in a scope nobody owns. Runtime paths that
+     * NEED a workspace must fail honestly; observability paths that can
+     * honestly attribute "none" should use [activeWorkspaceIdOrNull].
      */
     fun requireActiveWorkspaceId(): String {
-        return _activeWorkspace.value?.id ?: "default"
+        return _activeWorkspace.value?.id
+            ?: throw NoActiveWorkspaceStateException(
+                "NO_ACTIVE_WORKSPACE: لم تكتمل تهيئة مساحة العمل النشطة بعد — رفض الوصول بدلاً من إرجاع معرّف افتراضي قد يكتب البيانات في نطاق لا يملكه أحد."
+            )
+    }
+
+    /**
+     * GAP-CLOSURE P0-03 — honest nullable accessor for observability paths:
+     * null means UNATTRIBUTED (never a fabricated "default" id).
+     */
+    fun activeWorkspaceIdOrNull(): String? = _activeWorkspace.value?.id
+
+    /**
+     * GAP-CLOSURE P0-04 — the active workspace's OWN sandbox project id
+     * (null or non-positive = no project bound; NEVER an implicit 1L).
+     */
+    fun activeProjectIdOrNull(): Long? =
+        _activeWorkspace.value?.activeProjectId?.takeIf { it > 0L }
+
+    /**
+     * GAP-CLOSURE P0-02 — bootstrap-aware suspend accessor: waits (bounded)
+     * for the workspace bootstrap to complete, then returns the active id
+     * or null when the timeout expires (the caller decides how to fail).
+     */
+    suspend fun awaitActiveWorkspaceId(timeoutMs: Long = 5_000L): String? {
+        _activeWorkspace.value?.id?.let { return it }
+        return withTimeoutOrNull(timeoutMs) {
+            _activeWorkspace.first { ws -> ws != null }?.id
+        }
     }
 
     private suspend fun refreshAllWorkspaces() {

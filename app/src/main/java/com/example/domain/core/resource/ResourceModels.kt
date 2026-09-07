@@ -13,6 +13,13 @@ data class ResourceId(val value: String) {
 /**
  * Functional categories of system runtime resources.
  */
+/**
+ * RUNTIME resource taxonomy — materialized `ResourceRecord`s executed via
+ * adapters (LLM / SEARCH / EMBEDDING / TOOL). GAP-CLOSURE P1-12: distinct
+ * from the WORKSPACE-GRAPH node taxonomy
+ * (`com.example.domain.core.workspace.ResourceType`); the two must never be
+ * cross-wired.
+ */
 enum class ResourceType {
     LLM,
     SEARCH,

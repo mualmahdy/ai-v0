@@ -10,24 +10,32 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import androidx.core.app.NotificationCompat
 
 /**
  * Foreground service hosting agent task execution (audit 2026 fix).
  *
+ * Gap-closure P1-20: the service previously (a) monitored the GLOBAL
+ * `ExecutionHost.isRunning` boolean, so it could not tell WHICH execution it
+ * was protecting, and (b) leaked a NEW collector on every onStartCommand.
+ * It now tracks the per-execution REGISTRY ([ExecutionHost.activeExecutions])
+ * through a SINGLE lifecycle-managed collector (started at most once), stops
+ * itself the moment the registry empties, and its notification reflects the
+ * live execution count.
+ *
  * Android reality: without foreground priority, a long-running agent loop in
  * a backgrounded app is killed within seconds to minutes — mid-task process
- * death with no chance to checkpoint. While an execution is live, this
- * service:
+ * death with no chance to checkpoint. While at least one execution is live,
+ * this service:
  *   - elevates the process to FOREGROUND priority (survives backgrounding),
  *   - shows an honest progress notification the user can act on,
- *   - stops itself the moment the execution completes/cancels.
- *
- * It does not own the execution itself — `ExecutionHost` does — it exists to
- * satisfy Android's foreground-execution contract for that work.
+ *   - stops itself the moment the last execution completes/cancels.
  */
 class AgentExecutionForegroundService : Service() {
+
+    private var collectorJob: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -38,20 +46,31 @@ class AgentExecutionForegroundService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        startAsForeground()
-        // Observe the host: stop when nothing is running anymore.
-        ExecutionHost.scope.launch {
-            ExecutionHost.isRunning.collect { running ->
-                if (!running) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+        startAsForeground(executionCount = ExecutionHost.activeExecutions.value.size)
+        // SINGLE lifecycle-managed collector (P1-20): no more collector leak
+        // on repeated onStartCommand calls.
+        if (collectorJob == null || collectorJob?.isActive != true) {
+            collectorJob = ExecutionHost.scope.launch {
+                ExecutionHost.activeExecutions.collect { live ->
+                    if (live.isEmpty()) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    } else {
+                        notifyExecutionCount(live.size)
+                    }
                 }
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun startAsForeground() {
+    override fun onDestroy() {
+        collectorJob?.cancel()
+        collectorJob = null
+        super.onDestroy()
+    }
+
+    private fun startAsForeground(executionCount: Int) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(
@@ -64,21 +83,7 @@ class AgentExecutionForegroundService : Service() {
                 }
             )
         }
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-        val contentIntent = PendingIntent.getActivity(
-            this,
-            0,
-            launchIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("مهمة ذكية قيد التنفيذ")
-            .setContentText("يعمل الوكيل الآن على المهمة — لا تغلق التطبيق لضمان إكمال التنفيذ.")
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setOngoing(true)
-            .setContentIntent(contentIntent)
-            .build()
-
+        val notification = buildNotification(executionCount)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIFICATION_ID,
@@ -88,6 +93,36 @@ class AgentExecutionForegroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+    }
+
+    private fun notifyExecutionCount(count: Int) {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        runCatching {
+            manager.notify(NOTIFICATION_ID, buildNotification(count))
+        }
+    }
+
+    private fun buildNotification(executionCount: Int): Notification {
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+        val contentIntent = PendingIntent.getActivity(
+            this,
+            0,
+            launchIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val title = if (executionCount > 1) {
+            "$executionCount مهام ذكية قيد التنفيذ"
+        } else {
+            "مهمة ذكية قيد التنفيذ"
+        }
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText("يعمل الوكيل الآن على المهمة — لا تغلق التطبيق لضمان إكمال التنفيذ.")
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(contentIntent)
+            .build()
     }
 
     companion object {

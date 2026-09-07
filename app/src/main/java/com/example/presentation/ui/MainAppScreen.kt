@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MenuBook
@@ -62,6 +63,7 @@ import com.example.presentation.state.ActiveNavigationTab
 import com.example.presentation.state.UiState
 import com.example.presentation.ui.screens.AgentStudioScreen
 import com.example.presentation.ui.screens.DecisionIntelligenceScreen
+import com.example.presentation.ui.screens.activity.UnifiedActivityFeedScreen
 import com.example.presentation.ui.screens.ExtensionsScreen
 import com.example.presentation.ui.screens.FilesWorkspaceScreen
 import com.example.presentation.ui.screens.GovernanceObservatoryScreen
@@ -81,10 +83,16 @@ import com.example.presentation.viewmodel.MainViewModel
  *
  *   - TopAppBar: workspace brand + live intelligence status chip (active LLM
  *     resources count) so the user always knows if the workspace "has a brain".
- *   - Bottom NavigationBar: 5 primary destinations (Studio / Providers /
- *     Knowledge / Files / More).
- *   - "More": ModalBottomSheet with the secondary destinations (Tasks &
- *     Workflows, Decision Intelligence, Radar, Extensions).
+ *   - Bottom NavigationBar: 5 CONTEXT-CENTRIC primary destinations
+ *     (Studio / unified Activity / Knowledge / Files / More) — gap-closure
+ *     P1-19: the workspace shell centers on Context → Work → Activity →
+ *     Artifacts, not on tool pages.
+ *   - GAP-CLOSURE P1-18: the Unified Activity Feed (proactive suggestions +
+ *     execution trace + audit events) is a FIRST-CLASS bottom destination —
+ *     previously the screen existed but was unreachable.
+ *   - "More": ModalBottomSheet with the secondary destinations (Providers,
+ *     Tasks & Workflows, Decision Intelligence, Radar, Governance,
+ *     Extensions).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -168,11 +176,11 @@ fun MainAppScreen(
                     tag = "nav_tab_studio"
                 )
                 BottomDestination(
-                    selected = state.activeTab == ActiveNavigationTab.MODELS_CAPABILITIES,
-                    onClick = { viewModel.selectTab(ActiveNavigationTab.MODELS_CAPABILITIES) },
-                    icon = Icons.Default.Dns,
-                    label = "المزوّدون",
-                    tag = "nav_tab_providers"
+                    selected = state.activeTab == ActiveNavigationTab.UNIFIED_ACTIVITY,
+                    onClick = { viewModel.selectTab(ActiveNavigationTab.UNIFIED_ACTIVITY) },
+                    icon = Icons.Default.NotificationsActive,
+                    label = "النشاط",
+                    tag = "nav_tab_activity"
                 )
                 BottomDestination(
                     selected = state.activeTab == ActiveNavigationTab.KNOWLEDGE_RAG,
@@ -205,6 +213,7 @@ fun MainAppScreen(
         ) {
             when (state.activeTab) {
                 ActiveNavigationTab.STUDIO -> AgentStudioScreen(state = state, viewModel = viewModel)
+                ActiveNavigationTab.UNIFIED_ACTIVITY -> UnifiedActivityFeedScreen(viewModel = viewModel)
                 ActiveNavigationTab.TASKS_WORKFLOWS -> TasksWorkflowsScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.DECISION_INTELLIGENCE -> DecisionIntelligenceScreen(state = state, viewModel = viewModel)
                 ActiveNavigationTab.RADAR_EVOLUTION -> RadarEvolutionScreen(state = state, viewModel = viewModel)
@@ -228,6 +237,15 @@ fun MainAppScreen(
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
             )
+            MoreDestination(
+                icon = Icons.Default.Dns,
+                label = "المزوّدون والنماذج",
+                description = "إدارة مزودي LLM/البحث/التضمين والخدمات والتكوينات",
+                tag = "more_tab_providers"
+            ) {
+                viewModel.selectTab(ActiveNavigationTab.MODELS_CAPABILITIES)
+                moreSheetOpen = false
+            }
             MoreDestination(
                 icon = Icons.Default.AccountTree,
                 label = "المهام وخطط العمل",

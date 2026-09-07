@@ -1,8 +1,10 @@
 package com.example.application.decision
 
 import com.example.domain.core.decision.CbrMdpEngine
+import com.example.domain.core.decision.DecisionAction
+import com.example.domain.core.decision.DecisionActionType
 import com.example.domain.core.decision.DecisionCase
-import com.example.domain.core.decision.EnvironmentObservation
+import com.example.domain.core.decision.DecisionState
 import com.example.domain.core.evolution.runtime.PolicyEvaluationReport
 import com.example.domain.core.evolution.runtime.PolicyKind
 import com.example.infrastructure.persistence.dao.DecisionCaseDao
@@ -14,28 +16,23 @@ import kotlinx.coroutines.withContext
  * DecisionIntelligenceService — Phase 5 Decision Intelligence (P1)
  * ============================================================================
  *
- * Closes the Decision Intelligence gap (audit: ~45% → ~55%) by adding:
+ * GAP-CLOSURE P0-08: this service previously "evaluated" the policy with a
+ * HARD-CODED `simulatePolicyLookup() = "LLM_GENERATION"` and a placeholder
+ * lookahead that summed a constant — its reports could say nothing true
+ * about the REAL decision runtime (CbrMdpEngine + DecisionService). Both
+ * paths now call the REAL engine:
  *
- *   1. Richer state representation — augments the existing 15-feature
- *      `DecisionState.toFeatureVector()` with prompt-embedding and
- *      recent-action-history features. (The audit asked for richer
- *      learned features.)
+ *  - [evaluatePolicy] runs the engine's actual `evaluateAndSelectAction`
+ *    against the same candidate set the runtime builds, so the report
+ *    measures the policy that actually decides executions.
+ *  - [lookahead] reads REAL Q-table cells (`getQEntry`) and rolls the
+ *    discounted value of the sticky-state successor (max over actions),
+ *    honestly returning a neutral prior when nothing has been learned.
+ *  - [calibrateUncertainty] is unchanged (it was already empirical).
  *
- *   2. Policy evaluation — `evaluatePolicy` runs the current Q-table
- *      against a held-out task suite and produces a
- *      `PolicyEvaluationReport`.
- *
- *   3. Multi-step lookahead — `lookahead` simulates N future steps
- *      using the current Q-table to estimate the long-horizon value
- *      of a candidate action. (The audit found the engine was myopic.)
- *
- *   4. Uncertainty calibration — `calibrateUncertainty` adjusts the
- *      raw uncertainty score based on the historical prediction error
- *      for the state region. (The audit found uncertainty was
- *      hand-tuned with `*0.7` / `*1.3` factors.)
- *
- * The existing `CbrMdpEngine` is preserved as the primary decision
- * engine; this service provides the auxiliary intelligence layer.
+ * The service remains an AUXILIARY measurement layer; the authoritative
+ * decision path is still DecisionService.evaluate() — but now the numbers
+ * here are derived from that same engine, not fabricated.
  */
 class DecisionIntelligenceService(
     private val decisionCaseDao: DecisionCaseDao,
@@ -48,11 +45,11 @@ class DecisionIntelligenceService(
      * @param taskSuite list of (state, expectedBestAction) pairs to
      *        evaluate against. The "expected" action is whatever the
      *        ground-truth label says; we compare it to the action the
-     *        current policy would pick.
+     *        CURRENT engine (real CBR retrieval + Q-table) would pick.
      */
     suspend fun evaluatePolicy(
         versionId: String,
-        taskSuite: List<Pair<com.example.domain.core.decision.DecisionState, String>>
+        taskSuite: List<Pair<DecisionState, String>>
     ): PolicyEvaluationReport = withContext(Dispatchers.Default) {
         if (taskSuite.isEmpty()) {
             return@withContext PolicyEvaluationReport(
@@ -75,12 +72,14 @@ class DecisionIntelligenceService(
         var failure = 0
         var totalReward = 0f
         val latencies = mutableListOf<Long>()
+        var engineCells = 0
 
         for ((state, expectedAction) in taskSuite) {
             val start = System.currentTimeMillis()
-            // We don't actually call the engine here (it needs a full
-            // DecisionContext); instead we simulate the policy lookup.
-            val predictedAction = simulatePolicyLookup(state)
+            // P0-08: the REAL policy lookup — the same engine call the
+            // runtime's decision layer performs (CBR retrieval + Q-table).
+            val predictedAction = realPolicyLookup(state)
+            engineCells = cbrMdpEngine.qTableSize()
             val latency = System.currentTimeMillis() - start
             latencies.add(latency)
             val reward = if (predictedAction == expectedAction) {
@@ -110,53 +109,77 @@ class DecisionIntelligenceService(
             totalTokensConsumed = 0L,
             regressionDetected = false, // set by the caller via detectRegression
             regressionScore = 0f,
-            notes = "تقييم تلقائي عبر DecisionIntelligenceService"
+            notes = "تقييم عبر المحرك الحقيقي (CbrMdpEngine.evaluateAndSelectAction) — " +
+                "خلايا Q متعلمة: $engineCells"
         )
     }
 
     /**
-     * Simulate a policy lookup for evaluation purposes. In production
-     * this would call `cbrMdpEngine.selectBestAction(state)`; here we
-     * use a simple heuristic so the evaluation can run without a full
-     * DecisionContext.
+     * P0-08 (REAL): performs the engine's own action selection for the
+     * given state using the runtime's standard candidate set. Returns the
+     * chosen action TYPE name — exactly what the decision runtime would
+     * choose, not a simulation.
      */
-    private fun simulatePolicyLookup(state: com.example.domain.core.decision.DecisionState): String {
-        // Heuristic: pick the action type with the highest Q-value for
-        // this state region. Falls back to "LLM_GENERATION" if no data.
-        return "LLM_GENERATION"
+    private fun realPolicyLookup(state: DecisionState): String {
+        val candidates = standardCandidateActions()
+        val decision = cbrMdpEngine.evaluateAndSelectAction(state, candidates)
+        return decision.chosenAction.type.name
     }
 
+    /** The standard candidate set mirroring DecisionService's planner space. */
+    internal fun standardCandidateActions(): List<DecisionAction> =
+        listOf(
+            DecisionAction(DecisionActionType.EXECUTE_STEP, targetId = "current"),
+            DecisionAction(DecisionActionType.SELECT_MODEL, targetId = "auto"),
+            DecisionAction(DecisionActionType.SEARCH, targetId = "web"),
+            DecisionAction(DecisionActionType.RETRIEVE_KNOWLEDGE, targetId = "rag"),
+            DecisionAction(DecisionActionType.RETRIEVE_MEMORY, targetId = "memory"),
+            DecisionAction(DecisionActionType.DELEGATE, targetId = "sub_agent"),
+            DecisionAction(DecisionActionType.CREATE_PLAN, targetId = "dag_workflow_planner"),
+            DecisionAction(DecisionActionType.REPLAN, targetId = "self"),
+            DecisionAction(DecisionActionType.COMPLETE, targetId = "terminal_complete"),
+            DecisionAction(DecisionActionType.STOP, targetId = "terminal_stop"),
+            DecisionAction(DecisionActionType.ASK_USER, targetId = "guidance")
+        )
+
     /**
-     * Multi-step lookahead. Estimates the long-horizon value of taking
-     * `actionType` in `state` by simulating N future steps using the
-     * current Q-table.
+     * Multi-step lookahead (P0-08 — REAL Q-table values).
      *
-     * The simulation is intentionally cheap: we assume the next state
-     * is similar to the current state (Markov assumption with sticky
-     * transitions) and accumulate discounted future rewards.
+     * Estimates the long-horizon value of taking `actionType` in `state`:
      *
-     * @return the estimated long-horizon value (Q(s,a) + γ·V(s'))
+     *   Q(s, a) + Σ γ^i · max_a' Q(s', a')   (sticky successor s' = s)
+     *
+     * Q values come from the engine's LIVE Q-table (`getQEntry`). When no
+     * cell has been learned for the state region, the method returns a
+     * HONEST neutral prior (0f) — it no longer fabricates a constant and
+     * label it "lookahead".
+     *
+     * @return the estimated long-horizon value.
      */
     fun lookahead(
-        state: com.example.domain.core.decision.DecisionState,
+        state: DecisionState,
         actionType: String,
         horizon: Int = 3,
         gamma: Float = 0.9f
     ): Float {
-        var currentValue = 0f
-        var discount = 1f
-        // We don't have direct access to the Q-table here (it's encapsulated
-        // inside CbrMdpEngine); in a real implementation we'd expose a
-        // `peekQValue(regionKey, actionType)` method. For now, return the
-        // immediate reward estimate as the lookahead value.
-        for (i in 0 until horizon) {
-            // Placeholder: assume each future step contributes a constant
-            // expected reward. A real implementation would look up the Q
-            // values for the predicted next state.
-            currentValue += 0.1f * discount
+        val regionKey = cbrMdpEngine.stateRegionKey(state)
+        val action = runCatching { DecisionActionType.valueOf(actionType) }.getOrNull()
+            ?: return 0f
+
+        val qNow = cbrMdpEngine.getQEntry(regionKey, action)?.qValue ?: 0f
+
+        // Successor state assumed sticky (Markov with self-transition) — the
+        // honest simplification; we roll the BEST next-action value forward.
+        var value = qNow
+        var discount = gamma
+        for (i in 0 until (horizon - 1).coerceAtLeast(0)) {
+            val successorBest = DecisionActionType.entries.maxOfOrNull { next ->
+                cbrMdpEngine.getQEntry(regionKey, next)?.qValue ?: 0f
+            } ?: 0f
+            value += discount * successorBest
             discount *= gamma
         }
-        return currentValue
+        return value
     }
 
     /**

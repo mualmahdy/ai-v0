@@ -1,8 +1,10 @@
 package com.example.application.orchestration
 
 import com.example.application.decision.DecisionService
+import com.example.application.execution.ExecutionContextCodec
 import com.example.application.execution.ExecutionResult
 import com.example.application.execution.ExecutionService
+import com.example.application.execution.ActionIdempotencyService
 import com.example.application.budget.EconomicGovernanceService
 import com.example.application.observation.ObservationService
 import com.example.application.outcome.OutcomeService
@@ -17,6 +19,9 @@ import com.example.domain.core.decision.DecisionActionType
 import com.example.domain.core.decision.DecisionResult
 import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.events.ExecutionEvent
+import com.example.domain.core.execution.CanonicalExecutionContext
+import com.example.domain.core.execution.ExecutionScope
+import com.example.domain.core.execution.IntentGate
 import com.example.domain.core.llm.LlmMessage
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.security.SecurityPolicy
@@ -30,18 +35,22 @@ import com.example.domain.core.task.TaskConstraints
 import com.example.domain.core.task.TaskSuccessCriteria
 import com.example.domain.core.task.VerificationStrategy
 import com.example.domain.core.task.AutonomyPolicy
+import com.example.infrastructure.persistence.dao.ActionIntentDao
 import com.example.infrastructure.persistence.dao.TaskDao
 import com.example.infrastructure.persistence.entities.TaskEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -50,6 +59,26 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Core Orchestrator coordinating Closed-Loop Autonomous Execution:
  * DECIDE (CBR-MDP) -> EXECUTE -> OBSERVE -> BELIEF UPDATE -> RE-DECIDE -> COMPLETE.
+ *
+ * ============================================================================
+ * CANONICAL EXECUTION KERNEL (gap-closure P0-02 / P0-03 / P0-05 / P0-06 /
+ * P1-01 / P1-02 / P1-03 / P1-04 / P1-13)
+ * ============================================================================
+ *
+ * Every execution now binds a [CanonicalExecutionContext] ONCE at launch:
+ *  - a STABLE executionId that survives resume (attempt counter only);
+ *  - a PINNED workspaceId — captured before the loop starts, propagated to
+ *    memory/RAG/resource scoping via [ExecutionScope] and to telemetry via
+ *    `ExecutionEvent.Started.workspaceId`;
+ *  - a PINNED agent identity — a resume that cannot find the ORIGINAL agent
+ *    fails honestly (AGENT_UNAVAILABLE) instead of silently migrating to a
+ *    different agent with different prompts/permissions (P1-04);
+ *  - an ACTION IDEMPOTENCY LEDGER (`action_intents`) — side-effectful actions
+ *    are recorded intent -> outcome; a resume REPLAYS completed actions
+ *    instead of re-executing them (P0-05 / P0-06, exactly-once recovery);
+ *  - checkpoint persistence is AUTHORITATIVE: a failed checkpoint write now
+ *    STOPS the execution with an honest fatal error instead of continuing
+ *    with an unresumable, unsafe state (P0-05).
  */
 class AgentOrchestrator(
     private val registry: ComponentRegistry,
@@ -64,6 +93,8 @@ class AgentOrchestrator(
     private val observationService: ObservationService = ObservationService(),
     private val outcomeService: OutcomeService = OutcomeService(),
     private val taskDao: TaskDao? = null,
+    /** Action idempotency ledger (null in pure JVM tests = no exactly-once guarantee). */
+    private val actionIntentDao: ActionIntentDao? = null,
     private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
     private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
     /**
@@ -75,12 +106,14 @@ class AgentOrchestrator(
      */
     private val economicGovernanceService: EconomicGovernanceService? = null,
     /**
-     * GOVERNANCE PHASE — active workspace provider for correct scoping of
-     * accounting, evidence, and decision context. Late-bound by the
-     * AppContainer (avoids a constructor dependency cycle).
+     * Active workspace provider used ONLY at execution start to PIN the
+     * canonical context. Never consulted mid-execution (P0-02). Late-bound
+     * by the AppContainer (avoids a constructor dependency cycle).
      */
     var workspaceIdProvider: (() -> String?)? = null
 ) {
+
+    private val idempotency: ActionIdempotencyService = ActionIdempotencyService(actionIntentDao)
 
     /**
      * Observability bus (audit 2026 fix): every emitted execution event is also
@@ -96,6 +129,17 @@ class AgentOrchestrator(
 
     /** Guards concurrent auto-resume sweeps on startup. */
     private val resumeSweepRunning = AtomicBoolean(false)
+
+    /** Detailed execution outcome for workflow/DAG accounting (P1-07). */
+    data class TaskExecutionSummary(
+        val outcome: Outcome<String, String>,
+        val totalTokensConsumed: Int,
+        val executionId: String,
+        val workspaceId: String?,
+        val attempt: Int,
+        /** Number of side-effectful actions replayed from the ledger (idempotency). */
+        val replayedActions: Int
+    )
 
     /**
      * Executes a task synchronously returning a comprehensive Outcome for workflow engines.
@@ -151,6 +195,95 @@ class AgentOrchestrator(
             )
             else -> Outcome.Success(value = finalResult)
         }
+    }
+
+    /**
+     * Executes a task and returns the detailed summary (REAL token usage,
+     * execution identity, replay statistics) — used by the WorkflowEngine so
+     * workflow accounting matches the economic ledger instead of the legacy
+     * `output.length / 4` estimate (P1-07).
+     */
+    suspend fun executeTaskDetailed(
+        agent: AgentDefinition,
+        task: TaskDefinition,
+        conversationHistory: List<LlmMessage> = emptyList(),
+        preferredProviderId: String? = null,
+        networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
+        isNetworkAvailable: Boolean = true,
+        pinnedWorkspaceId: String? = null
+    ): TaskExecutionSummary {
+        var finalResult = ""
+        var isDegraded = false
+        var degradedReason: DegradedReason? = null
+        var isError = false
+        var errorMessage = ""
+        var tokens = 0
+        var executionId = ""
+        var attempt = 1
+        var replayed = 0
+
+        executeTaskStream(
+            agent = agent,
+            task = task,
+            conversationHistory = conversationHistory,
+            preferredProviderId = preferredProviderId,
+            networkPolicy = networkPolicy,
+            isNetworkAvailable = isNetworkAvailable,
+            pinnedWorkspaceId = pinnedWorkspaceId
+        ).collect { event ->
+            when (event) {
+                is ExecutionEvent.Started -> executionId = event.executionId
+                is ExecutionEvent.UsageBudgetUpdate -> tokens = event.totalSessionTokens
+                is ExecutionEvent.CostRecorded -> tokens = event.totalTokens.let { t ->
+                    // CostRecorded carries per-action usage; keep the max observed.
+                    maxOf(tokens, event.inputTokens + event.outputTokens)
+                }
+                is ExecutionEvent.ActionCompleted -> {
+                    if (event.action.payload.containsKey("__replayed__")) replayed++
+                }
+                is ExecutionEvent.Completed -> {
+                    finalResult = event.finalText
+                    isDegraded = event.isDegraded
+                    degradedReason = event.degradedReason
+                }
+                is ExecutionEvent.Error -> {
+                    if (event.isFatal) {
+                        isError = true
+                        errorMessage = event.message
+                    }
+                }
+                is ExecutionEvent.Degraded -> {
+                    isDegraded = true
+                    degradedReason = event.reason
+                }
+                else -> Unit
+            }
+        }
+
+        // Final token count comes from the durable task row when persistence
+        // is wired (authoritative accounting), else from the observed events.
+        val durableTokens = runCatching {
+            taskDao?.getTaskById(task.id.value)?.totalTokensConsumed
+        }.getOrNull()
+        val effectiveTokens = durableTokens?.takeIf { it > 0 } ?: tokens
+
+        val outcome = when {
+            isError -> Outcome.Error(failure = errorMessage, diagnosticMessage = errorMessage)
+            isDegraded -> Outcome.Degraded(
+                partialValue = finalResult,
+                reason = degradedReason ?: DegradedReason.UNKNOWN_DEGRADATION,
+                diagnosticMessage = "تم التنفيذ بوضع متراجع"
+            )
+            else -> Outcome.Success(value = finalResult)
+        }
+        return TaskExecutionSummary(
+            outcome = outcome,
+            totalTokensConsumed = effectiveTokens,
+            executionId = executionId,
+            workspaceId = pinnedWorkspaceId,
+            attempt = attempt,
+            replayedActions = replayed
+        )
     }
 
     /**
@@ -219,6 +352,11 @@ class AgentOrchestrator(
     /**
      * Executes an agent task via the autonomous closed loop governed by CBR-MDP Decision Intelligence.
      *
+     * Implemented as a [channelFlow] (gap-closure): the loop body runs inside
+     * a PINNED ExecutionScope (`withContext`) and emits from that scope — a
+     * plain `flow {}` forbids cross-context emission (Flow invariant), so the
+     * channel-based builder is the correct primitive for scoped emission.
+     *
      * Audit 2026 fixes in this loop:
      *  - every event is mirrored to [executionEventPublisher] for persistent tracing;
      *  - the loop checkpoint (step, evidence, output, tokens) is persisted after
@@ -226,6 +364,12 @@ class AgentOrchestrator(
      *  - a cancelled task is persisted as CANCELLED (previously the row stayed
      *    RUNNING forever, producing zombie resumable tasks);
      *  - delegation depth flows through the task parameters for the depth guard.
+     *
+     * Gap-closure:
+     *  - [restoredContext] carries the ORIGINAL execution identity when
+     *    resuming (stable executionId, pinned workspace/agent/model);
+     *  - [pinnedWorkspaceId] lets the WorkflowEngine pin all step executions
+     *    to the workspace the workflow started in.
      */
     fun executeTaskStream(
         agent: AgentDefinition,
@@ -235,10 +379,17 @@ class AgentOrchestrator(
         networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
         isNetworkAvailable: Boolean = true,
         includeWebSearch: Boolean = false,
-        restoredCheckpoint: TaskCheckpoint? = null
-    ): Flow<ExecutionEvent> = flow {
+        restoredCheckpoint: TaskCheckpoint? = null,
+        restoredContext: CanonicalExecutionContext? = null,
+        pinnedWorkspaceId: String? = null
+    ): Flow<ExecutionEvent> = channelFlow<ExecutionEvent> {
+        // ProducerScope (1.10+) is a SendChannel, NOT a FlowCollector — bridge
+        // the loop's emit() semantics onto the channel's send() (the channel
+        // allows emission from the pinned ExecutionScope coroutine).
+        val collector = kotlinx.coroutines.flow.FlowCollector<ExecutionEvent> { value -> send(value) }
         try {
             executeTaskLoop(
+                collector = collector,
                 agent = agent,
                 task = task,
                 conversationHistory = conversationHistory,
@@ -246,7 +397,9 @@ class AgentOrchestrator(
                 networkPolicy = networkPolicy,
                 isNetworkAvailable = isNetworkAvailable,
                 includeWebSearch = includeWebSearch,
-                restoredCheckpoint = restoredCheckpoint
+                restoredCheckpoint = restoredCheckpoint,
+                restoredContext = restoredContext,
+                pinnedWorkspaceId = pinnedWorkspaceId
             )
         } catch (e: CancellationException) {
             // Truthful cancellation (audit 2026 fix): persist CANCELLED so the
@@ -268,21 +421,26 @@ class AgentOrchestrator(
                     )
                 }
             }
-            emit(
-                ExecutionEvent.Cancelled(
-                    executionId = task.id.value,
-                    reason = "أُلغيت المهمة بواسطة المستخدم أو بسبب انقطاع البيئة."
+            runCatching {
+                send(
+                    ExecutionEvent.Cancelled(
+                        executionId = restoredContext?.executionId ?: task.id.value,
+                        reason = "أُلغيت المهمة بواسطة المستخدم أو بسبب انقطاع البيئة."
+                    )
                 )
-            )
+            }
             throw e
         }
+        // channelFlow closes its channel when this block returns — no
+        // awaitClose needed (events are produced sequentially here).
     }.onEach { event ->
         // Mirror every event to the observability bus (fire-and-forget).
         _executionEventPublisher.tryEmit(event)
     }
 
     /** The actual closed-loop body, extracted for cancellation-safe wrapping. */
-    private suspend fun kotlinx.coroutines.flow.FlowCollector<ExecutionEvent>.executeTaskLoop(
+    private suspend fun executeTaskLoop(
+        collector: kotlinx.coroutines.flow.FlowCollector<in ExecutionEvent>,
         agent: AgentDefinition,
         task: TaskDefinition,
         conversationHistory: List<LlmMessage>,
@@ -290,16 +448,87 @@ class AgentOrchestrator(
         networkPolicy: NetworkPolicy,
         isNetworkAvailable: Boolean,
         includeWebSearch: Boolean,
-        restoredCheckpoint: TaskCheckpoint?
+        restoredCheckpoint: TaskCheckpoint?,
+        restoredContext: CanonicalExecutionContext?,
+        pinnedWorkspaceId: String?
     ) {
-        val executionId = UUID.randomUUID().toString()
-        val startTime = System.currentTimeMillis()
+        // ------------------------------------------------------------
+        // CANONICAL CONTEXT BINDING (P0-02 / P0-03 / P1-01 / P1-03):
+        // the workspace is captured ONCE — before the loop — and pinned for
+        // the whole execution. A configured provider that cannot supply a
+        // workspace fails CLOSED: no data is written into an implicit
+        // "default" scope anymore.
+        // ------------------------------------------------------------
+        val resolvedWorkspaceId = pinnedWorkspaceId
+            ?: restoredContext?.workspaceId
+            ?: workspaceIdProvider?.invoke()
+        if (workspaceIdProvider != null && pinnedWorkspaceId == null &&
+            restoredContext == null && resolvedWorkspaceId == null
+        ) {
+            val reason = "WORKSPACE_CONTEXT_REQUIRED: لا توجد مساحة عمل نشطة لربط التنفيذ — أُوقف التنفيذ بأمان بدلاً من الكتابة في نطاق افتراضي."
+            collector.emit(ExecutionEvent.Error(task.id.value, "WORKSPACE_CONTEXT_REQUIRED", reason, isFatal = true))
+            // Persist the FAILED row (insert-or-update — the task may have no
+            // row yet at this early failure point).
+            runCatching {
+                taskDao?.insertOrUpdateTask(
+                    TaskEntity(
+                        id = task.id.value,
+                        assignedAgentId = agent.identity.id.value,
+                        rawPrompt = task.input.rawPrompt,
+                        lifecycleState = "FAILED",
+                        autonomyPolicy = task.constraints.autonomyPolicy.name,
+                        resultSummary = null,
+                        totalTokensConsumed = 0,
+                        durationMs = 0L,
+                        isDegraded = false,
+                        degradedReason = null,
+                        errorMessage = reason,
+                        createdAtEpochMs = System.currentTimeMillis(),
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                        goal = task.goal,
+                        currentStepIndex = task.currentStepIndex,
+                        tokenLimit = task.budget.tokenLimit,
+                        maxRetries = task.constraints.maxRetries,
+                        allowDegradedExecution = task.constraints.allowDegradedExecution,
+                        requireHumanConsentForSensitiveTools = task.constraints.requireHumanConsentForSensitiveTools,
+                        timeoutMs = task.constraints.timeoutMs,
+                        minOutputLengthChars = task.successCriteria.minOutputLengthChars,
+                        verificationStrategy = task.successCriteria.verificationStrategy.name,
+                        assignedModelId = task.assignedModelId,
+                        parentTaskId = task.input.parameters["parentTaskId"]?.toString(),
+                        delegationDepth = task.input.parameters["delegationDepth"]?.toString()?.toIntOrNull() ?: 0
+                    )
+                )
+            }
+            return
+        }
+
+        // STABLE execution identity: a resumed execution keeps its original
+        // executionId and increments the attempt counter (P1-03).
+        //
+        // Provider-less mode (pure JVM tests / legacy wiring) is labeled
+        // HONESTLY as "unattributed" — never a fabricated "default" scope
+        // (the fail-CLOSED path above already handles the configured-but-
+        // missing case).
+        val context = restoredContext?.nextAttempt() ?: CanonicalExecutionContext(
+            executionId = "exec_" + UUID.randomUUID().toString(),
+            taskId = task.id,
+            workspaceId = resolvedWorkspaceId ?: "unattributed",
+            projectId = null,
+            agentId = agent.identity.id,
+            agentRole = agent.identity.role,
+            modelId = task.assignedModelId,
+            parentTaskId = task.input.parameters["parentTaskId"]?.toString(),
+            delegationDepth = task.input.parameters["delegationDepth"]?.toString()?.toIntOrNull() ?: 0,
+            attempt = 1
+        )
+        val executionId = context.executionId
+        val workspaceId = context.workspaceId.takeIf { it.isNotBlank() && it != UNATTRIBUTED_WORKSPACE }
 
         // 0. Persist Initial Task State in Room DB
-        // GOVERNANCE PHASE: stamp the active workspace into the task parameters
+        // GOVERNANCE PHASE: stamp the pinned workspace into the task parameters
         // so the decision context, economic gate, and radar evidence scope
-        // correctly (previously the workspace never reached this layer).
-        val workspaceId = workspaceIdProvider?.invoke()
+        // correctly.
         var currentTask = if (workspaceId != null && task.input.parameters["workspaceId"] == null) {
             task.copy(
                 state = TaskLifecycleState.RUNNING,
@@ -310,9 +539,44 @@ class AgentOrchestrator(
         } else {
             task.copy(state = TaskLifecycleState.RUNNING)
         }
-        persistTaskInitial(currentTask, agent)
+        persistTaskInitial(currentTask, agent, context)
 
-        val maxSteps = (task.constraints.maxRetries + 4).coerceIn(3, 8)
+        // ------------------------------------------------------------
+        // PINNED WORKSPACE SCOPE (P0-02): every suspending call below this
+        // point (memory writes, RAG retrieval, resource scoping) resolves the
+        // workspace from THIS scope, not from the active-workspace StateFlow.
+        // ------------------------------------------------------------
+        withContext(ExecutionScope(executionId = executionId, workspaceId = context.workspaceId)) {
+            executeClosedLoop(
+                collector = collector,
+                agent = agent,
+                context = context,
+                initialTask = currentTask,
+                conversationHistory = conversationHistory,
+                networkPolicy = networkPolicy,
+                isNetworkAvailable = isNetworkAvailable,
+                restoredCheckpoint = restoredCheckpoint
+            )
+        }
+    }
+
+    /** The closed-loop body — executed INSIDE the pinned ExecutionScope. */
+    private suspend fun executeClosedLoop(
+        collector: kotlinx.coroutines.flow.FlowCollector<in ExecutionEvent>,
+        agent: AgentDefinition,
+        context: CanonicalExecutionContext,
+        initialTask: TaskDefinition,
+        conversationHistory: List<LlmMessage>,
+        networkPolicy: NetworkPolicy,
+        isNetworkAvailable: Boolean,
+        restoredCheckpoint: TaskCheckpoint?
+    ) {
+        val executionId = context.executionId
+        val workspaceId = context.workspaceId.takeIf { it.isNotBlank() && it != UNATTRIBUTED_WORKSPACE }
+        val startTime = System.currentTimeMillis()
+        var currentTask = initialTask
+
+        val maxSteps = (initialTask.constraints.maxRetries + 4).coerceIn(3, 8)
 
         // Restore durable state from the checkpoint when resuming after
         // process death — otherwise start a fresh loop.
@@ -324,6 +588,7 @@ class AgentOrchestrator(
         restoredCheckpoint?.evidence?.let { restored -> accumulatedEvidence.putAll(restored) }
         val decisionHistory = mutableListOf<DecisionResult>()
         val observationHistory = mutableListOf<EnvironmentObservation>()
+        var replayedActions = 0
 
         var currentDecisionState = decisionService.buildDecisionContext(
             task = currentTask,
@@ -339,11 +604,12 @@ class AgentOrchestrator(
         var degradedReason: DegradedReason? = null
         var finalResultText = ""
 
-        emit(
+        collector.emit(
             ExecutionEvent.Started(
                 executionId = executionId,
                 agentId = agent.identity.id,
-                modelId = "cbr_mdp_orchestrator"
+                modelId = "cbr_mdp_orchestrator",
+                workspaceId = workspaceId
             )
         )
 
@@ -375,7 +641,7 @@ class AgentOrchestrator(
             decisionHistory.add(decisionResult)
             val chosenAction = decisionResult.chosenAction
 
-            emit(
+            collector.emit(
                 ExecutionEvent.DecisionMade(
                     executionId = executionId,
                     decision = decisionResult
@@ -418,7 +684,7 @@ class AgentOrchestrator(
                 )
                 observationHistory.add(terminalObservation)
                 currentDecisionState = decisionService.recordObservation(currentDecisionState, terminalObservation)
-                emit(
+                collector.emit(
                     ExecutionEvent.ObservationRecorded(
                         executionId = executionId,
                         observation = terminalObservation,
@@ -442,7 +708,7 @@ class AgentOrchestrator(
             } else if (chosenAction.type == DecisionActionType.ASK_USER) {
                 val reason = chosenAction.payload["reason"] ?: "مطلوب تأكيد أو مدخلات من المستخدم."
                 persistTaskFinal(currentTask.id.value, "WAITING", reason, accumulatedTokens, System.currentTimeMillis() - startTime, isDegraded, degradedReason?.name, null)
-                emit(
+                collector.emit(
                     ExecutionEvent.Degraded(
                         executionId = executionId,
                         reason = DegradedReason.UNKNOWN_DEGRADATION,
@@ -453,7 +719,7 @@ class AgentOrchestrator(
                 return
             }
 
-            emit(
+            collector.emit(
                 ExecutionEvent.ActionStarted(
                     executionId = executionId,
                     action = chosenAction,
@@ -475,14 +741,14 @@ class AgentOrchestrator(
             ) {
                 val quotaMsg = "TOKEN_QUOTA_EXCEEDED: استُهلكت حصة التوكنز للمهمة " +
                     "(${accumulatedTokens}/${currentTask.budget.tokenLimit}) — توقّف الإنفاق الإضافي."
-                emit(
+                collector.emit(
                     ExecutionEvent.BudgetGateDecision(
                         executionId = executionId,
                         decision = com.example.domain.core.budget.EconomicGateDecision.DENIED.name,
                         reason = quotaMsg
                     )
                 )
-                emit(
+                collector.emit(
                     ExecutionEvent.Degraded(
                         executionId = executionId,
                         reason = DegradedReason.BUDGET_APPROACHING_LIMIT,
@@ -513,14 +779,14 @@ class AgentOrchestrator(
                 }.getOrNull()
                 if (sessionCheck is Outcome.Error) {
                     val secMsg = "SECURITY_TOKEN_CEILING: ${sessionCheck.diagnosticMessage ?: "رفضت سياسة الأمان استمرار الإنفاق"}"
-                    emit(
+                    collector.emit(
                         ExecutionEvent.BudgetGateDecision(
                             executionId = executionId,
                             decision = com.example.domain.core.budget.EconomicGateDecision.DENIED.name,
                             reason = secMsg
                         )
                     )
-                    emit(
+                    collector.emit(
                         ExecutionEvent.Degraded(
                             executionId = executionId,
                             reason = DegradedReason.BUDGET_APPROACHING_LIMIT,
@@ -541,7 +807,7 @@ class AgentOrchestrator(
             // ------------------------------------------------------------
             val budgetGateReason = chosenAction.payload["reason"]
             if (chosenAction.type == DecisionActionType.REPLAN && budgetGateReason?.startsWith("BUDGET_") == true) {
-                emit(
+                collector.emit(
                     ExecutionEvent.BudgetGateDecision(
                         executionId = executionId,
                         decision = com.example.domain.core.budget.EconomicGateDecision.DOWNGRADE.name,
@@ -550,18 +816,83 @@ class AgentOrchestrator(
                 )
             }
 
-            // 3. Execute Action via ExecutionService
-            val execResult = executionService.executeAction(
-                action = chosenAction,
-                context = decisionContext,
-                agent = agent,
-                conversationHistory = conversationHistory,
-                executionId = executionId,
-                onEvent = { event -> emit(event) }
-            )
+            // ------------------------------------------------------------
+            // ACTION IDEMPOTENCY GATE (P0-05 / P0-06): side-effectful actions
+            // are recorded in the durable ledger BEFORE execution. A
+            // COMPLETED intent from a previous attempt is REPLAYED (its
+            // stored output becomes this step's result) — the side effect is
+            // never repeated. Without a ledger (pure JVM tests) the gate is
+            // honestly "no exactly-once guarantee".
+            // ------------------------------------------------------------
+            var execResult: ExecutionResult? = null
+            val isGatedAction = chosenAction.type in idempotency.gatedActionTypes
+            val gate = if (isGatedAction) {
+                idempotency.begin(executionId, stepIndex, chosenAction)
+            } else {
+                null
+            }
+            when (gate) {
+                is IntentGate.AlreadyCompleted -> {
+                    replayedActions++
+                    val stored = gate.intent.outputSummary.orEmpty()
+                    execResult = ExecutionResult(
+                        isSuccess = true,
+                        outputText = if (stored.isBlank()) {
+                            "[IDEMPOTENT_REPLAY]: نُفّذ هذا الإجراء سابقاً في المحاولة الأولى وأُعيدت نتيجته من سجل النوايا."
+                        } else {
+                            "[IDEMPOTENT_REPLAY]: $stored"
+                        },
+                        outputData = mapOf(
+                            "replayed" to true,
+                            "actionKey" to gate.intent.actionKey,
+                            "replayFingerprint" to (gate.intent.outputFingerprint ?: "")
+                        ),
+                        tokensConsumed = 0
+                    )
+                    collector.emit(
+                        ExecutionEvent.ActionCompleted(
+                            executionId = executionId,
+                            action = chosenAction.copy(
+                                payload = chosenAction.payload + ("__replayed__" to "true")
+                            ),
+                            outputSummary = "[إعادة تشغيل من سجل الـIdempotency] ${gate.intent.actionKey}",
+                            observation = observationService.createObservation(
+                                action = chosenAction,
+                                result = execResult,
+                                stepIndex = stepIndex,
+                                actionOutcome = com.example.application.outcome.ActionOutcomeType.SUCCESS
+                            )
+                        )
+                    )
+                }
+                else -> {
+                    // Proceed (fresh intent, ungated action, or honestly
+                    // ledger-less mode) — then record the outcome.
+                    execResult = executionService.executeAction(
+                        action = chosenAction,
+                        context = decisionContext,
+                        agent = agent,
+                        conversationHistory = conversationHistory,
+                        executionId = executionId,
+                        onEvent = { event -> collector.emit(event) }
+                    )
+                    if (isGatedAction) {
+                        if (execResult.isSuccess) {
+                            idempotency.complete(executionId, stepIndex, chosenAction, execResult.outputText)
+                        } else {
+                            idempotency.fail(
+                                executionId, stepIndex, chosenAction,
+                                execResult.errorDescription ?: "فشل غير محدد"
+                            )
+                        }
+                    }
+                }
+            }
+            val stepResult = execResult
+                ?: ExecutionResult(isSuccess = false, outputText = "", errorDescription = "NO_RESULT")
 
             // 4. Update Token and Output Tracking
-            accumulatedTokens += execResult.tokensConsumed
+            accumulatedTokens += stepResult.tokensConsumed
             // GOVERNANCE PHASE: keep the LIVE task budget consumption accurate
             // (legacy defect: TaskBudget.consumedTokens was never incremented
             // during a run, so delegation carve-outs and remaining-budget
@@ -574,8 +905,9 @@ class AgentOrchestrator(
             // GOVERNANCE PHASE — POST-EXECUTION USAGE ACCOUNTING:
             // attributed usage -> persistent cost ledger (+ telemetry +
             // RPM/TPM window) -> CostRecorded event on the bus.
+            // Accounting uses the PINNED workspace (P0-02).
             // ------------------------------------------------------------
-            val attribution = execResult.usageDetail
+            val attribution = stepResult.usageDetail
             if (attribution != null && attribution.totalTokens > 0) {
                 val record = runCatching {
                     economicGovernanceService?.accountUsageSuspend(
@@ -600,7 +932,7 @@ class AgentOrchestrator(
                     )
                 }.getOrNull()
                 if (record != null) {
-                    emit(
+                    collector.emit(
                         ExecutionEvent.CostRecorded(
                             executionId = executionId,
                             inputTokens = record.usage.inputTokens,
@@ -617,31 +949,31 @@ class AgentOrchestrator(
                     )
                 }
             }
-            if (execResult.outputText.isNotBlank()) {
+            if (stepResult.outputText.isNotBlank()) {
                 if (accumulatedOutputText.isNotEmpty() && !accumulatedOutputText.endsWith("\n")) {
                     accumulatedOutputText.append("\n")
                 }
-                accumulatedOutputText.append(execResult.outputText)
+                accumulatedOutputText.append(stepResult.outputText)
             }
-            if (execResult.isDegraded) {
+            if (stepResult.isDegraded) {
                 isDegraded = true
-                degradedReason = execResult.degradedReason
+                degradedReason = stepResult.degradedReason
             }
 
             // 5. Merge Evidence into context memory
-            accumulatedEvidence.putAll(execResult.outputData)
-            if (execResult.outputText.isNotBlank()) {
-                accumulatedEvidence["step_${stepIndex}_output"] = execResult.outputText
+            accumulatedEvidence.putAll(stepResult.outputData)
+            if (stepResult.outputText.isNotBlank()) {
+                accumulatedEvidence["step_${stepIndex}_output"] = stepResult.outputText
             }
 
             // 6. Normalize Observation
             // FIX D-3 (audit c03919d): the previously-dead
             // OutcomeService.evaluateActionOutcome is now wired into the live
             // loop — its classification shapes the CBR-MDP feedback reward.
-            val actionOutcomeType = outcomeService.evaluateActionOutcome(chosenAction, execResult)
+            val actionOutcomeType = outcomeService.evaluateActionOutcome(chosenAction, stepResult)
             val observation = observationService.createObservation(
                 action = chosenAction,
-                result = execResult,
+                result = stepResult,
                 stepIndex = stepIndex,
                 actionOutcome = actionOutcomeType
             )
@@ -649,7 +981,7 @@ class AgentOrchestrator(
 
             // 7. Feed Observation into CBR-MDP Engine -> updates belief state and retains case
             currentDecisionState = decisionService.recordObservation(currentDecisionState, observation)
-            emit(
+            collector.emit(
                 ExecutionEvent.ObservationRecorded(
                     executionId = executionId,
                     observation = observation,
@@ -657,23 +989,25 @@ class AgentOrchestrator(
                 )
             )
 
-            if (execResult.isSuccess) {
+            if (stepResult.isSuccess) {
                 consecutiveFailures = 0
-                emit(
-                    ExecutionEvent.ActionCompleted(
-                        executionId = executionId,
-                        action = chosenAction,
-                        outputSummary = observation.outputSummary,
-                        observation = observation
+                if (gate !is IntentGate.AlreadyCompleted) {
+                    collector.emit(
+                        ExecutionEvent.ActionCompleted(
+                            executionId = executionId,
+                            action = chosenAction,
+                            outputSummary = observation.outputSummary,
+                            observation = observation
+                        )
                     )
-                )
+                }
             } else {
                 consecutiveFailures++
-                emit(
+                collector.emit(
                     ExecutionEvent.ActionFailed(
                         executionId = executionId,
                         action = chosenAction,
-                        errorDescription = execResult.errorDescription ?: "فشل في تنفيذ الإجراء",
+                        errorDescription = stepResult.errorDescription ?: "فشل في تنفيذ الإجراء",
                         observation = observation
                     )
                 )
@@ -694,20 +1028,35 @@ class AgentOrchestrator(
                 outcomeSummary = accumulatedOutputText.toString().take(200)
             )
 
-            persistTaskUpdate(
-                taskId = currentTask.id.value,
-                stateStr = currentTask.state.name,
-                outcomeSummary = currentTask.outcomeSummary,
-                tokensConsumed = accumulatedTokens,
-                durationMs = System.currentTimeMillis() - startTime,
-                isDegraded = isDegraded,
-                degradedReason = degradedReason?.name,
-                errorMsg = if (!execResult.isSuccess) execResult.errorDescription else null
-            )
+            if (!persistTaskUpdate(
+                    taskId = currentTask.id.value,
+                    stateStr = currentTask.state.name,
+                    outcomeSummary = currentTask.outcomeSummary,
+                    tokensConsumed = accumulatedTokens,
+                    durationMs = System.currentTimeMillis() - startTime,
+                    isDegraded = isDegraded,
+                    degradedReason = degradedReason?.name,
+                    errorMsg = if (!stepResult.isSuccess) stepResult.errorDescription else null
+                )
+            ) {
+                collector.emit(
+                    ExecutionEvent.Error(
+                        executionId = executionId,
+                        failureCode = "TASK_PERSISTENCE_FAILED",
+                        message = "تعذّر تحديث حالة المهمة في قاعدة البيانات — الحالة الجارية في الذاكرة فقط.",
+                        isFatal = false
+                    )
+                )
+            }
 
-            // Durable checkpoint (audit 2026 fix): persist the loop state after
-            // EVERY step so process death resumes from here instead of re-running.
-            persistCheckpoint(
+            // ------------------------------------------------------------
+            // AUTHORITATIVE CHECKPOINT (P0-05): persist the loop state after
+            // EVERY step. A FAILED checkpoint write is FATAL — continuing
+            // would create an execution whose recovery semantics are
+            // unknowable (a crash later could re-run side effects with no
+            // ledger guarantee). Fail closed, honestly.
+            // ------------------------------------------------------------
+            val checkpointPersisted = persistCheckpoint(
                 taskId = currentTask.id.value,
                 checkpoint = TaskCheckpoint(
                     stepIndex = stepIndex,
@@ -716,6 +1065,19 @@ class AgentOrchestrator(
                     evidence = accumulatedEvidence
                 )
             )
+            if (!checkpointPersisted) {
+                val reason = "CHECKPOINT_PERSISTENCE_FAILED: تعذّر حفظ نقطة الاستئناف بعد الخطوة $stepIndex — أُوقف التنفيذ بأمان لأن استئنافه لاحقاً لم يعد مضموناً (exactly-once)."
+                collector.emit(
+                    ExecutionEvent.Error(
+                        executionId = executionId,
+                        failureCode = "CHECKPOINT_PERSISTENCE_FAILED",
+                        message = reason,
+                        isFatal = true
+                    )
+                )
+                persistTaskFinal(currentTask.id.value, "FAILED", accumulatedOutputText.toString().take(200), accumulatedTokens, System.currentTimeMillis() - startTime, isDegraded, degradedReason?.name, reason)
+                return
+            }
 
             val isTerminalCondition = outcomeService.isTerminalConditionReached(
                 task = currentTask,
@@ -728,9 +1090,9 @@ class AgentOrchestrator(
             if (isTerminalCondition) {
                 finalResultText = accumulatedOutputText.toString()
                 isTerminal = true
-                if (!isObjectiveSatisfied && consecutiveFailures > task.constraints.maxRetries) {
-                    val failureMsg = "تجاوزت المهمة الحد الأقصى للمحاولات (${task.constraints.maxRetries}) دون الوصول للهدف: ${execResult.errorDescription}"
-                    emit(
+                if (!isObjectiveSatisfied && consecutiveFailures > currentTask.constraints.maxRetries) {
+                    val failureMsg = "تجاوزت المهمة الحد الأقصى للمحاولات (${currentTask.constraints.maxRetries}) دون الوصول للهدف: ${stepResult.errorDescription}"
+                    collector.emit(
                         ExecutionEvent.Error(
                             executionId = executionId,
                             failureCode = "MAX_RETRIES_EXCEEDED",
@@ -755,10 +1117,10 @@ class AgentOrchestrator(
         val totalDuration = System.currentTimeMillis() - startTime
         val finalOutput = if (finalResultText.isNotBlank()) finalResultText else accumulatedOutputText.toString().ifBlank { "اكتملت معالجة المهمة." }
 
-        if (!isFinalObjectiveMet && !task.constraints.allowDegradedExecution) {
+        if (!isFinalObjectiveMet && !currentTask.constraints.allowDegradedExecution) {
             val failureMsg = "فشلت المهمة في استيفاء معايير القبول المحددة بعد $stepIndex خطوات."
             persistTaskFinal(currentTask.id.value, "FAILED", finalOutput.take(200), accumulatedTokens, totalDuration, isDegraded, degradedReason?.name, failureMsg)
-            emit(
+            collector.emit(
                 ExecutionEvent.Error(
                     executionId = executionId,
                     failureCode = "OBJECTIVE_NOT_SATISFIED",
@@ -772,18 +1134,28 @@ class AgentOrchestrator(
         val stateStr = if (isDegraded || !isFinalObjectiveMet) "DEGRADED" else "COMPLETED"
         val effectiveDegradedReason = if (!isFinalObjectiveMet) DegradedReason.PARTIAL_EVIDENCE else degradedReason
 
-        persistTaskFinal(
-            taskId = currentTask.id.value,
-            stateStr = stateStr,
-            outcomeSummary = finalOutput.take(200),
-            tokensConsumed = accumulatedTokens,
-            durationMs = totalDuration,
-            isDegraded = isDegraded || !isFinalObjectiveMet,
-            degradedReason = effectiveDegradedReason?.name,
-            errorMsg = null
-        )
+        if (!persistTaskFinal(
+                taskId = currentTask.id.value,
+                stateStr = stateStr,
+                outcomeSummary = finalOutput.take(200),
+                tokensConsumed = accumulatedTokens,
+                durationMs = totalDuration,
+                isDegraded = isDegraded || !isFinalObjectiveMet,
+                degradedReason = effectiveDegradedReason?.name,
+                errorMsg = null
+            )
+        ) {
+            collector.emit(
+                ExecutionEvent.Error(
+                    executionId = executionId,
+                    failureCode = "TASK_PERSISTENCE_FAILED",
+                    message = "اكتمل التنفيذ لكن تعذّر تدوين الحالة النهائية في قاعدة البيانات — قد تظهر المهمة RUNNING في الواجهة رغم انتهائها.",
+                    isFatal = false
+                )
+            )
+        }
 
-        emit(
+        collector.emit(
             ExecutionEvent.Completed(
                 executionId = executionId,
                 finalText = finalOutput,
@@ -793,6 +1165,13 @@ class AgentOrchestrator(
             )
         )
     }
+
+    /**
+     * Honest scope label for provider-less executions (pure JVM tests /
+     * legacy wiring): the execution is UNATTRIBUTED — never a fabricated
+     * "default" workspace.
+     */
+    private val UNATTRIBUTED_WORKSPACE = "unattributed"
 
     /** Actions that consume the task token quota (execution limit). */
     private val TOKEN_QUOTA_GATED_ACTIONS = setOf(
@@ -819,6 +1198,13 @@ class AgentOrchestrator(
      * successCriteria/currentStepIndex/outcomeSummary. The resumed task started fresh from
      * step 0 with default constraints — effectively a re-execution, not a resume. Now we
      * reconstruct the full TaskDefinition from the extended TaskEntity.
+     *
+     * Gap-closure P1-03 / P1-04: the ORIGINAL canonical context (executionId,
+     * pinned workspace, pinned agent identity) is restored from
+     * `tasks.executionContextJson`. The ORIGINAL agent must exist and match —
+     * a resume NO LONGER silently migrates the task to a different agent
+     * (different prompt/capabilities/permissions/model). When the original
+     * agent is unavailable the resume fails honestly (AGENT_UNAVAILABLE).
      */
     fun resumeTask(taskId: String): Flow<ExecutionEvent> = flow {
         val dao = taskDao
@@ -831,6 +1217,10 @@ class AgentOrchestrator(
             emit(ExecutionEvent.Error("resume_err", "TASK_NOT_FOUND", "المهمة ذات المعرف $taskId غير موجودة."))
             return@flow
         }
+
+        // Restore the ORIGINAL canonical execution context (P1-03): the
+        // resumed execution keeps its stable executionId and pinned scope.
+        val restoredContext = ExecutionContextCodec.decode(taskEntity.executionContextJson)
 
         val restoredState = try {
             TaskLifecycleState.valueOf(taskEntity.lifecycleState)
@@ -879,12 +1269,44 @@ class AgentOrchestrator(
             outcomeSummary = taskEntity.resultSummary
         )
 
-        val assignedAgent = registry.listAgents().firstOrNull { it.identity.id.value == taskEntity.assignedAgentId }
-            ?: decisionService.selectSuitableAgent(taskDef, registry.listAgents())
-            ?: registry.listAgents().firstOrNull()
-
+        // ------------------------------------------------------------
+        // AGENT IDENTITY VERIFICATION (P1-04): a resume must run the SAME
+        // agent the execution started with. Silent agent migration (with a
+        // different prompt, capabilities, permissions or model) is exactly
+        // the "Resume became Migration" defect — it now fails honestly.
+        // ------------------------------------------------------------
+        val assignedAgent = registry.getAgent(taskEntity.assignedAgentId)
         if (assignedAgent == null) {
-            emit(ExecutionEvent.Error("resume_err", "NO_AGENT_FOUND", "لا يوجد عميل متاح لاستئناف المهمة."))
+            emit(
+                ExecutionEvent.Error(
+                    "resume_err",
+                    "AGENT_UNAVAILABLE",
+                    "الوكيل الأصلي '${taskEntity.assignedAgentId}' غير مسجّل — يُرفض الاستئناف بدلاً من الترحيل الصامت إلى وكيل آخر بصلاحيات مختلفة. أعد تسجيل الوكيل أو شغّل المهمة من جديد."
+                )
+            )
+            runCatching {
+                dao.updateTaskStatus(
+                    id = taskId,
+                    state = "BLOCKED",
+                    summary = "الوكيل الأصلي غير متوفر — الاستئناف مرفوض (منع الترحيل الصامت).",
+                    tokens = taskEntity.totalTokensConsumed,
+                    duration = taskEntity.durationMs,
+                    isDegraded = taskEntity.isDegraded,
+                    degradedReason = taskEntity.degradedReason,
+                    errorMsg = "AGENT_UNAVAILABLE",
+                    now = System.currentTimeMillis()
+                )
+            }
+            return@flow
+        }
+        if (restoredContext != null && restoredContext.agentRole != assignedAgent.identity.role) {
+            emit(
+                ExecutionEvent.Error(
+                    "resume_err",
+                    "AGENT_IDENTITY_MISMATCH",
+                    "دور الوكيل المسجّل (${assignedAgent.identity.role.name}) لا يطابق الدور المثبّت في سياق التنفيذ (${restoredContext.agentRole.name}) — يُرفض الاستئناف حفاظاً على هوية التنفيذ."
+                )
+            )
             return@flow
         }
 
@@ -892,7 +1314,12 @@ class AgentOrchestrator(
         // checkpoint (step, evidence, output, tokens) instead of silently
         // re-running the task from step 0.
         val restoredCheckpoint = TaskCheckpoint.fromJson(taskEntity.checkpointJson)
-        executeTaskStream(assignedAgent, taskDef, restoredCheckpoint = restoredCheckpoint).collect { emit(it) }
+        executeTaskStream(
+            agent = assignedAgent,
+            task = taskDef,
+            restoredCheckpoint = restoredCheckpoint,
+            restoredContext = restoredContext
+        ).collect { emit(it) }
     }
 
     /**
@@ -929,10 +1356,13 @@ class AgentOrchestrator(
         return resumedIds
     }
 
-    /** Persists the durable loop checkpoint; failures never break execution. */
-    private suspend fun persistCheckpoint(taskId: String, checkpoint: TaskCheckpoint) {
-        val dao = taskDao ?: return
-        try {
+    /**
+     * Persists the durable loop checkpoint (P0-05: AUTHORITATIVE — the
+     * caller treats a `false` result as fatal for the execution).
+     */
+    private suspend fun persistCheckpoint(taskId: String, checkpoint: TaskCheckpoint): Boolean {
+        val dao = taskDao ?: return true // no persistence wired — nothing to guarantee
+        return try {
             dao.updateCheckpoint(
                 id = taskId,
                 stepIndex = checkpoint.stepIndex,
@@ -940,8 +1370,9 @@ class AgentOrchestrator(
                 tokens = checkpoint.tokensConsumed,
                 now = System.currentTimeMillis()
             )
-        } catch (_: Exception) {
-            // Safe fallback — checkpointing is best-effort by design.
+            true
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -970,7 +1401,11 @@ class AgentOrchestrator(
         return arr.toString()
     }
 
-    private suspend fun persistTaskInitial(task: TaskDefinition, agent: AgentDefinition) {
+    private suspend fun persistTaskInitial(
+        task: TaskDefinition,
+        agent: AgentDefinition,
+        context: CanonicalExecutionContext
+    ) {
         val dao = taskDao ?: return
         try {
             dao.insertOrUpdateTask(
@@ -1007,7 +1442,10 @@ class AgentOrchestrator(
                     // Delegation lineage (audit 2026 fix) — child tasks carry
                     // their parent id and nesting depth for tracing + guards.
                     parentTaskId = task.input.parameters["parentTaskId"]?.toString(),
-                    delegationDepth = task.input.parameters["delegationDepth"]?.toString()?.toIntOrNull() ?: 0
+                    delegationDepth = task.input.parameters["delegationDepth"]?.toString()?.toIntOrNull() ?: 0,
+                    // Canonical execution context (gap-closure): stable
+                    // identity + pinned scope, restored on resume.
+                    executionContextJson = ExecutionContextCodec.encode(context)
                 )
             )
         } catch (_: Exception) {
@@ -1015,6 +1453,7 @@ class AgentOrchestrator(
         }
     }
 
+    /** @return true when the status row was written; false = honest failure. */
     private suspend fun persistTaskUpdate(
         taskId: String,
         stateStr: String,
@@ -1024,9 +1463,9 @@ class AgentOrchestrator(
         isDegraded: Boolean,
         degradedReason: String?,
         errorMsg: String?
-    ) {
-        val dao = taskDao ?: return
-        try {
+    ): Boolean {
+        val dao = taskDao ?: return true
+        return try {
             dao.updateTaskStatus(
                 id = taskId,
                 state = stateStr,
@@ -1038,11 +1477,13 @@ class AgentOrchestrator(
                 errorMsg = errorMsg,
                 now = System.currentTimeMillis()
             )
+            true
         } catch (_: Exception) {
-            // Safe fallback
+            false
         }
     }
 
+    /** @return true when the status row was written; false = honest failure. */
     private suspend fun persistTaskFinal(
         taskId: String,
         stateStr: String,
@@ -1052,22 +1493,9 @@ class AgentOrchestrator(
         isDegraded: Boolean,
         degradedReason: String?,
         errorMsg: String?
-    ) {
-        val dao = taskDao ?: return
-        try {
-            dao.updateTaskStatus(
-                id = taskId,
-                state = stateStr,
-                summary = outcomeSummary,
-                tokens = tokensConsumed,
-                duration = durationMs,
-                isDegraded = isDegraded,
-                degradedReason = degradedReason,
-                errorMsg = errorMsg,
-                now = System.currentTimeMillis()
-            )
-        } catch (_: Exception) {
-            // Safe fallback
-        }
+    ): Boolean {
+        return persistTaskUpdate(
+            taskId, stateStr, outcomeSummary, tokensConsumed, durationMs, isDegraded, degradedReason, errorMsg
+        )
     }
 }

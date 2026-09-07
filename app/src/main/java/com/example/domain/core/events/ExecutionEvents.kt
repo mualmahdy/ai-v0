@@ -17,11 +17,17 @@ sealed interface ExecutionEvent {
 
     /**
      * Fired when an agent task execution begins.
+     *
+     * Gap-closure P0-02: carries the execution's PINNED workspace id so
+     * downstream observability attributes every subsequent event of this
+     * executionId to the workspace the execution STARTED in — not to
+     * whichever workspace happens to be active when the event lands.
      */
     data class Started(
         override val executionId: String,
         val agentId: AgentId,
         val modelId: String,
+        val workspaceId: String? = null,
         override val timestampMs: Long = System.currentTimeMillis()
     ) : ExecutionEvent
 

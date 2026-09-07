@@ -211,12 +211,33 @@ class TelemetryService(
         }
     }
 
+    /**
+     * GAP-CLOSURE P0-02: execution → workspace attribution binding.
+     * `ExecutionEvent.Started` now carries the execution's PINNED workspace
+     * id; every later event of the SAME executionId is attributed to THAT
+     * workspace — not to whichever workspace happens to be active when the
+     * event lands (mid-run workspace switching no longer moves telemetry
+     * attribution across workspaces).
+     */
+    private val executionWorkspaceBinding = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun resolveWorkspaceFor(event: ExecutionEvent): String? {
+        if (event is ExecutionEvent.Started) {
+            event.workspaceId?.let { pinned ->
+                executionWorkspaceBinding[event.executionId] = pinned
+                return pinned
+            }
+        }
+        return executionWorkspaceBinding[event.executionId]
+            ?: runCatching { workspaceIdProvider?.invoke() }.getOrNull()
+    }
+
     private suspend fun handle(event: ExecutionEvent) {
         val dims = MetricDimensions(
             executionId = event.executionId,
             sessionId = null,
-            // GOVERNANCE PHASE: real workspace attribution on every metric row.
-            workspaceId = runCatching { workspaceIdProvider?.invoke() }.getOrNull()
+            // GOVERNANCE PHASE + P0-02: pinned execution→workspace binding.
+            workspaceId = resolveWorkspaceFor(event)
         )
         when (event) {
             is ExecutionEvent.Started -> {

@@ -39,6 +39,13 @@ import com.example.domain.core.workspace.ResourceGraph
 
 enum class ActiveNavigationTab(val displayName: String, val iconName: String) {
     STUDIO("الاستوديو", "ic_studio"),
+    /**
+     * GAP-CLOSURE P1-18/P1-19: the Unified Activity Feed (execution trace,
+     * proactive suggestions, audit events) is a FIRST-CLASS destination —
+     * backend capability made user-visible (previously the screen existed
+     * but was unreachable from the navigation).
+     */
+    UNIFIED_ACTIVITY("النشاط الموحد", "ic_activity"),
     TASKS_WORKFLOWS("المهام وخطط العمل", "ic_workflow"),
     DECISION_INTELLIGENCE("ذكاء القرار (CBR-MDP)", "ic_decision"),
     RADAR_EVOLUTION("رادار التطور", "ic_radar"),

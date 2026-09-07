@@ -171,9 +171,12 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.RadarRecommendationEntity::class,
         com.example.infrastructure.persistence.entities.PricingEntryEntity::class,
         com.example.infrastructure.persistence.entities.CostLedgerEntryEntity::class,
-        com.example.infrastructure.persistence.entities.BudgetAllocationEntity::class
+        com.example.infrastructure.persistence.entities.BudgetAllocationEntity::class,
+        // Gap-closure — Canonical Execution Kernel + Durable Agent Registry (v11)
+        com.example.infrastructure.persistence.entities.ActionIntentEntity::class,
+        com.example.infrastructure.persistence.entities.AgentDefinitionEntity::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -238,6 +241,12 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun pricingEntryDao(): com.example.infrastructure.persistence.dao.PricingEntryDao
     abstract fun costLedgerEntryDao(): com.example.infrastructure.persistence.dao.CostLedgerEntryDao
     abstract fun budgetAllocationDao(): com.example.infrastructure.persistence.dao.BudgetAllocationDao
+
+    // Gap-closure — action idempotency ledger (P0-05/P0-06)
+    abstract fun actionIntentDao(): com.example.infrastructure.persistence.dao.ActionIntentDao
+
+    // Gap-closure — canonical durable agent registry (P1-08/P1-09)
+    abstract fun agentDefinitionDao(): com.example.infrastructure.persistence.dao.AgentDefinitionDao
 
     companion object {
         @Volatile
@@ -1153,6 +1162,63 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v10 → v11 — Gap-closure (Canonical Execution Kernel + Agent Registry).
+         *
+         *  1. `tasks.executionContextJson` — serialized CanonicalExecutionContext
+         *     (stable executionId + pinned workspace/project/agent/model + attempt).
+         *  2. `action_intents` — the ACTION IDEMPOTENCY LEDGER: durable
+         *     intention → side-effect → completion records for exactly-once
+         *     recovery (P0-05 / P0-06).
+         *  3. `agent_definitions` — CANONICAL durable agent registry shared by
+         *     the UI catalog and the runtime (P1-08 / P1-09).
+         */
+        private val MIGRATION_10_TO_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tasks ADD COLUMN executionContextJson TEXT")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS action_intents (
+                        executionId TEXT NOT NULL,
+                        actionKey TEXT NOT NULL,
+                        actionType TEXT NOT NULL,
+                        targetId TEXT,
+                        stepIndex INTEGER NOT NULL,
+                        state TEXT NOT NULL,
+                        outputFingerprint TEXT,
+                        outputSummary TEXT,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL,
+                        PRIMARY KEY(executionId, actionKey)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_action_intents_executionId ON action_intents(executionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_action_intents_state ON action_intents(state)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_definitions (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        systemPrompt TEXT NOT NULL,
+                        capabilitiesJson TEXT NOT NULL,
+                        workspaceScopeJson TEXT NOT NULL,
+                        maxTokens INTEGER NOT NULL,
+                        enabled INTEGER NOT NULL,
+                        version INTEGER NOT NULL,
+                        origin TEXT NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1165,6 +1231,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_7_TO_8,
             MIGRATION_8_TO_9,
             MIGRATION_9_TO_10,
+            MIGRATION_10_TO_11,
         )
 
 

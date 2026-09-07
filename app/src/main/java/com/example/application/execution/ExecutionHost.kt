@@ -12,20 +12,32 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Process-wide execution host (audit 2026 fix).
+ * Process-wide execution host — now a MULTI-EXECUTION REGISTRY (gap-closure
+ * P0-01 / P1-20).
  *
- * Previously agent executions ran inside `viewModelScope` — when the user
- * left the screen (or the system tore down the ViewModel) the execution was
- * cancelled mid-flight while the task row stayed RUNNING. Long agent tasks
- * now run in an APPLICATION scope that survives ViewModel destruction, and a
- * foreground service ([com.example.application.execution.AgentExecutionForegroundService])
- * raises the process priority while work is live so Android does not kill it.
+ * Previously this host held ONE `currentJob` and `launch()` CANCELLED the
+ * previous execution — a second task silently killed the first, `isRunning`
+ * was a global lie, and the foreground service could not tell which
+ * execution it was protecting.
+ *
+ * Contract now:
+ *  - [launch] registers an execution under a caller-supplied key (taskId).
+ *    It NEVER cancels other executions — concurrent executions are the
+ *    supported case. Re-launching the SAME key replaces only that key's
+ *    previous job (honest "user re-ran this task" semantics).
+ *  - [cancel] cancels exactly ONE execution. The legacy [cancelCurrent]
+ *    remains only as a deprecated cancel-ALL shim for old call sites.
+ *  - [activeExecutions] is the live per-execution registry (StateFlow) the
+ *    foreground service and the UI subscribe to.
+ *  - `isRunning` is kept as a deprecated derived alias ("is ANY execution
+ *    running") so existing collectors keep compiling.
  *
  * State survives configuration changes and navigation; it does NOT survive
- * process death — that is covered by the durable checkpoint + startup resume
- * path in `AgentOrchestrator`.
+ * process death — that is covered by the durable checkpoint + canonical
+ * execution context + startup resume path in `AgentOrchestrator`.
  */
 object ExecutionHost {
 
@@ -36,46 +48,102 @@ object ExecutionHost {
         onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
     )
 
-    /** Live stream of the current execution's events (for UI collection). */
+    /** Live stream of ALL execution events (each event carries its executionId). */
     val events: SharedFlow<ExecutionEvent> = _events.asSharedFlow()
 
-    private val _isRunning = MutableStateFlow(false)
-    val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
+    /** One live execution registered under its key (convention: taskId). */
+    data class ExecutionHandle(
+        val key: String,
+        val job: Job,
+        val startedAtEpochMs: Long
+    )
 
-    @Volatile
-    var currentJob: Job? = null
-        private set
+    private val handles = ConcurrentHashMap<String, ExecutionHandle>()
+
+    private val _activeExecutions = MutableStateFlow<Map<String, ExecutionHandle>>(emptyMap())
+    val activeExecutions: StateFlow<Map<String, ExecutionHandle>> = _activeExecutions.asStateFlow()
+
+    private val _isAnyRunning = MutableStateFlow(false)
+
+    /** TRUE while at least one execution is live. */
+    val isAnyRunning: StateFlow<Boolean> = _isAnyRunning.asStateFlow()
+
+    @Deprecated(
+        message = "Global single-job semantics removed (P0-01). Use isAnyRunning.",
+        replaceWith = ReplaceWith("isAnyRunning")
+    )
+    val isRunning: StateFlow<Boolean> get() = isAnyRunning
+
+    @Deprecated(
+        message = "Single currentJob removed (P0-01). Use activeExecutions / handleFor(key).",
+        replaceWith = ReplaceWith("handleFor(key)")
+    )
+    val currentJob: Job? get() = null
+
+    init {
+        // Keep the derived any-running flag in sync with the registry.
+        scope.launch {
+            activeExecutions.collect { live ->
+                _isAnyRunning.value = live.isNotEmpty()
+            }
+        }
+    }
 
     fun publish(event: ExecutionEvent) {
         _events.tryEmit(event)
     }
 
-    fun markStarted() {
-        _isRunning.value = true
-    }
-
-    fun markFinished() {
-        _isRunning.value = false
-        currentJob = null
-    }
-
-    fun launch(block: suspend () -> Unit): Job {
-        currentJob?.cancel()
+    /**
+     * Launches ONE execution under [key] (convention: the taskId). Does NOT
+     * cancel any OTHER execution. Re-launching the same key replaces that
+     * key's previous job only.
+     */
+    fun launch(key: String, block: suspend () -> Unit): Job {
+        cancel(key)
         val job = scope.launch {
-            try {
-                markStarted()
-                block()
-            } finally {
-                markFinished()
-            }
+            block()
         }
-        currentJob = job
+        val handle = ExecutionHandle(key = key, job = job, startedAtEpochMs = System.currentTimeMillis())
+        handles[key] = handle
+        publishState()
+        job.invokeOnCompletion { unregisterIfCurrent(key, job) }
         return job
     }
 
+    /** Cancels exactly ONE execution (no-op if not running). */
+    fun cancel(key: String) {
+        handles.remove(key)?.job?.cancel()
+        publishState()
+    }
+
+    /**
+     * Legacy cancel-ALL (deprecated): the old UI "stop" button had global
+     * semantics. Prefer [cancel] with the specific execution key.
+     */
+    @Deprecated(
+        message = "Cancels ALL executions. Use cancel(key) for one execution (P0-01).",
+        replaceWith = ReplaceWith("cancel(key)")
+    )
     fun cancelCurrent() {
-        currentJob?.cancel()
-        currentJob = null
-        _isRunning.value = false
+        for (k in handles.keys.toList()) cancel(k)
+    }
+
+    /** TRUE when [key] is currently executing. */
+    fun isExecuting(key: String): Boolean = handles.containsKey(key)
+
+    fun handleFor(key: String): ExecutionHandle? = handles[key]
+
+    // --- internals ---
+
+    private fun unregisterIfCurrent(key: String, job: Job) {
+        val current = handles[key]
+        if (current?.job === job) {
+            handles.remove(key)
+            publishState()
+        }
+    }
+
+    private fun publishState() {
+        _activeExecutions.value = handles.toMap()
     }
 }

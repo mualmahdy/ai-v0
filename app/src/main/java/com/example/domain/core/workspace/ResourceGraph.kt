@@ -5,7 +5,16 @@ import com.example.domain.core.agent.AgentId
 import com.example.domain.core.task.TaskId
 
 /**
- * First-class Resource types in the AI-V0 Workspace.
+ * First-class Resource types in the AI-V0 Workspace GRAPH.
+ *
+ * GAP-CLOSURE P1-12 (semantic boundary): this enum describes WORKSPACE-GRAPH
+ * NODES (context/relationship vertices: projects, tasks, documents, memory
+ * nodes…). It is NOT the runtime resource taxonomy
+ * (`com.example.domain.core.resource.ResourceType`: LLM / SEARCH / EMBEDDING
+ * / TOOL — materialized `ResourceRecord`s executed by adapters). The two
+ * share the name for historical reasons; they live in different semantic
+ * domains and MUST NOT be cross-wired (a graph node id is not a runtime
+ * ResourceId and vice versa). Enforced by the LegacyIsolationTest guards.
  */
 enum class ResourceType {
     WORKSPACE,

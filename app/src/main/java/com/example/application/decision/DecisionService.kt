@@ -409,12 +409,31 @@ class DecisionService(
             (requiredCaps.isEmpty() && candidates.isEmpty())
 
         if (requiresLlm) {
+            // ------------------------------------------------------------
+            // GAP-CLOSURE P1-13 (model pinning): when the task carries an
+            // assignedModelId, the decision layer binds to EXACTLY that
+            // resource — the user's choice is a durable binding, not a
+            // preference that silently floats to "whatever is preferred now".
+            // If the pinned resource is unavailable, the planner emits an
+            // explicit PINNED_MODEL_UNAVAILABLE ask instead of substituting
+            // another model.
+            // ------------------------------------------------------------
+            val pinnedModelId = task.assignedModelId
             val llmCandidates = resourceCapabilityGraph.findCandidatesByType(
                 ResourceType.LLM,
                 context.networkPolicy,
                 context.isNetworkAvailable
-            ).filter { cand ->
-                requiredCaps.isEmpty() || cand.capabilities.any { it in requiredCaps }
+            ).let { all ->
+                val capabilityFiltered = all.filter { cand ->
+                    requiredCaps.isEmpty() || cand.capabilities.any { it in requiredCaps }
+                }
+                if (pinnedModelId.isNullOrBlank()) {
+                    capabilityFiltered
+                } else {
+                    capabilityFiltered.filter { cand ->
+                        cand.resourceId.value == pinnedModelId || cand.providerId == pinnedModelId
+                    }
+                }
             }
             for (llmCand in llmCandidates) {
                 val decisionRecord = DecisionRecord(
@@ -464,12 +483,23 @@ class DecisionService(
                 candidates.add(
                     DecisionAction(
                         type = DecisionActionType.ASK_USER,
-                        targetId = "no_llm_resource_available",
+                        targetId = if (pinnedModelId.isNullOrBlank()) {
+                            "no_llm_resource_available"
+                        } else {
+                            "pinned_model_unavailable"
+                        },
                         payload = mapOf(
-                            "reason" to "لا يوجد مورد LLM متاح في ResourceCapabilityGraph. " +
-                                "يجب على المستخدم إنشاء مزود LLM، إضافة خدمة، حفظ التكوين، " +
-                                "اختبار الاتصال، اكتشاف النماذج، اختيار نموذج، تفعيل المورد، " +
-                                "ثم إعادة التخطيط."
+                            "reason" to if (pinnedModelId.isNullOrBlank()) {
+                                "لا يوجد مورد LLM متاح في ResourceCapabilityGraph. " +
+                                    "يجب على المستخدم إنشاء مزود LLM، إضافة خدمة، حفظ التكوين، " +
+                                    "اختبار الاتصال، اكتشاف النماذج، اختيار نموذج، تفعيل المورد، " +
+                                    "ثم إعادة التخطيط."
+                            } else {
+                                "PINNED_MODEL_UNAVAILABLE: النموذج المثبّت للمهمة ('$pinnedModelId') " +
+                                    "غير متاح حالياً (غير مسجّل أو غير مفعّل أو لا يطابق سياسة الشبكة). " +
+                                    "لن يُستبدل بنموذج آخر تلقائياً — فعّل المورد المثبّت أو أعد إطلاق " +
+                                    "المهمة بدون تثبيت."
+                            }
                         )
                     )
                 )

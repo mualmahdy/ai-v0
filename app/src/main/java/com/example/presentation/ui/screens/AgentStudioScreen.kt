@@ -59,6 +59,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -295,6 +299,13 @@ fun AgentStudioScreen(
             }
         }
 
+        // ------------------------------------------------------------
+        // GAP-CLOSURE P1-10 (Agent Builder): Agent Studio is no longer just
+        // an execution console — the user can CREATE a durable agent
+        // (create -> configure -> run) through the canonical registry.
+        // ------------------------------------------------------------
+        AgentBuilderCard(viewModel = viewModel)
+
         Spacer(modifier = Modifier.height(10.dp))
 
         // Prompt Input Field
@@ -477,5 +488,136 @@ fun AgentStudioScreen(
         }
 
         Spacer(modifier = Modifier.height(24.dp))
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// GAP-CLOSURE P1-10 — Agent Builder (create -> configure -> run, durable).
+// ---------------------------------------------------------------------------
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AgentBuilderCard(viewModel: MainViewModel) {
+    var expanded by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var systemPrompt by remember { mutableStateOf("") }
+    var selectedRole by remember { mutableStateOf(AgentRole.GENERAL_ASSISTANT) }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .testTag("agent_builder_card"),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "بناء وكيل جديد (Agent Builder)",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                OutlinedButton(
+                    onClick = { expanded = !expanded },
+                    modifier = Modifier.testTag("agent_builder_toggle")
+                ) {
+                    Text(if (expanded) "إغلاق" else "إنشاء وكيل")
+                }
+            }
+
+            androidx.compose.animation.AnimatedVisibility(visible = expanded) {
+                Column {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text("اسم الوكيل") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("agent_builder_name")
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "الدور المعماري: ${selectedRole.displayName}",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.testTag("agent_builder_role")
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // Role chips (robust on all Compose versions):
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(AgentRole.entries) { role ->
+                            FilterChip(
+                                selected = selectedRole == role,
+                                onClick = { selectedRole = role },
+                                label = { Text(role.displayName, fontSize = 11.sp) },
+                                modifier = Modifier.testTag("agent_builder_role_${role.name}")
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = description,
+                        onValueChange = { description = it },
+                        label = { Text("الوصف (اختياري)") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("agent_builder_description")
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = systemPrompt,
+                        onValueChange = { systemPrompt = it },
+                        label = { Text("نص النظام (System Prompt — اختياري)") },
+                        minLines = 2,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("agent_builder_prompt")
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Button(
+                        enabled = name.isNotBlank(),
+                        onClick = {
+                            viewModel.createAgent(
+                                name = name,
+                                role = selectedRole,
+                                description = description,
+                                systemPrompt = systemPrompt,
+                                capabilities = setOf(
+                                    com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
+                                    com.example.domain.core.capability.CapabilityType.STREAMING
+                                )
+                            )
+                            name = ""
+                            description = ""
+                            systemPrompt = ""
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("agent_builder_create")
+                    ) {
+                        Text("إنشاء الوكيل وحفظه في السجل الدائم")
+                    }
+                    Text(
+                        text = "يُحفظ الوكيل في سجل الوكلاء الدائم (Room) ويصبح قابلاً للتنفيذ فوراً من نفس الشاشة.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
     }
 }

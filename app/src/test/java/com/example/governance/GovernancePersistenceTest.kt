@@ -251,18 +251,30 @@ class GovernancePersistenceTest {
     }
 
     @Test
-    fun `db version is 10 with all seven governance tables`() {
+    fun `db version is 11 with all governance + execution-kernel tables`() {
+        // Gap-closure: v11 adds action_intents + agent_definitions + the
+        // tasks.executionContextJson column (canonical execution kernel).
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(10, dbVersion)
+        assertEquals(11, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))
         }
         listOf(
             "capability_evidence", "radar_capability_states", "capability_changes",
-            "radar_recommendations", "pricing_entries", "cost_ledger_entries", "budget_allocations"
+            "radar_recommendations", "pricing_entries", "cost_ledger_entries", "budget_allocations",
+            "action_intents", "agent_definitions"
         ).forEach { tableName ->
-            assertTrue("missing governance table: $tableName", tables.contains(tableName))
+            assertTrue("missing table: $tableName", tables.contains(tableName))
+        }
+        db.openHelper.readableDatabase.query(
+            "PRAGMA table_info(tasks)"
+        ).use { cursor ->
+            var hasExecutionContext = false
+            while (cursor.moveToNext()) {
+                if (cursor.getString(1) == "executionContextJson") hasExecutionContext = true
+            }
+            assertTrue("tasks.executionContextJson column must exist (canonical context)", hasExecutionContext)
         }
     }
 }

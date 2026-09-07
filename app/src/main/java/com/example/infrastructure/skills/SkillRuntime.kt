@@ -25,7 +25,9 @@ interface ExecutableSkill {
  */
 class CleanArchitectureScaffolderSkill(
     private val storagePort: WorkspaceStoragePort,
-    private val defaultProjectId: Long = 1L
+    @Deprecated("P0-04: fixed shared project removed. Wire projectIdProvider instead.")
+    private val defaultProjectId: Long = 1L,
+    private val projectIdProvider: (() -> Long?)? = null
 ) : ExecutableSkill {
     override val skillId: String = "skill_clean_arch_scaffold"
     override val providedCapabilities: Set<CapabilityType> = setOf(
@@ -76,8 +78,20 @@ class CleanArchitectureScaffolderSkill(
         )
 
         var createdCount = 0
+        // P0-04: resolve the ACTIVE workspace's own project (never a shared 1L).
+        val projectId: Long = projectIdProvider?.invoke()?.takeIf { it > 0 }
+            ?: if (projectIdProvider != null) {
+                -1L // sentinel: no project bound → honest failure below
+            } else {
+                defaultProjectId
+            }
+        if (projectId == -1L) {
+            return@withContext Outcome.Error(
+                "PROJECT_CONTEXT_REQUIRED: لا يوجد مشروع مرتبط بمساحة العمل الحالية — ترفض المهارة إنشاء الملفات بدلاً من الكتابة في مشروع مشترك قديم."
+            )
+        }
         for ((path, content) in filesToCreate) {
-            when (storagePort.writeFile(defaultProjectId, path, content)) {
+            when (storagePort.writeFile(projectId, path, content)) {
                 is Outcome.Success -> createdCount++
                 else -> Unit
             }

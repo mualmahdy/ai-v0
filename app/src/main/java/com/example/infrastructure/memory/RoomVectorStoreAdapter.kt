@@ -12,6 +12,7 @@ import com.example.domain.core.memory.VectorStoreRecord
 import com.example.domain.ports.memory.EmbeddingProviderPort
 import com.example.domain.ports.memory.MemoryRepositoryPort
 import com.example.domain.ports.memory.VectorStorePort
+import com.example.domain.core.execution.ExecutionScope
 import com.example.infrastructure.persistence.dao.MemoryDao
 import com.example.infrastructure.persistence.entities.MemoryEntity
 import kotlinx.coroutines.Dispatchers
@@ -27,11 +28,17 @@ import kotlin.math.sqrt
  * GOVERNANCE PHASE FIX (workspace isolation — audit finding): this adapter
  * previously wrote memories with workspaceId = null and retrieved via
  * getAllActiveMemories() GLOBALLY — a cross-workspace leak: agent loops in
- * workspace B retrieved memories stored in workspace A. Now a
+ * workspace B retrieved memories stored in workspace A. A
  * [workspaceIdProvider] (wired by the AppContainer to the active workspace)
  * scopes BOTH writes and reads. When the provider is absent the legacy
  * global behavior is preserved for pre-governance tests — production always
  * wires the provider.
+ *
+ * GAP-CLOSURE P0-02: during an EXECUTION the orchestrator pins the workspace
+ * via the [ExecutionScope] coroutine-context element; both writes and
+ * reads resolve that scope FIRST so a mid-task workspace switch can never
+ * move this execution's memory attribution to another workspace. The
+ * provider remains only for user-driven (scope-less) calls.
  */
 class RoomVectorStoreAdapter(
     private val memoryDao: MemoryDao,
@@ -161,7 +168,8 @@ class RoomVectorStoreAdapter(
             memoryType = entry.type.name,
             importance = entry.importance,
             decayScore = 1.0f,
-            workspaceId = workspaceIdProvider?.invoke(),
+            // P0-02: execution-pinned workspace (scope) > active workspace.
+            workspaceId = currentWorkspaceId(),
             agentId = null,
             tagsJson = "[]",
             lastDecayEvaluatedAtEpochMs = System.currentTimeMillis()
@@ -257,13 +265,23 @@ class RoomVectorStoreAdapter(
     // --- Math & Vector Parsing Helpers ---
 
     /**
-     * Workspace-scoped active memories: when a workspace context is wired,
-     * only that workspace's (and legacy global workspaceId-null) rows are
-     * visible; without a provider the legacy global behavior applies.
+     * P0-02: resolves the workspace for THIS call — the execution-pinned
+     * scope (set by the orchestrator's `withContext(ExecutionScope)`) when
+     * present, otherwise the active workspace provider (scope-less calls).
+     */
+    private suspend fun currentWorkspaceId(): String? {
+        val pinned = kotlinx.coroutines.currentCoroutineContext()[ExecutionScope.Key]?.workspaceId
+        if (pinned != null) return pinned
+        return runCatching { workspaceIdProvider?.invoke() }.getOrNull()
+    }
+
+    /**
+     * Workspace-scoped active memories: only the resolved workspace's (and
+     * legacy global workspaceId-null) rows are visible; without any context
+     * the legacy global behavior applies.
      */
     private suspend fun scopedActiveMemories(): List<MemoryEntity> {
-        val workspaceId = runCatching { workspaceIdProvider?.invoke() }.getOrNull()
-            ?: return memoryDao.getAllActiveMemories()
+        val workspaceId = currentWorkspaceId() ?: return memoryDao.getAllActiveMemories()
         return memoryDao.getActiveForWorkspace(workspaceId)
     }
 

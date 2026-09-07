@@ -45,6 +45,13 @@ class IntelligenceRadarPipeline(
     ),
     private val radarItemDao: RadarItemDao? = null,
     private val evolutionCandidateDao: EvolutionCandidateDao? = null,
+    /**
+     * GAP-CLOSURE P1-17 (measure stage): optional recorder invoked when a
+     * REGISTERED capability is measured — wired by the AppContainer to the
+     * capability radar's evidence stream so post-registration outcomes are
+     * tracked (closing discover → … → register → MEASURE → retire).
+     */
+    private val measurementRecorder: (suspend (candidate: EvolutionCandidate) -> Unit)? = null,
     private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 ) {
 
@@ -331,6 +338,132 @@ class IntelligenceRadarPipeline(
             } catch (_: Exception) {}
         }
         return@withContext Outcome.Success(candidateToPersist!!)
+    }
+
+    /**
+     * GAP-CLOSURE P1-17 (security-audit entry point): records the security
+     * audit verdict for a candidate. Previously `securityAuditPassed` could
+     * NEVER become true (no setter anywhere) — the governance gate
+     * permanently blocked every candidate, making the whole acquisition
+     * pipeline a dead end. Persisted durably.
+     */
+    suspend fun recordSecurityAudit(
+        candidateId: String,
+        passed: Boolean,
+        notes: String
+    ): Outcome<EvolutionCandidate, String> = withContext(Dispatchers.IO) {
+        val current = _evolutionCandidates.value.firstOrNull { it.id == candidateId }
+            ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
+        val updated = current.copy(
+            securityAuditPassed = passed,
+            evaluationNotes = "تدقيق أمني: ${if (passed) "ناجح" else "فاشل"} — $notes"
+        )
+        _evolutionCandidates.update { list -> list.map { if (it.id == candidateId) updated else it } }
+        try {
+            evolutionCandidateDao?.updateSecurityAudit(
+                id = candidateId,
+                passed = passed,
+                notes = updated.evaluationNotes,
+                now = System.currentTimeMillis()
+            )
+        } catch (_: Exception) {}
+        Outcome.Success(updated)
+    }
+
+    /**
+     * GAP-CLOSURE P1-17 (approval entry point): records the governance
+     * approval verdict for a candidate (persisted durably).
+     */
+    suspend fun recordGovernanceApproval(
+        candidateId: String,
+        approved: Boolean
+    ): Outcome<EvolutionCandidate, String> = withContext(Dispatchers.IO) {
+        val current = _evolutionCandidates.value.firstOrNull { it.id == candidateId }
+            ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
+        val updated = current.copy(
+            governanceApproved = approved,
+            evaluationNotes = "موافقة الحوكمة: ${if (approved) "ممنوحة" else "مرفوضة"}."
+        )
+        _evolutionCandidates.update { list -> list.map { if (it.id == candidateId) updated else it } }
+        try {
+            evolutionCandidateDao?.updateStage(
+                id = candidateId,
+                stage = updated.stage.name,
+                governanceApproved = approved,
+                now = System.currentTimeMillis()
+            )
+        } catch (_: Exception) {}
+        Outcome.Success(updated)
+    }
+
+    /**
+     * GAP-CLOSURE P1-17 (MEASURE stage): measures a REGISTERED capability.
+     * Measurement is REAL and evidence-backed — the recorder (wired by the
+     * AppContainer into the capability radar's evidence stream) turns the
+     * registration into a measurable capability state; the pipeline's loop
+     * becomes discover → … → register → measure (→ retire).
+     */
+    suspend fun measureRegisteredCapability(
+        candidateId: String
+    ): Outcome<EvolutionCandidate, String> = withContext(Dispatchers.IO) {
+        val current = _evolutionCandidates.value.firstOrNull { it.id == candidateId }
+            ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
+        if (current.stage != EvolutionStage.REGISTERED) {
+            return@withContext Outcome.Error(
+                "GATE_MEASURE_REQUIRES_REGISTERED",
+                "القياس متاح فقط للقدرات المسجلة (REGISTERED) — المرحلة الحالية: ${current.stage.displayName}."
+            )
+        }
+        val recorder = measurementRecorder
+            ?: return@withContext Outcome.Error(
+                "MEASUREMENT_NOT_WIRED",
+                "لا يوجد مسجل قياس مهيأ في هذا التكوين (رادار القدرات غير موصول)."
+            )
+        try {
+            recorder(current)
+        } catch (e: Exception) {
+            return@withContext Outcome.Error(
+                "MEASUREMENT_FAILED",
+                "تعذّر تسجيل قياس القدرة: ${e.localizedMessage}"
+            )
+        }
+        val updated = current.copy(
+            evaluationNotes = "تم قياس القدرة المسجلة عبر تدفّق أدلة رادار القدرات."
+        )
+        _evolutionCandidates.update { list -> list.map { if (it.id == candidateId) updated else it } }
+        Outcome.Success(updated)
+    }
+
+    /**
+     * GAP-CLOSURE P1-17 (RETIRE stage): retires a REGISTERED capability —
+     * honest end-of-life with a durable reason (REJECTED + RETIRED notes).
+     */
+    suspend fun retireCapability(
+        candidateId: String,
+        reason: String
+    ): Outcome<EvolutionCandidate, String> = withContext(Dispatchers.IO) {
+        val current = _evolutionCandidates.value.firstOrNull { it.id == candidateId }
+            ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
+        if (current.stage != EvolutionStage.REGISTERED) {
+            return@withContext Outcome.Error(
+                "GATE_RETIRE_REQUIRES_REGISTERED",
+                "الإحالة للتقاعد متاحة فقط للقدرات المسجلة — المرحلة الحالية: ${current.stage.displayName}."
+            )
+        }
+        val updated = current.copy(
+            stage = EvolutionStage.REJECTED,
+            evaluationNotes = "RETIRED: $reason"
+        )
+        _evolutionCandidates.update { list -> list.map { if (it.id == candidateId) updated else it } }
+        try {
+            evolutionCandidateDao?.updateStageWithNotes(
+                id = candidateId,
+                stage = EvolutionStage.REJECTED.name,
+                notes = "RETIRED: $reason",
+                now = System.currentTimeMillis()
+            )
+        } catch (_: Exception) {}
+        Outcome.Success(updated)
     }
 
     private fun persistRadarItems(items: List<RadarItem>) {

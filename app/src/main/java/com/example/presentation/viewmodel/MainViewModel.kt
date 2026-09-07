@@ -96,6 +96,12 @@ class MainViewModel(
     /** App context for the foreground execution shell (audit 2026 fix). */
     private val appContext: android.content.Context? = null,
     /**
+     * GAP-CLOSURE P1-08/P1-10: canonical durable agent registry — the SAME
+     * authority the runtime ComponentRegistry syncs from. Nullable for
+     * source compatibility with existing call sites.
+     */
+    private val agentRegistryService: com.example.application.agent.AgentRegistryService? = null,
+    /**
      * GOVERNANCE PHASE — the operational capability radar (evidence-derived,
      * persisted). Nullable keeps existing constructor call sites compatible.
      */
@@ -117,6 +123,9 @@ class MainViewModel(
         workspaceRuntimeService.allWorkspaces
 
     private var currentExecutionJob: Job? = null
+
+    /** Gap-closure P0-01: the ExecutionHost key of the task launched by the Studio screen. */
+    private var currentExecutionTaskId: String? = null
 
     // Phase 5 — Unified Activity Feed state flows. These power the new
     // UnifiedActivityFeedScreen which renders a single timeline of
@@ -200,7 +209,11 @@ class MainViewModel(
      */
     fun refreshGovernance() {
         viewModelScope.launch {
-            val wsId = workspaceRuntimeService.requireActiveWorkspaceId()
+            // P0-03: bootstrap-aware — skip honestly when no workspace yet.
+            val wsId = workspaceRuntimeService.awaitActiveWorkspaceId() ?: run {
+                _uiState.update { it.copy(diagnosticBanner = "مساحة العمل لم تجهز بعد — تعذر تحديث الحوكمة.") }
+                return@launch
+            }
             val netAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: true
             runCatching {
                 val snapshot = capabilityRadarService?.deriveSnapshot(
@@ -295,7 +308,9 @@ class MainViewModel(
                         _uiState.update {
                             it.copy(
                                 activeProject = com.example.domain.core.storage.ProjectMetadata(
-                                    id = workspace.activeProjectId.takeIf { id -> id > 0 } ?: 1L,
+                                    // P0-04: honest project binding — 0 = no
+                                    // project bound yet (never a silent 1L).
+                                    id = workspace.activeProjectId.takeIf { id -> id > 0 } ?: 0L,
                                     name = workspace.name,
                                     description = workspace.description,
                                     isDefault = workspace.id == "default",
@@ -424,48 +439,115 @@ class MainViewModel(
         }
     }
 
+    /**
+     * GAP-CLOSURE P1-08: the agent catalog is NO LONGER a UI-invented list —
+     * it comes from the canonical durable registry (the same authority the
+     * runtime ComponentRegistry syncs from). The agent the user selects IS
+     * the agent that executes. Falls back to the runtime registry's live
+     * list when the durable service is not wired (source-compat).
+     */
     private fun initializeAgents() {
-        val defaultAgents = listOf(
-            AgentDefinition(
-                identity = AgentIdentity(
-                    id = AgentId("architect_orchestrator"),
-                    name = "المخطط الرئيسي (Strategic Planner)",
-                    description = "يقود تحليل المهام المعقدة، تقسيم العمليات، وحوكمة الموارد.",
-                    role = AgentRole.PLANNER,
-                    systemPrompt = "أنت المخطط الرئيسي لمنظومة AI-V0 Agent Studio. تتميز بالدقة الهندسية، التحليل المنهجي، وتوضيح القيود الواقعية."
-                ),
-                allowedCapabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.STREAMING, CapabilityType.MEMORY_RETRIEVAL),
-                budget = AgentBudget(maxTokens = 30000)
-            ),
-            AgentDefinition(
-                identity = AgentIdentity(
-                    id = AgentId("code_craftsman"),
-                    name = "المبرمج التنفيذي (Executive Coder)",
-                    description = "متخصص في بناء البرمجيات النظيفة وكتابة الشيفرات المعيارية والملفات.",
-                    role = AgentRole.CODER,
-                    systemPrompt = "أنت مهندس برمجيات محترف ومختص في هندسة النظم النظيفة وتطوير الأدوات."
-                ),
-                allowedCapabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.TOOL_EXECUTION, CapabilityType.FILE_STORAGE),
-                budget = AgentBudget(maxTokens = 40000)
-            ),
-            AgentDefinition(
-                identity = AgentIdentity(
-                    id = AgentId("security_guardian"),
-                    name = "حارس الحوكمة والأمان (Security Auditor)",
-                    description = "يدقق في مدخلات ومخرجات الأدوات، ويتحقق من سلامة الأوامر.",
-                    role = AgentRole.SECURITY_GUARD,
-                    systemPrompt = "أنت مدقق أمني مستقل وحارس لسياسات الأمان والحوكمة."
-                ),
-                allowedCapabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.TOOL_EXECUTION),
-                budget = AgentBudget(maxTokens = 20000)
-            )
-        )
-
+        // Synchronous cold-start catalog: the SAME definitions the durable
+        // seed uses (no IO on the main thread, instant UX, no empty Studio).
+        val initial = com.example.application.agent.CanonicalAgentCatalog.defaults
         _uiState.update {
             it.copy(
-                availableAgents = defaultAgents,
-                activeAgent = defaultAgents.first()
+                availableAgents = initial,
+                activeAgent = initial.firstOrNull()
             )
+        }
+        // Asynchronous authoritative refresh: once the durable registry is
+        // loaded (first launch bootstrap or user-created agents), it replaces
+        // the cold-start catalog (P1-08: one durable source of truth).
+        agentRegistryService?.let { registry ->
+            viewModelScope.launch {
+                runCatching {
+                    val agents = registry.listAgents().ifEmpty { componentRegistry.listAgents() }
+                    if (agents.isNotEmpty()) {
+                        _uiState.update { state ->
+                            val stillPresent = state.activeAgent?.takeIf { a ->
+                                agents.any { it.identity.id == a.identity.id }
+                            }
+                            state.copy(
+                                availableAgents = agents,
+                                activeAgent = stillPresent ?: agents.firstOrNull()
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Refreshes the agent catalog from the durable registry. */
+    fun refreshAgentCatalog() {
+        agentRegistryService?.let { registry ->
+            viewModelScope.launch {
+                runCatching {
+                    val agents = registry.listAgents()
+                    _uiState.update { state ->
+                        state.copy(
+                            availableAgents = agents,
+                            activeAgent = state.activeAgent?.takeIf { a ->
+                                agents.any { it.identity.id == a.identity.id }
+                            } ?: agents.firstOrNull()
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * GAP-CLOSURE P1-10 (Agent Builder): creates a NEW agent through the
+     * canonical durable registry and makes it immediately selectable +
+     * executable (registered into the runtime ComponentRegistry).
+     */
+    fun createAgent(
+        name: String,
+        role: com.example.domain.core.agent.AgentRole,
+        description: String,
+        systemPrompt: String,
+        capabilities: Set<com.example.domain.core.capability.CapabilityType>
+    ) {
+        val registry = agentRegistryService ?: run {
+            _uiState.update { it.copy(errorMessage = "سجل الوكلاء الدائم غير متاح في هذا التكوين.") }
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                val created = registry.createAgent(
+                    name = name,
+                    role = role,
+                    description = description,
+                    systemPrompt = systemPrompt,
+                    capabilities = capabilities
+                )
+                // Immediately executable (P1-10: create → configure → run).
+                componentRegistry.registerAgent(created)
+                created
+            }.onSuccess { created ->
+                _uiState.update { state ->
+                    state.copy(
+                        availableAgents = state.availableAgents + created,
+                        activeAgent = created,
+                        diagnosticBanner = "تم إنشاء الوكيل «${created.identity.name}» وحفظه في السجل الدائم — جاهز للتنفيذ."
+                    )
+                }
+            }.onFailure { e ->
+                _uiState.update { it.copy(errorMessage = "تعذر إنشاء الوكيل: ${e.localizedMessage}") }
+            }
+        }
+    }
+
+    /** Deletes an agent from the durable catalog (P1-10 builder loop). */
+    fun deleteAgent(agentId: String) {
+        val registry = agentRegistryService ?: return
+        viewModelScope.launch {
+            runCatching {
+                registry.deleteAgent(agentId)
+                refreshAgentCatalog()
+            }
         }
     }
 
@@ -518,9 +600,10 @@ class MainViewModel(
     }
 
     fun cancelExecution() {
-        com.example.application.execution.ExecutionHost.cancelCurrent()
+        currentExecutionTaskId?.let { com.example.application.execution.ExecutionHost.cancel(it) }
         currentExecutionJob?.cancel()
         currentExecutionJob = null
+        currentExecutionTaskId = null
         appContext?.let {
             com.example.application.execution.AgentExecutionForegroundService.stop(it)
         }
@@ -555,7 +638,15 @@ class MainViewModel(
         // (ExecutionHost) instead of viewModelScope — leaving the screen no
         // longer kills a live task, and the foreground service shell keeps
         // the process priority high while the agent loop is running.
-        com.example.application.execution.ExecutionHost.launch {
+        // GAP-CLOSURE P0-01: the execution is keyed by its taskId — launching
+        // a second task no longer cancels the first, and cancel() targets
+        // exactly THIS execution.
+        val executionTaskId = java.util.UUID.randomUUID().toString()
+        currentExecutionTaskId = executionTaskId
+        // P1-08 hardening: the selected agent IS the executing agent —
+        // idempotent registration into the runtime registry.
+        componentRegistry.registerAgent(agent)
+        com.example.application.execution.ExecutionHost.launch(executionTaskId) {
             try {
                 // Audit 2026 fix: real connectivity state (previously hardcoded true),
                 // so OFFLINE / DEGRADED policies engage honestly on real networks.
@@ -563,6 +654,7 @@ class MainViewModel(
                 executeAgentTaskUseCase(
                     agent = agent,
                     prompt = prompt,
+                    taskId = executionTaskId,
                     networkPolicy = current.networkPolicy,
                     isNetworkAvailable = netAvailable,
                     includeWebSearch = false
@@ -632,6 +724,8 @@ class MainViewModel(
                         errorMessage = "حدث خطأ غير متوقع أثناء المعالجة: ${e.localizedMessage}"
                     )
                 }
+            } finally {
+                if (currentExecutionTaskId == executionTaskId) currentExecutionTaskId = null
             }
         }
 
@@ -1297,6 +1391,59 @@ class MainViewModel(
         }
     }
 
+    /**
+     * GAP-CLOSURE P1-17 — the acquisition loop is now COMPLETE and operable:
+     * security audit, governance approval, registration measurement, and
+     * retirement all have explicit, durable entry points.
+     */
+    fun recordCandidateSecurityAudit(candidateId: String, passed: Boolean) {
+        viewModelScope.launch {
+            when (val r = intelligenceRadarPipeline.recordSecurityAudit(candidateId, passed, "تدقيق من مرصد التطور")) {
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = r.diagnosticMessage) }
+                is Outcome.Success -> _uiState.update {
+                    it.copy(diagnosticBanner = "نتيجة التدقيق الأمني: ${if (passed) "ناجح" else "فاشل"}.")
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    fun recordCandidateGovernanceApproval(candidateId: String, approved: Boolean) {
+        viewModelScope.launch {
+            when (val r = intelligenceRadarPipeline.recordGovernanceApproval(candidateId, approved)) {
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = r.diagnosticMessage) }
+                is Outcome.Success -> _uiState.update {
+                    it.copy(diagnosticBanner = "موافقة الحوكمة: ${if (approved) "ممنوحة" else "مرفوضة"}.")
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    fun measureRegisteredCapability(candidateId: String) {
+        viewModelScope.launch {
+            when (val r = intelligenceRadarPipeline.measureRegisteredCapability(candidateId)) {
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = r.diagnosticMessage) }
+                is Outcome.Success -> _uiState.update {
+                    it.copy(diagnosticBanner = "تم تسجيل قياس أساسي للقدرة في تدفق أدلة رادار القدرات.")
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    fun retireRegisteredCapability(candidateId: String, reason: String) {
+        viewModelScope.launch {
+            when (val r = intelligenceRadarPipeline.retireCapability(candidateId, reason)) {
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = r.diagnosticMessage) }
+                is Outcome.Success -> _uiState.update {
+                    it.copy(diagnosticBanner = "أُحيلت القدرة المسجلة إلى التقاعد: $reason")
+                }
+                else -> Unit
+            }
+        }
+    }
+
     // --- Knowledge & RAG Operations ---
     fun updateDocTitle(title: String) {
         _uiState.update { it.copy(newDocTitle = title) }
@@ -1315,8 +1462,18 @@ class MainViewModel(
             // FIX P0-8 (audit c03919d): sanitize the title so it cannot inject
             // path separators into the workspace:// source URI.
             val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_")
-            ragPipelineService.ingestDocument(safeTitle, content, "workspace://docs/$safeTitle.md")
-            _uiState.update { it.copy(newDocTitle = "", newDocContent = "") }
+            val ingested = ragPipelineService.ingestDocument(safeTitle, content, "workspace://docs/$safeTitle.md")
+            // GAP-CLOSURE P1-14: surface honest persistence failure to the user.
+            _uiState.update {
+                when (ingested.persistenceState) {
+                    com.example.domain.core.rag.KnowledgePersistenceState.FAILED -> it.copy(
+                        newDocTitle = "",
+                        newDocContent = "",
+                        diagnosticBanner = ingested.persistenceDiagnostic ?: "تعذر حفظ المستند في قاعدة البيانات."
+                    )
+                    else -> it.copy(newDocTitle = "", newDocContent = "")
+                }
+            }
         }
     }
 
@@ -1343,8 +1500,25 @@ class MainViewModel(
     }
 
     // --- Files Operations ---
+
+    /**
+     * GAP-CLOSURE P0-04: the file operations use the ACTIVE WORKSPACE'S OWN
+     * project — never the legacy implicit projectId=1L fallback. When no
+     * project is bound the operation fails honestly with a user-visible
+     * message instead of silently reading/writing the shared legacy project.
+     */
+    private fun currentProjectIdOrInform(): Long? {
+        val projectId = _uiState.value.activeProject?.id?.takeIf { it > 0L }
+        if (projectId == null || projectId <= 0L) {
+            _uiState.update {
+                it.copy(errorMessage = "لا يوجد مشروع مرتبط بمساحة العمل الحالية — أنشئ مساحة عمل جديدة أو اختر مشروعاً قبل الوصول إلى الملفات.")
+            }
+        }
+        return projectId
+    }
+
     fun refreshFiles() {
-        val projectId = _uiState.value.activeProject?.id ?: 1L
+        val projectId = currentProjectIdOrInform() ?: return
         viewModelScope.launch {
             _uiState.update { it.copy(isFileLoading = true) }
             when (val outcome = manageWorkspaceFilesUseCase.listProjectFiles(projectId)) {
@@ -1356,7 +1530,7 @@ class MainViewModel(
     }
 
     fun openFile(relativePath: String) {
-        val projectId = _uiState.value.activeProject?.id ?: 1L
+        val projectId = currentProjectIdOrInform() ?: return
         viewModelScope.launch {
             _uiState.update { it.copy(isFileLoading = true, selectedFilePath = relativePath) }
             when (val outcome = manageWorkspaceFilesUseCase.readProjectFile(projectId, relativePath)) {
@@ -1377,7 +1551,7 @@ class MainViewModel(
     }
 
     fun saveFile(relativePath: String, content: String) {
-        val projectId = _uiState.value.activeProject?.id ?: 1L
+        val projectId = currentProjectIdOrInform() ?: return
         viewModelScope.launch {
             when (val outcome = manageWorkspaceFilesUseCase.writeProjectFile(projectId, relativePath, content)) {
                 is Outcome.Success -> {

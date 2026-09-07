@@ -3,17 +3,20 @@ package com.example.application.rag
 import com.example.application.resource.ResourceRegistryService
 import com.example.application.resource.RuntimeAdapterResolver
 import com.example.domain.core.Outcome
+import com.example.domain.core.execution.ExecutionScope
 import com.example.domain.core.memory.EmbeddingVector
 import com.example.domain.core.memory.RetrievalMode
 import com.example.domain.core.provider.HealthStatus
 import com.example.domain.core.rag.AssembledRagContext
 import com.example.domain.core.rag.DocumentChunk
 import com.example.domain.core.rag.KnowledgeDocument
+import com.example.domain.core.rag.KnowledgePersistenceState
 import com.example.domain.core.rag.RetrievedContextChunk
 import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceType
 import com.example.domain.ports.memory.EmbeddingProviderPort
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,6 +25,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.sqrt
 
 /**
@@ -70,6 +74,25 @@ class RagPipelineService(
     private val chunksMutex = Mutex()
 
     /**
+     * GAP-CLOSURE P1-15 (stale async load guard): monotonic generation
+     * counter for workspace knowledge loads. A load started for workspace A
+     * that finishes AFTER a newer load for workspace B is DISCARDED — the
+     * working set can never be overwritten by stale async results.
+     */
+    private val loadGeneration = AtomicLong(0)
+
+    /**
+     * GAP-CLOSURE P0-02: resolves the workspace for THIS call — the
+     * execution-pinned scope when running inside an agent execution, else
+     * the active-workspace provider (user-driven calls).
+     */
+    private suspend fun currentWorkspaceId(): String? {
+        val pinned = currentCoroutineContext()[ExecutionScope.Key]?.workspaceId
+        if (pinned != null) return pinned
+        return runCatching { workspaceIdProvider() }.getOrNull()
+    }
+
+    /**
      * The embedding ResourceId used to embed the most recently-ingested chunks.
      * Used to enforce the embedding-compatibility boundary (Section 8).
      */
@@ -84,11 +107,19 @@ class RagPipelineService(
      * Phase 2 — Loads all persisted documents+chunks for the current workspace
      * into the in-memory index. Call this on app startup (after WorkspaceRuntimeService
      * has determined the active workspace) and whenever the user switches workspaces.
+     *
+     * GAP-CLOSURE P1-15: the load is generation-guarded — if a NEWER load
+     * (another workspace switch) started while this one was reading, this
+     * result is discarded instead of clobbering the newer workspace's
+     * working set (the A-load / B-load / A-finishes-last race).
      */
     suspend fun loadFromPersistence() {
         val persistence = persistenceService ?: return
+        val generation = loadGeneration.incrementAndGet()
         val workspaceId = workspaceIdProvider()
         val (docs, loadedChunks) = persistence.loadWorkspaceKnowledge(workspaceId)
+        // Stale-result guard: only the LATEST load may mutate the index.
+        if (loadGeneration.get() != generation) return
         chunksMutex.withLock {
             chunks.clear()
             chunks.addAll(loadedChunks)
@@ -209,20 +240,54 @@ class RagPipelineService(
         _documents.update { it + completedDoc }
         chunks.addAll(embeddedChunks)
 
-        // Phase 2 — persist to Room so the knowledge survives app restart.
+        // ------------------------------------------------------------
+        // GAP-CLOSURE P1-14 (honest RAG persistence): a failed write is NO
+        // LONGER swallowed with a fake "success" (RAM = ingested, DB =
+        // missing → knowledge vanished after restart). The write is retried
+        // once; on failure the returned document is marked
+        // [KnowledgePersistenceState.FAILED] with a diagnostic so the UI and
+        // callers know exactly what survived where.
+        // ------------------------------------------------------------
+        var persistenceState = KnowledgePersistenceState.PERSISTED
+        var persistenceDiagnostic: String? = null
         if (persistenceService != null) {
-            try {
+            val targetWorkspace = currentWorkspaceId() ?: workspaceIdProvider()
+            val persisted = runCatching {
                 persistenceService.persistDocument(
-                    workspaceId = workspaceIdProvider(),
+                    workspaceId = targetWorkspace,
                     document = completedDoc,
                     chunks = embeddedChunks
                 )
-            } catch (_: Exception) {
-                // Persistence failure is non-fatal.
+                true
             }
+            if (persisted.getOrDefault(false)) {
+                persistenceState = KnowledgePersistenceState.PERSISTED
+            } else {
+                // One honest retry before declaring failure.
+                val retried = runCatching {
+                    persistenceService.persistDocument(
+                        workspaceId = targetWorkspace,
+                        document = completedDoc,
+                        chunks = embeddedChunks
+                    )
+                    true
+                }
+                if (retried.getOrDefault(false)) {
+                    persistenceState = KnowledgePersistenceState.PERSISTED
+                } else {
+                    persistenceState = KnowledgePersistenceState.FAILED
+                    persistenceDiagnostic = "RAG_PERSISTENCE_FAILED: أُدرج المستند في الفهرس الحي لكن تعذّر حفظه في قاعدة البيانات (فشلت محاولتان) — سيفقد المستند عند إعادة تشغيل التطبيق: ${persisted.exceptionOrNull()?.localizedMessage ?: retried.exceptionOrNull()?.localizedMessage ?: "سبب غير معروف"}"
+                }
+            }
+        } else {
+            persistenceState = KnowledgePersistenceState.PENDING
+            persistenceDiagnostic = "لا يوجد مخزن دائم مهيأ — المستند في الذاكرة فقط."
         }
 
-        completedDoc
+        completedDoc.copy(
+            persistenceState = persistenceState,
+            persistenceDiagnostic = persistenceDiagnostic
+        )
     }
 
     /**
@@ -305,7 +370,24 @@ class RagPipelineService(
      *  - proper hybrid fusion: normalized semantic + lexical overlap score,
      *    followed by a lexical rerank of the top candidates.
      */
-    suspend fun retrieveRelevantContext(query: String, topK: Int = 4, maxTokenBudget: Int = 2000): AssembledRagContext = withContext(Dispatchers.Default) {
+    /**
+     * GAP-CLOSURE P2-05: the retrieval-budget parameter is DEPRECATED on
+     * this pipeline entry point — the authoritative retrieval-budget
+     * authority is the RagIntelligence layer
+     * (domain.core.rag.intelligence.RagRequest.maxTokenBudget), and callers
+     * should migrate there. Retained for source compatibility only.
+     */
+    @Deprecated(
+        message = "Retrieval budget authority moved to RagIntelligenceService (RagRequest.maxTokenBudget). Use the parameterless budget overload.",
+        replaceWith = ReplaceWith("retrieveRelevantContext(query, topK)")
+    )
+    suspend fun retrieveRelevantContext(query: String, topK: Int = 4, maxTokenBudget: Int = 2000): AssembledRagContext =
+        retrieveRelevantContextInternal(query, topK)
+
+    suspend fun retrieveRelevantContext(query: String, topK: Int = 4): AssembledRagContext =
+        retrieveRelevantContextInternal(query, topK)
+
+    private suspend fun retrieveRelevantContextInternal(query: String, topK: Int): AssembledRagContext = withContext(Dispatchers.Default) {
         val (embeddingProvider, usedResourceId) = resolveEmbeddingProvider()
 
         val providerIsSemantic = isProviderSemantic(embeddingProvider)

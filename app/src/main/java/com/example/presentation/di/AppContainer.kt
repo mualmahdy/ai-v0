@@ -148,7 +148,14 @@ class AppContainer(context: Context) {
     }
 
     val workspaceRuntimeService: WorkspaceRuntimeService by lazy {
-        WorkspaceRuntimeService(workspaceDao = database.workspaceDao())
+        WorkspaceRuntimeService(
+            workspaceDao = database.workspaceDao(),
+            // P0-04: every new workspace gets its OWN sandbox project row.
+            projectDao = database.projectDao(),
+            projectRootPathResolver = { projectId ->
+                java.io.File(appContext.filesDir, "workspaces/proj_$projectId").absolutePath
+            }
+        )
     }
 
     // --- RAG persistence ---
@@ -192,7 +199,9 @@ class AppContainer(context: Context) {
             embeddingProvider = localEmbeddingRouter,
             // GOVERNANCE PHASE: workspace-scoped memory writes AND reads
             // (fixes the cross-workspace memory leak — see adapter KDoc).
-            workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+            // GAP-CLOSURE P0-03: null = honestly UNATTRIBUTED (never a
+            // fabricated "default" id).
+            workspaceIdProvider = { workspaceRuntimeService.activeWorkspaceIdOrNull() }
         )
     }
 
@@ -200,7 +209,12 @@ class AppContainer(context: Context) {
 
     // --- Concrete Tools (in-app extensions) ---
     val fileSystemTool: FileSystemTool by lazy {
-        FileSystemTool(storagePort = workspaceStorage, defaultProjectId = 1L)
+        // P0-04: agent-driven file operations target the ACTIVE workspace's
+        // OWN project — never the legacy shared project 1L.
+        FileSystemTool(
+            storagePort = workspaceStorage,
+            projectIdProvider = { workspaceRuntimeService.activeProjectIdOrNull() }
+        )
     }
 
     val safeDiagnosticsTool: SafeDiagnosticsTool by lazy {
@@ -210,7 +224,10 @@ class AppContainer(context: Context) {
 
     // --- Executable Skills ---
     val cleanArchitectureSkill by lazy {
-        CleanArchitectureScaffolderSkill(storagePort = workspaceStorage, defaultProjectId = 1L)
+        CleanArchitectureScaffolderSkill(
+            storagePort = workspaceStorage,
+            projectIdProvider = { workspaceRuntimeService.activeProjectIdOrNull() }
+        )
     }
 
     val securityAuditorSkill by lazy { SecurityAuditorSkill() }
@@ -268,73 +285,45 @@ class AppContainer(context: Context) {
 
     /**
      * ComponentRegistry — Phase 4: contains only in-app runtime extensions
-     * (tools, agents, memory repository). It does NOT register LLM/Search/
+     * (tools, memory repository). It does NOT register LLM/Search/
      * Embedding providers — those are now `ResourceRecord`s authored by the
      * `ProviderControlPlaneService` via the control-plane resource repository
      * (which routes through the SAME DurableResourceRegistryService).
+     *
+     * GAP-CLOSURE P1-08: agents are NOT hardcoded here anymore — the
+     * canonical durable [agentRegistryService] seeds and syncs them into
+     * this registry (same store feeds the UI catalog AND the runtime).
      */
     val componentRegistry: ComponentRegistry by lazy {
         ComponentRegistry(durableResourceRegistryService).apply {
             registerMemoryRepository(memoryVectorStore)
             registerTool(fileSystemTool)
             registerTool(safeDiagnosticsTool)
-
-            registerAgent(
-                com.example.domain.core.agent.AgentDefinition(
-                    identity = com.example.domain.core.agent.AgentIdentity(
-                        id = com.example.domain.core.agent.AgentId("agent_general"),
-                        name = "المساعد الشامل",
-                        role = com.example.domain.core.agent.AgentRole.GENERAL_ASSISTANT,
-                        description = "المساعد العام للنظام",
-                        systemPrompt = com.example.domain.core.agent.AgentRole.GENERAL_ASSISTANT.defaultSystemPrompt
-                    ),
-                    allowedCapabilities = setOf(
-                        com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
-                        com.example.domain.core.capability.CapabilityType.STREAMING,
-                        com.example.domain.core.capability.CapabilityType.SEARCH,
-                        com.example.domain.core.capability.CapabilityType.MEMORY_RETRIEVAL,
-                        com.example.domain.core.capability.CapabilityType.AGENT_DELEGATION
-                    ),
-                    budget = com.example.domain.core.agent.AgentBudget()
-                )
-            )
-            registerAgent(
-                com.example.domain.core.agent.AgentDefinition(
-                    identity = com.example.domain.core.agent.AgentIdentity(
-                        id = com.example.domain.core.agent.AgentId("agent_coder"),
-                        name = "مهندس البرمجيات",
-                        role = com.example.domain.core.agent.AgentRole.CODER,
-                        description = "متخصص في بناء وتطوير وهندسة الكود",
-                        systemPrompt = com.example.domain.core.agent.AgentRole.CODER.defaultSystemPrompt
-                    ),
-                    allowedCapabilities = setOf(
-                        com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
-                        com.example.domain.core.capability.CapabilityType.TOOL_EXECUTION,
-                        com.example.domain.core.capability.CapabilityType.FILE_STORAGE,
-                        com.example.domain.core.capability.CapabilityType.MEMORY_RETRIEVAL
-                    ),
-                    budget = com.example.domain.core.agent.AgentBudget()
-                )
-            )
-            registerAgent(
-                com.example.domain.core.agent.AgentDefinition(
-                    identity = com.example.domain.core.agent.AgentIdentity(
-                        id = com.example.domain.core.agent.AgentId("agent_researcher"),
-                        name = "الباحث المعرفي",
-                        role = com.example.domain.core.agent.AgentRole.RESEARCHER,
-                        description = "متخصص في استرجاع المعرفة والبحث الموثوق",
-                        systemPrompt = com.example.domain.core.agent.AgentRole.RESEARCHER.defaultSystemPrompt
-                    ),
-                    allowedCapabilities = setOf(
-                        com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
-                        com.example.domain.core.capability.CapabilityType.SEARCH,
-                        com.example.domain.core.capability.CapabilityType.MEMORY_RETRIEVAL
-                    ),
-                    budget = com.example.domain.core.agent.AgentBudget()
-                )
-            )
         }
     }
+
+    /**
+     * GAP-CLOSURE P1-08/P1-09/P1-10: the CANONICAL durable agent registry
+     * (Room `agent_definitions`). One source of agent truth — the same store
+     * feeds the UI catalog and the runtime ComponentRegistry.
+     */
+    val agentRegistryService: com.example.application.agent.AgentRegistryService by lazy {
+        com.example.application.agent.AgentRegistryService(database.agentDefinitionDao())
+    }
+
+    /** Loads (or seeds) the canonical agent catalog into the runtime registry. */
+    private suspend fun syncCanonicalAgents() {
+        agentRegistryService.ensureSeeded(canonicalDefaultAgents)
+        agentRegistryService.syncInto(componentRegistry)
+    }
+
+    /**
+     * Canonical default catalog (P1-08) — defined ONCE in
+     * [com.example.application.agent.CanonicalAgentCatalog] and shared by the
+     * durable seed, the runtime registry and the ViewModel cold-start fallback.
+     */
+    val canonicalDefaultAgents: List<com.example.domain.core.agent.AgentDefinition>
+        get() = com.example.application.agent.CanonicalAgentCatalog.defaults
 
     /**
      * Authoritative control plane service. Operates on
@@ -461,7 +450,23 @@ class AppContainer(context: Context) {
         IntelligenceRadarPipeline(
             radarSources = listOf(GitHubReleasesRadarSource(), RssFeedRadarSource()),
             radarItemDao = database.radarItemDao(),
-            evolutionCandidateDao = database.evolutionCandidateDao()
+            evolutionCandidateDao = database.evolutionCandidateDao(),
+            // GAP-CLOSURE P1-17 (MEASURE): a REGISTERED capability's
+            // measurement lands in the SAME capability-radar evidence stream
+            // every other runtime evidence flows through (one loop, one bus).
+            measurementRecorder = { candidate ->
+                capabilityRadarService.recordEvidence(
+                    com.example.domain.core.radar.CapabilityEvidence(
+                        id = java.util.UUID.randomUUID().toString(),
+                        capabilityKey = "acquired:${candidate.targetType.lowercase()}:${candidate.id}",
+                        source = com.example.domain.core.radar.EvidenceSource.OPERATOR_ACTION,
+                        outcome = com.example.domain.core.radar.EvidenceOutcome.SUCCESS,
+                        confidence = candidate.confidence,
+                        detail = "قياس أساسي لقدرة مكتسبة: ${candidate.title} (${candidate.stage.name})",
+                        timestampEpochMs = System.currentTimeMillis()
+                    )
+                )
+            }
         )
     }
 
@@ -696,13 +701,19 @@ class AppContainer(context: Context) {
             observationService = observationService,
             outcomeService = outcomeService,
             taskDao = database.taskDao(),
+            // GAP-CLOSURE P0-05/P0-06: the action idempotency ledger — durable
+            // intention → outcome records for exactly-once recovery.
+            actionIntentDao = database.actionIntentDao(),
             // GOVERNANCE PHASE: economic governance (token quota gate +
             // usage accounting into the cost ledger).
             economicGovernanceService = economicGovernanceService
         ).also { orchestrator ->
             // GOVERNANCE PHASE: workspace scoping for accounting/evidence/
-            // decision context.
-            orchestrator.workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+            // decision context. GAP-CLOSURE P0-02/P0-03: the provider is
+            // consulted ONCE at execution start to PIN the canonical context;
+            // when no workspace is active the execution fails CLOSED with
+            // WORKSPACE_CONTEXT_REQUIRED (no silent "default" scope).
+            orchestrator.workspaceIdProvider = { workspaceRuntimeService.activeWorkspaceIdOrNull() }
             // Delegation executor: child tasks run through the same closed
             // loop (DECIDE → EXECUTE → OBSERVE), so children persist their
             // own task rows, emit their own traces, and honour the same
@@ -727,7 +738,7 @@ class AppContainer(context: Context) {
             capabilityRadarService.subscribeToExecutionEvents(
                 orchestrator.executionEventPublisher
             )
-            capabilityRadarService.workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+            capabilityRadarService.workspaceIdProvider = { workspaceRuntimeService.activeWorkspaceIdOrNull() }
             // GOVERNANCE PHASE: rate-limit encounters from the execution
             // layer close the RPM/TPM windows in the governor.
             executionService.rateLimitRecorder = { providerId, modelId, resourceId, _, retryAfterMs ->
@@ -744,7 +755,14 @@ class AppContainer(context: Context) {
         WorkflowEngine(
             orchestrator = agentOrchestrator,
             persistenceService = workflowPersistenceService,
-            workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+            // P0-02/P0-03: the workflow PINS its workspace once at start;
+            // awaiting bootstrap makes cold-start runs deterministic.
+            workspaceIdProvider = {
+                workspaceRuntimeService.awaitActiveWorkspaceId()
+                    ?: throw com.example.application.workspace.NoActiveWorkspaceStateException(
+                        "NO_ACTIVE_WORKSPACE: لا يمكن بدء خطة عمل دون مساحة عمل نشطة."
+                    )
+            }
         )
     }
 
@@ -799,7 +817,8 @@ class AppContainer(context: Context) {
         TelemetryService(telemetryPort).also { service ->
             // GOVERNANCE PHASE: every metric row carries the real workspace
             // attribution (previously always NULL — global metrics).
-            service.workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+            // GAP-CLOSURE P0-03: null = honestly UNATTRIBUTED.
+            service.workspaceIdProvider = { workspaceRuntimeService.activeWorkspaceIdOrNull() }
         }
     }
 
@@ -912,6 +931,9 @@ class AppContainer(context: Context) {
         applicationScope.launch {
             durableResourceRegistryService.eagerLoad()
             cbrMdpEngine.loadPersistedQTable()
+            // GAP-CLOSURE P1-08: seed/sync the canonical durable agent catalog
+            // into the runtime registry BEFORE any execution can start.
+            runCatching { syncCanonicalAgents() }
             providerControlPlaneService.ensureBootstrapDefaults()
             providerControlPlaneService.restoreAdaptersForPersistedResources()
             // Phase 5 — memory decay + workflow/task resume on startup.
@@ -925,12 +947,17 @@ class AppContainer(context: Context) {
             // GOVERNANCE PHASE: derive the initial radar snapshot AFTER the
             // registry is eager-loaded (persisted capability states survive
             // restarts; this refreshes them against live resource facts).
-            runCatching {
-                capabilityRadarService.deriveSnapshot(
-                    workspaceId = workspaceRuntimeService.requireActiveWorkspaceId(),
-                    networkPolicy = com.example.domain.core.network.NetworkPolicy.HYBRID,
-                    isNetworkAvailable = networkMonitor.isNetworkAvailable.value
-                )
+            // GAP-CLOSURE P0-03: bootstrap-aware — skipped honestly when no
+            // workspace became active (never a fabricated "default" scope).
+            val radarWorkspaceId = workspaceRuntimeService.awaitActiveWorkspaceId(timeoutMs = 2_000L)
+            if (radarWorkspaceId != null) {
+                runCatching {
+                    capabilityRadarService.deriveSnapshot(
+                        workspaceId = radarWorkspaceId,
+                        networkPolicy = com.example.domain.core.network.NetworkPolicy.HYBRID,
+                        isNetworkAvailable = networkMonitor.isNetworkAvailable.value
+                    )
+                }
             }
             // GOVERNANCE PHASE: ensure a SYSTEM-scope budget policy exists so
             // budget governance has defined (non-fabricated) semantics. NO
@@ -973,6 +1000,8 @@ class MainViewModelFactory(
                 ragPipelineService = appContainer.ragPipelineService,
                 providerControlPlaneService = appContainer.providerControlPlaneService,
                 workspaceRuntimeService = appContainer.workspaceRuntimeService,
+                // GAP-CLOSURE P1-08/P1-10 — canonical durable agent registry.
+                agentRegistryService = appContainer.agentRegistryService,
                 // Phase 5 — pass the new intelligence services for the
                 // Unified Activity Feed + proactive suggestion surface.
                 telemetryService = appContainer.telemetryService,

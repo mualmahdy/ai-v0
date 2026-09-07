@@ -135,9 +135,15 @@ class WorkflowPersistenceService(
 
     /**
      * Mark the workflow as completed (success or degraded).
+     *
+     * Gap-closure P1-06: previously both branches wrote "COMPLETED" (the
+     * isDegraded flag was computed then discarded) — the durable row could
+     * not distinguish a clean run from a degraded one. The state strings are
+     * free-form TEXT in the entity; DEGRADED is a terminal state like
+     * COMPLETED and is excluded from `resumable()` by design.
      */
     suspend fun complete(workflowId: WorkflowId, isDegraded: Boolean): Unit = withContext(Dispatchers.IO) {
-        val state = if (isDegraded) "COMPLETED" else "COMPLETED"
+        val state = if (isDegraded) "DEGRADED" else "COMPLETED"
         workflowExecutionDao.terminate(workflowId.value, state, System.currentTimeMillis(), null)
     }
 

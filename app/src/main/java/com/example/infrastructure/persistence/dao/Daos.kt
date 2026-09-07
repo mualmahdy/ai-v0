@@ -233,6 +233,18 @@ interface EvolutionCandidateDao {
 
     @Query("UPDATE evolution_candidates SET stage = :stage, governanceApproved = :governanceApproved, updatedAtEpochMs = :now WHERE id = :id")
     suspend fun updateStage(id: String, stage: String, governanceApproved: Boolean, now: Long)
+
+    /**
+     * GAP-CLOSURE P1-17: durable security-audit verdict for an evolution
+     * candidate (previously securityAuditPassed could NEVER become true —
+     * the whole pipeline was a dead end at the governance gate).
+     */
+    @Query("UPDATE evolution_candidates SET securityAuditPassed = :passed, evaluationNotes = :notes, updatedAtEpochMs = :now WHERE id = :id")
+    suspend fun updateSecurityAudit(id: String, passed: Boolean, notes: String, now: Long)
+
+    /** GAP-CLOSURE P1-17: durable retirement reason. */
+    @Query("UPDATE evolution_candidates SET stage = :stage, evaluationNotes = :notes, updatedAtEpochMs = :now WHERE id = :id")
+    suspend fun updateStageWithNotes(id: String, stage: String, notes: String, now: Long)
 }
 
 @Dao

@@ -17,11 +17,35 @@ import com.example.domain.ports.tools.ToolPort
 
 /**
  * Clean Infrastructure Adapter for workspace file system operations.
+ *
+ * GAP-CLOSURE P0-04: the sandbox project is resolved PER CALL via
+ * [projectIdProvider] (wired by the AppContainer to the ACTIVE workspace's
+ * OWN project). Previously a fixed `defaultProjectId = 1L` sent every
+ * agent-driven file operation to the LEGACY SHARED project — a
+ * cross-workspace data bleed. When no project is bound the tool fails
+ * honestly (PROJECT_CONTEXT_REQUIRED) instead of silently writing to the
+ * shared project.
  */
 class FileSystemTool(
     private val storagePort: WorkspaceStoragePort,
-    private val defaultProjectId: Long = 1L
+    @Deprecated("P0-04: fixed shared project removed. Wire projectIdProvider instead.")
+    private val defaultProjectId: Long = 1L,
+    private val projectIdProvider: (() -> Long?)? = null
 ) : ToolPort {
+
+    /** Resolves the sandbox project for THIS call; null = fail honestly. */
+    private fun resolveProjectId(): Long? {
+        projectIdProvider?.invoke()?.let { return it.takeIf { id -> id > 0 } }
+        return if (projectIdProvider != null) null else defaultProjectId
+    }
+
+    private fun noProjectFailure(): Outcome<ToolOutput, ToolFailure> = Outcome.Error(
+        failure = ToolFailure.CapabilityUnavailable(
+            capabilityName = "workspace_file_tool",
+            message = "PROJECT_CONTEXT_REQUIRED: لا يوجد مشروع مرتبط بمساحة العمل الحالية — ترفض الأداة الوصول بدلاً من الكتابة في مشروع مشترك قديم."
+        ),
+        diagnosticMessage = "PROJECT_CONTEXT_REQUIRED"
+    )
 
     override val declaration: ToolDeclaration = ToolDeclaration(
         name = "workspace_file_tool",
@@ -65,6 +89,7 @@ class FileSystemTool(
         val action = input.arguments["action"]?.toString()?.lowercase() ?: "list"
         val path = input.arguments["path"]?.toString() ?: ""
         val content = input.arguments["content"]?.toString() ?: ""
+        val projectId = resolveProjectId() ?: return noProjectFailure()
 
         return when (action) {
             "read" -> {
@@ -74,7 +99,7 @@ class FileSystemTool(
                         diagnosticMessage = "المسار غير محدد."
                     )
                 }
-                when (val result: Outcome<String, StorageFailure> = storagePort.readFile(defaultProjectId, path)) {
+                when (val result: Outcome<String, StorageFailure> = storagePort.readFile(projectId, path)) {
                     is Outcome.Success -> Outcome.Success(ToolOutput(content = result.value))
                     is Outcome.Degraded -> Outcome.Degraded(
                         partialValue = result.partialValue?.let { ToolOutput(content = it) },
@@ -93,7 +118,7 @@ class FileSystemTool(
                         failure = ToolFailure.InvalidParameters(listOf("path"), "يجب تحديد مسار الملف للكتابة.")
                     )
                 }
-                when (val result: Outcome<Unit, StorageFailure> = storagePort.writeFile(defaultProjectId, path, content)) {
+                when (val result: Outcome<Unit, StorageFailure> = storagePort.writeFile(projectId, path, content)) {
                     is Outcome.Success -> Outcome.Success(ToolOutput(content = "تم حفظ الملف بنجاح في: $path"))
                     is Outcome.Degraded -> Outcome.Degraded(
                         partialValue = ToolOutput(content = "تم حفظ الملف مع تنبيه."),
@@ -106,7 +131,7 @@ class FileSystemTool(
                 }
             }
             "list" -> {
-                when (val result: Outcome<List<WorkspaceFileEntry>, StorageFailure> = storagePort.listFiles(defaultProjectId, path.ifBlank { null })) {
+                when (val result: Outcome<List<WorkspaceFileEntry>, StorageFailure> = storagePort.listFiles(projectId, path.ifBlank { null })) {
                     is Outcome.Success -> {
                         val fileListStr = result.value.joinToString("\n") { file ->
                             val type = if (file.isDirectory) "[DIR]" else "[FILE]"
@@ -132,7 +157,7 @@ class FileSystemTool(
                         failure = ToolFailure.InvalidParameters(listOf("path"), "يجب تحديد مسار الملف للحذف.")
                     )
                 }
-                when (val result: Outcome<Unit, StorageFailure> = storagePort.deleteFile(defaultProjectId, path)) {
+                when (val result: Outcome<Unit, StorageFailure> = storagePort.deleteFile(projectId, path)) {
                     is Outcome.Success -> Outcome.Success(ToolOutput(content = "تم حذف الملف بنجاح: $path"))
                     is Outcome.Degraded -> Outcome.Degraded(
                         partialValue = ToolOutput(content = "تم حذف الملف مع تنبيه."),

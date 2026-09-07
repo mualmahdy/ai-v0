@@ -127,7 +127,8 @@ class WorkspaceRuntimeServiceTest {
     }
 
     @Test
-    fun `createWorkspace deactivates all then inserts new active workspace`() = runBlocking {
+    fun `createWorkspace binds the workspace to its OWN project (never legacy 1L)`() = runBlocking {
+        // GAP-CLOSURE P0-04: a fake ProjectDao that returns generated ids.
         val dao = FakeWorkspaceDao()
         dao.stored["default"] = WorkspaceEntity(
             id = "default", name = "Default", description = "",
@@ -136,19 +137,31 @@ class WorkspaceRuntimeServiceTest {
             lastActiveProjectId = 1L,
             createdAtEpochMs = 0, lastAccessedEpochMs = 0
         )
-        val service = newService(dao)
+        val projectDao = object : com.example.infrastructure.persistence.dao.ProjectDao {
+            override fun getAllActiveProjects(): Flow<List<com.example.infrastructure.persistence.entities.ProjectEntity>> =
+                MutableStateFlow(emptyList())
+            override suspend fun getAllActiveProjectsList(): List<com.example.infrastructure.persistence.entities.ProjectEntity> = emptyList()
+            override suspend fun getProjectById(id: Long): com.example.infrastructure.persistence.entities.ProjectEntity? = null
+            override suspend fun insertProject(project: com.example.infrastructure.persistence.entities.ProjectEntity): Long = 77L
+            override suspend fun updateProject(project: com.example.infrastructure.persistence.entities.ProjectEntity) {}
+            override suspend fun archiveProject(id: Long) {}
+        }
+        val service = WorkspaceRuntimeService(
+            workspaceDao = dao,
+            projectDao = projectDao,
+            coroutineScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+        )
         Thread.sleep(50)
 
-        val created = service.createWorkspace(
-            name = "Research",
-            description = "Research workspace",
-            networkPolicy = NetworkPolicy.OFFLINE
-        )
+        val created = service.createWorkspace(name = "Isolated", description = "")
 
-        assertEquals("Research", created.name)
-        assertEquals(NetworkPolicy.OFFLINE, created.networkPolicy)
-        assertTrue("deactivateAll should be called", dao.deactivateAllCount >= 1)
-        assertTrue("New workspace should be in storage", dao.stored.values.any { it.name == "Research" && it.isActive })
+        val stored = dao.stored.values.first { it.name == "Isolated" }
+        assertEquals(
+            "P0-04: the new workspace owns its dedicated project (77L), not the shared 1L",
+            77L,
+            stored.lastActiveProjectId
+        )
+        assertEquals(77L, created.activeProjectId)
     }
 
     @Test
@@ -227,14 +240,36 @@ class WorkspaceRuntimeServiceTest {
     }
 
     @Test
-    fun `requireActiveWorkspaceId returns default when no workspace is active yet`() = runBlocking {
-        val dao = FakeWorkspaceDao()
-        val service = newService(dao)
-        // Don't wait for bootstrap — simulate cold start before init completes
-        // (the bootstrap may have already run, but requireActiveWorkspaceId should
-        // still return a non-null stable key either way)
-        val id = service.requireActiveWorkspaceId()
-        assertTrue("Should return a non-null workspace id", id.isNotBlank())
+    fun `requireActiveWorkspaceId FAILS CLOSED when no workspace is active yet`() = runBlocking {
+        // GAP-CLOSURE P0-03: previously this fail-OPENED to the literal
+        // "default" (data written before bootstrap landed in a scope nobody
+        // owns). The honest contract now: activeWorkspaceIdOrNull() = null,
+        // requireActiveWorkspaceId() throws.
+        // Directly verify the accessor contract on a service whose bootstrap
+        // NEVER dispatches (a dispatcher that drops every task).
+        val neverDispatches = object : kotlinx.coroutines.CoroutineDispatcher() {
+            override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+                // dropped — the init coroutine never runs
+            }
+        }
+        val fresh = WorkspaceRuntimeService(
+            workspaceDao = FakeWorkspaceDao(),
+            coroutineScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + neverDispatches)
+        )
+        org.junit.Assert.assertNull(
+            "P0-03: no active workspace must be HONESTLY null, not 'default'",
+            fresh.activeWorkspaceIdOrNull()
+        )
+        var threw = false
+        try {
+            fresh.requireActiveWorkspaceId()
+        } catch (_: com.example.application.workspace.NoActiveWorkspaceStateException) {
+            threw = true
+        }
+        org.junit.Assert.assertTrue(
+            "P0-03: requireActiveWorkspaceId must FAIL CLOSED (NoActiveWorkspaceStateException)",
+            threw
+        )
     }
 
     @Test

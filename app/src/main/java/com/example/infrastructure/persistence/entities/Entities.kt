@@ -103,7 +103,13 @@ data class TaskEntity(
     val delegationDepth: Int = 0,
     // JSON checkpoint of the closed-loop state (step index, accumulated
     // evidence, accumulated output, consumed tokens) — the resume payload.
-    val checkpointJson: String? = null
+    val checkpointJson: String? = null,
+    // ---- Canonical Execution Context (gap-closure P0/P1, MIGRATION_10_TO_11) ----
+    // Serialized CanonicalExecutionContext: STABLE executionId + PINNED
+    // workspaceId/projectId/agentId/agentRole/modelId + attempt counter.
+    // Restored on resume so a resumed execution keeps its identity (P1-03)
+    // and refuses silent agent migration (P1-04).
+    val executionContextJson: String? = null
 )
 
 @Entity(tableName = "decision_cases")

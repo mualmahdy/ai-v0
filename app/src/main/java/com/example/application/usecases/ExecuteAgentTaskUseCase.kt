@@ -13,6 +13,11 @@ import java.util.UUID
 
 /**
  * High-level Use Case: Executes a user or agent task via decision-driven orchestrated event stream.
+ *
+ * Gap-closure P1-13 (model pinning): [assignedModelId] pins the task to ONE
+ * specific model — the decision layer targets exactly that resource and the
+ * binding survives the whole execution (reproducibility) instead of degrading
+ * into "whatever model is currently preferred".
  */
 class ExecuteAgentTaskUseCase(
     private val orchestrator: AgentOrchestrator
@@ -21,16 +26,19 @@ class ExecuteAgentTaskUseCase(
     operator fun invoke(
         agent: AgentDefinition,
         prompt: String,
+        taskId: String = UUID.randomUUID().toString(),
         history: List<LlmMessage> = emptyList(),
         preferredProviderId: String? = null,
+        assignedModelId: String? = null,
         networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
         isNetworkAvailable: Boolean = true,
         includeWebSearch: Boolean = false
     ): Flow<ExecutionEvent> {
         val task = TaskDefinition(
-            id = TaskId(UUID.randomUUID().toString()),
+            id = TaskId(taskId),
             assignedAgentId = agent.identity.id,
-            input = TaskInput(rawPrompt = prompt)
+            input = TaskInput(rawPrompt = prompt),
+            assignedModelId = assignedModelId ?: preferredProviderId
         )
 
         return orchestrator.executeTaskStream(
