@@ -24,6 +24,22 @@ import com.example.application.resource.DurableResourceRegistryService
 import com.example.application.resource.RegistryBackedResourceRecordRepository
 import com.example.application.security.SecurityGuardService
 import com.example.application.security.PermissionGrantService
+import com.example.application.governed.AdmissionControlService
+import com.example.application.governed.CodingToolchainService
+import com.example.application.governed.HumanApprovalGate
+import com.example.application.governed.SandboxLifecycleService
+import com.example.application.governed.BudgetAuthorizationPort
+import com.example.application.governed.BudgetAuthorizationOutcome
+import com.example.application.governed.ToolDeclarationResolver
+import com.example.domain.core.runtime.IsolationLevel
+import com.example.domain.core.security.governance.BudgetAuthorizationVerdict
+import com.example.domain.core.security.governance.ToolAdmissionRequest
+import com.example.domain.ports.governed.AdmissionAuditPort
+import com.example.domain.ports.governed.HumanApprovalStorePort
+import com.example.domain.ports.governed.PrincipalAuthorizationPort
+import com.example.domain.core.observability.AuditSeverity
+import com.example.domain.core.observability.AuditEvent
+import com.example.infrastructure.governed.InMemoryHumanApprovalStore
 import com.example.application.memory.MemoryLifecycleService
 import com.example.application.search.SearchIntelligenceService
 import com.example.application.tools.ToolLifecycleService
@@ -522,6 +538,117 @@ class AppContainer(context: Context) {
             rateLimitGovernor = rateLimitGovernor,
             telemetry = telemetryService,
             scope = applicationScope
+        )
+    }
+
+    // --- GOVERNED RUNTIME (Phase 1: admission-controlled execution) ---
+
+    /**
+     * Honest host isolation assessment: Android in-app execution provides
+     * ONLY the per-app sandbox (UID + app data dir). There is no process
+     * boundary, no network firewall, no syscall filter — so code-execution
+     * tools are DENIED at admission rather than executed with a false
+     * isolation claim.
+     */
+    val sandboxLifecycleService: SandboxLifecycleService by lazy {
+        SandboxLifecycleService(hostIsolationLevel = IsolationLevel.APP_SANDBOX_BEST_EFFORT)
+    }
+
+    /** Volatile (fail-safe) approval store; see InMemoryHumanApprovalStore KDoc. */
+    val humanApprovalStore: HumanApprovalStorePort by lazy { InMemoryHumanApprovalStore() }
+
+    val humanApprovalGate: HumanApprovalGate by lazy {
+        HumanApprovalGate(store = humanApprovalStore)
+    }
+
+    val admissionAuditPort: AdmissionAuditPort by lazy {
+        // Admission decisions flow into the SAME audit trail the rest of
+        // the system uses (Room-backed via TelemetryService).
+        AdmissionAuditPort { severity, actor, action, resourceType, resourceId, decision, reason, workspaceId, attributes ->
+            telemetryService.recordAudit(
+                AuditEvent(
+                    id = java.util.UUID.randomUUID().toString(),
+                    severity = AuditSeverity.entries.firstOrNull { it.name == severity } ?: AuditSeverity.WARN,
+                    actor = actor,
+                    action = action,
+                    resourceType = resourceType,
+                    resourceId = resourceId,
+                    decision = decision,
+                    reason = reason,
+                    workspaceId = workspaceId,
+                    attributes = attributes
+                )
+            )
+        }
+    }
+
+    /** Principal authorization via the Room-backed PermissionGrantService. */
+    val principalAuthorizationPort: PrincipalAuthorizationPort by lazy {
+        PrincipalAuthorizationPort { principalType, principalId, resourceType, resourceId, permission ->
+            permissionGrantService.check(principalType, principalId, resourceType, resourceId, permission)
+        }
+    }
+
+    /** Budget gate adapter over EconomicGovernanceService.authorize(). */
+    val budgetAuthorizationPort: BudgetAuthorizationPort by lazy {
+        BudgetAuthorizationPort { request: ToolAdmissionRequest ->
+            val result = economicGovernanceService.authorize(
+                com.example.domain.core.budget.EconomicAuthorizationRequest(
+                    executionId = request.executionId,
+                    workspaceId = request.workspaceId,
+                    agentId = request.principalId,
+                    taskId = null,
+                    providerId = null,
+                    serviceId = null,
+                    modelId = null,
+                    resourceId = null,
+                    isLocalResource = true,
+                    expectedTotalTokens = request.estimatedTokens,
+                    actionTypeCode = "TOOL:${request.toolName}"
+                )
+            )
+            BudgetAuthorizationOutcome(
+                verdict = when (result.decision) {
+                    com.example.domain.core.budget.EconomicGateDecision.ALLOWED -> BudgetAuthorizationVerdict.ALLOWED
+                    com.example.domain.core.budget.EconomicGateDecision.WARNED -> BudgetAuthorizationVerdict.WARNED
+                    com.example.domain.core.budget.EconomicGateDecision.DENIED -> BudgetAuthorizationVerdict.DENIED
+                    com.example.domain.core.budget.EconomicGateDecision.DOWNGRADE -> BudgetAuthorizationVerdict.DOWNGRADE
+                    com.example.domain.core.budget.EconomicGateDecision.LOCAL_FALLBACK -> BudgetAuthorizationVerdict.LOCAL_FALLBACK
+                    com.example.domain.core.budget.EconomicGateDecision.APPROVAL_REQUIRED -> BudgetAuthorizationVerdict.APPROVAL_REQUIRED
+                },
+                reason = result.reason
+            )
+        }
+    }
+
+    /**
+     * THE single ordered admission gate for every governed tool request.
+     * Production path policy resolves workspace roots through the same
+     * sandboxed directories SandboxWorkspaceStorageAdapter uses.
+     */
+    val admissionControlService: AdmissionControlService by lazy {
+        val declarations = codingToolchainService.declarations
+        AdmissionControlService(
+            toolDeclarations = ToolDeclarationResolver { name -> declarations[name] },
+            principalAuthorization = principalAuthorizationPort,
+            securityGuard = securityGuardService,
+            budgetAuthorization = budgetAuthorizationPort,
+            rateLimitCheck = { scopeKey -> rateLimitGovernor.allowsRequest(scopeKey) },
+            approvalGate = humanApprovalGate,
+            sandboxService = sandboxLifecycleService,
+            auditSink = admissionAuditPort,
+            workspaceRootResolver = { projectId ->
+                val dir = File(appContext.filesDir, "workspaces/proj_$projectId")
+                if (dir.exists()) dir.canonicalPath else null
+            },
+            canonicalResolver = { path -> File(path).canonicalPath }
+        )
+    }
+
+    val codingToolchainService: CodingToolchainService by lazy {
+        CodingToolchainService(
+            admission = admissionControlService,
+            workspaceStorage = workspaceStorage
         )
     }
 
