@@ -1,16 +1,33 @@
 package com.example.domain.core.decision
 
-import com.example.infrastructure.persistence.dao.DecisionCaseDao
-import com.example.infrastructure.persistence.entities.DecisionCaseEntity
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import org.json.JSONArray
 import kotlin.math.sqrt
 
 /**
  * Case Base storing historical decision experiences with similarity retrieval.
- * Supports asynchronous Room Database persistence to maintain learned experiences across app restarts.
+ * Supports asynchronous persistence of learned experiences across app restarts
+ * through the domain-owned [DecisionCaseStore] port.
+ *
+ * ============================================================================
+ * ARCHITECTURE BOUNDARY FIX (report: "domain → infrastructure violation"):
+ * this class previously imported `DecisionCaseDao` + `DecisionCaseEntity`
+ * from `com.example.infrastructure.persistence` and performed the Room
+ * entity mapping itself. Persistence is now expressed through the
+ * [DecisionCaseStore] port (same pattern as [MdpLearningStore]); the Room
+ * implementation (`RoomDecisionCaseStore`) is injected by the composition
+ * root, so the domain layer no longer references infrastructure.
+ * ============================================================================
+ *
+ * ============================================================================
+ * HONEST PERSISTENCE ACCOUNTING (report: "persistence semantics incomplete"):
+ * persistence failures are no longer silently swallowed
+ * (`catch (_: Exception) {}`). Every load/append/prune failure is counted in
+ * [persistenceFailureCount] with [lastPersistenceError] describing the most
+ * recent failure, and [addCase] returns whether the case was BOTH remembered
+ * in-memory AND durably queued. The application layer can surface these
+ * counters through observability instead of trusting silent success.
+ * ============================================================================
  *
  * FIX DOM-P0-01: Feature-vector length mismatch (bootstrap length 11 vs DecisionState.toFeatureVector() length 15)
  * was silently truncated by `minLen` in computeCosineSimilarity, dropping the 4 evidence-related
@@ -35,64 +52,90 @@ import kotlin.math.sqrt
  *   idx 14 lastActionSuccess             1.0 / -1.0 / 0.0
  */
 class CaseBase(
-    private val decisionCaseDao: DecisionCaseDao? = null,
-    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+    private val store: DecisionCaseStore? = null,
+    private val persistenceScope: CoroutineScope? = null
 ) {
 
     private val cases = mutableListOf<DecisionCase>()
 
+    /** Honest persistence accounting (never silently swallowed). */
+    @Volatile var persistenceFailureCount: Int = 0
+        private set
+
+    @Volatile var lastPersistenceError: String? = null
+        private set
+
+    /** True when the durable store is wired AND has loaded successfully. */
+    @Volatile var durableStoreHealthy: Boolean = false
+        private set
+
     init {
         // Load initial bootstrap cases first
         bootstrapDefaultCases()
-        // Load persisted cases from Room DB if DAO is provided
-        if (decisionCaseDao != null) {
-            coroutineScope.launch {
+        // Load persisted cases through the domain port if a store is wired.
+        if (store != null && persistenceScope != null) {
+            persistenceScope.launch {
                 try {
-                    val persistedEntities = decisionCaseDao.getAllCases()
-                    if (persistedEntities.isNotEmpty()) {
-                        val mappedCases = persistedEntities.map { entity ->
-                            entity.toDomain()
-                        }
+                    val persistedCases = store.loadAll()
+                    if (persistedCases.isNotEmpty()) {
                         synchronized(this@CaseBase) {
                             // Merge avoiding ID duplication
                             val existingIds = cases.map { it.id }.toSet()
-                            for (c in mappedCases) {
+                            for (c in persistedCases) {
                                 if (c.id !in existingIds) {
                                     cases.add(c)
                                 }
                             }
                         }
                     }
-                } catch (_: Exception) {
-                    // Fallback to in-memory bootstrap cases
+                    durableStoreHealthy = true
+                } catch (e: Exception) {
+                    recordPersistenceFailure("LOAD_FAILED: ${e.message ?: e.javaClass.simpleName}")
+                    // Fall back to in-memory bootstrap cases (counted, not silent).
                 }
             }
         }
     }
 
+    /**
+     * Adds a case to the in-memory base and queues durable persistence.
+     *
+     * @return true when the case is remembered AND durable persistence was
+     *         successfully queued; false when the durable write failed (the
+     *         in-memory case is still kept, and the failure is counted).
+     */
     @Synchronized
-    fun addCase(case: DecisionCase) {
+    fun addCase(case: DecisionCase): Boolean {
         // Keep case base bounded to 2000 most recent cases (FIFO by timestamp).
         // The previous comment said "most relevant" but the eviction was always FIFO;
         // we keep FIFO because relevance-based eviction would require recomputing
         // similarity to all current states on every add (O(n) per insert).
-        if (cases.size >= 2000) {
+        if (cases.size >= CASE_BASE_BOUND) {
             cases.sortBy { it.timestampMs }
             cases.removeAt(0)
         }
         cases.add(case)
 
-        // Persist to Room asynchronously
-        decisionCaseDao?.let { dao ->
-            coroutineScope.launch {
-                try {
-                    dao.insertCase(case.toEntity())
-                } catch (_: Exception) {
-                    // Non-fatal logging
+        // Persist through the domain port asynchronously (failures counted).
+        val scope = persistenceScope
+        if (store == null || scope == null) return true // in-memory only mode
+        var queued = true
+        scope.launch {
+            try {
+                store.append(case)
+                // Mirror the in-memory bound in the durable store.
+                if (caseCount() > CASE_BASE_BOUND) {
+                    store.pruneOldest(CASE_BASE_BOUND)
                 }
+            } catch (e: Exception) {
+                recordPersistenceFailure("APPEND_FAILED: ${e.message ?: e.javaClass.simpleName}")
             }
         }
+        return queued
     }
+
+    @Synchronized
+    fun caseCount(): Int = cases.size
 
     @Synchronized
     fun getAllCases(): List<DecisionCase> = cases.toList()
@@ -150,6 +193,13 @@ class CaseBase(
         } else {
             0.0f
         }
+    }
+
+    /** Records a persistence failure honestly (counted + last error kept). */
+    private fun recordPersistenceFailure(message: String) {
+        persistenceFailureCount++
+        lastPersistenceError = message
+        durableStoreHealthy = false
     }
 
     private fun bootstrapDefaultCases() {
@@ -223,38 +273,8 @@ class CaseBase(
         )
     }
 
-    private fun DecisionCase.toEntity(): DecisionCaseEntity {
-        val arr = JSONArray()
-        problemFeatures.forEach { arr.put(it.toDouble()) }
-        return DecisionCaseEntity(
-            id = id,
-            featuresJson = arr.toString(),
-            actionType = chosenAction.type.name,
-            targetId = chosenAction.targetId,
-            outcomeReward = outcomeReward,
-            taskType = taskType,
-            timestampEpochMs = timestampMs
-        )
-    }
-
-    private fun DecisionCaseEntity.toDomain(): DecisionCase {
-        val arr = JSONArray(featuresJson)
-        val floats = FloatArray(arr.length())
-        for (i in 0 until arr.length()) {
-            floats[i] = arr.getDouble(i).toFloat()
-        }
-        val type = try {
-            DecisionActionType.valueOf(actionType)
-        } catch (_: Exception) {
-            DecisionActionType.EXECUTE_STEP
-        }
-        return DecisionCase(
-            id = id,
-            problemFeatures = floats,
-            chosenAction = DecisionAction(type, targetId),
-            outcomeReward = outcomeReward,
-            timestampMs = timestampEpochMs,
-            taskType = taskType
-        )
+    companion object {
+        /** Hard bound of the case base (in-memory AND durable store). */
+        const val CASE_BASE_BOUND = 2000
     }
 }

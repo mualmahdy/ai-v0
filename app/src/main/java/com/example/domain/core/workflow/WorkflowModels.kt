@@ -46,6 +46,17 @@ data class StepNode(
     val evidenceRequirements: List<String> = emptyList(),
     val acceptanceCriteria: List<AcceptanceCriterion> = emptyList(),
     val dependencies: Set<String> = emptySet(),
+    /**
+     * REPORT GAP (workflow canonical-agent binding): when set, the step MUST
+     * execute through this DURABLE agent from the canonical agent registry —
+     * its system prompt, capabilities, budget, workspace scope, version and
+     * lifecycle are all inherited from the real agent. When null, the engine
+     * resolves a durable role-matching agent; synthetic fallback is last
+     * resort ONLY when no registry is wired (pure JVM tests).
+     */
+    val assignedAgentId: String? = null,
+    /** Optional exact model resource pin for this step (user choice per step). */
+    val assignedModelId: String? = null,
     val status: StepStatus = StepStatus.PENDING,
     val outputSummary: String? = null,
     val durationMs: Long = 0L

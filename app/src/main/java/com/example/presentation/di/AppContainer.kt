@@ -367,9 +367,23 @@ class AppContainer(context: Context) {
      * FIX D-1/D-4 (audit c03919d): the engine is backed by the persistent
      * tabular-MDP Q-table (Room `mdp_q_values`) — per-(region, action) values
      * and transition rates that survive app restarts.
+     *
+     * ARCHITECTURE BOUNDARY FIX (report: "domain → infrastructure violation"):
+     * the CaseBase no longer takes a Room DAO directly; persistence flows
+     * through the domain-owned [com.example.domain.core.decision.DecisionCaseStore]
+     * port, implemented by RoomDecisionCaseStore in infrastructure. Persistence
+     * failures inside the case base are COUNTED (honest accounting), never
+     * silently swallowed.
      */
     val cbrMdpEngine: CbrMdpEngine by lazy {
-        val persistentCaseBase = CaseBase(decisionCaseDao = database.decisionCaseDao())
+        val decisionCaseStore: com.example.domain.core.decision.DecisionCaseStore =
+            com.example.infrastructure.persistence.repository.RoomDecisionCaseStore(
+                database.decisionCaseDao()
+            )
+        val persistentCaseBase = CaseBase(
+            store = decisionCaseStore,
+            persistenceScope = applicationScope
+        )
         val mdpLearningStore: MdpLearningStore = RoomMdpLearningStore(database.mdpQValueDao())
         CbrMdpEngine(
             caseBase = persistentCaseBase,
@@ -785,8 +799,62 @@ class AppContainer(context: Context) {
                     ?: throw com.example.application.workspace.NoActiveWorkspaceStateException(
                         "NO_ACTIVE_WORKSPACE: لا يمكن بدء خطة عمل دون مساحة عمل نشطة."
                     )
+            },
+            // ----------------------------------------------------------------------
+            // CANONICAL AGENT BINDING (report gap: "workflow steps use
+            // synthetic agents"): every step resolves its DURABLE registry
+            // agent — assignedAgentId first, then a role match; when no
+            // durable role agent exists yet, one is MATERIALIZED into the
+            // registry (origin PLANNER) and registered into the runtime —
+            // so steps execute through REAL agents (system prompt,
+            // capabilities, budget, workspace scope, version, lifecycle),
+            // never throwaway synthetic ones.
+            // ----------------------------------------------------------------------
+            agentResolver = { step ->
+                resolveWorkflowStepAgent(step)
             }
         )
+    }
+
+    /**
+     * Canonical-agent resolution policy for workflow steps: durable
+     * registry first (pinned id → role match → materialize-and-register).
+     */
+    private suspend fun resolveWorkflowStepAgent(
+        step: com.example.domain.core.workflow.StepNode
+    ): com.example.domain.core.agent.AgentDefinition {
+        val workspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull()
+        val resolved = agentRegistryService.resolveStepAgent(
+            role = step.agentRole,
+            workspaceId = workspaceId,
+            assignedAgentId = step.assignedAgentId
+        )
+        if (resolved != null) {
+            componentRegistry.registerAgent(resolved)
+            return resolved
+        }
+        // MATERIALIZE a durable role agent (PLANNER-authored) so future runs
+        // resolve it from the registry — the registry stays canonical.
+        val materialized = agentRegistryService.saveAgent(
+            com.example.domain.core.agent.AgentDefinition(
+                identity = com.example.domain.core.agent.AgentIdentity(
+                    id = com.example.domain.core.agent.AgentId("agent_role_${step.agentRole.name.lowercase()}"),
+                    name = "وكيل ${step.agentRole.displayName}",
+                    role = step.agentRole,
+                    description = "وكيل قانوني منشأ لتنفيذ خطوات دور ${step.agentRole.displayName} في خطط العمل.",
+                    systemPrompt = step.agentRole.defaultSystemPrompt
+                ),
+                allowedCapabilities = setOf(
+                    com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
+                    com.example.domain.core.capability.CapabilityType.STREAMING,
+                    com.example.domain.core.capability.CapabilityType.TOOL_EXECUTION
+                ),
+                budget = com.example.domain.core.agent.AgentBudget(maxTokens = 30000)
+            ),
+            origin = "PLANNER"
+        )
+        componentRegistry.registerAgent(materialized)
+        return materialized
     }
 
     // Use Cases
@@ -949,6 +1017,40 @@ class AppContainer(context: Context) {
         ExtensionLifecycleService(extensionConfigDao = database.extensionConfigDao())
     }
 
+    // ==================================================================
+    // v13 — DURABLE SESSIONS + WORKFLOW LIBRARY (report gap-closure)
+    // ==================================================================
+
+    /**
+     * DURABLE CONVERSATION SESSIONS (report gap: "Sessions NOT FIXED —
+     * deleted without a durable replacement"): workspace-scoped sessions
+     * (chat_sessions/chat_turns) with mode (QUICK_CHAT/AGENT), exact model
+     * pins, turn/aggregate persistence — browsable, reopenable, resumable.
+     */
+    val conversationSessionService: com.example.application.session.ConversationSessionService by lazy {
+        com.example.application.session.ConversationSessionService(
+            repository = com.example.infrastructure.persistence.repository.RoomConversationSessionRepository(
+                database = database,
+                sessionDao = database.conversationSessionDao(),
+                turnDao = database.conversationTurnDao()
+            ),
+            workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+        )
+    }
+
+    /**
+     * WORKFLOW LIBRARY (report gap: "workflow library/history NOT FIXED"):
+     * the USER-AUTHORED workflow definition as a durable, re-editable,
+     * clonable, run-recorded workspace asset.
+     */
+    val workflowLibraryService: com.example.application.workflow.WorkflowLibraryService by lazy {
+        com.example.application.workflow.WorkflowLibraryService(
+            workflowDefinitionDao = database.workflowDefinitionDao(),
+            planSerializer = workflowPersistenceService,
+            workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
+        )
+    }
+
     /**
      * First-run bootstrap (parity with the legacy default providers): seeds
      * local embedding + multi-source search + Gemini provider records, then
@@ -963,6 +1065,23 @@ class AppContainer(context: Context) {
         applicationScope.launch {
             durableResourceRegistryService.eagerLoad()
             cbrMdpEngine.loadPersistedQTable()
+            // ----------------------------------------------------------------------
+            // EGRESS ENFORCEMENT WIRING (report gap: sandbox network-egress
+            // restrictions): the ACTIVE workspace's network policy is pinned
+            // into the transport-layer guard (EgressControl) — ONE policy
+            // drives both resource filtering and raw HTTP egress. An OFFLINE
+            // workspace can never dial out, from any adapter.
+            // ----------------------------------------------------------------------
+            launch {
+                runCatching {
+                    workspaceRuntimeService.activeWorkspace.collect { workspace ->
+                        com.example.infrastructure.network.EgressControl.setActivePolicy(
+                            workspaceId = workspace?.id,
+                            policy = workspace?.networkPolicy
+                        )
+                    }
+                }
+            }
             // GAP-CLOSURE P1-08: seed/sync the canonical durable agent catalog
             // into the runtime registry BEFORE any execution can start.
             runCatching { syncCanonicalAgents() }
@@ -1044,7 +1163,12 @@ class MainViewModelFactory(
                 // GOVERNANCE PHASE — radar + economic governance surfaces for
                 // the GovernanceObservatoryScreen.
                 capabilityRadarService = appContainer.capabilityRadarService,
-                economicGovernanceService = appContainer.economicGovernanceService
+                economicGovernanceService = appContainer.economicGovernanceService,
+                // v13 — DURABLE SESSIONS + QUICK CHAT + WORKFLOW LIBRARY
+                // (report gap-closure).
+                conversationSessionService = appContainer.conversationSessionService,
+                workflowLibraryService = appContainer.workflowLibraryService,
+                workflowPersistenceService = appContainer.workflowPersistenceService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

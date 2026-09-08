@@ -32,6 +32,10 @@ import java.util.concurrent.TimeUnit
  */
 class McpClient(
     private val client: OkHttpClient = OkHttpClient.Builder()
+        // EGRESS ENFORCEMENT (report gap: sandbox network-egress
+        // restrictions): the guard consults the ACTIVE workspace policy
+        // and fails CLOSED (IOException) before any socket is opened.
+        .addInterceptor(com.example.infrastructure.network.EgressControl.interceptor())
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)

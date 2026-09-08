@@ -252,13 +252,16 @@ class GovernancePersistenceTest {
     }
 
     @Test
-    fun `db version is 12 with all governance + execution-kernel + convergence tables`() {
+    fun `db version is 13 with all governance + execution-kernel + convergence tables`() {
         // Gap-closure: v11 added action_intents + agent_definitions + the
         // tasks.executionContextJson column (canonical execution kernel).
         // P0 convergence (v12): workspace-owned projects, RAG metadata
         // durability columns, resource-aware MDP PK, sessions remnant dropped.
+        // REPORT GAP-CLOSURE (v13): durable conversation sessions
+        // (chat_sessions/chat_turns), the user-authored workflow library
+        // (workflow_definitions), and full-fidelity durable agents.
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(12, dbVersion)
+        assertEquals(13, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))
@@ -266,9 +269,20 @@ class GovernancePersistenceTest {
         listOf(
             "capability_evidence", "radar_capability_states", "capability_changes",
             "radar_recommendations", "pricing_entries", "cost_ledger_entries", "budget_allocations",
-            "action_intents", "agent_definitions"
+            "action_intents", "agent_definitions",
+            // v13 — report gap-closure tables.
+            "chat_sessions", "chat_turns", "workflow_definitions"
         ).forEach { tableName ->
             assertTrue("missing table: $tableName", tables.contains(tableName))
+        }
+        // REPORT GAP-CLOSURE (v13): full-fidelity durable agent columns.
+        db.openHelper.readableDatabase.query("PRAGMA table_info(agent_definitions)").use { cursor ->
+            val columns = mutableSetOf<String>()
+            while (cursor.moveToNext()) columns.add(cursor.getString(1))
+            assertTrue("agent_definitions.goalsJson must exist", columns.contains("goalsJson"))
+            assertTrue("agent_definitions.networkRequirement must exist", columns.contains("networkRequirement"))
+            assertTrue("agent_definitions.locality must exist", columns.contains("locality"))
+            assertTrue("agent_definitions.authorityLevel must exist", columns.contains("authorityLevel"))
         }
         // P0 CONVERGENCE (v12) schema markers.
         db.openHelper.readableDatabase.query("PRAGMA table_info(projects)").use { cursor ->

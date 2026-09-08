@@ -266,6 +266,10 @@ class WorkflowPersistenceService(
         s.put("evidenceRequirements", toStringArray(step.evidenceRequirements))
         s.put("acceptanceCriteria", serializeAcceptanceCriteria(step.acceptanceCriteria))
         s.put("dependencies", toStringArray(step.dependencies.toList()))
+        // Schema v3 — canonical agent binding + per-step model pin (report:
+        // workflow steps must execute through DURABLE registry agents).
+        step.assignedAgentId?.let { s.put("assignedAgentId", it) } ?: s.put("assignedAgentId", JSONObject.NULL)
+        step.assignedModelId?.let { s.put("assignedModelId", it) } ?: s.put("assignedModelId", JSONObject.NULL)
         s.put("status", step.status.name)
         step.outputSummary?.let { s.put("outputSummary", it) } ?: s.put("outputSummary", JSONObject.NULL)
         s.put("durationMs", step.durationMs)
@@ -349,6 +353,8 @@ class WorkflowPersistenceService(
             evidenceRequirements = fromStringArray(s.optJSONArray("evidenceRequirements")),
             acceptanceCriteria = s.optJSONArray("acceptanceCriteria")?.let { deserializeAcceptanceCriteria(it) } ?: emptyList(),
             dependencies = fromStringArray(s.optJSONArray("dependencies")).toSet(),
+            assignedAgentId = if (s.isNull("assignedAgentId")) null else s.optString("assignedAgentId", null),
+            assignedModelId = if (s.isNull("assignedModelId")) null else s.optString("assignedModelId", null),
             status = runCatching { StepStatus.valueOf(s.optString("status", StepStatus.PENDING.name)) }
                 .getOrDefault(StepStatus.PENDING),
             outputSummary = if (s.isNull("outputSummary")) null else s.optString("outputSummary", null),
@@ -413,8 +419,12 @@ class WorkflowPersistenceService(
     }
 
     private companion object {
-        /** Bumped when the plan JSON schema changes; future readers can branch on it. */
-        const val PLAN_SCHEMA_VERSION = 2
+        /**
+         * Bumped when the plan JSON schema changes; future readers can branch on it.
+         * v3 adds assignedAgentId / assignedModelId per step (canonical agent
+         * binding + per-step model pin).
+         */
+        const val PLAN_SCHEMA_VERSION = 3
     }
 }
 

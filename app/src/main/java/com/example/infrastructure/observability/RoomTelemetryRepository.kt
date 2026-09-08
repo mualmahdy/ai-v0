@@ -363,6 +363,11 @@ class RoomTelemetryRepository(
             rows.map { it.toDomain() }
         }
 
+    override fun recentTraceNodes(limit: Int): Flow<List<ExecutionTraceNode>> =
+        executionTraceDao.recent(limit).map { rows ->
+            rows.map { it.toDomain() }
+        }
+
     override suspend fun snapshotByType(type: MetricType): List<MetricSnapshot> =
         snapshotsFlow.value.values.filter { it.type == type }
 

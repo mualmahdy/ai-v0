@@ -143,5 +143,6 @@ class DecisionIntelligenceRealEngineTest {
         override suspend fun getRecentCases(limit: Int): List<com.example.infrastructure.persistence.entities.DecisionCaseEntity> = emptyList()
         override suspend fun insertCase(caseEntity: com.example.infrastructure.persistence.entities.DecisionCaseEntity) {}
         override suspend fun insertAll(cases: List<com.example.infrastructure.persistence.entities.DecisionCaseEntity>) {}
+        override suspend fun deleteOlderThan(cutoff: Long) {}
     }
 }

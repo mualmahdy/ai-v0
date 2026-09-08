@@ -839,10 +839,10 @@ object CriticalFindingsRegister {
             "IntelligenceRadarPipeline (stages 3-8 not implemented)",
             "AgentOrchestrator (resumeTask broken)",
             "GeminiLlmAdapter (system role broken, config ignored)",
-            "OpenAiCompatibleAdapter (fake streaming, all errors → timeout)",
+            "OpenAiCompatibleAdapter (REMOVED with the legacy provider path — report gap: legacy provider runtime path)",
             "OpenAiCompatibleDiscoveryAdapter (fake local fallback models)",
             "SandboxWorkspaceStorageAdapter (listSessions stub, listProjects misleading)",
-            "ProviderAdapterFactory (embedding adapter local-only, accepts 400/405)",
+            "ProviderAdapterFactory (DELETED — legacy provider runtime path removed; only ProtocolAdapterFactory remains)",
         ),
         fakeOrMissing = listOf(
             "LocalDeterministicEmbeddingAdapter (hashing trick, not semantic)",

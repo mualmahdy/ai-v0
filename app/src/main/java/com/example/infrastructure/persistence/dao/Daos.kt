@@ -175,6 +175,13 @@ interface DecisionCaseDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(cases: List<DecisionCaseEntity>)
+
+    /**
+     * FIFO eviction support for the bounded case base (domain-owned bound of
+     * CaseBase.CASE_BASE_BOUND; the store prunes older-than-cutoff rows).
+     */
+    @Query("DELETE FROM decision_cases WHERE timestampEpochMs < :cutoff")
+    suspend fun deleteOlderThan(cutoff: Long)
 }
 
 @Dao

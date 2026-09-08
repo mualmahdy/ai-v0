@@ -62,7 +62,11 @@ class ComponentRegistry(
     val resourceRegistry: DurableResourceRegistryService = DurableResourceRegistryService()
 ) {
 
-    val resourceCapabilityGraph: ResourceCapabilityGraph = ResourceCapabilityGraph(resourceRegistry)
+    // ARCHITECTURE BOUNDARY FIX: the domain ResourceCapabilityGraph no longer
+    // accepts an application-layer registry (domain → application violation).
+    // The application composition root supplies a plain record snapshot.
+    val resourceCapabilityGraph: ResourceCapabilityGraph =
+        ResourceCapabilityGraph { resourceRegistry.listResources() }
     val runtimeAdapterResolver: RuntimeAdapterResolver = RuntimeAdapterResolver(resourceRegistry)
 
     // --- In-app Tools ---

@@ -30,10 +30,13 @@ import com.example.domain.core.radar.RadarSnapshot
 import com.example.domain.core.rag.AssembledRagContext
 import com.example.domain.core.rag.KnowledgeDocument
 import com.example.domain.core.resource.ResourceRecord
+import com.example.domain.core.session.ChatMode
+import com.example.domain.core.session.ConversationSession
 import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.storage.WorkspaceFileEntry
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.task.TaskDefinition
+import com.example.domain.core.workflow.ExecutionMode
 import com.example.domain.core.workflow.WorkflowExecutionReport
 import com.example.domain.core.workspace.ResourceGraph
 
@@ -61,6 +64,11 @@ enum class ActiveNavigationTab(val displayName: String, val iconName: String) {
  * the agent that ran it, the final streamed answer, the event count and the
  * outcome. Turns accumulate for the lifetime of the ViewModel so the Studio
  * behaves like a real conversation console instead of a one-shot prompt box.
+ *
+ * DURABLE SESSIONS (report gap-closure): every turn is now ALSO persisted to
+ * the workspace-scoped `chat_turns` table, so the transcript survives process
+ * death, can be browsed and reopened from the session browser, and resumed as
+ * conversation history.
  */
 data class StudioTurn(
     val id: String,
@@ -71,7 +79,37 @@ data class StudioTurn(
     val eventCount: Int,
     val tokensConsumed: Int,
     val durationMs: Long,
-    val isSuccessful: Boolean
+    val isSuccessful: Boolean,
+    /** The durable model-resource this turn was pinned to (user choice). */
+    val modelResourceId: String? = null
+)
+
+/**
+ * WORKFLOW BUILDER STATE (report gap: "workflow definition must be a
+ * re-editable durable asset"): the authoring state lives in the ViewModel —
+ * not in Compose `remember` — so saving, loading, editing and re-saving
+ * library definitions is possible without losing the builder on navigation.
+ */
+data class WorkflowBuilderStep(
+    val id: String,
+    val description: String,
+    val role: com.example.domain.core.agent.AgentRole,
+    val dependencies: Set<String>,
+    /** Canonical durable agent binding (report gap: synthetic agents). */
+    val assignedAgentId: String? = null
+)
+
+data class WorkflowBuilderState(
+    val name: String = "",
+    val goal: String = "بناء ونشر وحدة معمارية متكاملة",
+    val executionMode: ExecutionMode = ExecutionMode.DIRECTED_ACYCLIC_GRAPH,
+    val steps: List<WorkflowBuilderStep> = listOf(
+        WorkflowBuilderStep("step_1_plan", "تحليل المتطلبات والتخطيط المعماري للوحدة", com.example.domain.core.agent.AgentRole.PLANNER, emptySet()),
+        WorkflowBuilderStep("step_2_code", "كتابة الشيفرات ونماذج النطاق ومنافذ Ports", com.example.domain.core.agent.AgentRole.CODER, setOf("step_1_plan")),
+        WorkflowBuilderStep("step_3_security", "التدقيق الأمني وفحص تنقيح البيانات والسياسات", com.example.domain.core.agent.AgentRole.SECURITY_GUARD, setOf("step_2_code"))
+    ),
+    /** Library definition being edited (null = new unsaved plan). */
+    val editingDefinitionId: String? = null
 )
 
 data class ExecutionStepItem(
@@ -112,6 +150,18 @@ data class UiState(
     // Session transcript (Studio as a real conversation console).
     val studioSession: List<StudioTurn> = emptyList(),
     val sessionTurnStartMs: Long = 0L,
+    // ------------------------------------------------------------------
+    // DURABLE SESSIONS + QUICK CHAT + MODEL PICKER (report gap-closure):
+    // the conversation mode (agent-independent Quick Chat vs canonical
+    // agent), the active durable session id, the live session browser list,
+    // and the user-facing exact model selection.
+    // ------------------------------------------------------------------
+    val chatMode: ChatMode = ChatMode.QUICK_CHAT,
+    val activeSessionId: String? = null,
+    val sessions: List<ConversationSession> = emptyList(),
+    val isSessionBrowserOpen: Boolean = false,
+    val selectedModelResourceId: String? = null,
+    val selectedModelDisplayName: String? = null,
     val isDegraded: Boolean = false,
     val degradedReason: DegradedReason? = null,
     val diagnosticBanner: String? = null,
@@ -126,6 +176,10 @@ data class UiState(
     val activeTasks: List<TaskDefinition> = emptyList(),
     val workflowReport: WorkflowExecutionReport? = null,
     val isExecutingWorkflow: Boolean = false,
+    // WORKFLOW LIBRARY (report gap: durable, re-editable authored assets).
+    val workflowBuilder: WorkflowBuilderState = WorkflowBuilderState(),
+    val workflowLibrary: List<com.example.application.workflow.WorkflowLibraryService.WorkflowDefinitionSummary> = emptyList(),
+    val resumableWorkflows: List<com.example.application.workflow.ResumableWorkflow> = emptyList(),
 
     // Decision Intelligence (CBR-MDP)
     val latestDecision: DecisionResult? = null,

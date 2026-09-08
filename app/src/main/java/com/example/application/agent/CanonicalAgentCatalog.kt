@@ -28,6 +28,28 @@ import com.example.domain.core.capability.CapabilityType
 object CanonicalAgentCatalog {
 
     val defaults: List<AgentDefinition> = listOf(
+        // QUICK-CHAT CANONICAL AGENT (report gap: "Quick Chat missing"):
+        // the agent-independent conversation mode executes through THIS
+        // durable agent — the user never selects an agent, only a model —
+        // while the execution still flows through the SAME governed kernel
+        // (budget, security guard, telemetry, admission control), preserving
+        // a single execution authority instead of spawning an un-governed
+        // parallel generation path.
+        AgentDefinition(
+            identity = AgentIdentity(
+                id = AgentId("agent_quick_chat"),
+                name = "المحادثة السريعة",
+                role = AgentRole.GENERAL_ASSISTANT,
+                description = "مساعد المحادثة السريعة المستقل عن الوكلاء — يرتبط بالنموذج المختار فقط",
+                systemPrompt = "أنت مساعد محادثة سريع ودقيق. أجب مباشرة وبتلميح موجز، واستمر في سياق المحادثة السابق."
+            ),
+            allowedCapabilities = setOf(
+                CapabilityType.LLM_GENERATION,
+                CapabilityType.STREAMING,
+                CapabilityType.MEMORY_RETRIEVAL
+            ),
+            budget = AgentBudget()
+        ),
         AgentDefinition(
             identity = AgentIdentity(
                 id = AgentId("agent_general"),

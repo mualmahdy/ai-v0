@@ -327,6 +327,15 @@ private fun WorkspaceNavHost(
                 modifier = Modifier.fillMaxSize()
             )
         }
+        // UNIFIED OBJECT EXPLORER (report gap: everything was scattered —
+        // one place now discovers every workspace object).
+        composable(WorkspaceRoutes.EXPLORER) {
+            com.example.presentation.ui.screens.explorer.WorkspaceExplorerScreen(
+                viewModel = viewModel,
+                onNavigate = navigate,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
     }
 }
 

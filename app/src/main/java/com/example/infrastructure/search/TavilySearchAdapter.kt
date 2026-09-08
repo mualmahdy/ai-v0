@@ -29,6 +29,10 @@ import java.util.concurrent.TimeUnit
 class TavilySearchAdapter(
     private val apiKeyProvider: () -> String?,
     private val client: OkHttpClient = OkHttpClient.Builder()
+        // EGRESS ENFORCEMENT (report gap: sandbox network-egress
+        // restrictions): the guard consults the ACTIVE workspace policy
+        // and fails CLOSED (IOException) before any socket is opened.
+        .addInterceptor(com.example.infrastructure.network.EgressControl.interceptor())
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .build()

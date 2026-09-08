@@ -63,12 +63,17 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import java.util.UUID
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(
     private val executeAgentTaskUseCase: ExecuteAgentTaskUseCase,
     private val executeWorkflowUseCase: ExecuteWorkflowUseCase,
@@ -110,7 +115,21 @@ class MainViewModel(
      * GOVERNANCE PHASE — economic governance facade (pricing, ledger,
      * budgets, rate limits). Nullable keeps existing call sites compatible.
      */
-    private val economicGovernanceService: com.example.application.budget.EconomicGovernanceService? = null
+    private val economicGovernanceService: com.example.application.budget.EconomicGovernanceService? = null,
+    /**
+     * DURABLE SESSIONS (report gap-closure): the conversation session
+     * authority — sessions, turns, model pins, browser queries.
+     */
+    private val conversationSessionService: com.example.application.session.ConversationSessionService? = null,
+    /**
+     * WORKFLOW LIBRARY (report gap-closure): user-authored workflow assets
+     * (save / load / edit / clone / run history).
+     */
+    private val workflowLibraryService: com.example.application.workflow.WorkflowLibraryService? = null,
+    /**
+     * WORKFLOW EXECUTION PERSISTENCE — resumable workflows surface.
+     */
+    private val workflowPersistenceService: com.example.application.workflow.WorkflowPersistenceService? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UiState())
@@ -127,6 +146,17 @@ class MainViewModel(
     /** Gap-closure P0-01: the ExecutionHost key of the task launched by the Studio screen. */
     private var currentExecutionTaskId: String? = null
 
+    /**
+     * UNIFIED ACTIVITY TRACE WIRING FIX (report: "traceForExecution(\"\")" —
+     * broken/partial wiring): the execution id of the CURRENTLY RUNNING
+     * (or most recently finished) Studio execution. `ExecutionEvent.Started`
+     * carries the REAL execution id; the activity feed switches to the
+     * per-execution trace stream when set, and falls back to the recent
+     * trace window otherwise — never to an empty-id query that matches
+     * nothing.
+     */
+    private val activeExecutionId = MutableStateFlow<String?>(null)
+
     // Phase 5 — Unified Activity Feed state flows. These power the new
     // UnifiedActivityFeedScreen which renders a single timeline of
     // suggestions + execution trace + audit events.
@@ -139,7 +169,16 @@ class MainViewModel(
 
     val activeExecutionTrace: StateFlow<List<com.example.domain.core.observability.ExecutionTraceNode>> =
         telemetryPort?.let { port ->
-            port.traceForExecution("")
+            combine(flowOf(port), activeExecutionId) { p, id -> p to id }
+                .flatMapLatest { (p, id) ->
+                    if (id.isNullOrBlank()) {
+                        // No live execution → the recent-trace window (real,
+                        // persisted traces across executions).
+                        p.recentTraceNodes(50)
+                    } else {
+                        p.traceForExecution(id)
+                    }
+                }
                 .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
         } ?: MutableStateFlow(emptyList<com.example.domain.core.observability.ExecutionTraceNode>()).asStateFlow()
 
@@ -154,6 +193,10 @@ class MainViewModel(
         observeSubsystems()
         loadInitialData()
         observeWorkspace()
+        // DURABLE SESSIONS + WORKFLOW LIBRARY + RESUMABLE (report
+        // gap-closure): workspace-scoped durable assets follow the active
+        // workspace (continuity across switches).
+        observeWorkspaceScopedAssets()
         // GOVERNANCE PHASE: subscribe the observatory to the backend-truth
         // radar flows (Room-backed, survive process death).
         observeGovernance()
@@ -214,7 +257,7 @@ class MainViewModel(
                 _uiState.update { it.copy(diagnosticBanner = "مساحة العمل لم تجهز بعد — تعذر تحديث الحوكمة.") }
                 return@launch
             }
-            val netAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: true
+            val netAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: false
             runCatching {
                 val snapshot = capabilityRadarService?.deriveSnapshot(
                     workspaceId = wsId,
@@ -619,6 +662,300 @@ class MainViewModel(
         _uiState.update { it.copy(studioSession = emptyList()) }
     }
 
+    // ==================================================================
+    // DURABLE SESSIONS + QUICK CHAT + MODEL PICKER (report gap-closure)
+    // ==================================================================
+
+    /**
+     * Sets the conversation mode: QUICK_CHAT (agent-independent, binds to the
+     * selected model) or AGENT (canonical agent catalog).
+     */
+    fun setChatMode(mode: com.example.domain.core.session.ChatMode) {
+        _uiState.update { it.copy(chatMode = mode) }
+    }
+
+    /**
+     * USER-FACING MODEL PICKER (report gap): selects the exact LLM resource
+     * the conversation binds to. `resourceId == null` → the runtime decision
+     * layer picks (previous behaviour). The choice is persisted onto the
+     * active durable session (exact runtime binding survives restarts).
+     */
+    fun selectModel(resourceId: String?, displayName: String?) {
+        _uiState.update {
+            it.copy(selectedModelResourceId = resourceId, selectedModelDisplayName = displayName)
+        }
+        val service = conversationSessionService ?: return
+        val sessionId = _uiState.value.activeSessionId ?: return
+        viewModelScope.launch {
+            runCatching {
+                service.setSessionModel(
+                    sessionId = com.example.domain.core.session.ConversationSessionId(sessionId),
+                    modelResourceId = resourceId,
+                    modelDisplayName = displayName
+                )
+            }
+        }
+    }
+
+    /** Opens/closes the durable session browser sheet. */
+    fun setSessionBrowserOpen(open: Boolean) {
+        _uiState.update { it.copy(isSessionBrowserOpen = open) }
+    }
+
+    /**
+     * Starts a NEW durable conversation session (bound to the active
+     * workspace + current mode/model/agent) and clears the transcript.
+     */
+    fun startNewSession() {
+        val service = conversationSessionService ?: run {
+            clearStudioSession()
+            return
+        }
+        viewModelScope.launch {
+            runCatching {
+                val current = _uiState.value
+                val session = service.createSession(
+                    mode = current.chatMode,
+                    agentId = current.activeAgent?.identity?.id?.value,
+                    agentName = current.activeAgent?.identity?.name,
+                    modelResourceId = current.selectedModelResourceId,
+                    modelDisplayName = current.selectedModelDisplayName
+                )
+                _uiState.update {
+                    it.copy(
+                        activeSessionId = session.id.value,
+                        studioSession = emptyList(),
+                        executionLog = emptyList(),
+                        streamText = "",
+                        isSessionBrowserOpen = false
+                    )
+                }
+            }.onFailure { failure ->
+                _uiState.update { it.copy(errorMessage = "تعذر إنشاء جلسة جديدة: ${failure.localizedMessage}") }
+            }
+        }
+    }
+
+    /**
+     * SESSION BROWSER → REOPEN (report gaps: "Session retrieval after
+     * restart" + "Resume conversation"): loads a durable session with its
+     * full turn history into the Studio transcript, restores the session's
+     * mode / agent / model binding, and continues the conversation with the
+     * loaded turns as LLM history.
+     */
+    fun openSession(sessionId: String) {
+        val service = conversationSessionService ?: return
+        viewModelScope.launch {
+            runCatching {
+                val loaded = service.getSessionWithTurns(
+                    com.example.domain.core.session.ConversationSessionId(sessionId)
+                ) ?: return@launch
+                _uiState.update { state ->
+                    state.copy(
+                        activeSessionId = loaded.session.id.value,
+                        chatMode = loaded.session.mode,
+                        selectedModelResourceId = loaded.session.modelResourceId,
+                        selectedModelDisplayName = loaded.session.modelDisplayName,
+                        studioSession = loaded.turns.map { turn ->
+                            StudioTurn(
+                                id = turn.id,
+                                prompt = turn.prompt,
+                                agentName = turn.agentName ?: loaded.session.agentName ?: "المساعد",
+                                agentRole = turn.agentRole ?: "",
+                                answer = turn.answer,
+                                eventCount = turn.eventCount,
+                                tokensConsumed = turn.tokensConsumed,
+                                durationMs = turn.durationMs,
+                                isSuccessful = turn.isSuccessful,
+                                modelResourceId = turn.modelResourceId
+                            )
+                        },
+                        executionLog = emptyList(),
+                        streamText = "",
+                        isExecuting = false,
+                        isSessionBrowserOpen = false
+                    )
+                }
+            }.onFailure { failure ->
+                _uiState.update { it.copy(errorMessage = "تعذر فتح الجلسة: ${failure.localizedMessage}") }
+            }
+        }
+    }
+
+    /** Deletes a durable session (cascades to its turns). */
+    fun deleteSession(sessionId: String) {
+        val service = conversationSessionService ?: return
+        viewModelScope.launch {
+            runCatching {
+                service.deleteSession(com.example.domain.core.session.ConversationSessionId(sessionId))
+                if (_uiState.value.activeSessionId == sessionId) {
+                    _uiState.update { it.copy(activeSessionId = null, studioSession = emptyList()) }
+                }
+            }
+        }
+    }
+
+    /** Renames a durable session. */
+    fun renameSession(sessionId: String, title: String) {
+        val service = conversationSessionService ?: return
+        viewModelScope.launch {
+            runCatching { service.renameSession(com.example.domain.core.session.ConversationSessionId(sessionId), title) }
+        }
+    }
+
+    /**
+     * Resolves the canonical QUICK-CHAT agent: the durable registry agent
+     * (seeded from CanonicalAgentCatalog) — so even agent-independent chat
+     * keeps the SAME governed execution kernel (single execution authority).
+     * Falls back to the in-memory catalog entry when the registry is not yet
+     * available (first milliseconds of a cold start).
+     */
+    private fun resolveQuickChatAgent(): com.example.domain.core.agent.AgentDefinition {
+        val fromRegistry = componentRegistry.getAgent(
+            com.example.application.session.ConversationSessionService.QUICK_CHAT_AGENT_ID
+        )
+        if (fromRegistry != null) return fromRegistry
+        val fromCatalog = com.example.application.agent.CanonicalAgentCatalog.defaults.firstOrNull {
+            it.identity.id.value == com.example.application.session.ConversationSessionService.QUICK_CHAT_AGENT_ID
+        }
+        if (fromCatalog != null) {
+            componentRegistry.registerAgent(fromCatalog)
+            return fromCatalog
+        }
+        // Last-resort honest fallback: the general assistant canonical agent.
+        return componentRegistry.listAgents().firstOrNull()
+            ?: com.example.application.agent.CanonicalAgentCatalog.defaults.first()
+    }
+
+    /**
+     * Ensures the ACTIVE durable session exists (creating it bound to the
+     * current workspace / mode / agent / model on first use), then sets it
+     * active. First-turn titling policy: the session is renamed to the
+     * prompt when it still carries the default title.
+     */
+    private suspend fun ensureActiveSession(
+        service: com.example.application.session.ConversationSessionService,
+        mode: com.example.domain.core.session.ChatMode,
+        agent: com.example.domain.core.agent.AgentDefinition,
+        modelResourceId: String?,
+        modelDisplayName: String?
+    ): com.example.domain.core.session.ConversationSessionId? {
+        return runCatching {
+            val existingId = _uiState.value.activeSessionId
+            if (existingId != null) {
+                val existing = service.getSessionWithTurns(
+                    com.example.domain.core.session.ConversationSessionId(existingId)
+                )?.session
+                if (existing != null) return existing.id
+            }
+            val session = service.createSession(
+                mode = mode,
+                agentId = if (mode == com.example.domain.core.session.ChatMode.AGENT) agent.identity.id.value else null,
+                agentName = if (mode == com.example.domain.core.session.ChatMode.AGENT) agent.identity.name else null,
+                modelResourceId = modelResourceId,
+                modelDisplayName = modelDisplayName
+            )
+            _uiState.update { it.copy(activeSessionId = session.id.value) }
+            session.id
+        }.getOrNull()
+    }
+
+    /**
+     * Persists one finished turn to the durable session (fire-and-forget —
+     * failures surface as an honest diagnostic banner, never swallowed).
+     */
+    private fun persistTurnDurably(
+        sessionId: com.example.domain.core.session.ConversationSessionId?,
+        prompt: String,
+        answer: String,
+        agentName: String,
+        agentRole: String,
+        modelResourceId: String?,
+        tokensConsumed: Int,
+        durationMs: Long,
+        isSuccessful: Boolean,
+        eventCount: Int
+    ) {
+        val service = conversationSessionService ?: return
+        val id = sessionId ?: return
+        viewModelScope.launch {
+            runCatching {
+                service.appendTurn(
+                    sessionId = id,
+                    prompt = prompt,
+                    answer = answer,
+                    agentName = agentName,
+                    agentRole = agentRole,
+                    modelResourceId = modelResourceId,
+                    tokensConsumed = tokensConsumed,
+                    durationMs = durationMs,
+                    isSuccessful = isSuccessful,
+                    eventCount = eventCount
+                )
+                // First-turn titling: the default title becomes the prompt.
+                val session = service.getSessionWithTurns(id)?.session
+                if (session != null && session.title == com.example.application.session.ConversationSessionService.DEFAULT_TITLE) {
+                    service.titleFromPrompt(id, prompt)
+                }
+            }.onFailure { e ->
+                _uiState.update {
+                    it.copy(diagnosticBanner = "تعذر حفظ دورة المحادثة بشكل دائم: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Subscribes the durable session list + workflow library to the ACTIVE
+     * WORKSPACE (workspace continuity): switching workspaces repoints the
+     * session browser, the workflow library and the resumable list, and
+     * closes the active session (sessions are workspace-scoped).
+     */
+    private fun observeWorkspaceScopedAssets() {
+        viewModelScope.launch {
+            runCatching {
+                workspaceRuntimeService.activeWorkspace.collect { workspace ->
+                    val wsId = workspace?.id ?: return@collect
+
+                    // Durable session browser (most recent first).
+                    conversationSessionService?.let { service ->
+                        launch {
+                            runCatching {
+                                service.observeSessions(wsId).collect { sessions ->
+                                    _uiState.update { it.copy(sessions = sessions) }
+                                }
+                            }
+                        }
+                    }
+
+                    // Workflow library (user-authored assets).
+                    workflowLibraryService?.let { library ->
+                        launch {
+                            runCatching {
+                                library.observeLibrary(wsId).collect { defs ->
+                                    _uiState.update { it.copy(workflowLibrary = defs) }
+                                }
+                            }
+                        }
+                    }
+
+                    // Resumable workflow executions (durable resume surface).
+                    loadResumableWorkflows()
+                }
+            }
+        }
+    }
+
+    /** Refreshes the resumable (RUNNING/PAUSED/COMPENSATING) workflows list. */
+    fun loadResumableWorkflows() {
+        val persistence = workflowPersistenceService ?: return
+        viewModelScope.launch {
+            runCatching {
+                _uiState.update { it.copy(resumableWorkflows = persistence.resumable()) }
+            }
+        }
+    }
+
     /**
      * Appends a finished conversational turn to the Studio session transcript.
      * Called from the terminal execution events (Completed / Error).
@@ -629,7 +966,8 @@ class MainViewModel(
         agentName: String,
         agentRole: String,
         answer: String,
-        isSuccessful: Boolean
+        isSuccessful: Boolean,
+        modelResourceId: String? = null
     ): List<StudioTurn> {
         val turn = StudioTurn(
             id = "turn_${System.currentTimeMillis()}",
@@ -641,7 +979,8 @@ class MainViewModel(
             tokensConsumed = state.currentTokensConsumed,
             durationMs = state.sessionTurnStartMs.takeIf { it > 0L }
                 ?.let { System.currentTimeMillis() - it } ?: 0L,
-            isSuccessful = isSuccessful
+            isSuccessful = isSuccessful,
+            modelResourceId = modelResourceId
         )
         return state.studioSession + turn
     }
@@ -666,8 +1005,54 @@ class MainViewModel(
     fun executePrompt() {
         val current = _uiState.value
         val prompt = current.promptInput.trim()
-        val agent = current.activeAgent ?: return
         if (prompt.isEmpty() || current.isExecuting) return
+
+        // ------------------------------------------------------------------
+        // QUICK CHAT vs AGENT MODE (report gap: "Quick Chat missing — the
+        // chat path was hard-gated on `activeAgent ?: return`"). QUICK_CHAT
+        // is AGENT-INDEPENDENT: the conversation binds to the canonical
+        // quick-chat agent + the user-selected model — the user never has to
+        // pick an agent. AGENT mode keeps the canonical agent binding (and
+        // fails HONESTLY with an actionable message instead of a silent
+        // no-op return).
+        // ------------------------------------------------------------------
+        val agent: com.example.domain.core.agent.AgentDefinition = when (current.chatMode) {
+            com.example.domain.core.session.ChatMode.QUICK_CHAT -> resolveQuickChatAgent()
+            com.example.domain.core.session.ChatMode.AGENT -> current.activeAgent ?: run {
+                _uiState.update {
+                    it.copy(errorMessage = "وضع الوكيل يتطلب اختيار وكيلاً من الكتالوج أولاً — أو بدّل إلى «محادثة سريعة».")
+                }
+                return
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // CONVERSATION HISTORY (report gap: "Resume conversation / unified
+        // continuity"): the recent transcript is replayed as LLM history so
+        // the model keeps the thread of THIS session across turns and after
+        // reopening a durable session.
+        // ------------------------------------------------------------------
+        val history = current.studioSession.takeLast(CONVERSATION_HISTORY_WINDOW)
+            .flatMap { turn ->
+                listOf(
+                    com.example.domain.core.llm.LlmMessage(
+                        role = com.example.domain.core.llm.MessageRole.USER,
+                        content = turn.prompt
+                    ),
+                    com.example.domain.core.llm.LlmMessage(
+                        role = com.example.domain.core.llm.MessageRole.ASSISTANT,
+                        content = turn.answer
+                    )
+                )
+            }
+
+        // ------------------------------------------------------------------
+        // USER-FACING EXACT MODEL SELECTION (report gap: "direct Model
+        // Picker missing"): the selected model resource becomes a DURABLE
+        // binding (assignedModelId) honoured by the decision layer — not a
+        // floating preference.
+        // ------------------------------------------------------------------
+        val selectedModelId = current.selectedModelResourceId
 
         _uiState.update {
             it.copy(
@@ -694,19 +1079,50 @@ class MainViewModel(
         // P1-08 hardening: the selected agent IS the executing agent —
         // idempotent registration into the runtime registry.
         componentRegistry.registerAgent(agent)
+
+        // ------------------------------------------------------------------
+        // DURABLE SESSION (report gap: sessions were deleted without a
+        // durable replacement): a workspace-scoped session is ensured BEFORE
+        // execution; every completed/failed turn is appended to it, so the
+        // transcript survives process death and can be browsed/resumed.
+        // ------------------------------------------------------------------
+        val sessionService = conversationSessionService
+        val turnStartedAt = System.currentTimeMillis()
         com.example.application.execution.ExecutionHost.launch(executionTaskId) {
+            var sessionId: com.example.domain.core.session.ConversationSessionId? = null
             try {
-                // Audit 2026 fix: real connectivity state (previously hardcoded true),
-                // so OFFLINE / DEGRADED policies engage honestly on real networks.
-                val netAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: true
+                if (sessionService != null) {
+                    sessionId = ensureActiveSession(
+                        service = sessionService,
+                        mode = current.chatMode,
+                        agent = agent,
+                        modelResourceId = selectedModelId,
+                        modelDisplayName = current.selectedModelDisplayName
+                    )
+                }
+                // FAIL-CLOSED NETWORK DEFAULT (report gap: "missing monitor =
+                // network available is fail-open"): when no monitor is wired
+                // we assume OFFLINE, so OFFLINE/degraded policies engage
+                // honestly instead of silently attempting remote calls.
+                val netAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: false
                 executeAgentTaskUseCase(
                     agent = agent,
                     prompt = prompt,
                     taskId = executionTaskId,
+                    history = history,
+                    assignedModelId = selectedModelId,
                     networkPolicy = current.networkPolicy,
                     isNetworkAvailable = netAvailable,
                     includeWebSearch = false
                 ).collect { event ->
+                    // UNIFIED ACTIVITY TRACE WIRING FIX: capture the REAL
+                    // execution id from the Started event — the activity
+                    // feed follows this execution's trace (previously it
+                    // subscribed to traceForExecution(""), which matches
+                    // nothing).
+                    if (event is ExecutionEvent.Started) {
+                        activeExecutionId.value = event.executionId
+                    }
                     _uiState.update { state ->
                         val updatedLogs = state.executionLog + event
                         when (event) {
@@ -746,6 +1162,18 @@ class MainViewModel(
                                 )
                             }
                             is ExecutionEvent.Completed -> {
+                                persistTurnDurably(
+                                    sessionId = sessionId,
+                                    prompt = prompt,
+                                    answer = event.finalText.ifBlank { _uiState.value.streamText },
+                                    agentName = agent.identity.name,
+                                    agentRole = agent.identity.role.displayName,
+                                    modelResourceId = selectedModelId,
+                                    tokensConsumed = _uiState.value.currentTokensConsumed,
+                                    durationMs = System.currentTimeMillis() - turnStartedAt,
+                                    isSuccessful = true,
+                                    eventCount = _uiState.value.executionLog.size
+                                )
                                 state.copy(
                                     isExecuting = false,
                                     streamText = if (event.finalText.isNotBlank()) event.finalText else state.streamText,
@@ -756,12 +1184,25 @@ class MainViewModel(
                                         agentName = agent.identity.name,
                                         agentRole = agent.identity.role.displayName,
                                         answer = if (event.finalText.isNotBlank()) event.finalText else state.streamText,
-                                        isSuccessful = true
+                                        isSuccessful = true,
+                                        modelResourceId = selectedModelId
                                     ),
                                     caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
                                 )
                             }
                             is ExecutionEvent.Error -> {
+                                persistTurnDurably(
+                                    sessionId = sessionId,
+                                    prompt = prompt,
+                                    answer = state.streamText.ifBlank { event.message },
+                                    agentName = agent.identity.name,
+                                    agentRole = agent.identity.role.displayName,
+                                    modelResourceId = selectedModelId,
+                                    tokensConsumed = _uiState.value.currentTokensConsumed,
+                                    durationMs = System.currentTimeMillis() - turnStartedAt,
+                                    isSuccessful = false,
+                                    eventCount = _uiState.value.executionLog.size
+                                )
                                 state.copy(
                                     isExecuting = false,
                                     errorMessage = event.message,
@@ -772,7 +1213,8 @@ class MainViewModel(
                                         agentName = agent.identity.name,
                                         agentRole = agent.identity.role.displayName,
                                         answer = state.streamText.ifBlank { event.message },
-                                        isSuccessful = false
+                                        isSuccessful = false,
+                                        modelResourceId = selectedModelId
                                     ),
                                     caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
                                 )
@@ -1566,14 +2008,232 @@ class MainViewModel(
 
     // --- Workflow & Task ---
     fun executeWorkflow(plan: WorkflowPlan) {
+        executeWorkflow(plan, completedStepIds = emptySet())
+    }
+
+    /**
+     * DURABLE RESUME (report gap: "Resume later"): carries the steps a
+     * previous run already finished — the engine seeds them COMPLETED and
+     * never re-executes them.
+     */
+    private fun executeWorkflow(plan: WorkflowPlan, completedStepIds: Set<String>) {
         if (_uiState.value.isExecutingWorkflow) return
         _uiState.update { it.copy(isExecutingWorkflow = true, workflowReport = null, errorMessage = null) }
         viewModelScope.launch {
             try {
-                val report = executeWorkflowUseCase(plan)
+                val report = executeWorkflowUseCase(plan, completedStepIds)
                 _uiState.update { it.copy(isExecutingWorkflow = false, workflowReport = report) }
+                // Refresh the resumable surface (a failed run is resumable).
+                loadResumableWorkflows()
             } catch (e: Exception) {
                 _uiState.update { it.copy(isExecutingWorkflow = false, errorMessage = "فشل تنفيذ خطة العمل: ${e.localizedMessage}") }
+                loadResumableWorkflows()
+            }
+        }
+    }
+
+    // ==================================================================
+    // WORKFLOW BUILDER (report gap: authoring state lives in the ViewModel,
+    // not Compose memory — the definition is a durable, re-editable asset)
+    // ==================================================================
+
+    fun updateWorkflowName(name: String) {
+        _uiState.update { it.copy(workflowBuilder = it.workflowBuilder.copy(name = name)) }
+    }
+
+    fun updateWorkflowGoal(goal: String) {
+        _uiState.update { it.copy(workflowBuilder = it.workflowBuilder.copy(goal = goal)) }
+    }
+
+    fun updateWorkflowMode(mode: com.example.domain.core.workflow.ExecutionMode) {
+        _uiState.update { it.copy(workflowBuilder = it.workflowBuilder.copy(executionMode = mode)) }
+    }
+
+    fun addWorkflowStep() {
+        _uiState.update { state ->
+            val steps = state.workflowBuilder.steps
+            val newStep = com.example.presentation.state.WorkflowBuilderStep(
+                id = "step_${steps.size + 1}_${System.currentTimeMillis() % 1000}",
+                description = "",
+                role = com.example.domain.core.agent.AgentRole.GENERAL_ASSISTANT,
+                dependencies = emptySet()
+            )
+            state.copy(workflowBuilder = state.workflowBuilder.copy(steps = steps + newStep))
+        }
+    }
+
+    fun updateWorkflowStep(index: Int, transform: (com.example.presentation.state.WorkflowBuilderStep) -> com.example.presentation.state.WorkflowBuilderStep) {
+        _uiState.update { state ->
+            val steps = state.workflowBuilder.steps.toMutableList()
+            if (index in steps.indices) {
+                steps[index] = transform(steps[index])
+                state.copy(workflowBuilder = state.workflowBuilder.copy(steps = steps))
+            } else state
+        }
+    }
+
+    fun removeWorkflowStep(index: Int) {
+        _uiState.update { state ->
+            val steps = state.workflowBuilder.steps.toMutableList()
+            if (index in steps.indices) steps.removeAt(index)
+            state.copy(workflowBuilder = state.workflowBuilder.copy(steps = steps))
+        }
+    }
+
+    fun moveWorkflowStep(index: Int, delta: Int) {
+        _uiState.update { state ->
+            val steps = state.workflowBuilder.steps.toMutableList()
+            val target = index + delta
+            if (index in steps.indices && target in steps.indices) {
+                val moved = steps.removeAt(index)
+                steps.add(target, moved)
+                state.copy(workflowBuilder = state.workflowBuilder.copy(steps = steps))
+            } else state
+        }
+    }
+
+    fun toggleWorkflowStepDependency(index: Int, depId: String) {
+        updateWorkflowStep(index) { step ->
+            step.copy(
+                dependencies = if (depId in step.dependencies) step.dependencies - depId
+                else step.dependencies + depId
+            )
+        }
+    }
+
+    /**
+     * CANONICAL AGENT BINDING (report gap): assigns a DURABLE registry agent
+     * to a builder step — the step executes through the real agent (system
+     * prompt, capabilities, budget, version, lifecycle), not a synthetic one.
+     */
+    fun assignWorkflowStepAgent(index: Int, agentId: String?) {
+        updateWorkflowStep(index) { it.copy(assignedAgentId = agentId) }
+    }
+
+    /** Applies a built-in template to the builder. */
+    fun applyWorkflowTemplate(template: com.example.presentation.state.WorkflowBuilderState) {
+        _uiState.update { it.copy(workflowBuilder = template) }
+    }
+
+    // ==================================================================
+    // WORKFLOW LIBRARY (report gap: save → list → load → edit → clone →
+    // run — the USER-AUTHORED definition as a durable workspace asset)
+    // ==================================================================
+
+    /** Saves the current builder as a library definition (or re-saves it). */
+    fun saveWorkflowDefinition() {
+        val library = workflowLibraryService ?: return
+        viewModelScope.launch {
+            runCatching {
+                val builder = _uiState.value.workflowBuilder
+                val plan = WorkflowPlan(
+                    id = com.example.domain.core.workflow.WorkflowId(
+                        builder.editingDefinitionId ?: "wf_builder_${System.currentTimeMillis()}"
+                    ),
+                    goal = builder.goal.trim(),
+                    executionMode = builder.executionMode,
+                    steps = builder.steps.map { s ->
+                        com.example.domain.core.workflow.StepNode(
+                            id = s.id,
+                            taskId = com.example.domain.core.task.TaskId("task_${s.id}"),
+                            agentRole = s.role,
+                            description = s.description.ifBlank { "${s.role.displayName} — خطوة ${s.id}" },
+                            dependencies = s.dependencies,
+                            assignedAgentId = s.assignedAgentId
+                        )
+                    }
+                )
+                val id = library.saveDefinition(
+                    existingId = builder.editingDefinitionId?.let { com.example.domain.core.workflow.WorkflowId(it) },
+                    name = builder.name,
+                    plan = plan
+                )
+                _uiState.update {
+                    it.copy(
+                        workflowBuilder = it.workflowBuilder.copy(editingDefinitionId = id.value),
+                        diagnosticBanner = "تم حفظ خطة العمل في المكتبة (الإصدار محفوظ ويُحرَّر لاحقاً)."
+                    )
+                }
+            }.onFailure { e ->
+                _uiState.update { it.copy(errorMessage = "تعذر حفظ خطة العمل: ${e.localizedMessage}") }
+            }
+        }
+    }
+
+    /** Loads a library definition into the builder for editing. */
+    fun loadWorkflowDefinitionIntoBuilder(definitionId: String) {
+        val library = workflowLibraryService ?: return
+        viewModelScope.launch {
+            runCatching {
+                val summary = _uiState.value.workflowLibrary.firstOrNull { it.workflowId.value == definitionId }
+                val plan = library.loadDefinition(com.example.domain.core.workflow.WorkflowId(definitionId))
+                    ?: return@launch
+                _uiState.update {
+                    it.copy(
+                        workflowBuilder = com.example.presentation.state.WorkflowBuilderState(
+                            name = summary?.name ?: "خطة عمل",
+                            goal = plan.goal,
+                            executionMode = plan.executionMode,
+                            steps = plan.steps.map { s ->
+                                com.example.presentation.state.WorkflowBuilderStep(
+                                    id = s.id,
+                                    description = s.description,
+                                    role = s.agentRole,
+                                    dependencies = s.dependencies,
+                                    assignedAgentId = s.assignedAgentId
+                                )
+                            },
+                            editingDefinitionId = definitionId
+                        )
+                    )
+                }
+            }.onFailure { e ->
+                _uiState.update { it.copy(errorMessage = "تعذر تحميل خطة العمل: ${e.localizedMessage}") }
+            }
+        }
+    }
+
+    /** Runs a library definition directly (records the run). */
+    fun runWorkflowDefinition(definitionId: String) {
+        val library = workflowLibraryService ?: return
+        viewModelScope.launch {
+            runCatching {
+                val plan = library.loadDefinition(com.example.domain.core.workflow.WorkflowId(definitionId)) ?: return@launch
+                library.recordRun(com.example.domain.core.workflow.WorkflowId(definitionId))
+                executeWorkflow(plan)
+            }
+        }
+    }
+
+    /** Clones a library definition. */
+    fun cloneWorkflowDefinition(definitionId: String) {
+        val library = workflowLibraryService ?: return
+        viewModelScope.launch {
+            runCatching { library.cloneDefinition(com.example.domain.core.workflow.WorkflowId(definitionId)) }
+        }
+    }
+
+    /** Deletes a library definition. */
+    fun deleteWorkflowDefinition(definitionId: String) {
+        val library = workflowLibraryService ?: return
+        viewModelScope.launch {
+            runCatching { library.deleteDefinition(com.example.domain.core.workflow.WorkflowId(definitionId)) }
+        }
+    }
+
+    /**
+     * RESUMES a durable interrupted workflow execution (report gap:
+     * "Resume later"): the already-completed steps are seeded COMPLETED and
+     * never re-executed; remaining steps run with real prior outputs as
+     * upstream context.
+     */
+    fun resumeWorkflow(workflowId: String) {
+        val persistence = workflowPersistenceService ?: return
+        viewModelScope.launch {
+            runCatching {
+                val resumable = persistence.resumable().firstOrNull { it.workflowId.value == workflowId }
+                    ?: return@launch
+                executeWorkflow(resumable.plan, resumable.completedStepIds)
             }
         }
     }
@@ -1740,5 +2400,13 @@ class MainViewModel(
     /** Dismisses the transient diagnostic banner shown in the app shell. */
     fun dismissDiagnosticBanner() {
         _uiState.update { it.copy(diagnosticBanner = null) }
+    }
+
+    private companion object {
+        /**
+         * How many recent durable-session turns are replayed as LLM history
+         * (conversation continuity across turns and session reopen).
+         */
+        const val CONVERSATION_HISTORY_WINDOW = 8
     }
 }

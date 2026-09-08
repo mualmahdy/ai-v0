@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Settings
@@ -103,6 +104,13 @@ fun DashboardScreen(
         )
 
         val sections = listOf(
+            DashboardEntry(
+                route = WorkspaceRoutes.EXPLORER,
+                icon = Icons.Default.Explore,
+                title = "مستكشف مساحة العمل",
+                description = "كل الكائنات في مكان واحد: وكلاء، نماذج، موارد، أدوات، معرفة، ملفات، خطط وجلسات",
+                tag = "more_tab_explorer"
+            ),
             DashboardEntry(
                 route = WorkspaceRoutes.PROVIDERS,
                 icon = Icons.Default.Dns,

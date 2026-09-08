@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Timeline
@@ -38,6 +39,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -93,21 +95,20 @@ fun TasksScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
 
-    var goal by remember { mutableStateOf("بناء ونشر وحدة معمارية متكاملة") }
-    var executionMode by remember { mutableStateOf(ExecutionMode.DIRECTED_ACYCLIC_GRAPH) }
-    val steps = remember {
-        mutableStateListOf(
-            BuilderStep("step_1_plan", "تحليل المتطلبات والتخطيط المعماري للوحدة", AgentRole.PLANNER, setOf()),
-            BuilderStep("step_2_code", "كتابة الشيفرات ونماذج النطاق ومنافذ Ports", AgentRole.CODER, setOf("step_1_plan")),
-            BuilderStep("step_3_security", "التدقيق الأمني وفحص تنقيح البيانات والسياسات", AgentRole.SECURITY_GUARD, setOf("step_2_code"))
-        )
+    // WORKFLOW BUILDER STATE LIVES IN THE VIEWMODEL (report gap: the
+    // authored definition must survive navigation and be save/load/edit-able
+    // as a durable library asset — Compose `remember` state previously died
+    // with the screen).
+    val builder = state.workflowBuilder
+    val goal = builder.goal
+    val executionMode = builder.executionMode
+    val steps = builder.steps
+
+    fun updateStep(index: Int, transform: (com.example.presentation.state.WorkflowBuilderStep) -> com.example.presentation.state.WorkflowBuilderStep) {
+        viewModel.updateWorkflowStep(index, transform)
     }
 
-    fun updateStep(index: Int, transform: (BuilderStep) -> BuilderStep) {
-        steps[index] = transform(steps[index])
-    }
-
-    val cycleError = detectCycle(steps.toList())
+    val cycleError = detectCycle(steps)
     val canExecute = goal.isNotBlank() && steps.isNotEmpty() && cycleError == null
 
     Column(modifier = modifier.testTag("screen_tasks_workflows")) {
@@ -120,10 +121,27 @@ fun TasksScreen(
             SectionHeader(
                 icon = Icons.Default.AccountTree,
                 title = "منشئ خطط العمل",
-                subtitle = "خطة ديناميكية: خطوات + أدوار وكلاء + تبعيات DAG — تُنفَّذ بالمحرك الحقيقي"
+                subtitle = "خطة ديناميكية: خطوات + وكلاء قانونيون + تبعيات DAG — تُنفَّذ بالمحرك الحقيقي"
             )
 
-            // ---- Goal + mode ----
+            // ---- Workflow library (durable, re-editable assets) ----
+            WorkflowLibraryCard(
+                library = state.workflowLibrary,
+                onLoad = viewModel::loadWorkflowDefinitionIntoBuilder,
+                onRun = viewModel::runWorkflowDefinition,
+                onClone = viewModel::cloneWorkflowDefinition,
+                onDelete = viewModel::deleteWorkflowDefinition
+            )
+
+            // ---- Resumable executions (durable resume) ----
+            if (state.resumableWorkflows.isNotEmpty()) {
+                ResumableWorkflowsCard(
+                    resumable = state.resumableWorkflows,
+                    onResume = viewModel::resumeWorkflow
+                )
+            }
+
+            // ---- Goal + name + mode ----
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -135,8 +153,16 @@ fun TasksScreen(
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     OutlinedTextField(
+                        value = builder.name,
+                        onValueChange = viewModel::updateWorkflowName,
+                        label = { Text("اسم خطة العمل (للمكتبة)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("input_workflow_name")
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
                         value = goal,
-                        onValueChange = { goal = it },
+                        onValueChange = viewModel::updateWorkflowGoal,
                         label = { Text("هدف خطة العمل") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("input_workflow_goal")
@@ -152,7 +178,7 @@ fun TasksScreen(
                         ExecutionMode.entries.forEach { mode ->
                             FilterChip(
                                 selected = mode == executionMode,
-                                onClick = { executionMode = mode },
+                                onClick = { viewModel.updateWorkflowMode(mode) },
                                 label = {
                                     Text(
                                         when (mode) {
@@ -170,31 +196,56 @@ fun TasksScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
                             onClick = {
-                                steps.clear()
-                                steps.addAll(
-                                    listOf(
-                                        BuilderStep("step_1_plan", "تحليل المتطلبات والتخطيط المعماري", AgentRole.PLANNER, setOf()),
-                                        BuilderStep("step_2_code", "كتابة الشيفرات ونماذج النطاق", AgentRole.CODER, setOf("step_1_plan")),
-                                        BuilderStep("step_3_security", "التدقيق الأمني وفحص السياسات", AgentRole.SECURITY_GUARD, setOf("step_2_code"))
+                                viewModel.applyWorkflowTemplate(
+                                    com.example.presentation.state.WorkflowBuilderState(
+                                        name = "قالب الهيكلة الكاملة",
+                                        goal = "بناء ونشر وحدة معمارية متكاملة",
+                                        executionMode = ExecutionMode.DIRECTED_ACYCLIC_GRAPH,
+                                        steps = listOf(
+                                            com.example.presentation.state.WorkflowBuilderStep("step_1_plan", "تحليل المتطلبات والتخطيط المعماري", AgentRole.PLANNER, setOf()),
+                                            com.example.presentation.state.WorkflowBuilderStep("step_2_code", "كتابة الشيفرات ونماذج النطاق", AgentRole.CODER, setOf("step_1_plan")),
+                                            com.example.presentation.state.WorkflowBuilderStep("step_3_security", "التدقيق الأمني وفحص السياسات", AgentRole.SECURITY_GUARD, setOf("step_2_code"))
+                                        )
                                     )
                                 )
-                                executionMode = ExecutionMode.DIRECTED_ACYCLIC_GRAPH
                             },
                             modifier = Modifier.weight(1f)
                         ) { Text("قالب الهيكلة الكاملة", style = MaterialTheme.typography.labelSmall) }
                         Button(
                             onClick = {
-                                steps.clear()
-                                steps.addAll(
-                                    listOf(
-                                        BuilderStep("step_1_research", "البحث وجمع المصادر", AgentRole.RESEARCHER, setOf()),
-                                        BuilderStep("step_2_review", "مراجعة النتائج وتقييمها", AgentRole.REVIEWER, setOf("step_1_research"))
+                                viewModel.applyWorkflowTemplate(
+                                    com.example.presentation.state.WorkflowBuilderState(
+                                        name = "قالب بحث + مراجعة",
+                                        goal = "بحث موثوق ومراجعة النتائج",
+                                        executionMode = ExecutionMode.SEQUENTIAL,
+                                        steps = listOf(
+                                            com.example.presentation.state.WorkflowBuilderStep("step_1_research", "البحث وجمع المصادر", AgentRole.RESEARCHER, setOf()),
+                                            com.example.presentation.state.WorkflowBuilderStep("step_2_review", "مراجعة النتائج وتقييمها", AgentRole.REVIEWER, setOf("step_1_research"))
+                                        )
                                     )
                                 )
-                                executionMode = ExecutionMode.SEQUENTIAL
                             },
                             modifier = Modifier.weight(1f)
                         ) { Text("قالب بحث + مراجعة", style = MaterialTheme.typography.labelSmall) }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // SAVE AS LIBRARY ASSET (report gap: durable workflow
+                    // library): the authored plan becomes a versioned,
+                    // re-editable, clonable workspace asset.
+                    OutlinedButton(
+                        onClick = viewModel::saveWorkflowDefinition,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("btn_save_workflow_definition"),
+                        enabled = goal.isNotBlank() && steps.isNotEmpty()
+                    ) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            if (builder.editingDefinitionId == null) "حفظ الخطة في المكتبة"
+                            else "تحديث التعريف المحفوظ (إصدار جديد)",
+                            style = MaterialTheme.typography.labelMedium
+                        )
                     }
                 }
             }
@@ -206,48 +257,25 @@ fun TasksScreen(
                 StepEditorCard(
                     index = index,
                     step = step,
-                    allSteps = steps.toList(),
+                    allSteps = steps,
+                    availableAgents = state.availableAgents,
                     isFirst = index == 0,
                     isLast = index == steps.lastIndex,
                     onDescriptionChange = { text -> updateStep(index) { it.copy(description = text) } },
                     onRoleChange = { role -> updateStep(index) { it.copy(role = role) } },
                     onToggleDependency = { depId ->
-                        updateStep(index) { current ->
-                            current.copy(
-                                dependencies = if (depId in current.dependencies)
-                                    current.dependencies - depId
-                                else current.dependencies + depId
-                            )
-                        }
+                        viewModel.toggleWorkflowStepDependency(index, depId)
                     },
-                    onMoveUp = {
-                        if (index > 0) {
-                            val moved = steps.removeAt(index)
-                            steps.add(index - 1, moved)
-                        }
-                    },
-                    onMoveDown = {
-                        if (index < steps.lastIndex) {
-                            val moved = steps.removeAt(index)
-                            steps.add(index + 1, moved)
-                        }
-                    },
-                    onRemove = { steps.removeAt(index) }
+                    onAssignAgent = { agentId -> viewModel.assignWorkflowStepAgent(index, agentId) },
+                    onMoveUp = { viewModel.moveWorkflowStep(index, -1) },
+                    onMoveDown = { viewModel.moveWorkflowStep(index, +1) },
+                    onRemove = { viewModel.removeWorkflowStep(index) }
                 )
             }
 
             // ---- Add step ----
             Surface(
-                onClick = {
-                    steps.add(
-                        BuilderStep(
-                            id = "step_${steps.size + 1}_${System.currentTimeMillis() % 1000}",
-                            description = "",
-                            role = AgentRole.GENERAL_ASSISTANT,
-                            dependencies = setOf()
-                        )
-                    )
-                },
+                onClick = viewModel::addWorkflowStep,
                 shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
                 modifier = Modifier
@@ -316,7 +344,9 @@ fun TasksScreen(
             Button(
                 onClick = {
                     val plan = WorkflowPlan(
-                        id = WorkflowId("wf_${System.currentTimeMillis()}"),
+                        id = WorkflowId(
+                            builder.editingDefinitionId ?: "wf_${System.currentTimeMillis()}"
+                        ),
                         goal = goal.trim(),
                         executionMode = executionMode,
                         steps = steps.map { s ->
@@ -325,7 +355,8 @@ fun TasksScreen(
                                 taskId = TaskId("task_${s.id}"),
                                 agentRole = s.role,
                                 description = s.description.ifBlank { "${s.role.displayName} — خطوة ${s.id}" },
-                                dependencies = s.dependencies.toSet()
+                                dependencies = s.dependencies.toSet(),
+                                assignedAgentId = s.assignedAgentId
                             )
                         }
                     )
@@ -362,13 +393,15 @@ fun TasksScreen(
 @Composable
 private fun StepEditorCard(
     index: Int,
-    step: BuilderStep,
-    allSteps: List<BuilderStep>,
+    step: com.example.presentation.state.WorkflowBuilderStep,
+    allSteps: List<com.example.presentation.state.WorkflowBuilderStep>,
+    availableAgents: List<com.example.domain.core.agent.AgentDefinition>,
     isFirst: Boolean,
     isLast: Boolean,
     onDescriptionChange: (String) -> Unit,
     onRoleChange: (AgentRole) -> Unit,
     onToggleDependency: (String) -> Unit,
+    onAssignAgent: (String?) -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onRemove: () -> Unit
@@ -438,38 +471,94 @@ private fun StepEditorCard(
 
             // Role dropdown
             var roleMenuOpen by remember { mutableStateOf(false) }
-            Surface(
-                onClick = { roleMenuOpen = true },
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+            // CANONICAL AGENT BINDING (report gap: steps execute through
+            // DURABLE registry agents — assigned explicitly or resolved by
+            // role; never synthetic throwaways).
+            var agentMenuOpen by remember { mutableStateOf(false) }
+            val assignedAgent = availableAgents.firstOrNull {
+                it.identity.id.value == step.assignedAgentId
+            }
+            Column {
+                Surface(
+                    onClick = { roleMenuOpen = true },
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
                 ) {
-                    Icon(
-                        Icons.Default.Timeline,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "الوكيل: ${step.role.displayName}",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Timeline,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "الدور: ${step.role.displayName}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    DropdownMenu(expanded = roleMenuOpen, onDismissRequest = { roleMenuOpen = false }) {
+                        AgentRole.entries.forEach { role ->
+                            DropdownMenuItem(
+                                text = { Text(role.displayName) },
+                                onClick = {
+                                    onRoleChange(role)
+                                    roleMenuOpen = false
+                                }
+                            )
+                        }
+                    }
                 }
-                DropdownMenu(expanded = roleMenuOpen, onDismissRequest = { roleMenuOpen = false }) {
-                    AgentRole.entries.forEach { role ->
+                Spacer(modifier = Modifier.height(6.dp))
+                Surface(
+                    onClick = { agentMenuOpen = true },
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f),
+                    modifier = Modifier.testTag("agent_binding_${step.id}")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Psychology,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = assignedAgent?.let { "الوكيل: ${it.identity.name}" }
+                                ?: "الوكيل: حسب الدور (تلقائي)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                    }
+                    DropdownMenu(expanded = agentMenuOpen, onDismissRequest = { agentMenuOpen = false }) {
                         DropdownMenuItem(
-                            text = { Text(role.displayName) },
+                            text = { Text("حسب الدور (تلقائي)") },
                             onClick = {
-                                onRoleChange(role)
-                                roleMenuOpen = false
+                                onAssignAgent(null)
+                                agentMenuOpen = false
                             }
                         )
+                        availableAgents.forEach { agent ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text("${agent.identity.name} (${agent.identity.role.displayName})")
+                                },
+                                onClick = {
+                                    onAssignAgent(agent.identity.id.value)
+                                    agentMenuOpen = false
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -607,7 +696,7 @@ private fun WorkflowReportCard(report: com.example.domain.core.workflow.Workflow
 // Cycle detection (client-side DAG validation)
 // ---------------------------------------------------------------------------
 
-private fun detectCycle(steps: List<BuilderStep>): String? {
+private fun detectCycle(steps: List<com.example.presentation.state.WorkflowBuilderStep>): String? {
     val ids = steps.map { it.id }.toSet()
     // Unknown dependency references are dropped silently here (engine is the
     // authority); we only detect true cycles.
@@ -631,4 +720,198 @@ private fun detectCycle(steps: List<BuilderStep>): String? {
         dfs(id)?.let { return "عبر الخطوة $it" }
     }
     return null
+}
+
+// ---------------------------------------------------------------------------
+// WORKFLOW LIBRARY + RESUMABLE (report gap-closure: durable assets)
+// ---------------------------------------------------------------------------
+
+/**
+ * WORKFLOW LIBRARY (report gap: "workflow library/history NOT FIXED —
+ * durable execution exists, but the USER-AUTHORED definition is not a
+ * re-editable asset"): lists the saved definitions with version/run history;
+ * each row supports load-into-builder (edit), run, clone and delete.
+ */
+@Composable
+private fun WorkflowLibraryCard(
+    library: List<com.example.application.workflow.WorkflowLibraryService.WorkflowDefinitionSummary>,
+    onLoad: (String) -> Unit,
+    onRun: (String) -> Unit,
+    onClone: (String) -> Unit,
+    onDelete: (String) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .testTag("workflow_library_card"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.30f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Schedule,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "مكتبة خطط العمل المحفوظة",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            if (library.isEmpty()) {
+                Text(
+                    text = "لا خطط محفوظة بعد — حرّر الخطة أعلاه ثم اضغط «حفظ الخطة في المكتبة» لتصبح أصلاً دائماً قابلاً للتحرير والنسخ والتشغيل.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                library.forEach { def ->
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                            .testTag("workflow_definition_${def.workflowId.value}")
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = def.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = buildString {
+                                            append(def.stepCount)
+                                            append(" خطوات • إصدار ")
+                                            append(def.version)
+                                            append(" • تشغيلات ")
+                                            append(def.runCount)
+                                            append(" • ")
+                                            append(def.executionMode.name)
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                IconButton(onClick = { onLoad(def.workflowId.value) }, modifier = Modifier.size(30.dp)) {
+                                    Icon(
+                                        Icons.Default.AccountTree,
+                                        contentDescription = "تحرير",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                IconButton(onClick = { onRun(def.workflowId.value) }, modifier = Modifier.size(30.dp)) {
+                                    Icon(
+                                        Icons.Default.PlayArrow,
+                                        contentDescription = "تشغيل",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.tertiary
+                                    )
+                                }
+                                IconButton(onClick = { onClone(def.workflowId.value) }, modifier = Modifier.size(30.dp)) {
+                                    Icon(
+                                        Icons.Default.Add,
+                                        contentDescription = "نسخ",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.secondary
+                                    )
+                                }
+                                IconButton(onClick = { onDelete(def.workflowId.value) }, modifier = Modifier.size(30.dp)) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = "حذف",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * RESUMABLE WORKFLOWS (report gap: "Resume later"): executions left
+ * RUNNING/PAUSED/COMPENSATING by a killed process — resume skips the
+ * already-completed steps and continues from the durable checkpoint.
+ */
+@Composable
+private fun ResumableWorkflowsCard(
+    resumable: List<com.example.application.workflow.ResumableWorkflow>,
+    onResume: (String) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .testTag("resumable_workflows_card"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.WarningAmber,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "تنفيذات قابلة للاستئناف",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            resumable.forEach { wf ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 3.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = wf.plan.goal.ifBlank { wf.workflowId.value },
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = "مكتمل: ${wf.completedStepIds.size}/${wf.plan.steps.size} خطوة — استئناف من نقطة التوقف",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Button(
+                        onClick = { onResume(wf.workflowId.value) },
+                        modifier = Modifier.testTag("btn_resume_workflow")
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("استئناف", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+    }
 }

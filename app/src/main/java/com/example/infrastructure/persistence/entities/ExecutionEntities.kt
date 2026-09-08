@@ -88,6 +88,17 @@ data class AgentDefinitionEntity(
     val version: Int,
     /** PLANNER-authored (user-created in Agent Studio) vs PLATFORM-seeded. */
     val origin: String,
+    // v13 — full-fidelity agent persistence (report: round-tripping a
+    // durable agent previously LOST goals, networkRequirement, locality and
+    // authorityLevel on every save).
+    /** JSON array of {"description": ..., "priority": n} goal objects. */
+    val goalsJson: String = "[]",
+    /** NetworkRequirement.name. */
+    val networkRequirement: String = "HYBRID",
+    /** Locality.name. */
+    val locality: String = "LOCAL_ON_DEVICE",
+    /** Authority level (domain string, default STANDARD). */
+    val authorityLevel: String = "STANDARD",
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long
 )

@@ -70,6 +70,7 @@ class WorkspaceSwitchDuringExecutionTest {
         override fun dimensionSummaries(): Flow<List<com.example.domain.core.observability.DimensionSummary>> = flowOf(emptyList())
         override fun auditEvents(limit: Int): Flow<List<AuditEvent>> = flowOf(emptyList())
         override fun traceForExecution(executionId: String): Flow<List<com.example.domain.core.observability.ExecutionTraceNode>> = flowOf(emptyList())
+        override fun recentTraceNodes(limit: Int): Flow<List<com.example.domain.core.observability.ExecutionTraceNode>> = flowOf(emptyList())
         override suspend fun snapshotByType(type: MetricType): List<com.example.domain.core.observability.MetricSnapshot> = emptyList()
     }
 

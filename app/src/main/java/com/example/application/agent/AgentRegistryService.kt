@@ -3,10 +3,13 @@ package com.example.application.agent
 import com.example.application.registry.ComponentRegistry
 import com.example.domain.core.agent.AgentBudget
 import com.example.domain.core.agent.AgentDefinition
+import com.example.domain.core.agent.AgentGoal
 import com.example.domain.core.agent.AgentId
 import com.example.domain.core.agent.AgentIdentity
 import com.example.domain.core.agent.AgentRole
 import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.capability.NetworkRequirement
+import com.example.domain.core.capability.Locality
 import com.example.infrastructure.persistence.dao.AgentDefinitionDao
 import com.example.infrastructure.persistence.entities.AgentDefinitionEntity
 import kotlinx.coroutines.Dispatchers
@@ -62,6 +65,42 @@ class AgentRegistryService(
 
     suspend fun getAgent(id: String): AgentDefinition? = withContext(Dispatchers.IO) {
         dao.getAgentById(id)?.toDomain()
+    }
+
+    /**
+     * WORKFLOW CANONICAL AGENT BINDING (report gap): resolves the durable
+     * agent a workflow step should execute through.
+     *
+     * Resolution policy:
+     *  1. [assignedAgentId] (when provided) — the user/library-chosen agent,
+     *     returned when it exists, is ENABLED, and its role matches the
+     *     step's declared role. A mismatch fails the binding honestly
+     *     (returns null → caller materializes a role-matching agent) instead
+     *     of silently executing a step through a wrong-role agent.
+     *  2. The first ENABLED durable agent whose role matches [role] and
+     *     whose workspace scope covers [workspaceId] (or is unscoped
+     *     "default").
+     */
+    suspend fun resolveStepAgent(
+        role: AgentRole,
+        workspaceId: String?,
+        assignedAgentId: String? = null
+    ): AgentDefinition? = withContext(Dispatchers.IO) {
+        if (!assignedAgentId.isNullOrBlank()) {
+            val pinned = dao.getAgentById(assignedAgentId)?.toDomain()
+            if (pinned != null && pinned.enabled && pinned.identity.role == role) {
+                return@withContext pinned
+            }
+            // Pinned agent missing/disabled/role-mismatch — fall through to
+            // role resolution (honest degradation, no wrong-role execution).
+        }
+        listAgents().firstOrNull { agent ->
+            agent.enabled &&
+                agent.identity.role == role &&
+                (workspaceId == null ||
+                    agent.workspaceScope.isEmpty() ||
+                    agent.workspaceScope.any { it == "default" || it == workspaceId })
+        }
     }
 
     /**
@@ -142,6 +181,14 @@ class AgentRegistryService(
     ): AgentDefinitionEntity {
         val caps = JSONArray().also { arr -> agent.allowedCapabilities.forEach { arr.put(it.name) } }
         val scope = JSONArray().also { arr -> agent.workspaceScope.forEach { arr.put(it) } }
+        // v13 — full-fidelity fields (goals, network requirement, locality,
+        // authority level): previously dropped, so a durable agent lost its
+        // goals and runtime policies on every save round-trip.
+        val goals = JSONArray().also { arr ->
+            agent.goals.forEach { goal ->
+                arr.put(org.json.JSONObject().put("description", goal.description).put("priority", goal.priority))
+            }
+        }
         return AgentDefinitionEntity(
             id = agent.identity.id.value,
             name = agent.identity.name,
@@ -154,6 +201,10 @@ class AgentRegistryService(
             enabled = agent.enabled,
             version = version,
             origin = origin,
+            goalsJson = goals.toString(),
+            networkRequirement = agent.networkRequirement.name,
+            locality = agent.locality.name,
+            authorityLevel = agent.authorityLevel,
             createdAtEpochMs = createdAt,
             updatedAtEpochMs = now
         )
@@ -171,6 +222,13 @@ class AgentRegistryService(
             val arr = JSONArray(workspaceScopeJson)
             (0 until arr.length()).map { arr.getString(it) }
         }.getOrDefault(emptyList())
+        val goals = runCatching {
+            val arr = JSONArray(goalsJson)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                AgentGoal(description = o.optString("description"), priority = o.optInt("priority", 1))
+            }
+        }.getOrDefault(emptyList())
         return AgentDefinition(
             identity = AgentIdentity(
                 id = AgentId(id),
@@ -181,7 +239,13 @@ class AgentRegistryService(
             ),
             allowedCapabilities = caps,
             budget = AgentBudget(maxTokens = maxTokens),
+            goals = goals,
             enabled = enabled,
+            networkRequirement = runCatching { NetworkRequirement.valueOf(networkRequirement) }
+                .getOrDefault(NetworkRequirement.HYBRID),
+            locality = runCatching { Locality.valueOf(locality) }
+                .getOrDefault(Locality.LOCAL_ON_DEVICE),
+            authorityLevel = authorityLevel,
             workspaceScope = scope
         )
     }

@@ -24,6 +24,9 @@ object WorkspaceRoutes {
     const val EXTENSIONS = "extensions"
     const val SETTINGS = "settings"
 
+    /** UNIFIED OBJECT EXPLORER (report gap: discoverability). */
+    const val EXPLORER = "explorer"
+
     val topLevel: List<String> = listOf(STUDIO, ACTIVITY, KNOWLEDGE, FILES, MORE)
 
     fun isTopLevel(route: String?): Boolean = topLevel.contains(route)

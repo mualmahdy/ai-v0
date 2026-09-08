@@ -63,6 +63,10 @@ class OpenAiCompatibleLlmAdapter(
     private val defaultModel: String = "gpt-4o-mini",
     override val providerId: String = "openai_compatible",
     private val client: OkHttpClient = OkHttpClient.Builder()
+        // EGRESS ENFORCEMENT (report gap: sandbox network-egress
+        // restrictions): the guard consults the ACTIVE workspace policy
+        // and fails CLOSED (IOException) before any socket is opened.
+        .addInterceptor(com.example.infrastructure.network.EgressControl.interceptor())
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .build()

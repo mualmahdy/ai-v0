@@ -171,9 +171,14 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.BudgetAllocationEntity::class,
         // Gap-closure — Canonical Execution Kernel + Durable Agent Registry (v11)
         com.example.infrastructure.persistence.entities.ActionIntentEntity::class,
-        com.example.infrastructure.persistence.entities.AgentDefinitionEntity::class
+        com.example.infrastructure.persistence.entities.AgentDefinitionEntity::class,
+        // v13 — Report gap-closure: durable conversation sessions + workflow
+        // library + full-fidelity durable agents
+        com.example.infrastructure.persistence.entities.ConversationSessionEntity::class,
+        com.example.infrastructure.persistence.entities.ConversationTurnEntity::class,
+        com.example.infrastructure.persistence.entities.WorkflowDefinitionEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -243,6 +248,13 @@ abstract class AppDatabase : RoomDatabase() {
 
     // Gap-closure — canonical durable agent registry (P1-08/P1-09)
     abstract fun agentDefinitionDao(): com.example.infrastructure.persistence.dao.AgentDefinitionDao
+
+    // v13 — durable conversation sessions (report gap: sessions)
+    abstract fun conversationSessionDao(): com.example.infrastructure.persistence.dao.ConversationSessionDao
+    abstract fun conversationTurnDao(): com.example.infrastructure.persistence.dao.ConversationTurnDao
+
+    // v13 — user-authored workflow library (report gap: workflow assets)
+    abstract fun workflowDefinitionDao(): com.example.infrastructure.persistence.dao.WorkflowDefinitionDao
 
     companion object {
         @Volatile
@@ -1343,6 +1355,101 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+
+
+        /**
+         * v12 → v13 (report gap-closure round):
+         *  1. `chat_sessions` + `chat_turns` — RESTORES a durable session
+         *     system, born workspace-owned (the legacy `sessions` table was
+         *     dropped in v12 without a durable replacement; the conversation
+         *     transcript lived only in the ViewModel and died with the
+         *     process). Sessions carry mode (QUICK_CHAT/AGENT) and optional
+         *     exact model pins.
+         *  2. `workflow_definitions` — the USER-AUTHORED workflow library:
+         *     save / list / load / edit / clone / run (the execution was
+         *     durable since v8, but the authored definition was not).
+         *  3. `agent_definitions` gains full-fidelity columns (goals,
+         *     networkRequirement, locality, authorityLevel) — previously
+         *     dropped on every save, so round-tripping a durable agent lost
+         *     its goals and runtime policies.
+         * Purely additive — no existing column altered or dropped.
+         */
+        private val MIGRATION_12_TO_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // --- 1. Durable conversation sessions ---
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_sessions (
+                        sessionId TEXT NOT NULL PRIMARY KEY,
+                        workspaceId TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        agentId TEXT,
+                        agentName TEXT,
+                        modelResourceId TEXT,
+                        modelDisplayName TEXT,
+                        turnCount INTEGER NOT NULL DEFAULT 0,
+                        totalTokensConsumed INTEGER NOT NULL DEFAULT 0,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        lastActiveAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_sessions_workspaceId ON chat_sessions(workspaceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_sessions_lastActiveAtEpochMs ON chat_sessions(lastActiveAtEpochMs)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS chat_turns (
+                        turnId TEXT NOT NULL PRIMARY KEY,
+                        sessionId TEXT NOT NULL,
+                        prompt TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        agentName TEXT,
+                        agentRole TEXT,
+                        modelResourceId TEXT,
+                        tokensConsumed INTEGER NOT NULL DEFAULT 0,
+                        durationMs INTEGER NOT NULL DEFAULT 0,
+                        isSuccessful INTEGER NOT NULL DEFAULT 1,
+                        eventCount INTEGER NOT NULL DEFAULT 0,
+                        createdAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_turns_sessionId ON chat_turns(sessionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_turns_createdAtEpochMs ON chat_turns(createdAtEpochMs)")
+
+                // --- 2. User-authored workflow library ---
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS workflow_definitions (
+                        workflowId TEXT NOT NULL PRIMARY KEY,
+                        workspaceId TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        goal TEXT NOT NULL,
+                        executionMode TEXT NOT NULL,
+                        stepsJson TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        runCount INTEGER NOT NULL DEFAULT 0,
+                        lastRunAtEpochMs INTEGER,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_workflow_definitions_workspaceId ON workflow_definitions(workspaceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_workflow_definitions_updatedAtEpochMs ON workflow_definitions(updatedAtEpochMs)")
+
+                // --- 3. Full-fidelity durable agents ---
+                db.execSQL("ALTER TABLE agent_definitions ADD COLUMN goalsJson TEXT NOT NULL DEFAULT '[]'")
+                db.execSQL("ALTER TABLE agent_definitions ADD COLUMN networkRequirement TEXT NOT NULL DEFAULT 'HYBRID'")
+                db.execSQL("ALTER TABLE agent_definitions ADD COLUMN locality TEXT NOT NULL DEFAULT 'LOCAL_ON_DEVICE'")
+                db.execSQL("ALTER TABLE agent_definitions ADD COLUMN authorityLevel TEXT NOT NULL DEFAULT 'STANDARD'")
+            }
+        }
+
+
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1357,9 +1464,8 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_9_TO_10,
             MIGRATION_10_TO_11,
             MIGRATION_11_TO_12,
+            MIGRATION_12_TO_13,
         )
-
-
 
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {

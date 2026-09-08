@@ -72,6 +72,11 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.application.agent.CanonicalAgentCatalog
+import com.example.domain.core.session.ChatMode
+import com.example.domain.core.session.ConversationSession
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import com.example.domain.core.agent.AgentDefinition
 import com.example.domain.core.agent.AgentRole
 import com.example.domain.core.capability.CapabilityType
@@ -141,6 +146,20 @@ fun StudioScreen(
                 }
             }
 
+            // ---- Conversation mode + durable session browser ----
+            // (report gap-closure: Quick Chat is a REAL agent-independent
+            // mode; sessions are durable, browsable and resumable)
+            item {
+                ChatModeAndSessionsBar(
+                    mode = state.chatMode,
+                    onModeChange = viewModel::setChatMode,
+                    onOpenSessions = { viewModel.setSessionBrowserOpen(true) },
+                    onNewSession = viewModel::startNewSession,
+                    activeSessionTitle = state.sessions
+                        .firstOrNull { it.id.value == state.activeSessionId }?.title
+                )
+            }
+
             // ---- Runtime policy controls (decision-engine inputs) ----
             item {
                 PolicyControlBar(
@@ -151,20 +170,36 @@ fun StudioScreen(
                 )
             }
 
-            // ---- Agent catalog (durable registry, create/delete) ----
-            item {
-                AgentCatalogRow(
-                    agents = state.availableAgents,
-                    activeAgentId = state.activeAgent?.identity?.id?.value,
-                    onSelect = viewModel::selectAgent,
-                    onDeleteRequest = { deleteAgentTarget = it },
-                    onBuildAgent = { agentBuilderOpen = true }
-                )
-            }
+            // ---- Model picker (QUICK_CHAT) / Agent catalog (AGENT) ----
+            when (state.chatMode) {
+                ChatMode.QUICK_CHAT -> item {
+                    ModelPickerRow(
+                        resources = state.materializedResources.filter {
+                            it.resourceType == ResourceType.LLM &&
+                                (it.lifecycleState == ResourceLifecycleState.ENABLED ||
+                                    it.lifecycleState == ResourceLifecycleState.ACTIVE)
+                        },
+                        selectedResourceId = state.selectedModelResourceId,
+                        onSelect = viewModel::selectModel
+                    )
+                }
 
-            // ---- Active agent card ----
-            state.activeAgent?.let { agent ->
-                item { ActiveAgentCard(agent) }
+                ChatMode.AGENT -> {
+                    item {
+                        AgentCatalogRow(
+                            agents = state.availableAgents,
+                            activeAgentId = state.activeAgent?.identity?.id?.value,
+                            onSelect = viewModel::selectAgent,
+                            onDeleteRequest = { deleteAgentTarget = it },
+                            onBuildAgent = { agentBuilderOpen = true }
+                        )
+                    }
+
+                    // ---- Active agent card ----
+                    state.activeAgent?.let { agent ->
+                        item { ActiveAgentCard(agent) }
+                    }
+                }
             }
 
             // ---- Token budget (live, honest) ----
@@ -212,6 +247,18 @@ fun StudioScreen(
             onCancel = viewModel::cancelExecution,
             onClearSession = viewModel::clearStudioSession,
             hasSession = state.studioSession.isNotEmpty()
+        )
+    }
+
+    // ---- Durable session browser ----
+    if (state.isSessionBrowserOpen) {
+        SessionBrowserDialog(
+            sessions = state.sessions,
+            activeSessionId = state.activeSessionId,
+            onOpen = viewModel::openSession,
+            onDelete = viewModel::deleteSession,
+            onNewSession = viewModel::startNewSession,
+            onDismiss = { viewModel.setSessionBrowserOpen(false) }
         )
     }
 
@@ -934,4 +981,277 @@ private fun FlowRoleChips(selected: AgentRole, onSelect: (AgentRole) -> Unit) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// DURABLE SESSIONS + QUICK CHAT + MODEL PICKER (report gap-closure)
+// ---------------------------------------------------------------------------
+
+/**
+ * Conversation mode bar: QUICK_CHAT (agent-independent, binds to the selected
+ * model) vs AGENT (canonical agent catalog) — plus the durable session
+ * browser trigger and "new session" action.
+ */
+@Composable
+private fun ChatModeAndSessionsBar(
+    mode: ChatMode,
+    onModeChange: (ChatMode) -> Unit,
+    onOpenSessions: () -> Unit,
+    onNewSession: () -> Unit,
+    activeSessionTitle: String?
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .testTag("chat_mode_bar"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                FilterChip(
+                    selected = mode == ChatMode.QUICK_CHAT,
+                    onClick = { onModeChange(ChatMode.QUICK_CHAT) },
+                    label = { Text("محادثة سريعة", style = MaterialTheme.typography.labelSmall) },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                )
+                FilterChip(
+                    selected = mode == ChatMode.AGENT,
+                    onClick = { onModeChange(ChatMode.AGENT) },
+                    label = { Text("وضع الوكيل", style = MaterialTheme.typography.labelSmall) },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Psychology,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                IconButton(onClick = onOpenSessions) {
+                    Icon(
+                        Icons.Default.AccountTree,
+                        contentDescription = "تصفح الجلسات",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                IconButton(onClick = onNewSession) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = "جلسة جديدة",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+            activeSessionTitle?.let { title ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "الجلسة النشطة: $title",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/**
+ * USER-FACING EXACT MODEL PICKER (report gap: "direct Model Picker missing"):
+ * lists the ENABLED/ACTIVE LLM resources and binds the conversation to the
+ * exact chosen resource (durable runtime binding, not a floating preference).
+ */
+@Composable
+private fun ModelPickerRow(
+    resources: List<com.example.domain.core.resource.ResourceRecord>,
+    selectedResourceId: String?,
+    onSelect: (String?, String?) -> Unit
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val selected = resources.firstOrNull { it.resourceId.value == selectedResourceId }
+    val selectedLabel = selected?.let { record ->
+        record.metadata["displayName"] ?: record.metadata["offeringId"] ?: record.resourceId.value
+    } ?: "اختيار تلقائي (طبقة القرار)"
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .testTag("model_picker_row"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+        )
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .clickable { menuOpen = true }
+        ) {
+            Icon(
+                Icons.Default.Dns,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "النموذج المرتبط بالمحادثة",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = selectedLabel,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("اختيار تلقائي (طبقة القرار)") },
+                    onClick = {
+                        onSelect(null, null)
+                        menuOpen = false
+                    }
+                )
+                resources.forEach { record ->
+                    val label = record.metadata["displayName"]
+                        ?: record.metadata["offeringId"]
+                        ?: record.resourceId.value
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(label, style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    text = buildString {
+                                        append(if (record.isLocal) "محلي" else "سحابي")
+                                        append(" • ")
+                                        append(record.providerId)
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        onClick = {
+                            onSelect(record.resourceId.value, label)
+                            menuOpen = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * DURABLE SESSION BROWSER (report gaps: "Session browser / Session retrieval
+ * after restart / Resume conversation"): lists the workspace sessions with
+ * turn/token aggregates; open resumes the conversation with its full history.
+ */
+@Composable
+private fun SessionBrowserDialog(
+    sessions: List<ConversationSession>,
+    activeSessionId: String?,
+    onOpen: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onNewSession: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val timeFormat = remember { SimpleDateFormat("HH:mm • dd/MM", Locale.getDefault()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("جلسات المحادثة الدائمة") },
+        text = {
+            if (sessions.isEmpty()) {
+                Text(
+                    "لا جلسات محفوظة بعد — أرسل أول رسالة لتُنشأ جلسة دائمة تلقائياً.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(sessions, key = { it.id.value }) { session ->
+                        val isActive = session.id.value == activeSessionId
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpen(session.id.value) }
+                                .testTag("session_item_${session.id.value}")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(10.dp)
+                            ) {
+                                Icon(
+                                    if (session.mode == ChatMode.QUICK_CHAT) Icons.Default.PlayArrow
+                                    else Icons.Default.Psychology,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = session.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = buildString {
+                                            append(session.turnCount)
+                                            append(" دورة • ")
+                                            append(session.totalTokensConsumed)
+                                            append(" توكن • ")
+                                            append(timeFormat.format(Date(session.lastActiveAtEpochMs)))
+                                            session.modelDisplayName?.let { append(" • $it") }
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                IconButton(onClick = { onDelete(session.id.value) }) {
+                                    Icon(
+                                        Icons.Default.DeleteSweep,
+                                        contentDescription = "حذف الجلسة",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onNewSession) { Text("جلسة جديدة") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("إغلاق") }
+        }
+    )
 }

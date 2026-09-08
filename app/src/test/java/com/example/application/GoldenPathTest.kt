@@ -587,6 +587,8 @@ class GoldenPathTest {
             flowOf(auditEvents.toList())
         override fun traceForExecution(executionId: String): Flow<List<com.example.domain.core.observability.ExecutionTraceNode>> =
             flowOf(emptyList())
+        override fun recentTraceNodes(limit: Int): Flow<List<com.example.domain.core.observability.ExecutionTraceNode>> =
+            flowOf(emptyList())
         override suspend fun snapshotByType(type: com.example.domain.core.observability.MetricType): List<com.example.domain.core.observability.MetricSnapshot> =
             emptyList()
     }

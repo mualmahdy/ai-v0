@@ -60,7 +60,16 @@ class WorkflowEngine(
     private val persistenceService: com.example.application.workflow.WorkflowPersistenceService? = null,
     private val workspaceIdProvider: suspend () -> String = { "default" },
     /** Upper bound on concurrently RUNNING steps (P1-05 resource safety). */
-    private val maxConcurrentSteps: Int = 3
+    private val maxConcurrentSteps: Int = 3,
+    /**
+     * REPORT GAP (canonical agent binding): resolves the DURABLE agent a
+     * step executes through — the composition root wires this to the
+     * canonical agent registry (assignedAgentId first, then role match,
+     * then durable role-materialization). When null (pure JVM tests), the
+     * engine falls back to the last-resort synthetic agent so tests keep
+     * running — but production ALWAYS binds real registry agents.
+     */
+    private val agentResolver: (suspend (StepNode) -> AgentDefinition)? = null
 ) {
 
     /** Per-run mutable state (guarded by [stateMutex]). */
@@ -118,8 +127,16 @@ class WorkflowEngine(
     /**
      * Executes a validated workflow plan with dependency resolution and
      * (for DAG / fan-out topologies) bounded concurrent branch execution.
+     *
+     * @param completedStepIds steps already finished by a PREVIOUS run
+     *        (durable resume): they are seeded as COMPLETED, never re-executed,
+     *        and their recorded outputs are honoured as upstream context when
+     *        available through the persistence service.
      */
-    suspend fun executePlan(plan: WorkflowPlan): WorkflowExecutionReport {
+    suspend fun executePlan(
+        plan: WorkflowPlan,
+        completedStepIds: Set<String> = emptySet()
+    ): WorkflowExecutionReport {
         val startTime = System.currentTimeMillis()
 
         // 1. Validation Gate
@@ -146,6 +163,29 @@ class WorkflowEngine(
 
         val stateMutex = Mutex()
         val state = RunState(plan)
+
+        // ------------------------------------------------------------
+        // DURABLE RESUME (report gap: "Resume later"): steps completed by a
+        // PREVIOUS run are seeded COMPLETED and never re-executed. Their
+        // persisted output summaries are reloaded as upstream context so
+        // dependent steps receive real prior outputs.
+        // ------------------------------------------------------------
+        if (completedStepIds.isNotEmpty()) {
+            val priorOutputs = runCatching {
+                persistenceService?.byId(plan.id)?.stepStates
+                    ?.filter { it.stepId in completedStepIds }
+                    ?.mapNotNull { st -> st.outputSummary?.let { st.stepId to it } }
+                    ?.toMap()
+            }.getOrNull() ?: emptyMap()
+            stateMutex.withLock {
+                for (id in completedStepIds) {
+                    if (state.stepStatuses.containsKey(id)) {
+                        state.stepStatuses[id] = StepStatus.COMPLETED
+                        priorOutputs[id]?.let { state.outputs[id] = it }
+                    }
+                }
+            }
+        }
 
         // ------------------------------------------------------------
         // AUTHORITATIVE PERSISTENCE (P1-06): a failed start-write is
@@ -239,6 +279,11 @@ class WorkflowEngine(
         stateMutex: Mutex
     ) {
         for (step in plan.steps) {
+            // DURABLE RESUME: steps seeded COMPLETED by a previous run are
+            // never re-executed (their outputs are already in state).
+            val alreadyDone = stateMutex.withLock { state.stepStatuses[step.id] == StepStatus.COMPLETED }
+            if (alreadyDone) continue
+
             val depsSatisfied = stateMutex.withLock {
                 step.dependencies.all { depId ->
                     state.stepStatuses[depId] == StepStatus.COMPLETED || state.stepStatuses[depId] == StepStatus.DEGRADED
@@ -267,7 +312,12 @@ class WorkflowEngine(
         stateMutex: Mutex
     ) = coroutineScope {
         val semaphore = Semaphore(maxConcurrentSteps.coerceAtLeast(1))
-        val pending = plan.steps.associate { it.id to it }.toMutableMap()
+        // DURABLE RESUME: seeded-COMPLETED steps are removed from the pending
+        // set up front so the scheduler never launches them again.
+        val pending = plan.steps
+            .filter { step -> stateMutex.withLock { state.stepStatuses[step.id] != StepStatus.COMPLETED } }
+            .associate { it.id to it }
+            .toMutableMap()
         val finished = Channel<String>(Channel.UNLIMITED)
         var inflight = 0
 
@@ -339,25 +389,30 @@ class WorkflowEngine(
             step.description
         }
 
-        val stepAgent = AgentDefinition(
-            identity = AgentIdentity(
-                id = AgentId("workflow_agent_${step.id}"),
-                name = "منفذ خطوة ${step.id}",
-                role = step.agentRole,
-                description = "وكيل تنفيذ خطوة ${step.id}",
-                systemPrompt = step.agentRole.defaultSystemPrompt
-            ),
-            allowedCapabilities = setOf(
-                com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
-                com.example.domain.core.capability.CapabilityType.TOOL_EXECUTION
-            ),
-            budget = com.example.domain.core.agent.AgentBudget(maxTokens = 30000)
-        )
+        // ------------------------------------------------------------------
+        // CANONICAL AGENT BINDING (report gap: "workflow steps use synthetic
+        // agents"). Resolution order:
+        //   1. step.assignedAgentId → the DURABLE registry agent the user (or
+        //      the saved library definition) chose — inherits its system
+        //      prompt, capabilities, budget, workspace scope, version and
+        //      lifecycle.
+        //   2. agentResolver(step) → composition-root policy (role-matching
+        //      durable agent, materializing one when no match exists).
+        //   3. LAST-RESORT synthetic agent — ONLY when no resolver is wired
+        //      (pure JVM tests). Production ALWAYS binds registry agents, so
+        //      steps keep the SAME governed loop, memory namespaces and
+        //      telemetry attribution as every other execution.
+        // ------------------------------------------------------------------
+        val stepAgent: AgentDefinition = agentResolver?.invoke(step)
+            ?: syntheticStepAgent(step)
 
         val stepTask = TaskDefinition(
             id = step.taskId,
             assignedAgentId = stepAgent.identity.id,
             input = TaskInput(rawPrompt = combinedPrompt),
+            // Per-step exact model pin (schema v3): the user's choice is a
+            // durable binding honoured by the decision layer.
+            assignedModelId = step.assignedModelId,
             specification = TaskSpecification(
                 objective = step.description,
                 requirements = step.requirements,
@@ -423,6 +478,30 @@ class WorkflowEngine(
                 persistenceService?.checkpoint(plan.id, plan.steps.indexOf(step) + 1)
             }
         }
+    }
+
+    /**
+     * LAST-RESORT synthetic step agent — used ONLY when no canonical agent
+     * resolver is wired (pure JVM tests without a durable registry). In
+     * production the composition root always provides [agentResolver], so
+     * workflow steps execute through REAL durable registry agents and this
+     * path is unreachable.
+     */
+    private fun syntheticStepAgent(step: StepNode): AgentDefinition {
+        return AgentDefinition(
+            identity = AgentIdentity(
+                id = AgentId("workflow_agent_${step.id}"),
+                name = "منفذ خطوة ${step.id}",
+                role = step.agentRole,
+                description = "وكيل تنفيذ خطوة ${step.id}",
+                systemPrompt = step.agentRole.defaultSystemPrompt
+            ),
+            allowedCapabilities = setOf(
+                com.example.domain.core.capability.CapabilityType.LLM_GENERATION,
+                com.example.domain.core.capability.CapabilityType.TOOL_EXECUTION
+            ),
+            budget = com.example.domain.core.agent.AgentBudget(maxTokens = 30000)
+        )
     }
 
     /**

@@ -424,9 +424,21 @@ class DecisionService(
                 context.networkPolicy,
                 context.isNetworkAvailable
             ).let { all ->
-                val capabilityFiltered = all.filter { cand ->
-                    requiredCaps.isEmpty() || cand.capabilities.any { it in requiredCaps }
-                }
+                // ----------------------------------------------------------------------
+                // SINGLE AUTHORITATIVE CAPABILITY ADMISSION (report: "duplicate
+                // capability semantics"): the previous inline filter used
+                // `cand.capabilities.any { it in requiredCaps }` — a private,
+                // weaker duplicate of the admission policy. ALL capability
+                // admission now delegates to ResourceCapabilityGraph.
+                // admittedByRequirements (required = hard ALL-gate, optional =
+                // ranking only) so exactly ONE policy exists in the runtime.
+                // ----------------------------------------------------------------------
+                val capabilityFiltered = resourceCapabilityGraph.admittedByTypeRequirements(
+                    candidates = all,
+                    type = ResourceType.LLM,
+                    required = requiredCaps,
+                    optional = optionalCaps
+                )
                 if (pinnedModelId.isNullOrBlank()) {
                     capabilityFiltered
                 } else {

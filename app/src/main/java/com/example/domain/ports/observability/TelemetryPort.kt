@@ -46,6 +46,15 @@ interface TelemetryPort {
     /** Live stream of execution-trace nodes for an execution. */
     fun traceForExecution(executionId: String): Flow<List<ExecutionTraceNode>>
 
+    /**
+     * Live stream of the MOST RECENT execution-trace nodes across executions
+     * (report fix: Unified Activity wiring). The activity feed previously
+     * subscribed to `traceForExecution("")` — an empty id that can never
+     * match a real execution, so the feed showed nothing. When no execution
+     * is active the feed now falls back to the recent-trace window.
+     */
+    fun recentTraceNodes(limit: Int = 50): Flow<List<ExecutionTraceNode>>
+
     /** Aggregate snapshot filtered by type. */
     suspend fun snapshotByType(type: MetricType): List<MetricSnapshot>
 }
