@@ -30,7 +30,8 @@ import java.util.concurrent.TimeUnit
  */
 class ProviderAdapterFactory(
     private val workspaceStoragePort: WorkspaceStoragePort? = null,
-    private val defaultProjectId: Long = 1L
+    /** P0 CONVERGENCE: replaces the legacy `defaultProjectId = 1L` fallback. */
+    private val projectIdProvider: (() -> Long?)? = null
 ) {
 
     private val httpClient = OkHttpClient.Builder()
@@ -70,13 +71,13 @@ class ProviderAdapterFactory(
             ProviderFlavor.MULTI_SOURCE_SEARCH -> MultiSourceSearchAdapter(
                 tavilyApiKeyProvider = apiKeyProvider,
                 workspaceStoragePort = workspaceStoragePort,
-                defaultProjectId = defaultProjectId,
+                projectIdProvider = projectIdProvider,
                 client = httpClient
             )
             else -> MultiSourceSearchAdapter(
                 tavilyApiKeyProvider = apiKeyProvider,
                 workspaceStoragePort = workspaceStoragePort,
-                defaultProjectId = defaultProjectId,
+                projectIdProvider = projectIdProvider,
                 client = httpClient
             )
         }

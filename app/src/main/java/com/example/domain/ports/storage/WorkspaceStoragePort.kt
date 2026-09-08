@@ -1,15 +1,23 @@
 package com.example.domain.ports.storage
 
 import com.example.domain.core.Outcome
-import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.storage.StorageFailure
 import com.example.domain.core.storage.WorkspaceFileEntry
-import com.example.domain.core.storage.WorkspaceSessionInfo
 
 /**
  * Standard Port for Project & Workspace File Storage.
  *
  * Operates strictly within the isolated Android sandbox directories.
+ *
+ * P0 CONVERGENCE (audit step 12 §6): the `projectId` parameter is the
+ * sandbox-root key of the OWNING WORKSPACE's project — resolved by callers
+ * from the workspace's bound project (never an implicit shared project).
+ * The port is deliberately project-keyed at the storage layer (the project
+ * IS the on-disk sandbox root, `workspaces/proj_<id>`); ownership authority
+ * lives one level up: Workspace → Project → files. `SessionRepositoryPort`
+ * (the project-scoped session/project legacy surface with zero production
+ * callers and the implicit 1L bootstrap) was REMOVED as dead architecture
+ * residue — see its removal note in the git history.
  */
 interface WorkspaceStoragePort {
     /**
@@ -36,15 +44,4 @@ interface WorkspaceStoragePort {
      * Checks if a file exists.
      */
     suspend fun fileExists(projectId: Long, relativePath: String): Boolean
-}
-
-/**
- * Standard Port for Persistence of Workspace Sessions and Projects.
- */
-interface SessionRepositoryPort {
-    suspend fun getActiveProject(): Outcome<ProjectMetadata, StorageFailure>
-    suspend fun listProjects(): Outcome<List<ProjectMetadata>, StorageFailure>
-    suspend fun createProject(name: String, description: String?): Outcome<ProjectMetadata, StorageFailure>
-    suspend fun listSessions(projectId: Long): Outcome<List<WorkspaceSessionInfo>, StorageFailure>
-    suspend fun saveSession(session: WorkspaceSessionInfo): Outcome<Unit, StorageFailure>
 }

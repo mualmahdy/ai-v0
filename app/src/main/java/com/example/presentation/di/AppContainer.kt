@@ -140,11 +140,10 @@ class AppContainer(context: Context) {
 
     // --- Workspace Storage & Runtime ---
     val workspaceStorage: SandboxWorkspaceStorageAdapter by lazy {
-        SandboxWorkspaceStorageAdapter(
-            context = appContext,
-            projectDao = database.projectDao(),
-            sessionDao = database.sessionDao()
-        )
+        // P0 CONVERGENCE: the adapter is a pure file-system port. The legacy
+        // SessionRepositoryPort implementation (project-scoped, zero production
+        // callers, implicit 1L bootstrap) was removed with the sessions table.
+        SandboxWorkspaceStorageAdapter(context = appContext)
     }
 
     val workspaceRuntimeService: WorkspaceRuntimeService by lazy {
@@ -381,13 +380,31 @@ class AppContainer(context: Context) {
 
     // --- Extensibility Engine ---
     /**
-     * FIX F-8: the in-process MCP bridge tools are backed by REAL executors —
-     * `workspace_summary` reads the actual sandbox workspace file statistics
-     * (previously the bridge returned canned placeholder text).
+     * FIX F-8 + P0 CONVERGENCE: the in-process MCP bridge tools are backed
+     * by REAL executors — `workspace_summary` reads the ACTIVE workspace's
+     * OWN sandbox statistics. Previously the bridge hard-read the LEGACY
+     * shared project 1L (cross-workspace data bleed — audit step 12 §6);
+     * now the project is resolved from the active workspace (pinned
+     * execution scope first), and the tool fails HONESTLY when no project
+     * is bound instead of reporting another workspace's files.
      */
     private val inProcessMcpTools: Map<String, suspend (Map<String, Any?>) -> com.example.domain.core.Outcome<com.example.domain.core.tools.ToolOutput, com.example.domain.core.tools.ToolFailure>> = mapOf(
         "workspace_summary" to { _ ->
-            when (val files = workspaceStorage.listFiles(1L)) {
+            val mcpProjectId = kotlin.coroutines.coroutineContext[
+                com.example.domain.core.execution.ExecutionScope.Key
+            ]?.projectId?.takeIf { it > 0 }
+                ?: workspaceRuntimeService.activeProjectIdOrNull()
+            if (mcpProjectId == null) {
+                // Fail honestly: no project bound to the active workspace —
+                // NEVER fall back to the legacy shared project 1L.
+                com.example.domain.core.Outcome.Error(
+                    failure = com.example.domain.core.tools.ToolFailure.CapabilityUnavailable(
+                        capabilityName = "workspace_summary",
+                        message = "PROJECT_CONTEXT_REQUIRED: لا يوجد مشروع مرتبط بمساحة العمل النشطة — يرفض الجسر المحلي قراءة ملفات مشروع مشترك قديم."
+                    ),
+                    diagnosticMessage = "PROJECT_CONTEXT_REQUIRED"
+                )
+            } else when (val files = workspaceStorage.listFiles(mcpProjectId)) {
                 is com.example.domain.core.Outcome.Success<*> -> {
                     @Suppress("UNCHECKED_CAST")
                     val entries = files.value as? List<com.example.domain.core.storage.WorkspaceFileEntry> ?: emptyList()
@@ -714,6 +731,12 @@ class AppContainer(context: Context) {
             // when no workspace is active the execution fails CLOSED with
             // WORKSPACE_CONTEXT_REQUIRED (no silent "default" scope).
             orchestrator.workspaceIdProvider = { workspaceRuntimeService.activeWorkspaceIdOrNull() }
+            // P0 CONVERGENCE (audit step 12 §6): the workspace's sandbox
+            // project is pinned INTO the canonical execution context at
+            // launch, so mid-run workspace switches cannot re-target agent
+            // file operations (FileSystemTool / skills / MCP local bridge all
+            // resolve the pinned scope first). No implicit 1L ever.
+            orchestrator.projectIdProvider = { workspaceRuntimeService.activeProjectIdOrNull() }
             // Delegation executor: child tasks run through the same closed
             // loop (DECIDE → EXECUTE → OBSERVE), so children persist their
             // own task rows, emit their own traces, and honour the same
@@ -864,15 +887,24 @@ class AppContainer(context: Context) {
     }
 
     val searchIntelligenceService: SearchIntelligenceService by lazy {
+        // P0 CONVERGENCE: the offline local-workspace search fallback is now
+        // WIRED (previously dead: no storage port) and scoped to the ACTIVE
+        // workspace's own project — never the legacy shared 1L.
         SearchIntelligenceService(
-            searchProvider = com.example.infrastructure.search.MultiSourceSearchAdapter()
+            searchProvider = com.example.infrastructure.search.MultiSourceSearchAdapter(
+                workspaceStoragePort = workspaceStorage,
+                projectIdProvider = { workspaceRuntimeService.activeProjectIdOrNull() }
+            )
         )
     }
 
     val ragIntelligenceService: RagIntelligenceService by lazy {
         RagIntelligenceService(
             documentChunkDao = database.documentChunkDao(),
-            embeddingProvider = localEmbeddingRouter
+            embeddingProvider = localEmbeddingRouter,
+            // P0 CONVERGENCE: real document titles survive the intelligence
+            // reload path (previously reloaded chunks lost their titles).
+            documentDao = database.knowledgeDocumentDao()
         )
     }
 

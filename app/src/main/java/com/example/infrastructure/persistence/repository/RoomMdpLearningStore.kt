@@ -8,7 +8,7 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
 
 /**
  * FIX D-1 / D-4 (audit c03919d): Room-backed implementation of the tabular
- * MDP learning store — one row per (state-region, action) pair in the
+ * MDP learning store — one row per (state-region, RESOURCE, action) triple in the
  * `mdp_q_values` table. The CBR-MDP engine loads the full table once at
  * startup and persists updated cells asynchronously after every learning
  * update, so learned Q values and transition rates survive app restarts.
@@ -28,6 +28,7 @@ class RoomMdpLearningStore(
             actionType?.let {
                 MdpQEntry(
                     regionKey = entity.regionKey,
+                    resourceKey = entity.resourceKey,
                     actionType = it,
                     qValue = entity.qValue,
                     visitCount = entity.visitCount,
@@ -43,6 +44,7 @@ class RoomMdpLearningStore(
             entries.map { entry ->
                 MdpQValueEntity(
                     regionKey = entry.regionKey,
+                    resourceKey = entry.resourceKey,
                     actionType = entry.actionType.name,
                     qValue = entry.qValue,
                     visitCount = entry.visitCount,

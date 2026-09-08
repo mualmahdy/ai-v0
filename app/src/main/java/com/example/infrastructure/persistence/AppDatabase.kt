@@ -30,7 +30,6 @@ import com.example.infrastructure.persistence.dao.ResourceRecordDao
 import com.example.infrastructure.persistence.dao.ServiceConfigurationDao
 import com.example.infrastructure.persistence.dao.ServiceHealthRecordDao
 import com.example.infrastructure.persistence.dao.ServiceOfferingDao
-import com.example.infrastructure.persistence.dao.SessionDao
 import com.example.infrastructure.persistence.dao.TaskDao
 import com.example.infrastructure.persistence.dao.ToolAuditDao
 import com.example.infrastructure.persistence.dao.ToolHealthDao
@@ -64,7 +63,6 @@ import com.example.infrastructure.persistence.entities.ResourceRecordEntity
 import com.example.infrastructure.persistence.entities.ServiceConfigurationEntity
 import com.example.infrastructure.persistence.entities.ServiceHealthRecordEntity
 import com.example.infrastructure.persistence.entities.ServiceOfferingEntity
-import com.example.infrastructure.persistence.entities.SessionEntity
 import com.example.infrastructure.persistence.entities.TaskEntity
 import com.example.infrastructure.persistence.entities.ToolAuditEntity
 import com.example.infrastructure.persistence.entities.ToolHealthSnapshotEntity
@@ -127,7 +125,6 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
 @Database(
     entities = [
         ProjectEntity::class,
-        SessionEntity::class,
         MemoryEntity::class,
         ExecutionLogEntity::class,
         TaskEntity::class,
@@ -176,13 +173,12 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.ActionIntentEntity::class,
         com.example.infrastructure.persistence.entities.AgentDefinitionEntity::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun projectDao(): ProjectDao
-    abstract fun sessionDao(): SessionDao
     abstract fun memoryDao(): MemoryDao
     abstract fun executionLogDao(): ExecutionLogDao
     abstract fun taskDao(): TaskDao
@@ -1219,6 +1215,134 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * P0 CONVERGENCE — Migration v11 → v12 (audit step 12 §6/§7 + §4):
+         *
+         *  1. WORKSPACE OWNERSHIP UNIFICATION:
+         *     - `projects` gains a `workspaceId` column (explicit ownership
+         *       backfilled from the `workspaces.lastActiveProjectId` bridge —
+         *       previously ownership was only inferable and ambiguous).
+         *     - The legacy implicit project id=1L is MATERIALIZED as a real
+         *       owned row when (and only when) a workspace still references
+         *       it — a data repair that kills the magic reference.
+         *     - `workspaces.lastActiveProjectId = 1` rows keep pointing at a
+         *       REAL row from now on; fresh installs never reference 1L at
+         *       all (WorkspaceRuntimeService creates an owned project).
+         *
+         *  2. LEGACY REMNANT REMOVAL: the `sessions` table is dropped. It was
+         *    project-scoped (never workspace-scoped) and had zero production
+         *    readers/writers — a dead remnant of the pre-workspace era.
+         *
+         *  3. RAG METADATA DURABILITY:
+         *     - `knowledge_documents` is rebuilt WITHOUT the dead `projectId`
+         *       column (always NULL since Phase 2, never read) and WITH the
+         *       previously-dropped `mimeType` column.
+         *     - `document_chunks` gains `metadataJson` so chunk metadata
+         *       (embedding provenance, tags, filters) survives restarts.
+         *
+         *  4. RESOURCE-AWARE DECISION LEARNING: `mdp_q_values` is rebuilt
+         *    with a `resourceKey` axis in the primary key so the tabular MDP
+         *    can learn per-resource/model performance instead of collapsing
+         *    every resource into one cell. Legacy rows map to "R:none" —
+         *    exactly the axis where resource-less actions keep learning.
+         */
+        private val MIGRATION_11_TO_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                val now = System.currentTimeMillis()
+
+                // --- 1. Workspace ownership of projects -------------------
+                db.execSQL("ALTER TABLE projects ADD COLUMN workspaceId TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_projects_workspaceId ON projects(workspaceId)")
+                db.execSQL(
+                    """
+                    UPDATE projects SET workspaceId = (
+                        SELECT w.id FROM workspaces w
+                        WHERE w.lastActiveProjectId = projects.id
+                        ORDER BY w.lastAccessedEpochMs DESC LIMIT 1
+                    ) WHERE workspaceId IS NULL
+                    """.trimIndent()
+                )
+                // Materialize the legacy implicit 1L reference as a REAL owned row.
+                db.execSQL(
+                    """
+                    INSERT INTO projects (id, name, description, rootPath, createdAtEpochMs, updatedAtEpochMs, isArchived, workspaceId)
+                    SELECT 1, 'المشروع الافتراضي (مُهاجر)', 'مشروع sandbox مُنشأ من المرجع الضمني القديم 1L أثناء توحيد ملكية مساحات العمل', 'workspaces/proj_1', $now, $now, 0, 'default'
+                    WHERE NOT EXISTS (SELECT 1 FROM projects WHERE id = 1)
+                      AND EXISTS (SELECT 1 FROM workspaces WHERE lastActiveProjectId = 1)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    UPDATE projects SET workspaceId = 'default'
+                    WHERE id = 1 AND workspaceId IS NULL
+                      AND EXISTS (SELECT 1 FROM workspaces WHERE id = 'default' AND lastActiveProjectId = 1)
+                    """.trimIndent()
+                )
+
+                // --- 2. Drop the dead project-scoped sessions remnant ------
+                db.execSQL("DROP TABLE IF EXISTS sessions")
+
+                // --- 3a. knowledge_documents: drop dead projectId, add mimeType.
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS knowledge_documents_v12 (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        workspaceId TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        sourceUri TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        mimeType TEXT NOT NULL DEFAULT 'text/markdown',
+                        tagsJson TEXT NOT NULL,
+                        totalChunks INTEGER NOT NULL,
+                        totalTokensEstimated INTEGER NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL,
+                        isArchived INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO knowledge_documents_v12 (id, workspaceId, title, sourceUri, content, mimeType, tagsJson, totalChunks, totalTokensEstimated, createdAtEpochMs, updatedAtEpochMs, isArchived)
+                    SELECT id, workspaceId, title, sourceUri, content, 'text/markdown', tagsJson, totalChunks, totalTokensEstimated, createdAtEpochMs, updatedAtEpochMs, isArchived
+                    FROM knowledge_documents
+                    """.trimIndent()
+                )
+                db.execSQL("DROP TABLE knowledge_documents")
+                db.execSQL("ALTER TABLE knowledge_documents_v12 RENAME TO knowledge_documents")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_documents_workspaceId ON knowledge_documents(workspaceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_documents_createdAtEpochMs ON knowledge_documents(createdAtEpochMs)")
+
+                // --- 3b. document_chunks: persist chunk metadata.
+                db.execSQL("ALTER TABLE document_chunks ADD COLUMN metadataJson TEXT NOT NULL DEFAULT '{}'")
+
+                // --- 4. Resource-aware MDP Q-table primary key.
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS mdp_q_values_v12 (
+                        regionKey TEXT NOT NULL,
+                        resourceKey TEXT NOT NULL DEFAULT 'R:none',
+                        actionType TEXT NOT NULL,
+                        qValue REAL NOT NULL,
+                        visitCount INTEGER NOT NULL,
+                        successCount INTEGER NOT NULL,
+                        lastUpdatedEpochMs INTEGER NOT NULL,
+                        PRIMARY KEY(regionKey, resourceKey, actionType)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO mdp_q_values_v12 (regionKey, resourceKey, actionType, qValue, visitCount, successCount, lastUpdatedEpochMs)
+                    SELECT regionKey, 'R:none', actionType, qValue, visitCount, successCount, lastUpdatedEpochMs
+                    FROM mdp_q_values
+                    """.trimIndent()
+                )
+                db.execSQL("DROP TABLE mdp_q_values")
+                db.execSQL("ALTER TABLE mdp_q_values_v12 RENAME TO mdp_q_values")
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1232,6 +1356,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_8_TO_9,
             MIGRATION_9_TO_10,
             MIGRATION_10_TO_11,
+            MIGRATION_11_TO_12,
         )
 
 

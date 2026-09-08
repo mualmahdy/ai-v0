@@ -5,6 +5,7 @@ import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.capability.Locality
 import com.example.domain.core.capability.NetworkRequirement
 import com.example.domain.core.capability.SideEffectClassification
+import com.example.domain.core.execution.ExecutionScope
 import com.example.domain.core.storage.StorageFailure
 import com.example.domain.core.storage.WorkspaceFileEntry
 import com.example.domain.core.tools.ToolDeclaration
@@ -14,29 +15,39 @@ import com.example.domain.core.tools.ToolOutput
 import com.example.domain.core.tools.ToolParameter
 import com.example.domain.ports.storage.WorkspaceStoragePort
 import com.example.domain.ports.tools.ToolPort
+import kotlin.coroutines.coroutineContext
 
 /**
  * Clean Infrastructure Adapter for workspace file system operations.
  *
- * GAP-CLOSURE P0-04: the sandbox project is resolved PER CALL via
- * [projectIdProvider] (wired by the AppContainer to the ACTIVE workspace's
- * OWN project). Previously a fixed `defaultProjectId = 1L` sent every
- * agent-driven file operation to the LEGACY SHARED project — a
- * cross-workspace data bleed. When no project is bound the tool fails
- * honestly (PROJECT_CONTEXT_REQUIRED) instead of silently writing to the
- * shared project.
+ * GAP-CLOSURE P0-04 + P0 CONVERGENCE: the sandbox project is resolved PER
+ * CALL, in priority order:
+ *
+ *   1. The PINNED [ExecutionScope] projectId — when the tool runs inside an
+ *      agent execution, the workspace pinned AT LAUNCH decides the target
+ *      sandbox (a mid-run workspace switch can no longer re-target file
+ *      operations to another workspace's sandbox).
+ *   2. The [projectIdProvider] (wired by the AppContainer to the ACTIVE
+ *      workspace's OWN project) — user-driven paths outside executions.
+ *   3. Nothing → the tool fails honestly (PROJECT_CONTEXT_REQUIRED).
+ *
+ * The legacy `defaultProjectId = 1L` constructor fallback was REMOVED —
+ * there is no construction that can silently re-arm the shared-project
+ * cross-workspace data bleed.
  */
 class FileSystemTool(
     private val storagePort: WorkspaceStoragePort,
-    @Deprecated("P0-04: fixed shared project removed. Wire projectIdProvider instead.")
-    private val defaultProjectId: Long = 1L,
-    private val projectIdProvider: (() -> Long?)? = null
+    private val projectIdProvider: () -> Long?
 ) : ToolPort {
 
     /** Resolves the sandbox project for THIS call; null = fail honestly. */
-    private fun resolveProjectId(): Long? {
-        projectIdProvider?.invoke()?.let { return it.takeIf { id -> id > 0 } }
-        return if (projectIdProvider != null) null else defaultProjectId
+    private suspend fun resolveProjectId(): Long? {
+        // 1. Pinned execution scope (the workspace bound at execution launch).
+        coroutineContext[ExecutionScope.Key]?.projectId?.let { pinned ->
+            return pinned.takeIf { it > 0 }
+        }
+        // 2. Active workspace's own project (user-driven paths).
+        return projectIdProvider()?.takeIf { it > 0 }
     }
 
     private fun noProjectFailure(): Outcome<ToolOutput, ToolFailure> = Outcome.Error(

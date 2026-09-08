@@ -97,7 +97,16 @@ class CbrMdpEngine(
      * Aggregates a [DecisionState] into a coarse region key — the "s" of the
      * tabular MDP. Dimensions (deliberately few, so the table stays learnable):
      *   taskType | memory-evidence | search-evidence | tool-evidence |
-     *   failure-bucket (0/1/2+) | step-bucket (0/1/2+) | network
+     *   failure-bucket (0/1/2+) | step-bucket (0/1/2+) | network |
+     *   capability-coverage bucket
+     *
+     * P0/P1 CONVERGENCE (audit step 12 §4): the capability-coverage bucket
+     * (C?/C0/C1/C2, from `contextFeatures["capabilityCoverageRatio"]` —
+     * previously computed by DecisionContext and then DISCARDED by the
+     * learner) is now part of the state, so learning distinguishes
+     * capability-starved states from capability-rich ones. The resource/model
+     * identity axis lives in the CELL key (see [resourceAxisKey]) — together
+     * they make the learning state "task state + capability + resource".
      */
     fun stateRegionKey(state: DecisionState): String {
         val taskType = when {
@@ -116,16 +125,54 @@ class CbrMdpEngine(
             else -> "P2"
         }
         val network = if (state.networkPolicy == NetworkPolicy.OFFLINE || !state.isNetworkAvailable) "OFF" else "ON"
+        val coverage = state.contextFeatures["capabilityCoverageRatio"]
+        val capabilityBucket = when {
+            coverage == null -> "C?"
+            coverage < 0.34f -> "C0"
+            coverage < 0.67f -> "C1"
+            else -> "C2"
+        }
         return "$taskType|M${if (state.hasMemoryEvidence) 1 else 0}|S${if (state.hasSearchEvidence) 1 else 0}|" +
-            "T${if (state.hasToolExecutionEvidence) 1 else 0}|$failureBucket|$stepBucket|$network"
+            "T${if (state.hasToolExecutionEvidence) 1 else 0}|$failureBucket|$stepBucket|$network|$capabilityBucket"
     }
 
-    private fun cellKey(regionKey: String, actionType: DecisionActionType): String =
-        "$regionKey|${actionType.name}"
+    /**
+     * P0/P1 CONVERGENCE (audit step 12 §4): the RESOURCE axis of a learning
+     * cell — derived from the acting decision's bound resource identity
+     * (DecisionRecord.selectedResourceId — which encodes provider/service/
+     * model — falling back to the action's target). Resource-less actions
+     * (COMPLETE, STOP, …) share the [RESOURCE_AXIS_NONE] axis. This is what
+     * lets the Q-table learn per-provider/model/resource performance
+     * instead of collapsing every resource into one cell.
+     */
+    fun resourceAxisKey(action: DecisionAction): String {
+        val resourceId = action.decisionRecord?.selectedResourceId?.value
+            ?: action.targetId
+            ?: return RESOURCE_AXIS_NONE
+        return "R:$resourceId"
+    }
 
-    /** Direct read access for observability/tests. */
+    private fun cellKey(regionKey: String, resourceKey: String, actionType: DecisionActionType): String =
+        "$regionKey|$resourceKey|${actionType.name}"
+
+    /**
+     * Direct read access for observability/tests — EXACT cell lookup on the
+     * (region, resource, action) triple.
+     */
+    fun getQEntry(regionKey: String, resourceKey: String, actionType: DecisionActionType): MdpQEntry? =
+        qTable[cellKey(regionKey, resourceKey, actionType)]
+
+    /**
+     * Direct read access for observability/tests — AGGREGATED view across the
+     * resource axis: returns the MOST-VISITED cell for (region, action)
+     * regardless of which resource produced it (representative Q value).
+     */
     fun getQEntry(regionKey: String, actionType: DecisionActionType): MdpQEntry? =
-        qTable[cellKey(regionKey, actionType)]
+        qTable.entries
+            .asSequence()
+            .filter { it.key.startsWith("$regionKey|") && it.key.endsWith("|${actionType.name}") }
+            .maxByOrNull { it.value.visitCount }
+            ?.value
 
     /** Number of learned cells (observability). */
     fun qTableSize(): Int = qTable.size
@@ -138,7 +185,7 @@ class CbrMdpEngine(
         val store = mdpStore ?: return
         runCatching {
             for (entry in store.loadAll()) {
-                qTable[cellKey(entry.regionKey, entry.actionType)] = entry
+                qTable[cellKey(entry.regionKey, entry.resourceKey, entry.actionType)] = entry
             }
         }
     }
@@ -305,12 +352,14 @@ class CbrMdpEngine(
         }
 
         // ------------------------------------------------------------------
-        // FIX D-1: learned per-(region, action) Q value + REAL transition rate.
-        // learnedWeight grows with visits (shrinkage toward the heuristic when
-        // the cell is cold), so an empty table reproduces legacy behavior and
-        // a warm table overrides heuristics with measured experience.
+        // FIX D-1: learned per-(region, RESOURCE, action) Q value + REAL
+        // transition rate (P0/P1 convergence: the cell is the ACTION'S OWN
+        // resource axis — see [resourceAxisKey]). learnedWeight grows with
+        // visits (shrinkage toward the heuristic when the cell is cold), so an
+        // empty table reproduces legacy behavior and a warm table overrides
+        // heuristics with measured PER-RESOURCE experience.
         // ------------------------------------------------------------------
-        val cell = qTable[cellKey(regionKey, action.type)]
+        val cell = qTable[cellKey(regionKey, resourceAxisKey(action), action.type)]
         val learnedQ = cell?.qValue ?: 0f
         val learnedWeight = if (cell != null) {
             cell.visitCount.toFloat() / (cell.visitCount + VISIT_CONFIDENCE).toFloat()
@@ -438,11 +487,13 @@ class CbrMdpEngine(
             .maxOrNull() ?: 0f
 
         val reward = observation.feedbackReward
-        val key = cellKey(regionKey, observation.action.type)
+        val resourceAxis = resourceAxisKey(observation.action)
+        val key = cellKey(regionKey, resourceAxis, observation.action.type)
         val existing = qTable[key]
         val newCell = if (existing == null) {
             MdpQEntry(
                 regionKey = regionKey,
+                resourceKey = resourceAxis,
                 actionType = observation.action.type,
                 qValue = reward + gamma * maxNextQ,
                 visitCount = 1,

@@ -93,12 +93,43 @@ class WorkspaceRuntimeService(
      * The default workspace is named "مساحة العمل الافتراضية" (Default Workspace)
      * and uses HYBRID network policy + SUPERVISED autonomy policy — matching
      * the previous hardcoded behaviour so existing users see no regression.
+     *
+     * P0 CONVERGENCE (audit step 12 §6): the default workspace now gets its
+     * OWN real sandbox project row (created through [ProjectDao], exactly
+     * like every other workspace) instead of pointing at the LEGACY shared
+     * project id=1L. When no project DAO is wired (pure-JVM tests), the
+     * workspace binds NO project (lastActiveProjectId = null — the honest
+     * "not bound" state) rather than fabricating an implicit 1L. Existing
+     * installs referencing 1L are repaired by MIGRATION_11_TO_12, which
+     * materializes the reference as a real owned row.
      */
     private suspend fun bootstrapDefaultWorkspaceIfNeeded() {
         val existing = workspaceDao.getAllWorkspaces()
         if (existing.isEmpty()) {
             val now = System.currentTimeMillis()
             val defaultId = "default"
+            // P0-04/P0 convergence: the default workspace's OWN project row —
+            // never the legacy implicit projectId=1L.
+            val ownProjectId: Long? = projectDao?.let { dao ->
+                runCatching {
+                    val provisional = ProjectEntity(
+                        name = "مشروع مساحة العمل الافتراضية",
+                        description = "مشروع sandbox مملوك لمساحة العمل الافتراضية",
+                        rootPath = "",
+                        createdAtEpochMs = now,
+                        updatedAtEpochMs = now,
+                        workspaceId = defaultId
+                    )
+                    val generatedId = dao.insertProject(provisional)
+                    dao.updateProject(
+                        provisional.copy(
+                            id = generatedId,
+                            rootPath = projectRootPathResolver(generatedId)
+                        )
+                    )
+                    generatedId
+                }.getOrNull()
+            }
             workspaceDao.insertOrUpdate(
                 WorkspaceEntity(
                     id = defaultId,
@@ -108,7 +139,7 @@ class WorkspaceRuntimeService(
                     autonomyPolicy = "SUPERVISED",
                     settingsJson = "{}",
                     isActive = true,
-                    lastActiveProjectId = 1L, // the legacy default project
+                    lastActiveProjectId = ownProjectId,
                     createdAtEpochMs = now,
                     lastAccessedEpochMs = now
                 )
@@ -128,8 +159,8 @@ class WorkspaceRuntimeService(
      * The new workspace becomes the active workspace automatically.
      *
      * GAP-CLOSURE P0-04: the workspace gets its OWN dedicated sandbox project
-     * (never the legacy shared projectId=1L). The default workspace (id
-     * "default") is the ONLY workspace entitled to the legacy project 1L.
+     * (never the legacy shared projectId=1L). Every workspace — default or
+     * not — owns its project; the "default" id has no special entitlement.
      */
     suspend fun createWorkspace(
         name: String,
@@ -141,7 +172,7 @@ class WorkspaceRuntimeService(
         val now = System.currentTimeMillis()
         val id = "ws_" + UUID.randomUUID().toString().take(12)
 
-        // P0-04: per-workspace sandbox project — real isolation.
+        // P0-04: per-workspace sandbox project — real isolation, explicitly owned.
         val ownProjectId: Long? = projectDao?.let { dao ->
             runCatching {
                 val provisional = ProjectEntity(
@@ -149,7 +180,8 @@ class WorkspaceRuntimeService(
                     description = description,
                     rootPath = "",
                     createdAtEpochMs = now,
-                    updatedAtEpochMs = now
+                    updatedAtEpochMs = now,
+                    workspaceId = id
                 )
                 val generatedId = dao.insertProject(provisional)
                 dao.updateProject(

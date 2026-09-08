@@ -2,7 +2,9 @@ package com.example.workspace
 
 import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.network.NetworkPolicy
+import com.example.infrastructure.persistence.dao.ProjectDao
 import com.example.infrastructure.persistence.dao.WorkspaceDao
+import com.example.infrastructure.persistence.entities.ProjectEntity
 import com.example.infrastructure.persistence.entities.WorkspaceEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -74,6 +76,34 @@ class WorkspaceRuntimeServiceTest {
         }
     }
 
+    /** In-memory fake of ProjectDao (P0 convergence: workspace-owned projects). */
+    private class FakeProjectDao : ProjectDao {
+        val stored = mutableMapOf<Long, ProjectEntity>()
+        private var nextId = 100L
+
+        override fun getAllActiveProjects(): Flow<List<ProjectEntity>> =
+            MutableStateFlow(stored.values.filter { !it.isArchived })
+
+        override suspend fun getAllActiveProjectsList(): List<ProjectEntity> =
+            stored.values.filter { !it.isArchived }
+
+        override suspend fun getProjectById(id: Long): ProjectEntity? = stored[id]
+
+        override suspend fun insertProject(project: ProjectEntity): Long {
+            val id = nextId++
+            stored[id] = project.copy(id = id)
+            return id
+        }
+
+        override suspend fun updateProject(project: ProjectEntity) {
+            stored[project.id] = project
+        }
+
+        override suspend fun archiveProject(id: Long) {
+            stored[id]?.let { stored[id] = it.copy(isArchived = true) }
+        }
+    }
+
     private fun newService(dao: FakeWorkspaceDao): WorkspaceRuntimeService {
         return WorkspaceRuntimeService(
             workspaceDao = dao,
@@ -81,6 +111,11 @@ class WorkspaceRuntimeServiceTest {
         )
     }
 
+    /**
+     * P0 CONVERGENCE: the default workspace binds NO project when no
+     * ProjectDao is wired (pure-JVM test wiring) — the honest "not bound"
+     * state. Previously it fail-OPENED to the legacy implicit projectId=1L.
+     */
     @Test
     fun `bootstrapDefaultWorkspaceIfNeeded creates default workspace when none exist`() = runBlocking {
         val dao = FakeWorkspaceDao()
@@ -94,8 +129,42 @@ class WorkspaceRuntimeServiceTest {
         assertTrue("Default workspace must be active", default.isActive)
         assertEquals(NetworkPolicy.HYBRID.name, default.networkPolicy)
         assertEquals("SUPERVISED", default.autonomyPolicy)
-        // lastActiveProjectId should default to 1L so the legacy single-project flow keeps working
-        assertEquals(1L, default.lastActiveProjectId)
+        // P0 CONVERGENCE: NEVER an implicit legacy 1L — without a ProjectDao
+        // the workspace binds NO project (null = honestly not bound).
+        assertEquals(null, default.lastActiveProjectId)
+    }
+
+    /**
+     * P0 CONVERGENCE: with a ProjectDao wired (production wiring), the
+     * default workspace gets its OWN real sandbox project row — explicitly
+     * workspace-owned — instead of pointing at the legacy shared 1L.
+     */
+    @Test
+    fun `bootstrap creates an OWNED real project for the default workspace (never 1L)`() = runBlocking {
+        val dao = FakeWorkspaceDao()
+        val projectDao = FakeProjectDao()
+        val service = WorkspaceRuntimeService(
+            workspaceDao = dao,
+            projectDao = projectDao,
+            coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        )
+        Thread.sleep(50)
+
+        val default = dao.stored["default"]
+        assertNotNull("Default workspace should be created", default)
+        val boundProjectId = default!!.lastActiveProjectId
+        assertNotNull("Default workspace should own a real project", boundProjectId)
+        assertTrue(
+            "The default workspace's project must NOT be the legacy implicit 1L",
+            boundProjectId != 1L
+        )
+        val owned = projectDao.stored[boundProjectId]
+        assertNotNull("The bound project row must actually exist", owned)
+        assertEquals(
+            "The project row must be explicitly workspace-owned",
+            "default",
+            owned!!.workspaceId
+        )
     }
 
     @Test

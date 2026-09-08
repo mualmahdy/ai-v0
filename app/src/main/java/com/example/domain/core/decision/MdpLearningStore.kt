@@ -14,7 +14,7 @@ package com.example.domain.core.decision
  *   2. No persistence (D-4): all learned values were lost on every process
  *      death, so the engine never actually accumulated experience.
  *
- * This port persists one row per (state-region, action) pair:
+ * This port persists one row per (state-region, RESOURCE, action) triple:
  *
  *   - `qValue`       — running Q(s,a) estimate updated by TD learning
  *   - `visitCount`   — number of times the pair was executed
@@ -33,9 +33,26 @@ interface MdpLearningStore {
     suspend fun persist(entries: List<MdpQEntry>)
 }
 
-/** One learned table cell: value + transition statistics for a (region, action). */
+/**
+ * The resource axis value for actions that carry NO resource/model/target
+ * identity (COMPLETE, STOP, ASK_USER, …). Legacy pre-v12 rows migrate to
+ * this axis so their accumulated experience keeps contributing exactly
+ * where resource-less actions continue to learn.
+ */
+const val RESOURCE_AXIS_NONE = "R:none"
+
+/**
+ * One learned table cell: value + transition statistics for a
+ * (region, RESOURCE, action) triple.
+ *
+ * P0/P1 CONVERGENCE (audit step 12 §4): the `resourceKey` axis makes the
+ * learning RESOURCE-AWARE — the engine can now learn "SELECT_MODEL via
+ * resource X outperforms resource Y in this state", which the previous
+ * (region, action) key structurally collapsed into one cell.
+ */
 data class MdpQEntry(
     val regionKey: String,
+    val resourceKey: String = RESOURCE_AXIS_NONE,
     val actionType: DecisionActionType,
     val qValue: Float,
     val visitCount: Int,
@@ -54,7 +71,7 @@ class InMemoryMdpLearningStore : MdpLearningStore {
 
     override suspend fun persist(entries: List<MdpQEntry>) {
         for (e in entries) {
-            this.entries["${e.regionKey}|${e.actionType.name}"] = e
+            this.entries["${e.regionKey}|${e.resourceKey}|${e.actionType.name}"] = e
         }
     }
 }

@@ -36,23 +36,25 @@ data class WorkspaceEntity(
 /**
  * Phase 2 — Persistent knowledge document entity.
  *
- * Previously RagPipelineService kept `_documents` and `chunks` in memory only,
- * so all ingested knowledge was lost on app restart. This entity persists the
- * document metadata so the RAG subsystem can rebuild its in-memory index on
- * startup. The actual chunk text + embedding vectors live in DocumentChunkEntity.
+ * P0 CONVERGENCE (audit step 12 §7): RAG metadata durability.
+ *  - The dead `projectId` column + its index were REMOVED (MIGRATION_11_TO_12):
+ *    the column was written as NULL on every insert since Phase 2 and nothing
+ *    ever read it — schema residue from the pre-workspace ownership model.
+ *  - `mimeType` is now persisted (previously dropped on write, so reloaded
+ *    documents silently lost their content type).
  */
 @Entity(
     tableName = "knowledge_documents",
-    indices = [Index("workspaceId"), Index("projectId"), Index("createdAtEpochMs")]
+    indices = [Index("workspaceId"), Index("createdAtEpochMs")]
 )
 data class KnowledgeDocumentEntity(
     @PrimaryKey
     val id: String,
     val workspaceId: String,
-    val projectId: Long?,
     val title: String,
     val sourceUri: String,
     val content: String,              // full document text (so re-chunking is possible)
+    val mimeType: String = "text/markdown",
     val tagsJson: String,             // JSON array of tags
     val totalChunks: Int,
     val totalTokensEstimated: Int,
@@ -64,15 +66,17 @@ data class KnowledgeDocumentEntity(
 /**
  * Phase 2 — Persistent document chunk entity with embedding vector.
  *
- * Each chunk is stored with its embedding vector as JSON (Phase 2 simplicity;
- * Phase 4 can migrate to BLOB). The `vectorDimension` is redundant with the
- * JSON length but stored explicitly for sanity checks and to detect schema
- * drift across embedding model upgrades.
- *
  * The `retrievalSource` field records whether the vector came from a real
- * embedding model ("SEMANTIC") or the lexical hash fallback ("LEXICAL_FALLBACK").
- * This lets the retrieval pipeline weight results honestly instead of treating
- * all vectors as semantic.
+ * semantic embedding model ("SEMANTIC") or the lexical hash fallback
+ * ("LEXICAL_FALLBACK") — derived from the persisted chunk metadata so the
+ * label stays honest across restarts (previously any non-null vector was
+ * labeled SEMANTIC, but the lexical fallback ALSO produces a vector).
+ *
+ * P0 CONVERGENCE (audit step 12 §7): `metadataJson` persists the chunk's
+ * metadata map (embeddingResourceId, embeddingSemantic, tags, source…).
+ * Previously metadata was dropped on write and rebuilt as an empty map on
+ * reload, which silently collapsed the embedding-compatibility boundary,
+ * authority/recency ranking signals and metadata filters after restart.
  */
 @Entity(
     tableName = "document_chunks",
@@ -89,6 +93,7 @@ data class DocumentChunkEntity(
     val vectorDimension: Int,
     val vectorJson: String,           // Float array as JSON
     val retrievalSource: String,      // SEMANTIC | LEXICAL_FALLBACK
+    val metadataJson: String = "{}",  // JSON map of chunk metadata
     val createdAtEpochMs: Long
 )
 

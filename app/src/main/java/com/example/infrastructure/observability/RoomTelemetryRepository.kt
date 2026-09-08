@@ -122,11 +122,40 @@ class RoomTelemetryRepository(
     }
 
     override suspend fun record(sample: MetricSample) {
-        // Update durable store.
-        val entity = sample.toEntity()
+        // Update durable store (single write — see recordBatch for the batched
+        // path; both paths persist EXACTLY once per sample).
+        persistSamples(listOf(sample))
+        // Update in-process aggregates.
+        updateCaches(sample)
+    }
+
+    /**
+     * P0 CORRECTNESS FIX (audit step 12 §12): `recordBatch()` previously
+     * persisted the batch via `metricEventDao.insertAll(entities)` and THEN
+     * delegated to `record()` for every sample — which persisted the SAME
+     * sample AGAIN. Every batched sample was written twice to the durable
+     * store, so `aggregateBuckets()` (which reads the table) double-counted
+     * counters, token usage and cost. Batches now persist EXACTLY ONCE and
+     * only update the in-memory caches per sample.
+     */
+    override suspend fun recordBatch(samples: List<MetricSample>) {
+        // Update durable store in ONE transaction — and ONLY here.
+        persistSamples(samples)
+        // Update aggregate caches sequentially to preserve monotonicity.
+        for (s in samples) updateCaches(s)
+    }
+
+    /**
+     * Persists samples to `metric_events` exactly once (fire-and-forget on
+     * the write scope; persistence failures never break the runtime path).
+     * Prunes rows older than 7 days to keep the table bounded.
+     */
+    private fun persistSamples(samples: List<MetricSample>) {
+        if (samples.isEmpty()) return
+        val entities = samples.map { it.toEntity() }
         writeScope.launch {
             try {
-                metricEventDao.insertAll(listOf(entity))
+                metricEventDao.insertAll(entities)
                 // Prune anything older than 7 days to keep the table bounded.
                 val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
                 metricEventDao.pruneOlderThan(cutoff)
@@ -134,7 +163,14 @@ class RoomTelemetryRepository(
                 // Persistence failures must never break the runtime path.
             }
         }
+    }
 
+    /**
+     * Updates the in-process aggregate cache and the bounded latency-sample
+     * windows for ONE sample. Shared by `record()` and `recordBatch()` so the
+     * cache sees every sample exactly once (no cache double-count either).
+     */
+    private suspend fun updateCaches(sample: MetricSample) {
         // Update aggregate cache.
         val key = "${sample.type.code}|${sample.dimensions.toKey()}"
         cacheLock.withLock {
@@ -173,20 +209,6 @@ class RoomTelemetryRepository(
                 while (deque.size > maxSamplesPerBucket) deque.removeFirst()
             }
         }
-    }
-
-    override suspend fun recordBatch(samples: List<MetricSample>) {
-        // Update durable store in one transaction.
-        val entities = samples.map { it.toEntity() }
-        writeScope.launch {
-            try {
-                metricEventDao.insertAll(entities)
-            } catch (_: Throwable) {
-                // Persistence failures must never break the runtime path.
-            }
-        }
-        // Update cache sequentially to preserve monotonicity.
-        for (s in samples) record(s)
     }
 
     override suspend fun recordAudit(event: AuditEvent): Long = withContext(Dispatchers.IO) {

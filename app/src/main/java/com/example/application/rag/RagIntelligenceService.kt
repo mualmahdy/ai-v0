@@ -14,6 +14,7 @@ import com.example.domain.core.rag.intelligence.RrfConfig
 import com.example.domain.core.rag.intelligence.RrfFusedCandidate
 import com.example.domain.ports.memory.EmbeddingProviderPort
 import com.example.infrastructure.persistence.dao.DocumentChunkDao
+import com.example.infrastructure.persistence.dao.KnowledgeDocumentDao
 import com.example.infrastructure.persistence.entities.DocumentChunkEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -63,6 +64,12 @@ import kotlin.math.sqrt
 class RagIntelligenceService(
     private val documentChunkDao: DocumentChunkDao,
     private val embeddingProvider: EmbeddingProviderPort,
+    /**
+     * P0 CONVERGENCE (audit step 12 §7): optional document DAO so reloaded
+     * chunks get their REAL document titles (previously always "" — titles
+     * vanished on the intelligence path after restart).
+     */
+    private val documentDao: KnowledgeDocumentDao? = null,
     private val rrfConfig: RrfConfig = RrfConfig(),
     private val rerankerConfig: RerankerConfig = RerankerConfig()
 ) {
@@ -134,7 +141,12 @@ class RagIntelligenceService(
         metadataFilters: Map<String, String>
     ): List<DocumentChunk> {
         val entities = documentChunkDao.getChunksForWorkspace(workspaceId)
-        return entities.map { it.toDomain() }.filter { chunk ->
+        // P0 CONVERGENCE: rebuild chunk titles from the document map so the
+        // intelligence path no longer loses provenance titles on reload.
+        val titlesByDocId = documentDao?.getDocumentsForWorkspace(workspaceId)
+            ?.associate { it.id to it.title }
+            ?: emptyMap()
+        return entities.map { it.toDomain(titlesByDocId[it.documentId] ?: "") }.filter { chunk ->
             if (metadataFilters.isEmpty()) true
             else metadataFilters.all { (k, v) -> chunk.metadata[k] == v }
         }
@@ -430,21 +442,36 @@ class RagIntelligenceService(
         return if (denom > 0f) (dot / denom).coerceIn(-1f, 1f) else 0f
     }
 
-    private fun DocumentChunkEntity.toDomain(): DocumentChunk {
+    private fun DocumentChunkEntity.toDomain(documentTitle: String): DocumentChunk {
         val vec = runCatching {
             val arr = JSONArray(vectorJson)
             val floats = FloatArray(arr.length()) { i -> arr.getDouble(i).toFloat() }
             EmbeddingVector(values = floats, dimension = floats.size)
         }.getOrNull()
+        // P0 CONVERGENCE (audit step 12 §7): the chunk's OWN persisted metadata
+        // (embeddingResourceId, embeddingSemantic, tags, ingest-time filter
+        // keys...) is now restored from `metadataJson` instead of being
+        // rebuilt as a partial synthetic map — metadata filters, authority
+        // and recency signals survive restarts. The workspace/retrieval
+        // context keys are merged on top (same values the reload previously
+        // fabricated, kept for compatibility).
+        val persistedMetadata = runCatching {
+            val obj = org.json.JSONObject(metadataJson)
+            val out = mutableMapOf<String, String>()
+            for (k in obj.keys()) {
+                if (!obj.isNull(k)) out[k] = obj.optString(k)
+            }
+            out
+        }.getOrDefault(emptyMap())
         return DocumentChunk(
             id = id,
             documentId = documentId,
-            documentTitle = "", // not stored on the chunk entity; populated by caller
+            documentTitle = documentTitle,
             chunkIndex = chunkIndex,
             text = text,
             vector = vec,
             tokenCount = tokenCount,
-            metadata = mapOf(
+            metadata = persistedMetadata + mapOf(
                 "workspaceId" to workspaceId,
                 "createdAtEpochMs" to createdAtEpochMs.toString(),
                 "retrievalSource" to retrievalSource

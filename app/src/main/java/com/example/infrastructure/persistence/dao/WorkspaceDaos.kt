@@ -65,9 +65,6 @@ interface KnowledgeDocumentDao {
     @Query("SELECT * FROM knowledge_documents WHERE workspaceId = :workspaceId AND isArchived = 0 ORDER BY createdAtEpochMs DESC")
     suspend fun getDocumentsForWorkspace(workspaceId: String): List<KnowledgeDocumentEntity>
 
-    @Query("SELECT * FROM knowledge_documents WHERE projectId = :projectId AND isArchived = 0 ORDER BY createdAtEpochMs DESC")
-    suspend fun getDocumentsForProject(projectId: Long): List<KnowledgeDocumentEntity>
-
     @Query("SELECT * FROM knowledge_documents WHERE id = :id LIMIT 1")
     suspend fun getDocumentById(id: String): KnowledgeDocumentEntity?
 

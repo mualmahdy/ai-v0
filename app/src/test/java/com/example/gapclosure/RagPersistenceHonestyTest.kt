@@ -37,7 +37,6 @@ class RagPersistenceHonestyTest {
         override fun observeDocumentsForWorkspace(workspaceId: String) =
             kotlinx.coroutines.flow.MutableStateFlow(emptyList<KnowledgeDocumentEntity>())
         override suspend fun getDocumentsForWorkspace(workspaceId: String): List<KnowledgeDocumentEntity> = emptyList()
-        override suspend fun getDocumentsForProject(projectId: Long): List<KnowledgeDocumentEntity> = emptyList()
         override suspend fun getDocumentById(id: String): KnowledgeDocumentEntity? = null
         override suspend fun insertOrUpdate(document: KnowledgeDocumentEntity) {
             throw IllegalStateException("DOC_WRITE_FAILED")
@@ -135,12 +134,12 @@ class RagPersistenceHonestyTest {
     @Test
     fun `stale async load cannot clobber the newer workspace working set`() = runBlocking {
         val docA = KnowledgeDocumentEntity(
-            id = "doc_a", workspaceId = "ws_a", projectId = null, title = "A",
+            id = "doc_a", workspaceId = "ws_a", title = "A",
             sourceUri = "a", content = "A-content", tagsJson = "[]", totalChunks = 0,
             totalTokensEstimated = 0, createdAtEpochMs = 1, updatedAtEpochMs = 1, isArchived = false
         )
         val docB = KnowledgeDocumentEntity(
-            id = "doc_b", workspaceId = "ws_b", projectId = null, title = "B",
+            id = "doc_b", workspaceId = "ws_b", title = "B",
             sourceUri = "b", content = "B-content", tagsJson = "[]", totalChunks = 0,
             totalTokensEstimated = 0, createdAtEpochMs = 2, updatedAtEpochMs = 2, isArchived = false
         )

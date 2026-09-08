@@ -16,7 +16,7 @@ data class Project(
     val lastOpenedAt: String?
 )
 
-@Deprecated("Legacy parallel model. Use com.example.domain.core.storage.WorkspaceSessionInfo instead.")
+@Deprecated("Legacy parallel model. The workspace-scoped runtime supersedes it (Task/Execution path).")
 data class Session(
     val sessionId: String,
     val projectId: Long,

@@ -26,11 +26,18 @@ import java.util.concurrent.TimeUnit
  * 1. Primary: Official Tavily Search API (when API key is provided).
  * 2. Fallback: Public Instant Search / Wikipedia API (when no Tavily API key is provided).
  * 3. Offline/Workspace Fallback: Local Workspace files search.
+ *
+ * P0 CONVERGENCE: the legacy `defaultProjectId = 1L` constructor fallback
+ * was REMOVED. The local-workspace fallback resolves the sandbox project
+ * from the PINNED [ExecutionScope] first, then from the
+ * [projectIdProvider]; when neither yields a bound project the fallback is
+ * SKIPPED (empty honest result) — never silently searched in the legacy
+ * shared project 1L.
  */
 class MultiSourceSearchAdapter(
     private val tavilyApiKeyProvider: suspend () -> String? = { null },
     private val workspaceStoragePort: WorkspaceStoragePort? = null,
-    private val defaultProjectId: Long = 1L,
+    private val projectIdProvider: (() -> Long?)? = null,
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
@@ -155,34 +162,41 @@ class MultiSourceSearchAdapter(
             // Fall through to workspace search
         }
 
-        // 3. Local Workspace Fallback
+        // 3. Local Workspace Fallback (P0 convergence: pinned-scope or
+        // provider-resolved project — never the legacy shared 1L).
         if (workspaceStoragePort != null) {
-            when (val files = workspaceStoragePort.listFiles(defaultProjectId)) {
-                is Outcome.Success -> {
-                    val matching = files.value.filter {
-                        it.relativePath.contains(query.query, ignoreCase = true)
-                    }
-                    val items = matching.map { file ->
-                        SearchResultItem(
-                            title = "ملف محلي: ${file.relativePath}",
-                            url = "workspace://${file.relativePath}",
-                            snippet = "ملف في مساحة العمل (${file.sizeBytes} بايت)",
-                            score = 0.90f
+            val projectId = kotlin.coroutines.coroutineContext[
+                com.example.domain.core.execution.ExecutionScope.Key
+            ]?.projectId?.takeIf { it > 0 }
+                ?: projectIdProvider?.invoke()?.takeIf { it > 0 }
+            if (projectId != null) {
+                when (val files = workspaceStoragePort.listFiles(projectId)) {
+                    is Outcome.Success -> {
+                        val matching = files.value.filter {
+                            it.relativePath.contains(query.query, ignoreCase = true)
+                        }
+                        val items = matching.map { file ->
+                            SearchResultItem(
+                                title = "ملف محلي: ${file.relativePath}",
+                                url = "workspace://${file.relativePath}",
+                                snippet = "ملف في مساحة العمل (${file.sizeBytes} بايت)",
+                                score = 0.90f
+                            )
+                        }
+                        val duration = System.currentTimeMillis() - startTime
+                        return@withContext Outcome.Degraded(
+                            partialValue = SearchResultSet(
+                                query = query.query,
+                                items = items,
+                                providerId = "local_workspace"
+                            ),
+                            reason = DegradedReason.CACHE_FALLBACK,
+                            diagnosticMessage = "تم البحث محلياً في مساحة العمل بسبب عدم توفر مفتاح Tavily أو تعذر الاتصال بالشبكة.",
+                            metadata = OutcomeMetadata(durationMs = duration, providerId = "local_workspace")
                         )
                     }
-                    val duration = System.currentTimeMillis() - startTime
-                    return@withContext Outcome.Degraded(
-                        partialValue = SearchResultSet(
-                            query = query.query,
-                            items = items,
-                            providerId = "local_workspace"
-                        ),
-                        reason = DegradedReason.CACHE_FALLBACK,
-                        diagnosticMessage = "تم البحث محلياً في مساحة العمل بسبب عدم توفر مفتاح Tavily أو تعذر الاتصال بالشبكة.",
-                        metadata = OutcomeMetadata(durationMs = duration, providerId = "local_workspace")
-                    )
+                    else -> Unit
                 }
-                else -> Unit
             }
         }
 

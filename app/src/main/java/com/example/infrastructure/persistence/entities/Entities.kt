@@ -1,9 +1,25 @@
 package com.example.infrastructure.persistence.entities
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "projects")
+/**
+ * P0 CONVERGENCE (audit step 12 §6): the Project is now explicitly
+ * WORKSPACE-OWNED. `workspaceId` is the owning workspace's id (null =
+ * legacy rows whose owner could not be determined during migration —
+ * they remain readable but are never implicitly re-assigned).
+ *
+ * Previously the projects table had no workspace back-reference at all:
+ * ownership had to be inferred through `workspaces.lastActiveProjectId`,
+ * which is ambiguous (nothing prevented two workspaces pointing at the
+ * same project) and left the Project as a floating anchor. MIGRATION_11_TO_12
+ * backfills `workspaceId` from the existing bridge column.
+ */
+@Entity(
+    tableName = "projects",
+    indices = [Index("workspaceId")]
+)
 data class ProjectEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0L,
@@ -12,21 +28,26 @@ data class ProjectEntity(
     val rootPath: String,
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long,
-    val isArchived: Boolean = false
+    val isArchived: Boolean = false,
+    /** Owning workspace id — set at creation, never implicit. */
+    val workspaceId: String? = null
 )
 
-@Entity(tableName = "sessions")
-data class SessionEntity(
-    @PrimaryKey
-    val sessionId: String,
-    val projectId: Long,
-    val title: String,
-    val assignedAgentId: String,
-    val activeModelId: String,
-    val createdAtEpochMs: Long,
-    val updatedAtEpochMs: Long,
-    val totalTokensConsumed: Int = 0
-)
+/*
+ * P0 CONVERGENCE REMOVAL: `SessionEntity` (table `sessions`) was deleted.
+ *
+ * The whole `SessionRepositoryPort` surface (getActiveProject / listProjects /
+ * createProject / listSessions / saveSession) had ZERO production callers —
+ * it was a dead remnant of the pre-workspace project-scoped architecture:
+ *  - ownership was projectId-only (never workspace-scoped),
+ *  - it lazily bootstrapped the legacy shared project id=1L,
+ *  - and no production path ever wrote or read a session row.
+ *
+ * The durable conversation/session surface of the runtime is the Task/
+ * Execution/ExecutionLog path (workspace-scoped). MIGRATION_11_TO_12 drops
+ * the table; a future first-class Session experience must be born
+ * workspace-owned, not resurrected from this remnant.
+ */
 
 @Entity(tableName = "memory_records")
 data class MemoryEntity(
@@ -196,17 +217,27 @@ data class ProviderConfigEntity(
 
 /**
  * FIX D-1 / D-4 (audit c03919d): tabular MDP Q-table cell.
- * One row per (state-region, action) pair — stores the learned Q value and
- * transition statistics so the CBR-MDP engine accumulates REAL experience
- * across sessions (previously estimates were in-memory per-action-type only
- * and were wiped on every restart).
+ * One row per (state-region, RESOURCE, action) triple — stores the learned
+ * Q value and transition statistics so the CBR-MDP engine accumulates REAL
+ * experience across sessions (previously estimates were in-memory per-
+ * action-type only and were wiped on every restart).
+ *
+ * P0/P1 CONVERGENCE (audit step 12 §4): learning is RESOURCE-AWARE. The
+ * previous (regionKey, actionType) primary key collapsed every
+ * SELECT_MODEL/EXECUTE_TOOL/SEARCH over EVERY provider/model/resource into
+ * one cell, so the engine could learn "SEARCH is good" but never "SEARCH
+ * via resource X beats resource Y in this state". The new `resourceKey`
+ * column (MIGRATION_11_TO_12, default "R:none") extends the primary key;
+ * legacy rows map to the resource-less axis, which is exactly where
+ * resource-less actions (COMPLETE/STOP/RETRY/...) continue to learn.
  */
 @Entity(
     tableName = "mdp_q_values",
-    primaryKeys = ["regionKey", "actionType"]
+    primaryKeys = ["regionKey", "resourceKey", "actionType"]
 )
 data class MdpQValueEntity(
     val regionKey: String,
+    val resourceKey: String,
     val actionType: String,
     val qValue: Float,
     val visitCount: Int,

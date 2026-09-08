@@ -28,6 +28,7 @@ import com.example.infrastructure.persistence.radar.RoomCapabilityRadarStore
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -251,11 +252,13 @@ class GovernancePersistenceTest {
     }
 
     @Test
-    fun `db version is 11 with all governance + execution-kernel tables`() {
-        // Gap-closure: v11 adds action_intents + agent_definitions + the
+    fun `db version is 12 with all governance + execution-kernel + convergence tables`() {
+        // Gap-closure: v11 added action_intents + agent_definitions + the
         // tasks.executionContextJson column (canonical execution kernel).
+        // P0 convergence (v12): workspace-owned projects, RAG metadata
+        // durability columns, resource-aware MDP PK, sessions remnant dropped.
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(11, dbVersion)
+        assertEquals(12, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))
@@ -267,6 +270,29 @@ class GovernancePersistenceTest {
         ).forEach { tableName ->
             assertTrue("missing table: $tableName", tables.contains(tableName))
         }
+        // P0 CONVERGENCE (v12) schema markers.
+        db.openHelper.readableDatabase.query("PRAGMA table_info(projects)").use { cursor ->
+            var hasWorkspaceOwnership = false
+            while (cursor.moveToNext()) {
+                if (cursor.getString(1) == "workspaceId") hasWorkspaceOwnership = true
+            }
+            assertTrue("projects.workspaceId must exist (workspace ownership)", hasWorkspaceOwnership)
+        }
+        db.openHelper.readableDatabase.query("PRAGMA table_info(document_chunks)").use { cursor ->
+            var hasMetadata = false
+            while (cursor.moveToNext()) {
+                if (cursor.getString(1) == "metadataJson") hasMetadata = true
+            }
+            assertTrue("document_chunks.metadataJson must exist (RAG durability)", hasMetadata)
+        }
+        db.openHelper.readableDatabase.query("PRAGMA table_info(mdp_q_values)").use { cursor ->
+            var hasResourceKey = false
+            while (cursor.moveToNext()) {
+                if (cursor.getString(1) == "resourceKey") hasResourceKey = true
+            }
+            assertTrue("mdp_q_values.resourceKey must exist (resource-aware learning)", hasResourceKey)
+        }
+        assertFalse("The dead sessions remnant must be gone", tables.contains("sessions"))
         db.openHelper.readableDatabase.query(
             "PRAGMA table_info(tasks)"
         ).use { cursor ->

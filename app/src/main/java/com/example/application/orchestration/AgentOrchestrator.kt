@@ -110,7 +110,15 @@ class AgentOrchestrator(
      * canonical context. Never consulted mid-execution (P0-02). Late-bound
      * by the AppContainer (avoids a constructor dependency cycle).
      */
-    var workspaceIdProvider: (() -> String?)? = null
+    var workspaceIdProvider: (() -> String?)? = null,
+    /**
+     * P0 CONVERGENCE (audit step 12 §6): resolves the ACTIVE workspace's OWN
+     * sandbox project id ONCE at execution launch and pins it into the
+     * canonical execution context — mid-run workspace switches can no longer
+     * re-target agent file operations. Never an implicit 1L (null = not
+     * bound; the fail-closed contract lives in FileSystemTool/skills/MCP).
+     */
+    var projectIdProvider: (() -> Long?)? = null
 ) {
 
     private val idempotency: ActionIdempotencyService = ActionIdempotencyService(actionIntentDao)
@@ -514,7 +522,7 @@ class AgentOrchestrator(
             executionId = "exec_" + UUID.randomUUID().toString(),
             taskId = task.id,
             workspaceId = resolvedWorkspaceId ?: "unattributed",
-            projectId = null,
+            projectId = projectIdProvider?.invoke()?.takeIf { it > 0 },
             agentId = agent.identity.id,
             agentRole = agent.identity.role,
             modelId = task.assignedModelId,
@@ -546,7 +554,7 @@ class AgentOrchestrator(
         // point (memory writes, RAG retrieval, resource scoping) resolves the
         // workspace from THIS scope, not from the active-workspace StateFlow.
         // ------------------------------------------------------------
-        withContext(ExecutionScope(executionId = executionId, workspaceId = context.workspaceId)) {
+        withContext(ExecutionScope(executionId = executionId, workspaceId = context.workspaceId, projectId = context.projectId)) {
             executeClosedLoop(
                 collector = collector,
                 agent = agent,

@@ -2,6 +2,7 @@ package com.example.infrastructure.skills
 
 import com.example.domain.core.Outcome
 import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.execution.ExecutionScope
 import com.example.domain.core.storage.StorageFailure
 import com.example.domain.core.tools.ToolFailure
 import com.example.domain.core.tools.ToolInput
@@ -10,6 +11,7 @@ import com.example.domain.ports.storage.WorkspaceStoragePort
 import com.example.domain.ports.tools.ToolPort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 
 /**
  * Executable Skills Runtime implementing real capability execution.
@@ -22,12 +24,17 @@ interface ExecutableSkill {
 
 /**
  * Clean Architecture Scaffolding Skill: Generates real directory structure and Kotlin templates in the Workspace.
+ *
+ * P0 CONVERGENCE: the legacy `defaultProjectId = 1L` constructor fallback
+ * was REMOVED. The sandbox project resolves per call from the PINNED
+ * [ExecutionScope] first (agent executions) and the [projectIdProvider]
+ * second (user-driven paths); when neither yields a bound project the skill
+ * fails honestly — there is no construction that can silently re-arm the
+ * shared-project cross-workspace data bleed.
  */
 class CleanArchitectureScaffolderSkill(
     private val storagePort: WorkspaceStoragePort,
-    @Deprecated("P0-04: fixed shared project removed. Wire projectIdProvider instead.")
-    private val defaultProjectId: Long = 1L,
-    private val projectIdProvider: (() -> Long?)? = null
+    private val projectIdProvider: () -> Long?
 ) : ExecutableSkill {
     override val skillId: String = "skill_clean_arch_scaffold"
     override val providedCapabilities: Set<CapabilityType> = setOf(
@@ -78,14 +85,12 @@ class CleanArchitectureScaffolderSkill(
         )
 
         var createdCount = 0
-        // P0-04: resolve the ACTIVE workspace's own project (never a shared 1L).
-        val projectId: Long = projectIdProvider?.invoke()?.takeIf { it > 0 }
-            ?: if (projectIdProvider != null) {
-                -1L // sentinel: no project bound → honest failure below
-            } else {
-                defaultProjectId
-            }
-        if (projectId == -1L) {
+        // P0 convergence: resolve the pinned execution scope's project first,
+        // then the ACTIVE workspace's own project — never a shared 1L.
+        val projectId: Long? =
+            coroutineContext[ExecutionScope.Key]?.projectId?.takeIf { it > 0 }
+                ?: projectIdProvider()?.takeIf { it > 0 }
+        if (projectId == null) {
             return@withContext Outcome.Error(
                 "PROJECT_CONTEXT_REQUIRED: لا يوجد مشروع مرتبط بمساحة العمل الحالية — ترفض المهارة إنشاء الملفات بدلاً من الكتابة في مشروع مشترك قديم."
             )

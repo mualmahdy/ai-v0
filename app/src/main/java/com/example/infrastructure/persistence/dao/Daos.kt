@@ -14,7 +14,6 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
 import com.example.infrastructure.persistence.entities.ProjectEntity
 import com.example.infrastructure.persistence.entities.ProviderConfigEntity
 import com.example.infrastructure.persistence.entities.RadarItemEntity
-import com.example.infrastructure.persistence.entities.SessionEntity
 import com.example.infrastructure.persistence.entities.TaskEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -37,27 +36,6 @@ interface ProjectDao {
 
     @Query("UPDATE projects SET isArchived = 1 WHERE id = :id")
     suspend fun archiveProject(id: Long)
-}
-
-@Dao
-interface SessionDao {
-    @Query("SELECT * FROM sessions WHERE projectId = :projectId ORDER BY updatedAtEpochMs DESC")
-    fun getSessionsForProject(projectId: Long): Flow<List<SessionEntity>>
-
-    // FIX APP-P0-05: listSessions() in SandboxWorkspaceStorageAdapter was returning
-    // emptyList() even though saveSession() wrote to Room. Added a suspend query so
-    // the storage adapter can actually read back what was written.
-    @Query("SELECT * FROM sessions WHERE projectId = :projectId ORDER BY updatedAtEpochMs DESC")
-    suspend fun getSessionsForProjectList(projectId: Long): List<SessionEntity>
-
-    @Query("SELECT * FROM sessions WHERE sessionId = :sessionId LIMIT 1")
-    suspend fun getSessionById(sessionId: String): SessionEntity?
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertSession(session: SessionEntity)
-
-    @Query("UPDATE sessions SET updatedAtEpochMs = :updatedAt, totalTokensConsumed = totalTokensConsumed + :tokensAdded WHERE sessionId = :sessionId")
-    suspend fun recordSessionTokens(sessionId: String, tokensAdded: Int, updatedAt: Long)
 }
 
 @Dao

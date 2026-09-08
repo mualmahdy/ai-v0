@@ -10,6 +10,7 @@ import com.example.infrastructure.persistence.entities.KnowledgeDocumentEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Phase 2 — Persistent knowledge store for the RAG subsystem.
@@ -35,19 +36,26 @@ open class KnowledgePersistenceService(
      * Loads all non-archived documents and their chunks for a workspace.
      * Returns a Pair of (documents, chunks) ready to be loaded into the
      * RagPipelineService in-memory index.
+     *
+     * P0 CONVERGENCE (audit step 12 §7): chunk METADATA (embedding
+     * provenance, tags, filtering keys) and the document MIME TYPE now
+     * round-trip through persistence, and chunk `documentTitle` is rebuilt
+     * from the document map — previously titles and metadata silently
+     * vanished on reload, collapsing the embedding-compatibility boundary,
+     * authority/recency signals and metadata filters after restart.
      */
     open suspend fun loadWorkspaceKnowledge(workspaceId: String): Pair<List<KnowledgeDocument>, List<DocumentChunk>> = withContext(Dispatchers.IO) {
         val docEntities = documentDao.getDocumentsForWorkspace(workspaceId)
         if (docEntities.isEmpty()) return@withContext emptyList<KnowledgeDocument>() to emptyList()
 
         val chunkEntities = chunkDao.getChunksForWorkspace(workspaceId)
-        val chunksByDoc = chunkEntities.groupBy { it.documentId }
+        val titlesByDocId = docEntities.associate { it.id to it.title }
 
         val documents = docEntities.map { entity ->
             entity.toDomain()
         }
         val chunks = chunkEntities.map { entity ->
-            entity.toDomain()
+            entity.toDomain(documentTitle = titlesByDocId[entity.documentId] ?: "")
         }
         documents to chunks
     }
@@ -55,6 +63,12 @@ open class KnowledgePersistenceService(
     /**
      * Persists a document and its chunks to Room. Replaces any existing
      * document with the same id (idempotent re-ingest).
+     *
+     * P0 CONVERGENCE: chunk metadata is persisted into `metadataJson` and
+     * the document's mimeType into its column — the reload path restores
+     * both. `retrievalSource` is now derived from the chunk's embedding
+     * provenance metadata (the lexical fallback ALSO produces a vector, so
+     * "vector != null" previously mislabeled every fallback chunk SEMANTIC).
      */
     suspend fun persistDocument(
         workspaceId: String,
@@ -65,10 +79,10 @@ open class KnowledgePersistenceService(
         val docEntity = KnowledgeDocumentEntity(
             id = document.id,
             workspaceId = workspaceId,
-            projectId = null, // Phase 2: documents are workspace-scoped, not project-scoped yet
             title = document.title,
             sourceUri = document.sourceUri,
             content = document.content,
+            mimeType = document.mimeType,
             tagsJson = encodeStringArray(document.tags),
             totalChunks = chunks.size,
             totalTokensEstimated = chunks.sumOf { it.tokenCount },
@@ -90,7 +104,8 @@ open class KnowledgePersistenceService(
                 tokenCount = chunk.tokenCount,
                 vectorDimension = chunk.vector?.values?.size ?: 0,
                 vectorJson = encodeVector(chunk.vector?.values),
-                retrievalSource = if (chunk.vector != null) "SEMANTIC" else "LEXICAL_FALLBACK",
+                retrievalSource = if (chunk.metadata["embeddingSemantic"] == "true") "SEMANTIC" else "LEXICAL_FALLBACK",
+                metadataJson = encodeMetadata(chunk.metadata),
                 createdAtEpochMs = now
             )
         }
@@ -137,23 +152,51 @@ open class KnowledgePersistenceService(
         id = id,
         title = title,
         sourceUri = sourceUri,
+        mimeType = mimeType,
         content = content,
         tags = decodeStringArray(tagsJson),
         totalChunks = totalChunks,
         createdAtTimestampMs = createdAtEpochMs
     )
 
-    private fun DocumentChunkEntity.toDomain(): DocumentChunk {
+    private fun DocumentChunkEntity.toDomain(documentTitle: String): DocumentChunk {
         val vector = decodeVector(vectorJson, vectorDimension)
         return DocumentChunk(
             id = id,
             documentId = documentId,
-            documentTitle = "", // populated by caller from document map
+            documentTitle = documentTitle,
             chunkIndex = chunkIndex,
             text = text,
+            vector = vector,
             tokenCount = tokenCount,
-            vector = vector
+            metadata = decodeMetadata(metadataJson)
         )
+    }
+
+    /** P0 CONVERGENCE: chunk metadata map <-> JSON round-trip. */
+    private fun encodeMetadata(metadata: Map<String, String>): String {
+        if (metadata.isEmpty()) return "{}"
+        return try {
+            val obj = JSONObject()
+            for ((k, v) in metadata) obj.put(k, v)
+            obj.toString()
+        } catch (_: Exception) {
+            "{}"
+        }
+    }
+
+    private fun decodeMetadata(json: String?): Map<String, String> {
+        if (json.isNullOrBlank() || json == "{}") return emptyMap()
+        return try {
+            val obj = JSONObject(json)
+            val out = mutableMapOf<String, String>()
+            for (k in obj.keys()) {
+                if (!obj.isNull(k)) out[k] = obj.optString(k)
+            }
+            out
+        } catch (_: Exception) {
+            emptyMap()
+        }
     }
 
     private fun encodeStringArray(list: List<String>): String {
