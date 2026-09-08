@@ -146,22 +146,39 @@ class RoomTelemetryRepository(
     }
 
     /**
-     * Persists samples to `metric_events` exactly once (fire-and-forget on
-     * the write scope; persistence failures never break the runtime path).
-     * Prunes rows older than 7 days to keep the table bounded.
+     * Honest persistence accounting (defect family 5 pattern repaired —
+     * previously BOTH baseline test failures and a durability hole):
+     * `persistSamples` was fire-and-forget on [writeScope] with failures
+     * silently swallowed, so a caller returning "recorded" had NO proof the
+     * rows were durable — reads could run ahead of writes (the baseline
+     * TelemetryNoDoubleCountTest race) and failures vanished.
+     *
+     * Contract now: `record()` / `recordBatch()` are already suspend — the
+     * write is AWAITED to completion before returning (Room suspend DAO
+     * calls run on Room's own executor, so this never blocks the caller's
+     * thread). Failures are counted in [persistenceFailureCount] with
+     * [lastPersistenceError] kept — surfaced instead of swallowed. The
+     * 7-day prune stays part of the same awaited write.
      */
-    private fun persistSamples(samples: List<MetricSample>) {
+    @Volatile var persistenceFailureCount: Int = 0
+        private set
+
+    @Volatile var lastPersistenceError: String? = null
+        private set
+
+    private suspend fun persistSamples(samples: List<MetricSample>) {
         if (samples.isEmpty()) return
         val entities = samples.map { it.toEntity() }
-        writeScope.launch {
-            try {
-                metricEventDao.insertAll(entities)
-                // Prune anything older than 7 days to keep the table bounded.
-                val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
-                metricEventDao.pruneOlderThan(cutoff)
-            } catch (_: Throwable) {
-                // Persistence failures must never break the runtime path.
-            }
+        try {
+            metricEventDao.insertAll(entities)
+            // Prune anything older than 7 days to keep the table bounded.
+            val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
+            metricEventDao.pruneOlderThan(cutoff)
+        } catch (t: Throwable) {
+            // Persistence failures must never break the runtime path — but
+            // they are COUNTED and surfaced (never silently swallowed).
+            persistenceFailureCount++
+            lastPersistenceError = "METRIC_PERSIST_FAILED: ${t.message ?: t.javaClass.simpleName}"
         }
     }
 

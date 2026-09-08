@@ -555,6 +555,21 @@ class GoldenPathTest {
                     it.permission == permission && it.isAllowed
             }
 
+        override suspend fun lookupScoped(
+            principalType: String,
+            principalId: String,
+            resourceType: String,
+            resourceId: String,
+            permission: String,
+            workspaceId: String?
+        ): com.example.infrastructure.persistence.entities.PermissionGrantEntity? =
+            grants.lastOrNull {
+                it.principalType == principalType && it.principalId == principalId &&
+                    it.resourceType == resourceType && it.resourceId == resourceId &&
+                    it.permission == permission && it.isAllowed &&
+                    (it.workspaceId == null || it.workspaceId == workspaceId)
+            }
+
         override suspend fun upsert(grant: com.example.infrastructure.persistence.entities.PermissionGrantEntity): Long {
             val withId = if (grant.id == 0L) grant.copy(id = nextId++) else grant
             grants.removeAll { it.id == withId.id }

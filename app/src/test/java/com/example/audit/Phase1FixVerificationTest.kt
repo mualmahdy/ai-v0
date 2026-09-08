@@ -76,31 +76,33 @@ class Phase1FixVerificationTest {
 
     @Test
     fun `CaseBase handles persisted legacy length-11 vectors via zero-padding`() {
-        // Simulate a legacy case with the old length-11 vector (pre-fix).
-        // The new computeCosineSimilarity zero-pads shorter vectors to the longer one's
-        // length, so the legacy case should still match (with reduced similarity because
-        // the evidence features contribute 0 to the dot product).
-        val caseBase = CaseBase()
-        caseBase.addCase(
-            DecisionCase(
-                id = "legacy_test",
-                problemFeatures = floatArrayOf(0.5f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.2f),
-                chosenAction = DecisionAction(DecisionActionType.EXECUTE_STEP),
-                outcomeReward = 0.8f,
-                taskType = "LEGACY"
+        kotlinx.coroutines.runBlocking {
+            // Simulate a legacy case with the old length-11 vector (pre-fix).
+            // The new computeCosineSimilarity zero-pads shorter vectors to the longer one's
+            // length, so the legacy case should still match (with reduced similarity because
+            // the evidence features contribute 0 to the dot product).
+            val caseBase = CaseBase()
+            caseBase.addCase(
+                DecisionCase(
+                    id = "legacy_test",
+                    problemFeatures = floatArrayOf(0.5f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.2f),
+                    chosenAction = DecisionAction(DecisionActionType.EXECUTE_STEP),
+                    outcomeReward = 0.8f,
+                    taskType = "LEGACY"
+                )
             )
-        )
 
-        val queryVec = floatArrayOf(
-            0.5f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.2f,
-            1.0f, 0.0f, 1.0f, 0.0f // evidence features (idx 11-14)
-        )
-        val similar = caseBase.findSimilarCases(queryVec, k = 5, minSimilarity = 0.0f)
-        val legacyMatch = similar.firstOrNull { it.first.id == "legacy_test" }
-        assertNotNull("Legacy length-11 case should still match (zero-padded)", legacyMatch)
-        // The similarity should be > 0 (the first 11 features match) but < 1.0 (the
-        // evidence features don't match because the legacy vector has zeros there).
-        assertTrue("Legacy match similarity should be > 0", (legacyMatch?.second ?: 0f) > 0f)
+            val queryVec = floatArrayOf(
+                0.5f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.2f,
+                1.0f, 0.0f, 1.0f, 0.0f // evidence features (idx 11-14)
+            )
+            val similar = caseBase.findSimilarCases(queryVec, k = 5, minSimilarity = 0.0f)
+            val legacyMatch = similar.firstOrNull { it.first.id == "legacy_test" }
+            assertNotNull("Legacy length-11 case should still match (zero-padded)", legacyMatch)
+            // The similarity should be > 0 (the first 11 features match) but < 1.0 (the
+            // evidence features don't match because the legacy vector has zeros there).
+            assertTrue("Legacy match similarity should be > 0", (legacyMatch?.second ?: 0f) > 0f)
+        }
     }
 
     // ────────────────────────────────────────────────────────────────────

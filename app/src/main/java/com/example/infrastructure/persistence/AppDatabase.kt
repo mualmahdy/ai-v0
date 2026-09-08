@@ -169,16 +169,19 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.PricingEntryEntity::class,
         com.example.infrastructure.persistence.entities.CostLedgerEntryEntity::class,
         com.example.infrastructure.persistence.entities.BudgetAllocationEntity::class,
-        // Gap-closure — Canonical Execution Kernel + Durable Agent Registry (v11)
+        // Gap-closure — canonical durable agent registry (P1-08/P1-09)
         com.example.infrastructure.persistence.entities.ActionIntentEntity::class,
         com.example.infrastructure.persistence.entities.AgentDefinitionEntity::class,
+        // v14 — durable agent revision ledger (defect family 4: agent
+        // revisions must be durable and reproducible)
+        com.example.infrastructure.persistence.entities.AgentRevisionEntity::class,
         // v13 — Report gap-closure: durable conversation sessions + workflow
         // library + full-fidelity durable agents
         com.example.infrastructure.persistence.entities.ConversationSessionEntity::class,
         com.example.infrastructure.persistence.entities.ConversationTurnEntity::class,
         com.example.infrastructure.persistence.entities.WorkflowDefinitionEntity::class
     ],
-    version = 13,
+    version = 14,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -248,6 +251,9 @@ abstract class AppDatabase : RoomDatabase() {
 
     // Gap-closure — canonical durable agent registry (P1-08/P1-09)
     abstract fun agentDefinitionDao(): com.example.infrastructure.persistence.dao.AgentDefinitionDao
+
+    // v14 — durable agent revision ledger (defect family 4)
+    abstract fun agentRevisionDao(): com.example.infrastructure.persistence.dao.AgentRevisionDao
 
     // v13 — durable conversation sessions (report gap: sessions)
     abstract fun conversationSessionDao(): com.example.infrastructure.persistence.dao.ConversationSessionDao
@@ -1448,6 +1454,48 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v13 → v14 (cumulative correctness & authority repair order):
+         *   1. `permission_grants.workspaceId` — workspace context becomes
+         *      part of authorization (defect family 2). Existing rows keep
+         *      NULL = explicitly GLOBAL grants.
+         *   2. `agent_revisions` — the durable agent revision ledger (defect
+         *      family 4: version chains survive process death).
+         *   3. `workflow_step_states.artifactsJson` — durable artifact/
+         *      dataflow payloads so workflow resume restores the explicit
+         *      dataflow, not just a 200-char summary (defect family 7).
+         * Purely additive — no existing column altered or dropped.
+         */
+        private val MIGRATION_13_TO_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // --- 1. Workspace-scoped permission grants ---
+                db.execSQL("ALTER TABLE permission_grants ADD COLUMN workspaceId TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_permission_grants_workspaceId ON permission_grants(workspaceId)")
+
+                // --- 2. Durable agent revision ledger ---
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_revisions (
+                        agentId TEXT NOT NULL,
+                        revisionId TEXT NOT NULL,
+                        major INTEGER NOT NULL,
+                        minor INTEGER NOT NULL,
+                        patch INTEGER NOT NULL,
+                        previousVersionId TEXT,
+                        snapshotJson TEXT NOT NULL,
+                        createdBy TEXT NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        PRIMARY KEY(agentId, revisionId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_agent_revisions_agentId ON agent_revisions(agentId)")
+
+                // --- 3. Durable workflow artifacts ---
+                db.execSQL("ALTER TABLE workflow_step_states ADD COLUMN artifactsJson TEXT")
+            }
+        }
+
 
 
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
@@ -1465,6 +1513,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_10_TO_11,
             MIGRATION_11_TO_12,
             MIGRATION_12_TO_13,
+            MIGRATION_13_TO_14,
         )
 
         fun getInstance(context: Context): AppDatabase {

@@ -116,8 +116,20 @@ class WorkflowPersistenceService(
      * Write a durable checkpoint. Called by `WorkflowEngine` after each
      * step completes.
      */
-    suspend fun checkpoint(workflowId: WorkflowId, currentStepIndex: Int): Unit = withContext(Dispatchers.IO) {
-        workflowExecutionDao.checkpoint(workflowId.value, "RUNNING", currentStepIndex, System.currentTimeMillis())
+    suspend fun checkpoint(
+        workflowId: WorkflowId,
+        currentStepIndex: Int,
+        workspaceId: String? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        // WORKSPACE-AUTHORIZED (defect family 1): when a workspace scope is
+        // supplied, only the owning workspace's execution row is written.
+        if (workspaceId != null) {
+            workflowExecutionDao.checkpointForWorkspace(
+                workflowId.value, workspaceId, "RUNNING", currentStepIndex, System.currentTimeMillis()
+            )
+        } else {
+            workflowExecutionDao.checkpoint(workflowId.value, "RUNNING", currentStepIndex, System.currentTimeMillis())
+        }
     }
 
     /**
@@ -129,8 +141,19 @@ class WorkflowPersistenceService(
         status: StepStatus,
         outputSummary: String?,
         durationMs: Long?,
-        errorMessage: String? = null
+        errorMessage: String? = null,
+        workspaceId: String? = null,
+        /** Durable artifact payloads (defect family 7): {"name":"value"}. */
+        artifactsJson: String? = null
     ): Unit = withContext(Dispatchers.IO) {
+        // WORKSPACE-AUTHORIZED (defect family 1): step-state mutations are
+        // gated on the OWNING execution row when a scope is supplied — a
+        // cross-workspace step write is a no-op.
+        if (workspaceId != null &&
+            workflowExecutionDao.byIdAndWorkspace(workflowId.value, workspaceId) == null
+        ) {
+            return@withContext
+        }
         workflowStepStateDao.updateStepStatus(
             workflowId = workflowId.value,
             stepId = stepId,
@@ -139,13 +162,31 @@ class WorkflowPersistenceService(
             duration = durationMs,
             now = System.currentTimeMillis()
         )
+        if (artifactsJson != null) {
+            workflowStepStateDao.updateStepArtifacts(
+                workflowId = workflowId.value,
+                stepId = stepId,
+                artifactsJson = artifactsJson
+            )
+        }
     }
 
     /**
      * Mark a step as compensated — its effects were rolled back by a
      * compensation action.
      */
-    suspend fun markStepCompensated(workflowId: WorkflowId, stepId: String, reason: String): Unit = withContext(Dispatchers.IO) {
+    suspend fun markStepCompensated(
+        workflowId: WorkflowId,
+        stepId: String,
+        reason: String,
+        workspaceId: String? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        // WORKSPACE-AUTHORIZED — see markStepStatus.
+        if (workspaceId != null &&
+            workflowExecutionDao.byIdAndWorkspace(workflowId.value, workspaceId) == null
+        ) {
+            return@withContext
+        }
         workflowStepStateDao.updateStepStatus(
             workflowId = workflowId.value,
             stepId = stepId,
@@ -165,31 +206,62 @@ class WorkflowPersistenceService(
      * free-form TEXT in the entity; DEGRADED is a terminal state like
      * COMPLETED and is excluded from `resumable()` by design.
      */
-    suspend fun complete(workflowId: WorkflowId, isDegraded: Boolean): Unit = withContext(Dispatchers.IO) {
+    suspend fun complete(
+        workflowId: WorkflowId,
+        isDegraded: Boolean,
+        workspaceId: String? = null
+    ): Unit = withContext(Dispatchers.IO) {
         val state = if (isDegraded) "DEGRADED" else "COMPLETED"
-        workflowExecutionDao.terminate(workflowId.value, state, System.currentTimeMillis(), null)
+        if (workspaceId != null) {
+            workflowExecutionDao.terminateForWorkspace(workflowId.value, workspaceId, state, System.currentTimeMillis(), null)
+        } else {
+            workflowExecutionDao.terminate(workflowId.value, state, System.currentTimeMillis(), null)
+        }
     }
 
     /**
      * Mark the workflow as failed.
      */
-    suspend fun fail(workflowId: WorkflowId, reason: String): Unit = withContext(Dispatchers.IO) {
-        workflowExecutionDao.terminate(workflowId.value, "FAILED", System.currentTimeMillis(), reason)
+    suspend fun fail(
+        workflowId: WorkflowId,
+        reason: String,
+        workspaceId: String? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        if (workspaceId != null) {
+            workflowExecutionDao.terminateForWorkspace(workflowId.value, workspaceId, "FAILED", System.currentTimeMillis(), reason)
+        } else {
+            workflowExecutionDao.terminate(workflowId.value, "FAILED", System.currentTimeMillis(), reason)
+        }
     }
 
     /**
      * Mark the workflow as cancelled.
      */
-    suspend fun cancel(workflowId: WorkflowId, reason: String): Unit = withContext(Dispatchers.IO) {
-        workflowExecutionDao.terminate(workflowId.value, "CANCELLED", System.currentTimeMillis(), reason)
+    suspend fun cancel(
+        workflowId: WorkflowId,
+        reason: String,
+        workspaceId: String? = null
+    ): Unit = withContext(Dispatchers.IO) {
+        if (workspaceId != null) {
+            workflowExecutionDao.terminateForWorkspace(workflowId.value, workspaceId, "CANCELLED", System.currentTimeMillis(), reason)
+        } else {
+            workflowExecutionDao.terminate(workflowId.value, "CANCELLED", System.currentTimeMillis(), reason)
+        }
     }
 
     /**
      * List all workflows that can be resumed after process death.
      * Returns workflows in state RUNNING, PAUSED, or COMPENSATING.
      */
-    suspend fun resumable(): List<ResumableWorkflow> = withContext(Dispatchers.IO) {
-        workflowExecutionDao.resumable().map { entity ->
+    suspend fun resumable(workspaceId: String? = null): List<ResumableWorkflow> = withContext(Dispatchers.IO) {
+        // WORKSPACE-SCOPED (defect family 1): callers operating inside a
+        // workspace only see that workspace's resumable runs.
+        val rows = if (workspaceId != null) {
+            workflowExecutionDao.resumableForWorkspace(workspaceId)
+        } else {
+            workflowExecutionDao.resumable()
+        }
+        rows.map { entity ->
             val plan = deserializePlan(entity.planJson)
             val steps = workflowStepStateDao.forWorkflow(entity.workflowId)
             ResumableWorkflow(
@@ -207,8 +279,15 @@ class WorkflowPersistenceService(
     /**
      * Get a single workflow execution state by id.
      */
-    suspend fun byId(workflowId: WorkflowId): WorkflowExecutionState? = withContext(Dispatchers.IO) {
-        val entity = workflowExecutionDao.byId(workflowId.value) ?: return@withContext null
+    suspend fun byId(
+        workflowId: WorkflowId,
+        workspaceId: String? = null
+    ): WorkflowExecutionState? = withContext(Dispatchers.IO) {
+        val entity = if (workspaceId != null) {
+            workflowExecutionDao.byIdAndWorkspace(workflowId.value, workspaceId)
+        } else {
+            workflowExecutionDao.byId(workflowId.value)
+        } ?: return@withContext null
         val steps = workflowStepStateDao.forWorkflow(workflowId.value)
         WorkflowExecutionState(
             workflowId = WorkflowId(entity.workflowId),
@@ -228,7 +307,8 @@ class WorkflowPersistenceService(
                     outputSummary = it.outputSummary,
                     durationMs = it.durationMs,
                     attemptCount = it.attemptCount,
-                    lastErrorMessage = it.lastErrorMessage
+                    lastErrorMessage = it.lastErrorMessage,
+                    artifactsJson = it.artifactsJson
                 )
             }
         )
@@ -270,10 +350,48 @@ class WorkflowPersistenceService(
         // workflow steps must execute through DURABLE registry agents).
         step.assignedAgentId?.let { s.put("assignedAgentId", it) } ?: s.put("assignedAgentId", JSONObject.NULL)
         step.assignedModelId?.let { s.put("assignedModelId", it) } ?: s.put("assignedModelId", JSONObject.NULL)
+        // Schema v4 — EXPLICIT artifact/dataflow contract (defect family 7).
+        s.put("artifactContract", serializeArtifactContract(step.artifactContract))
         s.put("status", step.status.name)
         step.outputSummary?.let { s.put("outputSummary", it) } ?: s.put("outputSummary", JSONObject.NULL)
         s.put("durationMs", step.durationMs)
         return s
+    }
+
+    private fun serializeArtifactContract(contract: com.example.domain.core.workflow.StepArtifactContract): JSONObject {
+        val c = JSONObject()
+        val produces = JSONArray()
+        for (spec in contract.produces) {
+            val o = JSONObject()
+            o.put("name", spec.name)
+            o.put("description", spec.description)
+            produces.put(o)
+        }
+        c.put("produces", produces)
+        c.put("consumes", toStringArray(contract.consumes))
+        return c
+    }
+
+    private fun deserializeArtifactContract(c: JSONObject?): com.example.domain.core.workflow.StepArtifactContract {
+        if (c == null) return com.example.domain.core.workflow.StepArtifactContract()
+        val produces = mutableListOf<com.example.domain.core.workflow.StepArtifactContract.ArtifactSpec>()
+        val arr = c.optJSONArray("produces") ?: JSONArray()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val name = o.optString("name", "")
+            if (name.isNotBlank()) {
+                produces.add(
+                    com.example.domain.core.workflow.StepArtifactContract.ArtifactSpec(
+                        name = name,
+                        description = o.optString("description", "")
+                    )
+                )
+            }
+        }
+        return com.example.domain.core.workflow.StepArtifactContract(
+            produces = produces,
+            consumes = fromStringArray(c.optJSONArray("consumes"))
+        )
     }
 
     private fun serializeRequirements(req: TaskCapabilityRequirements): JSONObject {
@@ -355,6 +473,7 @@ class WorkflowPersistenceService(
             dependencies = fromStringArray(s.optJSONArray("dependencies")).toSet(),
             assignedAgentId = if (s.isNull("assignedAgentId")) null else s.optString("assignedAgentId", null),
             assignedModelId = if (s.isNull("assignedModelId")) null else s.optString("assignedModelId", null),
+            artifactContract = deserializeArtifactContract(s.optJSONObject("artifactContract")),
             status = runCatching { StepStatus.valueOf(s.optString("status", StepStatus.PENDING.name)) }
                 .getOrDefault(StepStatus.PENDING),
             outputSummary = if (s.isNull("outputSummary")) null else s.optString("outputSummary", null),
@@ -458,5 +577,7 @@ data class WorkflowStepState(
     val outputSummary: String?,
     val durationMs: Long?,
     val attemptCount: Int,
-    val lastErrorMessage: String?
+    val lastErrorMessage: String?,
+    /** Durable artifact payloads produced by this step (defect family 7). */
+    val artifactsJson: String? = null
 )

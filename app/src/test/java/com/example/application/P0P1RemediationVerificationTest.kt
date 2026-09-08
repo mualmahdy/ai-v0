@@ -81,56 +81,60 @@ class P0P1RemediationVerificationTest {
 
     @Test
     fun `q table learns per region-action cells from observations`() {
-        val engine = CbrMdpEngine()
-        val state = decisionState()
-        val action = DecisionAction(DecisionActionType.SEARCH, targetId = "multi_source_search")
+        kotlinx.coroutines.runBlocking {
+            val engine = CbrMdpEngine()
+            val state = decisionState()
+            val action = DecisionAction(DecisionActionType.SEARCH, targetId = "multi_source_search")
 
-        // Two observations taken in the SAME state region (no evidence yet) —
-        // they must accumulate in ONE (region, action) cell.
-        val updated = engine.processObservationAndUpdateBelief(state, observation(action, true, 0.8f))
-        val updated2 = engine.processObservationAndUpdateBelief(state, observation(action, false, -0.4f))
+            // Two observations taken in the SAME state region (no evidence yet) —
+            // they must accumulate in ONE (region, action) cell.
+            val updated = engine.processObservationAndUpdateBelief(state, observation(action, true, 0.8f))
+            val updated2 = engine.processObservationAndUpdateBelief(state, observation(action, false, -0.4f))
 
-        val region = engine.stateRegionKey(state)
-        val cell = engine.getQEntry(region, DecisionActionType.SEARCH)
-        assertNotNull("Q cell must exist after an observation (D-1)", cell)
-        assertEquals(2, cell!!.visitCount)
-        assertEquals(1, cell.successCount)
-        assertTrue(cell.qValue in -1.5f..1.5f)
+            val region = engine.stateRegionKey(state)
+            val cell = engine.getQEntry(region, DecisionActionType.SEARCH)
+            assertNotNull("Q cell must exist after an observation (D-1)", cell)
+            assertEquals(2, cell!!.visitCount)
+            assertEquals(1, cell.successCount)
+            assertTrue(cell.qValue in -1.5f..1.5f)
 
-        // The region changed after evidence flags flipped — different cell space.
-        assertTrue(engine.qTableSize() >= 1)
-        // Evidence flag propagated from the SUCCESSFUL search observation...
-        assertTrue(updated.hasSearchEvidence)
-        // ...while the FAILED search did NOT fabricate evidence (honest belief).
-        assertFalse(updated2.hasSearchEvidence)
+            // The region changed after evidence flags flipped — different cell space.
+            assertTrue(engine.qTableSize() >= 1)
+            // Evidence flag propagated from the SUCCESSFUL search observation...
+            assertTrue(updated.hasSearchEvidence)
+            // ...while the FAILED search did NOT fabricate evidence (honest belief).
+            assertFalse(updated2.hasSearchEvidence)
+        }
     }
 
     @Test
     fun `q table persists to the learning store and reloads after restart (D-4)`() {
-        val store = InMemoryMdpLearningStore()
-        // Unconfined scope → persistence flush happens synchronously in-test.
-        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
-        val engine = CbrMdpEngine(mdpStore = store, persistenceScope = scope)
+        kotlinx.coroutines.runBlocking {
+            val store = InMemoryMdpLearningStore()
+            // Unconfined scope → persistence flush happens synchronously in-test.
+            val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+            val engine = CbrMdpEngine(mdpStore = store, persistenceScope = scope)
 
-        val state = decisionState()
-        val action = DecisionAction(DecisionActionType.RETRIEVE_MEMORY)
-        engine.processObservationAndUpdateBelief(state, observation(action, true, 0.9f))
-        engine.processObservationAndUpdateBelief(state, observation(action, true, 0.7f))
+            val state = decisionState()
+            val action = DecisionAction(DecisionActionType.RETRIEVE_MEMORY)
+            engine.processObservationAndUpdateBelief(state, observation(action, true, 0.9f))
+            engine.processObservationAndUpdateBelief(state, observation(action, true, 0.7f))
 
-        // Store received the dirty cells (Unconfined scope → synchronous flush).
-        val persisted = kotlinx.coroutines.runBlocking { store.loadAll() }
-        assertTrue("cells must be persisted (D-4)", persisted.isNotEmpty())
-        val persistedCell = persisted.first { it.actionType == DecisionActionType.RETRIEVE_MEMORY }
-        assertEquals(2, persistedCell.visitCount)
+            // Store received the dirty cells (Unconfined scope → synchronous flush).
+            val persisted = kotlinx.coroutines.runBlocking { store.loadAll() }
+            assertTrue("cells must be persisted (D-4)", persisted.isNotEmpty())
+            val persistedCell = persisted.first { it.actionType == DecisionActionType.RETRIEVE_MEMORY }
+            assertEquals(2, persistedCell.visitCount)
 
-        // Simulate an app restart: a NEW engine over the SAME store restores
-        // the learned table via loadPersistedQTable (bootstrap path).
-        val restarted = CbrMdpEngine(mdpStore = store, persistenceScope = scope)
-        kotlinx.coroutines.runBlocking { restarted.loadPersistedQTable() }
-        val restored = restarted.getQEntry(engine.stateRegionKey(state), DecisionActionType.RETRIEVE_MEMORY)
-        assertNotNull("persisted cells must reload after restart (D-4)", restored)
-        assertEquals(2, restored!!.visitCount)
-        assertEquals(2, restored.successCount)
+            // Simulate an app restart: a NEW engine over the SAME store restores
+            // the learned table via loadPersistedQTable (bootstrap path).
+            val restarted = CbrMdpEngine(mdpStore = store, persistenceScope = scope)
+            kotlinx.coroutines.runBlocking { restarted.loadPersistedQTable() }
+            val restored = restarted.getQEntry(engine.stateRegionKey(state), DecisionActionType.RETRIEVE_MEMORY)
+            assertNotNull("persisted cells must reload after restart (D-4)", restored)
+            assertEquals(2, restored!!.visitCount)
+            assertEquals(2, restored.successCount)
+        }
     }
 
     // ====================================================================
@@ -139,43 +143,47 @@ class P0P1RemediationVerificationTest {
 
     @Test
     fun `evoi gate penalizes ASK_USER when uncertainty is low`() {
-        val engine = CbrMdpEngine()
-        val state = decisionState(uncertainty = 0.2f, failures = 0, step = 2)
+        kotlinx.coroutines.runBlocking {
+            val engine = CbrMdpEngine()
+            val state = decisionState(uncertainty = 0.2f, failures = 0, step = 2)
 
-        val candidates = listOf(
-            DecisionAction(DecisionActionType.ASK_USER, payload = mapOf("reason" to "confirm?")),
-            DecisionAction(DecisionActionType.SELECT_MODEL, targetId = "gemini-2.5-flash"),
-            DecisionAction(DecisionActionType.COMPLETE)
-        )
-        val result = engine.evaluateAndSelectAction(state, candidates)
-        val askScore = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.ASK_USER }.finalScore
-        val modelScore = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.SELECT_MODEL }.finalScore
-        assertTrue(
-            "ASK_USER must be penalized at low uncertainty (EVOI gate): ask=$askScore model=$modelScore",
-            askScore < modelScore
-        )
-        // The gate reason is surfaced in the decision rationale.
-        val askReason = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.ASK_USER }.reason
-        assertTrue(askReason.contains("EVOI"))
+            val candidates = listOf(
+                DecisionAction(DecisionActionType.ASK_USER, payload = mapOf("reason" to "confirm?")),
+                DecisionAction(DecisionActionType.SELECT_MODEL, targetId = "gemini-2.5-flash"),
+                DecisionAction(DecisionActionType.COMPLETE)
+            )
+            val result = engine.evaluateAndSelectAction(state, candidates)
+            val askScore = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.ASK_USER }.finalScore
+            val modelScore = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.SELECT_MODEL }.finalScore
+            assertTrue(
+                "ASK_USER must be penalized at low uncertainty (EVOI gate): ask=$askScore model=$modelScore",
+                askScore < modelScore
+            )
+            // The gate reason is surfaced in the decision rationale.
+            val askReason = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.ASK_USER }.reason
+            assertTrue(askReason.contains("EVOI"))
+        }
     }
 
     @Test
     fun `evoi gate allows ASK_USER when uncertainty justifies information value`() {
-        val engine = CbrMdpEngine()
-        val state = decisionState(uncertainty = 0.8f, failures = 3, step = 1)
+        kotlinx.coroutines.runBlocking {
+            val engine = CbrMdpEngine()
+            val state = decisionState(uncertainty = 0.8f, failures = 3, step = 1)
 
-        val candidates = listOf(
-            DecisionAction(DecisionActionType.ASK_USER, payload = mapOf("reason" to "confirm?")),
-            DecisionAction(DecisionActionType.COMPLETE)
-        )
-        val result = engine.evaluateAndSelectAction(state, candidates)
-        val askScore = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.ASK_USER }.finalScore
-        val completeScore = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.COMPLETE }.finalScore
-        // ASK_USER gets a boost from consecutive failures; COMPLETE is weak
-        // (no evidence + early step) — ASK_USER must dominate.
-        assertTrue("ASK_USER should be viable under justified uncertainty", askScore > completeScore)
-        val askReason = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.ASK_USER }.reason
-        assertFalse(askReason.contains("EVOI"))
+            val candidates = listOf(
+                DecisionAction(DecisionActionType.ASK_USER, payload = mapOf("reason" to "confirm?")),
+                DecisionAction(DecisionActionType.COMPLETE)
+            )
+            val result = engine.evaluateAndSelectAction(state, candidates)
+            val askScore = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.ASK_USER }.finalScore
+            val completeScore = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.COMPLETE }.finalScore
+            // ASK_USER gets a boost from consecutive failures; COMPLETE is weak
+            // (no evidence + early step) — ASK_USER must dominate.
+            assertTrue("ASK_USER should be viable under justified uncertainty", askScore > completeScore)
+            val askReason = result.evaluatedAlternatives.first { it.action.type == DecisionActionType.ASK_USER }.reason
+            assertFalse(askReason.contains("EVOI"))
+        }
     }
 
     // ====================================================================
@@ -184,47 +192,51 @@ class P0P1RemediationVerificationTest {
 
     @Test
     fun `terminal verification quality shapes the feedback reward (D-2)`() {
-        val observationService = ObservationService()
-        val action = DecisionAction(DecisionActionType.COMPLETE)
-        val result = ExecutionResult(isSuccess = true, outputText = "final answer")
+        kotlinx.coroutines.runBlocking {
+            val observationService = ObservationService()
+            val action = DecisionAction(DecisionActionType.COMPLETE)
+            val result = ExecutionResult(isSuccess = true, outputText = "final answer")
 
-        val verified = observationService.createObservation(
-            action, result, stepIndex = 3,
-            actionOutcome = ActionOutcomeType.SUCCESS,
-            taskVerificationQuality = +0.9f
-        )
-        val failed = observationService.createObservation(
-            action, result, stepIndex = 3,
-            actionOutcome = ActionOutcomeType.SUCCESS,
-            taskVerificationQuality = -0.9f
-        )
+            val verified = observationService.createObservation(
+                action, result, stepIndex = 3,
+                actionOutcome = ActionOutcomeType.SUCCESS,
+                taskVerificationQuality = +0.9f
+            )
+            val failed = observationService.createObservation(
+                action, result, stepIndex = 3,
+                actionOutcome = ActionOutcomeType.SUCCESS,
+                taskVerificationQuality = -0.9f
+            )
 
-        assertTrue(
-            "verified completion must reward higher than failed verification",
-            verified.feedbackReward > failed.feedbackReward
-        )
-        // The honest outcome type is exposed (D-3 wiring).
-        assertEquals("SUCCESS", verified.outputData["actionOutcomeType"])
+            assertTrue(
+                "verified completion must reward higher than failed verification",
+                verified.feedbackReward > failed.feedbackReward
+            )
+            // The honest outcome type is exposed (D-3 wiring).
+            assertEquals("SUCCESS", verified.outputData["actionOutcomeType"])
+        }
     }
 
     @Test
     fun `action outcome classification shapes the reward (D-3)`() {
-        val observationService = ObservationService()
-        val action = DecisionAction(DecisionActionType.EXECUTE_TOOL)
-        val result = ExecutionResult(isSuccess = true, outputText = "partial", isDegraded = false)
+        kotlinx.coroutines.runBlocking {
+            val observationService = ObservationService()
+            val action = DecisionAction(DecisionActionType.EXECUTE_TOOL)
+            val result = ExecutionResult(isSuccess = true, outputText = "partial", isDegraded = false)
 
-        val successObs = observationService.createObservation(
-            action, result, actionOutcome = ActionOutcomeType.SUCCESS
-        )
-        val partialObs = observationService.createObservation(
-            action, result, actionOutcome = ActionOutcomeType.PARTIAL_SUCCESS
-        )
-        val blockedObs = observationService.createObservation(
-            action, result, actionOutcome = ActionOutcomeType.BLOCKED
-        )
+            val successObs = observationService.createObservation(
+                action, result, actionOutcome = ActionOutcomeType.SUCCESS
+            )
+            val partialObs = observationService.createObservation(
+                action, result, actionOutcome = ActionOutcomeType.PARTIAL_SUCCESS
+            )
+            val blockedObs = observationService.createObservation(
+                action, result, actionOutcome = ActionOutcomeType.BLOCKED
+            )
 
-        assertTrue(successObs.feedbackReward > partialObs.feedbackReward)
-        assertTrue(partialObs.feedbackReward > blockedObs.feedbackReward)
+            assertTrue(successObs.feedbackReward > partialObs.feedbackReward)
+            assertTrue(partialObs.feedbackReward > blockedObs.feedbackReward)
+        }
     }
 
     @Test

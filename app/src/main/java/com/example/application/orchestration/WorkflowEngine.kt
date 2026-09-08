@@ -77,6 +77,8 @@ class WorkflowEngine(
         val stepStatuses: MutableMap<String, StepStatus> =
             plan.steps.associate { it.id to StepStatus.PENDING }.toMutableMap()
         val outputs = mutableMapOf<String, String>()
+        /** Named artifact payloads (defect family 7 — explicit dataflow). */
+        val artifacts = mutableMapOf<String, String>()
         var totalTokens = 0
         var hasDegradedStep = false
         var hasFailedStep = false
@@ -121,6 +123,53 @@ class WorkflowEngine(
             )
         }
 
+        // ------------------------------------------------------------
+        // EXPLICIT ARTIFACT/DATAFLOW CONTRACT (defect family 7): every
+        // CONSUMED artifact must have a producer among the consumer's
+        // TRANSITIVE dependencies. A dangling consumer is a plan defect —
+        // previously the consuming step would silently run with EMPTY
+        // upstream data while the workflow reported success.
+        // ------------------------------------------------------------
+        val producers = plan.steps.flatMap { step ->
+            step.artifactContract.produces.map { it.name to step.id }
+        }.toMap()
+        val transitiveDeps = mutableMapOf<String, Set<String>>()
+        fun depsOf(stepId: String, seen: MutableSet<String> = mutableSetOf()): Set<String> {
+            if (stepId in transitiveDeps) return transitiveDeps.getValue(stepId)
+            if (stepId in seen) return emptySet() // cycle guard (validated separately)
+            seen.add(stepId)
+            val direct = plan.steps.firstOrNull { it.id == stepId }?.dependencies ?: emptySet()
+            val all = direct + direct.flatMap { depsOf(it, seen) }
+            transitiveDeps[stepId] = all
+            return all
+        }
+        for (step in plan.steps) {
+            for (consumed in step.artifactContract.consumes) {
+                val producerId = producers[consumed]
+                if (producerId == null) {
+                    return Outcome.Error(
+                        failure = WorkflowFailure.StepExecutionFailed(
+                            stepId = step.id,
+                            reason = "DANGLING_ARTIFACT_CONSUMER: الخطوة '${step.id}' تستهلك المُخرج " +
+                                "'$consumed' ولا يوجد أي خطوة تُنتجه في المخطط."
+                        ),
+                        diagnosticMessage = "عقد تدفق البيانات غير مكتمل: مُخرج مُستهلك بلا مُنتِج."
+                    )
+                }
+                if (producerId !in depsOf(step.id)) {
+                    return Outcome.Error(
+                        failure = WorkflowFailure.StepExecutionFailed(
+                            stepId = step.id,
+                            reason = "ARTIFACT_PRODUCER_NOT_UPSTREAM: الخطوة '${step.id}' تستهلك المُخرج " +
+                                "'$consumed' (منتجه $producerId) لكنه ليس ضمن تبعياتها الانتقالية — " +
+                                "ترتيب البيانات غير مضمون."
+                        ),
+                        diagnosticMessage = "عقد تدفق البيانات يخالف اتجاه التبعيات."
+                    )
+                }
+            }
+        }
+
         return Outcome.Success(Unit)
     }
 
@@ -158,8 +207,26 @@ class WorkflowEngine(
         // P0-02 (workflow level): the workspace is PINNED once at plan
         // start; every step execution binds to it, so a mid-run workspace
         // switch cannot scatter step attribution across workspaces.
+        // REPAIR (defect family 1): a workspace resolution FAILURE is no
+        // longer swallowed into null (which silently wrote "unknown" and
+        // unscoped rows) — it fails the workflow honestly.
         // ------------------------------------------------------------
-        val pinnedWorkspaceId = runCatching { workspaceIdProvider() }.getOrNull()
+        val pinnedWorkspaceId = try {
+            workspaceIdProvider()
+        } catch (e: Exception) {
+            val failure = WorkflowFailure.StepExecutionFailed(
+                stepId = "plan",
+                reason = "WORKSPACE_CONTEXT_REQUIRED: تعذّر تثبيت مساحة العمل للخطة — ${e.message ?: e.javaClass.simpleName}"
+            )
+            return WorkflowExecutionReport(
+                workflowId = plan.id,
+                goal = plan.goal,
+                overallOutcome = Outcome.Error(failure, failure.reason),
+                stepStatuses = plan.steps.associate { it.id to StepStatus.FAILED },
+                totalDurationMs = System.currentTimeMillis() - startTime,
+                totalTokensConsumed = 0
+            )
+        }
 
         val stateMutex = Mutex()
         val state = RunState(plan)
@@ -171,12 +238,25 @@ class WorkflowEngine(
         // dependent steps receive real prior outputs.
         // ------------------------------------------------------------
         if (completedStepIds.isNotEmpty()) {
-            val priorOutputs = runCatching {
+            val priorStepStates = runCatching {
                 persistenceService?.byId(plan.id)?.stepStates
                     ?.filter { it.stepId in completedStepIds }
-                    ?.mapNotNull { st -> st.outputSummary?.let { st.stepId to it } }
-                    ?.toMap()
-            }.getOrNull() ?: emptyMap()
+                    ?: emptyList()
+            }.getOrDefault(emptyList())
+            val priorOutputs = priorStepStates
+                .mapNotNull { st -> st.outputSummary?.let { st.stepId to it } }
+                .toMap()
+            // DURABLE ARTIFACTS (defect family 7): the explicit dataflow is
+            // restored from persisted artifact payloads — resume carries the
+            // REAL step outputs forward, not just 200-char summaries.
+            val priorArtifacts = mutableMapOf<String, String>()
+            for (st in priorStepStates) {
+                val json = st.artifactsJson ?: continue
+                runCatching {
+                    val obj = org.json.JSONObject(json)
+                    for (key in obj.keys()) priorArtifacts[key] = obj.optString(key)
+                }
+            }
             stateMutex.withLock {
                 for (id in completedStepIds) {
                     if (state.stepStatuses.containsKey(id)) {
@@ -184,6 +264,7 @@ class WorkflowEngine(
                         priorOutputs[id]?.let { state.outputs[id] = it }
                     }
                 }
+                state.artifacts.putAll(priorArtifacts)
             }
         }
 
@@ -193,7 +274,7 @@ class WorkflowEngine(
         // degrades honestly so nobody trusts a durable state that is not
         // actually written.
         // ------------------------------------------------------------
-        persistTracked(state) { persistenceService?.start(plan.id, pinnedWorkspaceId ?: "unknown", plan) }
+        persistTracked(state) { persistenceService?.start(plan.id, pinnedWorkspaceId, plan) }
 
         when (plan.executionMode) {
             ExecutionMode.SEQUENTIAL -> executeSequential(plan, pinnedWorkspaceId, state, stateMutex)
@@ -212,10 +293,11 @@ class WorkflowEngine(
             if (state.hasFailedStep || skippedSteps.isNotEmpty()) {
                 persistenceService?.fail(
                     plan.id,
-                    state.failureReason.ifBlank { "خطوات مطلوبة لم تُنفّذ: ${skippedSteps.joinToString(", ")}" }
+                    state.failureReason.ifBlank { "خطوات مطلوبة لم تُنفّذ: ${skippedSteps.joinToString(", ")}" },
+                    pinnedWorkspaceId
                 )
             } else {
-                persistenceService?.complete(plan.id, state.hasDegradedStep)
+                persistenceService?.complete(plan.id, state.hasDegradedStep, pinnedWorkspaceId)
             }
         }
 
@@ -292,7 +374,9 @@ class WorkflowEngine(
             if (!depsSatisfied) {
                 stateMutex.withLock { state.stepStatuses[step.id] = StepStatus.SKIPPED }
                 persistTracked(state) {
-                    persistenceService?.markStepStatus(plan.id, step.id, StepStatus.SKIPPED, null, null)
+                    persistenceService?.markStepStatus(
+                        plan.id, step.id, StepStatus.SKIPPED, null, null, null, pinnedWorkspaceId
+                    )
                 }
                 continue
             }
@@ -352,7 +436,7 @@ class WorkflowEngine(
                 stateMutex.withLock { for (id in blocked) state.stepStatuses[id] = StepStatus.SKIPPED }
                 for (id in blocked) {
                     persistTracked(state) {
-                        persistenceService?.markStepStatus(plan.id, id, StepStatus.SKIPPED, null, null)
+                        persistenceService?.markStepStatus(plan.id, id, StepStatus.SKIPPED, null, null, null, pinnedWorkspaceId)
                     }
                 }
                 break
@@ -376,17 +460,30 @@ class WorkflowEngine(
     ) {
         stateMutex.withLock { state.stepStatuses[step.id] = StepStatus.RUNNING }
 
-        // Build context including upstream outputs
+        // Build context including upstream outputs + EXPLICIT ARTIFACTS
+        // (defect family 7): consumed artifacts are injected by NAME with
+        // their REAL values — the dataflow contract is executed, not implied.
         val upstreamContext = stateMutex.withLock {
             step.dependencies.mapNotNull { depId ->
                 state.outputs[depId]?.let { "مخرجات خطوة ($depId): $it" }
             }
         }.joinToString("\n")
+        val artifactContext = stateMutex.withLock {
+            step.artifactContract.consumes.mapNotNull { name ->
+                state.artifacts[name]?.let { value ->
+                    "مُخرج معهود ($name):\n$value"
+                }
+            }
+        }.joinToString("\n\n")
 
-        val combinedPrompt = if (upstreamContext.isNotBlank()) {
-            "${step.description}\n\nالسياق من الخطوات السابقة:\n$upstreamContext"
-        } else {
-            step.description
+        val combinedPrompt = buildString {
+            append(step.description)
+            if (upstreamContext.isNotBlank()) {
+                append("\n\nالسياق من الخطوات السابقة:\n").append(upstreamContext)
+            }
+            if (artifactContext.isNotBlank()) {
+                append("\n\nالمُخرجات المعهدة من عقد تدفق البيانات:\n").append(artifactContext)
+            }
         }
 
         // ------------------------------------------------------------------
@@ -395,16 +492,34 @@ class WorkflowEngine(
         //   1. step.assignedAgentId → the DURABLE registry agent the user (or
         //      the saved library definition) chose — inherits its system
         //      prompt, capabilities, budget, workspace scope, version and
-        //      lifecycle.
+        //      lifecycle. A pin that cannot be honoured FAILS THIS STEP with
+        //      the explicit reason (defect family 3: exact bindings must not
+        //      silently degrade into role/provider fallbacks).
         //   2. agentResolver(step) → composition-root policy (role-matching
-        //      durable agent, materializing one when no match exists).
+        //      durable agent, materializing one when no match exists) — the
+        //      DECLARED fallback policy, audited by the composition root.
         //   3. LAST-RESORT synthetic agent — ONLY when no resolver is wired
         //      (pure JVM tests). Production ALWAYS binds registry agents, so
         //      steps keep the SAME governed loop, memory namespaces and
         //      telemetry attribution as every other execution.
         // ------------------------------------------------------------------
-        val stepAgent: AgentDefinition = agentResolver?.invoke(step)
-            ?: syntheticStepAgent(step)
+        val stepAgent: AgentDefinition = try {
+            agentResolver?.invoke(step) ?: syntheticStepAgent(step)
+        } catch (e: Exception) {
+            // Honest step failure — the pinned binding could not be honoured.
+            val reason = e.message ?: e.javaClass.simpleName
+            stateMutex.withLock {
+                state.stepStatuses[step.id] = StepStatus.FAILED
+                state.hasFailedStep = true
+                state.failureReason = reason
+            }
+            persistTracked(state) {
+                persistenceService?.markStepStatus(
+                    plan.id, step.id, StepStatus.FAILED, null, null, reason, pinnedWorkspaceId
+                )
+            }
+            return
+        }
 
         val stepTask = TaskDefinition(
             id = step.taskId,
@@ -465,6 +580,31 @@ class WorkflowEngine(
             }
         }
 
+        // ------------------------------------------------------------
+        // ARTIFACT REGISTRATION (defect family 7): declared produced
+        // artifacts are bound to the step's output (bounded) and persisted
+        // with the step state so resume restores the explicit dataflow.
+        // ------------------------------------------------------------
+        var producedArtifactsJson: String? = null
+        if (status == StepStatus.COMPLETED || status == StepStatus.DEGRADED) {
+            val produced = step.artifactContract.produces
+            if (produced.isNotEmpty()) {
+                val artifactValues = mutableMapOf<String, String>()
+                stateMutex.withLock {
+                    produced.forEach { spec ->
+                        val value = stepOutput.take(ARTIFACT_PAYLOAD_BOUND)
+                        state.artifacts[spec.name] = value
+                        artifactValues[spec.name] = value
+                    }
+                }
+                producedArtifactsJson = runCatching {
+                    val obj = org.json.JSONObject()
+                    artifactValues.forEach { (k, v) -> obj.put(k, v) }
+                    obj.toString()
+                }.getOrNull()
+            }
+        }
+
         // Persist the step outcome + checkpoint (P1-06 — tracked, not swallowed).
         persistTracked(state) {
             persistenceService?.markStepStatus(
@@ -472,12 +612,19 @@ class WorkflowEngine(
                 stepId = step.id,
                 status = status,
                 outputSummary = stepOutput.take(200),
-                durationMs = null
+                durationMs = null,
+                workspaceId = pinnedWorkspaceId,
+                artifactsJson = producedArtifactsJson
             )
             if (status == StepStatus.COMPLETED || status == StepStatus.DEGRADED) {
-                persistenceService?.checkpoint(plan.id, plan.steps.indexOf(step) + 1)
+                persistenceService?.checkpoint(plan.id, plan.steps.indexOf(step) + 1, pinnedWorkspaceId)
             }
         }
+    }
+
+    private companion object {
+        /** Bounded artifact payload (kept faithful, not 200-char truncated). */
+        const val ARTIFACT_PAYLOAD_BOUND = 4000
     }
 
     /**

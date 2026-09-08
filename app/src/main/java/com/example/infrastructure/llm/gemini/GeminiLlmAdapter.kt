@@ -56,11 +56,14 @@ class GeminiLlmAdapter(
     private val apiKeyProvider: suspend () -> String? = { null },
     private val baseUrl: String = "https://generativelanguage.googleapis.com",
     override val providerId: String = "gemini",
+    /** EGRESS ENFORCEMENT: scoped, fail-closed transport guard. */
+    private val egressControl: com.example.infrastructure.network.EgressControl =
+        com.example.infrastructure.network.EgressControl.default,
     private val client: OkHttpClient = OkHttpClient.Builder()
-        // EGRESS ENFORCEMENT (report gap: sandbox network-egress
-        // restrictions): the guard consults the ACTIVE workspace policy
-        // and fails CLOSED (IOException) before any socket is opened.
-        .addInterceptor(com.example.infrastructure.network.EgressControl.interceptor())
+        // EGRESS ENFORCEMENT (report gap: sandbox network-egress restrictions):
+        // the guard evaluates the REQUEST-SCOPED workspace policy and fails
+        // CLOSED (IOException) before any socket is opened.
+        .addInterceptor(egressControl.interceptor())
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(180, TimeUnit.SECONDS)
         .build()
@@ -192,6 +195,7 @@ class GeminiLlmAdapter(
             .url(url)
             .header("x-goog-api-key", key) // header, never the URL (P0-8)
             .post(body.toRequestBody("application/json".toMediaType()))
+        egressControl.applyEgressScope(builder)
         return builder.build()
     }
 
@@ -226,15 +230,18 @@ class GeminiLlmAdapter(
                             sb.append(part.optString("text", "") ?: "")
                             // REAL protocol support: parse functionCall parts into
                             // domain ToolCallRequests (previously ignored entirely).
-                            part.optJSONObject("functionCall")?.let { fn ->
-                                toolCalls.add(
-                                    ToolCallRequest(
-                                        callId = fn.optString("name", "call_${System.currentTimeMillis()}"),
-                                        toolName = fn.optString("name", ""),
-                                        argumentsJson = fn.optJSONObject("args")?.toString() ?: "{}"
-                                    )
+                            val fn = part.optJSONObject("functionCall") ?: continue
+                            toolCalls.add(
+                                ToolCallRequest(
+                                    // Deterministic, UNIQUE per part — Gemini
+                                    // function calls carry no provider id, and
+                                    // parallel calls to the same function must
+                                    // never share one callId.
+                                    callId = "gemcall_${start}_${i}_${toolCalls.size}",
+                                    toolName = fn.optString("name", ""),
+                                    argumentsJson = fn.optJSONObject("args")?.toString() ?: "{}"
                                 )
-                            }
+                            )
                         }
                     }
                     val usageJson = json.optJSONObject("usageMetadata")
@@ -299,11 +306,16 @@ class GeminiLlmAdapter(
             val call = client.newCall(requestWithKey(url, buildRequestBody(request, stream = true), stream = true))
             var sequence = 0
             val fullText = StringBuilder()
+            // GOVERNANCE PHASE: cached + provider-total token capture.
             var promptTokens = 0
             var completionTokens = 0
-            // GOVERNANCE PHASE: cached + provider-total token capture.
             var cachedTokens = 0
             var providerTotalTokens: Int? = null
+            // Defect family 6: unique call ids for streamed function calls
+            // (Gemini function calls carry no provider id; two parallel calls
+            // to the SAME function must never share one callId).
+            var streamedToolCallOrdinal = 0
+            var streamedToolCallCount = 0
 
             // The whole builder runs on Dispatchers.IO via flowOn below — blocking
             // line reads and vault lookups are safe, emissions stay in-context.
@@ -337,7 +349,10 @@ class GeminiLlmAdapter(
                                 }
                                 // REAL protocol support: surface streamed functionCall
                                 // parts as ToolRequested events (previously dropped).
-                                extractToolCalls(json).forEach { call ->
+                                // Each call gets a UNIQUE id (see defect family 6).
+                                extractToolCalls(json, start, streamedToolCallOrdinal).forEach { call ->
+                                    streamedToolCallOrdinal++
+                                    streamedToolCallCount++
                                     emit(
                                         ExecutionEvent.ToolRequested(
                                             executionId = executionId,
@@ -361,20 +376,40 @@ class GeminiLlmAdapter(
                 }
             }
 
-            if (fullText.isBlank()) {
+            // FALLBACK (defect family 6): the single-shot fallback fires only
+            // when the SSE stream produced NEITHER text NOR tool calls. A
+            // tool-call-only stream is a COMPLETE response — falling back
+            // would duplicate the request. And when the fallback DOES run, its
+            // tool calls are emitted too (previously discarded, silently
+            // breaking the tool loop for stream-less providers).
+            if (fullText.isBlank() && streamedToolCallCount == 0) {
                 // SSE produced nothing (some regions / proxies strip it) — fall back
                 // to the single-shot endpoint and emit one chunk. Honest, visible.
                 val fallback = generate(request)
                 when (fallback) {
                     is Outcome.Success -> {
                         fullText.append(fallback.value.text)
-                        emit(
-                            ExecutionEvent.ContentChunk(
-                                executionId = executionId,
-                                deltaText = fallback.value.text,
-                                sequenceIndex = sequence++
+                        if (fallback.value.text.isNotEmpty()) {
+                            emit(
+                                ExecutionEvent.ContentChunk(
+                                    executionId = executionId,
+                                    deltaText = fallback.value.text,
+                                    sequenceIndex = sequence++
+                                )
                             )
-                        )
+                        }
+                        // The fallback response's tool calls are REAL protocol
+                        // output — emit them (previously silently dropped).
+                        fallback.value.toolCalls.forEach { call ->
+                            emit(
+                                ExecutionEvent.ToolRequested(
+                                    executionId = executionId,
+                                    callId = call.callId,
+                                    toolName = call.toolName,
+                                    argumentsJson = call.argumentsJson
+                                )
+                            )
+                        }
                     }
                     else -> {
                         val diag = (fallback as? Outcome.Error)?.diagnosticMessage
@@ -454,9 +489,15 @@ class GeminiLlmAdapter(
     /**
      * Extracts functionCall parts from one SSE data payload as domain
      * ToolCallRequests. Missing/invalid fields yield no calls rather than
-     * fabricated ones.
+     * fabricated ones. Each call receives a UNIQUE deterministic callId —
+     * Gemini function calls carry no provider id, so two parallel calls to
+     * the same function must be distinguished (defect family 6).
      */
-    private fun extractToolCalls(json: String): List<ToolCallRequest> {
+    private fun extractToolCalls(
+        json: String,
+        streamStartMs: Long = 0L,
+        callOrdinalBase: Int = 0
+    ): List<ToolCallRequest> {
         return runCatching {
             val obj = JSONObject(json)
             val parts = obj.optJSONArray("candidates")?.optJSONObject(0)
@@ -469,7 +510,7 @@ class GeminiLlmAdapter(
                 if (name.isBlank()) continue
                 calls.add(
                     ToolCallRequest(
-                        callId = fn.optString("name", "call_${System.currentTimeMillis()}_$i"),
+                        callId = "gemcall_${streamStartMs}_${callOrdinalBase + calls.size}_$i",
                         toolName = name,
                         argumentsJson = fn.optJSONObject("args")?.toString() ?: "{}"
                     )

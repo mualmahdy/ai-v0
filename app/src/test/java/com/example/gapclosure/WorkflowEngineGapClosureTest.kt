@@ -103,17 +103,22 @@ class WorkflowEngineGapClosureTest {
     /** Throwing persistence DAOs (P1-06: failures must surface, not vanish). */
     private class ThrowingWorkflowExecutionDao : WorkflowExecutionDao {
         override suspend fun resumable(): List<WorkflowExecutionEntity> = emptyList()
+        override suspend fun resumableForWorkspace(workspaceId: String): List<WorkflowExecutionEntity> = emptyList()
         override fun forWorkspace(workspaceId: String): Flow<List<WorkflowExecutionEntity>> = MutableStateFlow(emptyList())
         override suspend fun byId(id: String): WorkflowExecutionEntity? = null
+        override suspend fun byIdAndWorkspace(id: String, workspaceId: String): WorkflowExecutionEntity? = null
         override suspend fun upsert(entity: WorkflowExecutionEntity) { throw IllegalStateException("DB_WRITE_FAILED") }
         override suspend fun checkpoint(id: String, state: String, step: Int, now: Long) { throw IllegalStateException("DB_WRITE_FAILED") }
+        override suspend fun checkpointForWorkspace(id: String, workspaceId: String, state: String, step: Int, now: Long) { throw IllegalStateException("DB_WRITE_FAILED") }
         override suspend fun terminate(id: String, state: String, now: Long, reason: String?) { throw IllegalStateException("DB_WRITE_FAILED") }
+        override suspend fun terminateForWorkspace(id: String, workspaceId: String, state: String, now: Long, reason: String?) { throw IllegalStateException("DB_WRITE_FAILED") }
     }
 
     private class ThrowingWorkflowStepStateDao : WorkflowStepStateDao {
         override suspend fun forWorkflow(workflowId: String): List<WorkflowStepStateEntity> = emptyList()
         override suspend fun upsertAll(states: List<WorkflowStepStateEntity>) { throw IllegalStateException("DB_WRITE_FAILED") }
         override suspend fun updateStepStatus(workflowId: String, stepId: String, status: String, summary: String?, duration: Long?, now: Long) { throw IllegalStateException("DB_WRITE_FAILED") }
+        override suspend fun updateStepArtifacts(workflowId: String, stepId: String, artifactsJson: String) { throw IllegalStateException("DB_WRITE_FAILED") }
     }
 
     @Before

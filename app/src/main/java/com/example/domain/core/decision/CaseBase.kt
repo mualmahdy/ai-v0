@@ -69,12 +69,24 @@ class CaseBase(
     @Volatile var durableStoreHealthy: Boolean = false
         private set
 
+    /** The async durable-load job (null in in-memory-only mode). */
+    private var loadJob: kotlinx.coroutines.Job? = null
+
+    /** True once the durable load completed (successfully or not). */
+    @Volatile var isLoadComplete: Boolean = false
+        private set
+
     init {
         // Load initial bootstrap cases first
         bootstrapDefaultCases()
         // Load persisted cases through the domain port if a store is wired.
+        // REPAIR (defect family 5 — startup-loading race): the load is still
+        // asynchronous (non-blocking startup), but its completion is now
+        // TRACKED ([isLoadComplete], [awaitReady]) so callers no longer read
+        // decisions against an un-loaded store without knowing it — the race
+        // is observable and gateable instead of silent.
         if (store != null && persistenceScope != null) {
-            persistenceScope.launch {
+            loadJob = persistenceScope.launch {
                 try {
                     val persistedCases = store.loadAll()
                     if (persistedCases.isNotEmpty()) {
@@ -92,46 +104,78 @@ class CaseBase(
                 } catch (e: Exception) {
                     recordPersistenceFailure("LOAD_FAILED: ${e.message ?: e.javaClass.simpleName}")
                     // Fall back to in-memory bootstrap cases (counted, not silent).
+                } finally {
+                    isLoadComplete = true
                 }
             }
+        } else {
+            isLoadComplete = true
         }
     }
 
     /**
-     * Adds a case to the in-memory base and queues durable persistence.
-     *
-     * @return true when the case is remembered AND durable persistence was
-     *         successfully queued; false when the durable write failed (the
-     *         in-memory case is still kept, and the failure is counted).
+     * Readiness gate (defect family 5): suspends until the durable load has
+     * completed, or returns false on timeout — the caller then KNOWS it is
+     * deciding against bootstrap-only state (observable, not silent).
      */
-    @Synchronized
-    fun addCase(case: DecisionCase): Boolean {
-        // Keep case base bounded to 2000 most recent cases (FIFO by timestamp).
-        // The previous comment said "most relevant" but the eviction was always FIFO;
-        // we keep FIFO because relevance-based eviction would require recomputing
-        // similarity to all current states on every add (O(n) per insert).
-        if (cases.size >= CASE_BASE_BOUND) {
-            cases.sortBy { it.timestampMs }
-            cases.removeAt(0)
-        }
-        cases.add(case)
+    suspend fun awaitReady(timeoutMs: Long = 5_000L): Boolean {
+        val job = loadJob ?: return true // in-memory-only mode is ready
+        return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+            job.join()
+            true
+        } ?: false
+    }
 
-        // Persist through the domain port asynchronously (failures counted).
-        val scope = persistenceScope
-        if (store == null || scope == null) return true // in-memory only mode
-        var queued = true
-        scope.launch {
-            try {
-                store.append(case)
-                // Mirror the in-memory bound in the durable store.
-                if (caseCount() > CASE_BASE_BOUND) {
-                    store.pruneOldest(CASE_BASE_BOUND)
+    /**
+     * Adds a case to the in-memory base AND durably persists it — the
+     * returned boolean is PROOF of the durable write (defect family 5:
+     * "addCase() reports success without proving the persistence operation
+     * succeeded").
+     *
+     * HONEST CONTRACT:
+     *  - true  = the case is remembered AND the durable append COMPLETED.
+     *  - false = the durable append FAILED (counted in
+     *    [persistenceFailureCount]; the in-memory copy is still kept so the
+     *    session continues, but the caller knows it is not durable).
+     *  - In-memory-only mode (no store wired) returns true — there is no
+     *    durability claim to prove.
+     *
+     * IDEMPOTENCY: the case id is the identity — re-adding an existing id
+     * updates it in place (and the store insert is REPLACE-conflict), so a
+     * crash-replay cannot duplicate rows.
+     */
+    suspend fun addCase(case: DecisionCase): Boolean {
+        // In-memory update first (idempotent by id — never duplicates).
+        synchronized(this) {
+            val existingIndex = cases.indexOfFirst { it.id == case.id }
+            if (existingIndex >= 0) {
+                cases[existingIndex] = case
+            } else {
+                // Keep case base bounded to CASE_BASE_BOUND most recent cases
+                // (FIFO by timestamp).
+                if (cases.size >= CASE_BASE_BOUND) {
+                    cases.sortBy { it.timestampMs }
+                    cases.removeAt(0)
                 }
-            } catch (e: Exception) {
-                recordPersistenceFailure("APPEND_FAILED: ${e.message ?: e.javaClass.simpleName}")
+                cases.add(case)
             }
         }
-        return queued
+
+        val durableStore = store ?: return true // in-memory only mode
+        if (persistenceScope == null) return true // in-memory only mode
+        // DURABLE, AWAITED write: the return value is the real outcome of the
+        // persistence operation — not a "queued" claim.
+        return try {
+            durableStore.append(case)
+            // Mirror the in-memory bound in the durable store.
+            if (caseCount() > CASE_BASE_BOUND) {
+                durableStore.pruneOldest(CASE_BASE_BOUND)
+            }
+            true
+        } catch (e: Exception) {
+            recordPersistenceFailure("APPEND_FAILED: ${e.message ?: e.javaClass.simpleName}")
+            false
+        }
     }
 
     @Synchronized

@@ -57,6 +57,11 @@ android {
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
+    // CORRECTNESS & AUTHORITY REPAIR (lint/static analysis): the baseline
+    // failed lintDebug with NewApi errors — SearchIntelligenceService uses
+    // java.time (API 26+) while minSdk is 24. Core library desugaring is
+    // the canonical fix so java.time works on API 24+.
+    isCoreLibraryDesugaringEnabled = true
   }
   buildFeatures {
     compose = true
@@ -84,6 +89,8 @@ googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.W
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
+  // Core library desugaring (see compileOptions — java.time on minSdk 24).
+  coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
   // implementation(libs.androidx.camera.camera2)

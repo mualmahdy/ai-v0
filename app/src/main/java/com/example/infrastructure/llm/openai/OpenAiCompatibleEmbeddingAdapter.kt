@@ -31,7 +31,15 @@ class OpenAiCompatibleEmbeddingAdapter(
     private val model: String = "text-embedding-3-small",
     override val providerId: String = "openai_compatible_embedding",
     override val dimension: Int = 1536,
+    /** EGRESS ENFORCEMENT: scoped, fail-closed transport guard. */
+    private val egressControl: com.example.infrastructure.network.EgressControl =
+        com.example.infrastructure.network.EgressControl.default,
     private val client: OkHttpClient = OkHttpClient.Builder()
+        // EGRESS ENFORCEMENT (defect family 6 — bypass path): remote
+        // embeddings previously dialed out WITHOUT any network-policy
+        // check. The interceptor closes that bypass: scoped, fail-closed
+        // evaluation before any socket is opened.
+        .addInterceptor(egressControl.interceptor())
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
@@ -61,6 +69,7 @@ class OpenAiCompatibleEmbeddingAdapter(
                 val builder = Request.Builder()
                     .url(url)
                     .post(body.toString().toRequestBody("application/json".toMediaType()))
+                egressControl.applyEgressScope(builder)
                 apiKeyProvider()?.takeIf { it.isNotBlank() }?.let { key ->
                     builder.addHeader("Authorization", "Bearer $key")
                 }

@@ -19,12 +19,18 @@ import kotlinx.coroutines.flow.Flow
  *
  * Semantics contract for implementors:
  *  - Sessions are workspace-scoped: every query is keyed by workspaceId.
+ *  - REPAIR (defect family 1 — workspace-authorized access): ALL read and
+ *    mutation operations are workspace-authorized. An id that belongs to a
+ *    DIFFERENT workspace is indistinguishable from "not found" — mutations
+ *    targeting it are no-ops. Id-only access can no longer cross workspace
+ *    boundaries.
  *  - [observeSessions] emits on every session mutation (bumped aggregates,
  *    renames, deletes) so UI lists stay live.
  *  - [appendTurn] persists the turn AND bumps the session's aggregate
  *    counters (turnCount, totalTokensConsumed, lastActiveAtEpochMs) in one
- *    transaction.
- *  - [deleteSession] cascades to the session's turns.
+ *    transaction — ONLY when the session belongs to the given workspace.
+ *  - [deleteSession] cascades to the session's turns — ONLY for the owning
+ *    workspace.
  */
 interface ConversationSessionRepositoryPort {
 
@@ -34,31 +40,72 @@ interface ConversationSessionRepositoryPort {
     /** Live, oldest-first turn list of one session. */
     fun observeTurns(sessionId: ConversationSessionId): Flow<List<com.example.domain.core.session.ConversationTurn>>
 
-    /** Loads one session by id (any workspace — caller enforces scoping). */
+    /**
+     * Loads one session by id (any workspace — for internal wiring only;
+     * authorization decisions MUST use [getSessionForWorkspace]).
+     */
     suspend fun getSession(id: ConversationSessionId): ConversationSession?
 
-    /** Loads one session with its full turn history (for resume). */
-    suspend fun getSessionWithTurns(id: ConversationSessionId): ConversationSessionWithTurns?
+    /**
+     * WORKSPACE-AUTHORIZED load: returns the session only when it belongs to
+     * [workspaceId]; a session of another workspace is indistinguishable
+     * from nonexistent (authorization boundary, not a leak).
+     */
+    suspend fun getSessionForWorkspace(
+        id: ConversationSessionId,
+        workspaceId: String
+    ): ConversationSession?
+
+    /**
+     * WORKSPACE-AUTHORIZED load with full turn history (for resume) — a
+     * session of another workspace returns null.
+     */
+    suspend fun getSessionWithTurnsForWorkspace(
+        id: ConversationSessionId,
+        workspaceId: String
+    ): ConversationSessionWithTurns?
 
     /** Creates or updates a session row. */
     suspend fun upsertSession(session: ConversationSession)
 
     /**
-     * Appends one durable turn and bumps the session aggregates
-     * (turnCount, totalTokensConsumed, lastActiveAtEpochMs) atomically.
+     * WORKSPACE-AUTHORIZED append: persists one durable turn and bumps the
+     * session aggregates atomically — ONLY when the session belongs to
+     * [workspaceId]; otherwise nothing is written and `false` is returned.
      */
-    suspend fun appendTurn(turn: com.example.domain.core.session.ConversationTurn)
+    suspend fun appendTurnForWorkspace(
+        turn: com.example.domain.core.session.ConversationTurn,
+        workspaceId: String
+    ): Boolean
 
-    /** Deletes a session and all of its turns. */
-    suspend fun deleteSession(id: ConversationSessionId)
-
-    /** Updates a session's pinned model (exact runtime binding surface). */
-    suspend fun updateSessionModel(
+    /**
+     * WORKSPACE-AUTHORIZED delete: deletes a session and all of its turns —
+     * ONLY when it belongs to [workspaceId]; returns whether anything was
+     * deleted.
+     */
+    suspend fun deleteSessionForWorkspace(
         id: ConversationSessionId,
+        workspaceId: String
+    ): Boolean
+
+    /**
+     * WORKSPACE-AUTHORIZED model pin update — no-op for a session owned by
+     * another workspace.
+     */
+    suspend fun updateSessionModelForWorkspace(
+        id: ConversationSessionId,
+        workspaceId: String,
         modelResourceId: String?,
         modelDisplayName: String?
     )
 
-    /** Renames a session (title) — the user-editable library surface. */
-    suspend fun renameSession(id: ConversationSessionId, title: String)
+    /**
+     * WORKSPACE-AUTHORIZED rename — no-op for a session owned by another
+     * workspace. Returns whether the rename applied.
+     */
+    suspend fun renameSessionForWorkspace(
+        id: ConversationSessionId,
+        workspaceId: String,
+        title: String
+    ): Boolean
 }

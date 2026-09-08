@@ -46,9 +46,26 @@ class ConversationSessionService(
     fun observeTurns(sessionId: ConversationSessionId): Flow<List<ConversationTurn>> =
         repository.observeTurns(sessionId)
 
-    /** Full session + turns (for resume / reopen). */
-    suspend fun getSessionWithTurns(sessionId: ConversationSessionId): ConversationSessionWithTurns? =
-        repository.getSessionWithTurns(sessionId)
+/**
+ * Full session + turns (for resume / reopen) — WORKSPACE-AUTHORIZED
+ * (defect family 1 repair): the session is loaded only when it belongs to
+ * the given workspace; another workspace's session is indistinguishable
+ * from nonexistent (an authorization boundary, not a data leak).
+ */
+suspend fun getSessionWithTurns(
+    sessionId: ConversationSessionId,
+    workspaceId: String? = null
+): ConversationSessionWithTurns? =
+    repository.getSessionWithTurnsForWorkspace(sessionId, workspaceId ?: workspaceIdProvider())
+
+/**
+ * WORKSPACE-AUTHORIZED session lookup — see [getSessionWithTurns].
+ */
+suspend fun getSession(
+    sessionId: ConversationSessionId,
+    workspaceId: String? = null
+): ConversationSession? =
+    repository.getSessionForWorkspace(sessionId, workspaceId ?: workspaceIdProvider())
 
     /**
      * Creates a new durable session bound to the ACTIVE workspace.
@@ -82,7 +99,10 @@ class ConversationSessionService(
 
     /**
      * Appends a REAL executed turn (prompt, answer, measured tokens,
-     * duration, outcome) to a durable session.
+     * duration, outcome) to a durable session — WORKSPACE-AUTHORIZED: the
+     * turn is written ONLY when the session belongs to the given workspace
+     * (defect family 1 repair). Returns the appended turn, or null when the
+     * session does not exist in that workspace (nothing written).
      */
     suspend fun appendTurn(
         sessionId: ConversationSessionId,
@@ -94,8 +114,10 @@ class ConversationSessionService(
         tokensConsumed: Int,
         durationMs: Long,
         isSuccessful: Boolean,
-        eventCount: Int
-    ): ConversationTurn {
+        eventCount: Int,
+        workspaceId: String? = null
+    ): ConversationTurn? {
+        val authorizedWorkspaceId = workspaceId ?: workspaceIdProvider()
         val turn = ConversationTurn(
             id = "turn_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}",
             sessionId = sessionId,
@@ -110,33 +132,63 @@ class ConversationSessionService(
             eventCount = eventCount,
             createdAtEpochMs = System.currentTimeMillis()
         )
-        repository.appendTurn(turn)
-        return turn
+        val written = repository.appendTurnForWorkspace(turn, authorizedWorkspaceId)
+        return if (written) turn else null
     }
 
-    /** First-turn titling policy: use the prompt itself (bounded). */
-    suspend fun titleFromPrompt(sessionId: ConversationSessionId, prompt: String) {
+    /**
+     * First-turn titling policy: use the prompt itself (bounded) —
+     * WORKSPACE-AUTHORIZED (no-op for another workspace's session).
+     */
+    suspend fun titleFromPrompt(
+        sessionId: ConversationSessionId,
+        prompt: String,
+        workspaceId: String? = null
+    ) {
         if (prompt.isBlank()) return
         val title = prompt.trim().take(60).let { if (it.length >= 60) "$it…" else it }
-        repository.renameSession(sessionId, title)
+        repository.renameSessionForWorkspace(sessionId, workspaceId ?: workspaceIdProvider(), title)
     }
 
-    suspend fun deleteSession(sessionId: ConversationSessionId) =
-        repository.deleteSession(sessionId)
+    /** WORKSPACE-AUTHORIZED delete — returns whether anything was deleted. */
+    suspend fun deleteSession(
+        sessionId: ConversationSessionId,
+        workspaceId: String? = null
+    ): Boolean =
+        repository.deleteSessionForWorkspace(sessionId, workspaceId ?: workspaceIdProvider())
 
-    suspend fun renameSession(sessionId: ConversationSessionId, title: String) {
-        if (title.isNotBlank()) repository.renameSession(sessionId, title.take(80))
+    /** WORKSPACE-AUTHORIZED rename (no-op for another workspace's session). */
+    suspend fun renameSession(
+        sessionId: ConversationSessionId,
+        title: String,
+        workspaceId: String? = null
+    ) {
+        if (title.isNotBlank()) {
+            repository.renameSessionForWorkspace(sessionId, workspaceId ?: workspaceIdProvider(), title.take(80))
+        }
     }
 
-    /** Pins the exact model resource for the session (durable user choice). */
+    /**
+     * Pins the exact model resource for the session (durable user choice) —
+     * WORKSPACE-AUTHORIZED.
+     */
     suspend fun setSessionModel(
         sessionId: ConversationSessionId,
         modelResourceId: String?,
-        modelDisplayName: String?
-    ) = repository.updateSessionModel(sessionId, modelResourceId, modelDisplayName)
+        modelDisplayName: String?,
+        workspaceId: String? = null
+    ) = repository.updateSessionModelForWorkspace(
+        sessionId, workspaceId ?: workspaceIdProvider(), modelResourceId, modelDisplayName
+    )
 
-    suspend fun setSessionAgent(sessionId: ConversationSessionId, agentId: String?, agentName: String?) {
-        val session = repository.getSession(sessionId) ?: return
+    /** WORKSPACE-AUTHORIZED agent binding update. */
+    suspend fun setSessionAgent(
+        sessionId: ConversationSessionId,
+        agentId: String?,
+        agentName: String?,
+        workspaceId: String? = null
+    ) {
+        val session = repository.getSessionForWorkspace(sessionId, workspaceId ?: workspaceIdProvider()) ?: return
         repository.upsertSession(
             session.copy(agentId = agentId, agentName = agentName, lastActiveAtEpochMs = System.currentTimeMillis())
         )

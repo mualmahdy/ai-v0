@@ -369,7 +369,13 @@ class WorkspaceRuntimeService(
         } catch (_: IllegalArgumentException) {
             NetworkPolicy.HYBRID
         },
-        settings = decodeSettings(settingsJson),
+        settings = decodeSettings(settingsJson) + mapOf(
+            // The workspace's AUTHORITATIVE autonomy policy (defect family 4:
+            // agent autonomy governance derives from the workspace's stored
+            // policy — the entity column exists since v1 but was never
+            // surfaced to the domain model, so nothing could enforce it).
+            "autonomyPolicy" to autonomyPolicy
+        ),
         createdAtTimestampMs = createdAtEpochMs,
         lastAccessedTimestampMs = lastAccessedEpochMs
     )

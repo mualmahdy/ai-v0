@@ -141,11 +141,20 @@ class AdmissionControlService(
 
         // -------- 4. SECURITY POLICY (CEILING) ----------------------------
         val secStart = clock()
+        // CANONICAL CLASSIFICATION INPUTS (defect family 2): the SAME
+        // declaration facts the execution boundary supplies — one
+        // classification authority, closed-world, never a fabricated ALLOW.
         val evaluation = securityGuard.evaluateToolExecution(
             ToolInput(
                 toolName = request.toolName,
                 arguments = request.arguments,
-                executionId = request.executionId
+                executionId = request.executionId,
+                contextAttributes = mapOf(
+                    com.example.application.security.SecurityGuardService.ATTR_DECLARED_SIDE_EFFECTS to declaration.sideEffects.name,
+                    com.example.application.security.SecurityGuardService.ATTR_DECLARED_SENSITIVE to declaration.isSensitive.toString(),
+                    com.example.application.security.SecurityGuardService.ATTR_DECLARED_REQUIRES_CONSENT to declaration.requiresHumanConsent.toString(),
+                    com.example.application.security.SecurityGuardService.ATTR_DECLARED_NETWORK_REQUIREMENT to declaration.networkRequirement.name
+                )
             ),
             policy
         )

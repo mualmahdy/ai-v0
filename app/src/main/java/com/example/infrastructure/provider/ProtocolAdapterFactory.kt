@@ -38,7 +38,10 @@ import com.example.infrastructure.search.MultiSourceSearchAdapter
 class ProtocolAdapterFactory(
     // Optional: only used for opportunistic Firebase-options key discovery.
     // The Gemini REST path itself needs no Firebase (fix: firebase not initiated).
-    private val geminiBootstrap: GeminiBootstrap? = null
+    private val geminiBootstrap: GeminiBootstrap? = null,
+    /** EGRESS ENFORCEMENT: the shared, composition-root-owned guard. */
+    private val egressControl: com.example.infrastructure.network.EgressControl =
+        com.example.infrastructure.network.EgressControl.default
 ) {
 
     fun createLlmAdapter(
@@ -58,7 +61,8 @@ class ProtocolAdapterFactory(
                 GeminiLlmAdapter(
                     defaultModelName = offeringModelId ?: config.defaultOfferingId.ifBlank { "gemini-2.5-flash" },
                     apiKeyProvider = apiKeyProvider,
-                    baseUrl = config.endpointUrl.ifBlank { "https://generativelanguage.googleapis.com" }
+                    baseUrl = config.endpointUrl.ifBlank { "https://generativelanguage.googleapis.com" },
+                    egressControl = egressControl
                 )
             }
             ServiceProtocolId.OPENAI_COMPATIBLE,
@@ -66,13 +70,15 @@ class ProtocolAdapterFactory(
                 baseUrl = config.endpointUrl,
                 apiKeyProvider = apiKeyProvider,
                 defaultModel = offeringModelId ?: config.defaultOfferingId.ifBlank { "gpt-4o-mini" },
-                providerId = "${service.providerId}_${service.id}"
+                providerId = "${service.providerId}_${service.id}",
+                egressControl = egressControl
             )
             ServiceProtocolId.OLLAMA_NATIVE -> OpenAiCompatibleLlmAdapter(
                 baseUrl = config.endpointUrl.ifBlank { "http://127.0.0.1:11434" },
                 apiKeyProvider = { null },
                 defaultModel = offeringModelId ?: config.defaultOfferingId.ifBlank { "llama3" },
-                providerId = "${service.providerId}_${service.id}"
+                providerId = "${service.providerId}_${service.id}",
+                egressControl = egressControl
             )
             else -> null
         }
@@ -88,7 +94,8 @@ class ProtocolAdapterFactory(
             ServiceProtocolId.TAVILY_NATIVE,
             ServiceProtocolId.IN_PROCESS,
             ServiceProtocolId.NATIVE_SDK -> MultiSourceSearchAdapter(
-                tavilyApiKeyProvider = apiKeyProvider
+                tavilyApiKeyProvider = apiKeyProvider,
+                egressControl = egressControl
             )
             else -> null
         }
@@ -110,7 +117,8 @@ class ProtocolAdapterFactory(
             ServiceProtocolId.OPENAI_NATIVE -> OpenAiCompatibleEmbeddingAdapter(
                 baseUrl = config.endpointUrl,
                 apiKeyProvider = apiKeyProvider,
-                model = offeringModelId ?: config.defaultOfferingId.ifBlank { "text-embedding-3-small" }
+                model = offeringModelId ?: config.defaultOfferingId.ifBlank { "text-embedding-3-small" },
+                egressControl = egressControl
             )
             ServiceProtocolId.OLLAMA_NATIVE -> OpenAiCompatibleEmbeddingAdapter(
                 baseUrl = config.endpointUrl.ifBlank { "http://127.0.0.1:11434" },

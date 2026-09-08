@@ -946,12 +946,14 @@ class MainViewModel(
         }
     }
 
-    /** Refreshes the resumable (RUNNING/PAUSED/COMPENSATING) workflows list. */
+    /** Refreshes the resumable (RUNNING/PAUSED/COMPENSATING) workflows list —
+     *  WORKSPACE-SCOPED (defect family 1): only the ACTIVE workspace's runs. */
     fun loadResumableWorkflows() {
         val persistence = workflowPersistenceService ?: return
         viewModelScope.launch {
             runCatching {
-                _uiState.update { it.copy(resumableWorkflows = persistence.resumable()) }
+                val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
+                _uiState.update { it.copy(resumableWorkflows = persistence.resumable(workspaceId)) }
             }
         }
     }
@@ -1254,6 +1256,14 @@ class MainViewModel(
     }
 
     fun simulateDecision() {
+        // Readiness-gated engine evaluation (defect family 5): the decision
+        // may suspend on case-base load readiness, so it runs scoped.
+        viewModelScope.launch {
+            simulateDecisionInternal()
+        }
+    }
+
+    private suspend fun simulateDecisionInternal() {
         val current = _uiState.value
         val state = DecisionState(
             taskId = TaskId(UUID.randomUUID().toString()),
@@ -2231,7 +2241,10 @@ class MainViewModel(
         val persistence = workflowPersistenceService ?: return
         viewModelScope.launch {
             runCatching {
-                val resumable = persistence.resumable().firstOrNull { it.workflowId.value == workflowId }
+                // WORKSPACE-SCOPED resume (defect family 1): a workflow of
+                // ANOTHER workspace cannot be resumed from this surface.
+                val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
+                val resumable = persistence.resumable(workspaceId).firstOrNull { it.workflowId.value == workflowId }
                     ?: return@launch
                 executeWorkflow(resumable.plan, resumable.completedStepIds)
             }

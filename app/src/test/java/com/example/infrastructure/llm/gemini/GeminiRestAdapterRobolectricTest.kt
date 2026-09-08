@@ -59,11 +59,19 @@ class GeminiRestAdapterRobolectricTest {
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val port = server.address.port
         baseUrl = "http://127.0.0.1:$port"
+        // EGRESS (defect family 1): egress control is now FAIL-CLOSED by
+        // default — the test adapter shares the standalone default guard,
+        // so pin an ONLINE policy for the local mock server.
+        com.example.infrastructure.network.EgressControl.default.apply {
+            pinWorkspacePolicy("test_ws", com.example.domain.core.network.NetworkPolicy.HYBRID)
+            setActiveWorkspace("test_ws")
+        }
     }
 
     @After
     fun tearDown() {
         server.stop(0)
+        com.example.infrastructure.network.EgressControl.default.reset()
     }
 
     private fun route(path: String, status: Int = 200, body: String = "") {

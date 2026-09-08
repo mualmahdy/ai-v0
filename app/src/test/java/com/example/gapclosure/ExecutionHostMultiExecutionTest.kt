@@ -95,25 +95,33 @@ class ExecutionHostMultiExecutionTest {
 
     @Test
     fun `relaunching the same key replaces only that key`() = runBlocking {
-        val firstCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
         val secondCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
 
-        ExecutionHost.launch("same_key") {
+        // The FIRST job's own handle: cancellation is asserted on the JOB
+        // STATE, not only on a catch block — a job cancelled before its
+        // first dispatch never enters the catch (still correct replacement).
+        val firstJob = ExecutionHost.launch("same_key") {
             try {
                 delay(2000)
             } catch (e: kotlinx.coroutines.CancellationException) {
-                firstCancelled.set(true)
                 throw e
             }
         }
-        ExecutionHost.launch("same_key") {
+
+        val secondJob = ExecutionHost.launch("same_key") {
             delay(150)
             secondCompleted.set(true)
         }
 
-        awaitTrue { firstCancelled.get() && secondCompleted.get() }
-        assertTrue("Re-launch of the same key replaces that key's previous job", firstCancelled.get())
+        awaitTrue { secondCompleted.get() }
         assertTrue(secondCompleted.get())
+        // Re-launch of the same key replaces that key's previous job —
+        // the FIRST job must be CANCELLED and COMPLETED (deterministic
+        // job-state assertion, immune to pre-dispatch cancellation).
+        awaitTrue { firstJob.isCancelled && firstJob.isCompleted }
+        assertTrue("Re-launch of the same key replaces that key's previous job", firstJob.isCancelled)
+        assertTrue(firstJob.isCompleted)
+        assertTrue(secondJob.isCompleted && !secondJob.isCancelled)
         awaitTrue { ExecutionHost.activeExecutions.value.isEmpty() }
         assertEquals(0, ExecutionHost.activeExecutions.value.size)
     }

@@ -38,11 +38,13 @@ class MultiSourceSearchAdapter(
     private val tavilyApiKeyProvider: suspend () -> String? = { null },
     private val workspaceStoragePort: WorkspaceStoragePort? = null,
     private val projectIdProvider: (() -> Long?)? = null,
+    /** EGRESS ENFORCEMENT: scoped, fail-closed transport guard. */
+    private val egressControl: com.example.infrastructure.network.EgressControl =
+        com.example.infrastructure.network.EgressControl.default,
     private val client: OkHttpClient = OkHttpClient.Builder()
-        // EGRESS ENFORCEMENT (report gap: sandbox network-egress
-        // restrictions): the guard consults the ACTIVE workspace policy
-        // and fails CLOSED (IOException) before any socket is opened.
-        .addInterceptor(com.example.infrastructure.network.EgressControl.interceptor())
+        // EGRESS ENFORCEMENT (report gap: sandbox network-egress restrictions):
+        // scoped, fail-closed evaluation before any socket is opened.
+        .addInterceptor(egressControl.interceptor())
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
@@ -74,15 +76,16 @@ class MultiSourceSearchAdapter(
                     put("include_answer", true)
                 }
 
-                val request = Request.Builder()
-                    .url("https://api.tavily.com/search")
-                    // FIX P0-8/R-4 (audit c03919d): the API key is sent as an
-                    // Authorization Bearer HEADER (recommended by Tavily) — not
-                    // in the request body — and the response is closed on every
-                    // path via .use{} (previously leaked on failures).
-                    .header("Authorization", "Bearer $tavilyKey")
-                    .post(jsonBody.toString().toRequestBody("application/json".toMediaTypeOrNull()))
-                    .build()
+                val request = egressControl.applyEgressScope(
+                    Request.Builder()
+                        .url("https://api.tavily.com/search")
+                        // FIX P0-8/R-4 (audit c03919d): the API key is sent as an
+                        // Authorization Bearer HEADER (recommended by Tavily) — not
+                        // in the request body — and the response is closed on every
+                        // path via .use{} (previously leaked on failures).
+                        .header("Authorization", "Bearer $tavilyKey")
+                        .post(jsonBody.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+                ).build()
 
                 client.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
@@ -121,10 +124,11 @@ class MultiSourceSearchAdapter(
         try {
             val encodedQuery = URLEncoder.encode(query.query, "UTF-8")
             val wikiUrl = "https://en.wikipedia.org/w/api.php?action=opensearch&search=$encodedQuery&limit=5&namespace=0&format=json"
-            val request = Request.Builder()
-                .url(wikiUrl)
-                .header("User-Agent", "AI-V0-Search/1.0")
-                .build()
+            val request = egressControl.applyEgressScope(
+                Request.Builder()
+                    .url(wikiUrl)
+                    .header("User-Agent", "AI-V0-Search/1.0")
+            ).build()
 
             // FIX R-4: response closed on every path (.use).
             client.newCall(request).execute().use { response ->

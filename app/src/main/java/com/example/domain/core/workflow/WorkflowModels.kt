@@ -34,6 +34,28 @@ enum class StepStatus {
 }
 
 /**
+ * EXPLICIT ARTIFACT/DATAFLOW CONTRACT (defect family 7): complements the
+ * dependency DAG with a data contract — a step DECLARES the named artifacts
+ * it produces and the named artifacts it consumes. The engine validates
+ * that every consumed artifact has a producer among the step's transitive
+ * dependencies (a dangling consumer is a PLAN DEFECT, surfaced at
+ * validation — never a silent empty input), stores the produced values at
+ * runtime, and feeds them into consuming steps' prompts. Artifacts are
+ * PERSISTED with the step state so resume restores the explicit dataflow.
+ */
+data class StepArtifactContract(
+    /** Named outputs this step produces (name -> value at runtime). */
+    val produces: List<ArtifactSpec> = emptyList(),
+    /** Named artifacts (produced by upstream steps) this step consumes. */
+    val consumes: List<String> = emptyList()
+) {
+    data class ArtifactSpec(
+        val name: String,
+        val description: String = ""
+    )
+}
+
+/**
  * Directed node in a workflow plan with dynamic step-level capability requirements (Rule 8).
  */
 data class StepNode(
@@ -57,6 +79,8 @@ data class StepNode(
     val assignedAgentId: String? = null,
     /** Optional exact model resource pin for this step (user choice per step). */
     val assignedModelId: String? = null,
+    /** Explicit artifact/dataflow contract (defect family 7). */
+    val artifactContract: StepArtifactContract = StepArtifactContract(),
     val status: StepStatus = StepStatus.PENDING,
     val outputSummary: String? = null,
     val durationMs: Long = 0L

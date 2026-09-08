@@ -252,7 +252,7 @@ class GovernancePersistenceTest {
     }
 
     @Test
-    fun `db version is 13 with all governance + execution-kernel + convergence tables`() {
+    fun `db version is 14 with all governance + execution-kernel + convergence tables`() {
         // Gap-closure: v11 added action_intents + agent_definitions + the
         // tasks.executionContextJson column (canonical execution kernel).
         // P0 convergence (v12): workspace-owned projects, RAG metadata
@@ -260,8 +260,12 @@ class GovernancePersistenceTest {
         // REPORT GAP-CLOSURE (v13): durable conversation sessions
         // (chat_sessions/chat_turns), the user-authored workflow library
         // (workflow_definitions), and full-fidelity durable agents.
+        // CORRECTNESS & AUTHORITY REPAIR (v14): workspace-scoped permission
+        // grants (permission_grants.workspaceId), the durable agent revision
+        // ledger (agent_revisions), and durable workflow artifacts
+        // (workflow_step_states.artifactsJson).
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(13, dbVersion)
+        assertEquals(14, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))
@@ -271,7 +275,9 @@ class GovernancePersistenceTest {
             "radar_recommendations", "pricing_entries", "cost_ledger_entries", "budget_allocations",
             "action_intents", "agent_definitions",
             // v13 — report gap-closure tables.
-            "chat_sessions", "chat_turns", "workflow_definitions"
+            "chat_sessions", "chat_turns", "workflow_definitions",
+            // v14 — correctness & authority repair tables.
+            "agent_revisions"
         ).forEach { tableName ->
             assertTrue("missing table: $tableName", tables.contains(tableName))
         }

@@ -239,8 +239,24 @@ class AppContainer(context: Context) {
         GeminiBootstrap(appContext)
     }
 
+    /**
+     * EGRESS CONTROL (defect family 1 — scoped, fail-closed): the ONE
+     * composition-root-owned transport guard shared by EVERY outbound
+     * adapter (LLM, embeddings, search, MCP, discovery). It keeps a
+     * per-workspace policy REGISTRY (an execution pinned to workspace A
+     * keeps A's policy even after the user switches the active workspace),
+     * evaluates requests against their OWN execution scope, and FAILS
+     * CLOSED when the governing workspace has no pinned policy.
+     */
+    val egressControl: com.example.infrastructure.network.EgressControl by lazy {
+        com.example.infrastructure.network.EgressControl()
+    }
+
     val protocolAdapterFactory: ProtocolAdapterFactory by lazy {
-        ProtocolAdapterFactory(geminiBootstrap = geminiBootstrap)
+        ProtocolAdapterFactory(
+            geminiBootstrap = geminiBootstrap,
+            egressControl = egressControl
+        )
     }
 
     val resourceValidatorRegistry by lazy {
@@ -343,6 +359,7 @@ class AppContainer(context: Context) {
             secureCredentialStorage = secureCredentialStorage,
             adapterFactory = protocolAdapterFactory,
             validatorRegistry = resourceValidatorRegistry,
+            egressControl = egressControl,
             // FIX F-1: bridge materialized/validated adapters into the SAME
             // RuntimeAdapterResolver consumed by ExecutionService & RAG.
             runtimeAdapterResolver = componentRegistry.runtimeAdapterResolver
@@ -469,7 +486,10 @@ class AppContainer(context: Context) {
     val extensionManager: ExtensionManager by lazy {
         ExtensionManager(
             componentRegistry = componentRegistry,
-            mcpClient = McpClient(inProcessTools = inProcessMcpTools),
+            mcpClient = McpClient(
+                egressControl = egressControl,
+                inProcessTools = inProcessMcpTools
+            ),
             integrationGateway = IntegrationGateway(),
             extensionConfigDao = database.extensionConfigDao(),
             executableSkills = listOf(cleanArchitectureSkill, securityAuditorSkill)
@@ -784,6 +804,90 @@ class AppContainer(context: Context) {
             // Security governance wiring (audit 2026 fix): tool/MCP/delegation
             // permission checks are enforced through the permission service.
             executionService.permissionGrantService = permissionGrantService
+
+            // AUTONOMY + BUDGET GOVERNORS (defect family 4): agent autonomy
+            // and budget governance now derive from AUTHORITATIVE effective
+            // policy — the more restrictive of the WORKSPACE's stored policy
+            // (authoritative) and the task's persisted policy — instead of
+            // raw caller-supplied authority. An explicit EXECUTE grant counts
+            // as recorded consent.
+            orchestrator.autonomyGovernor = { agent, action, isSensitive, taskPolicy ->
+                val workspacePolicy = runCatching {
+                    workspaceRuntimeService.activeWorkspace.value
+                        ?.settings?.get("autonomyPolicy")
+                }.getOrNull()?.let {
+                    runCatching {
+                        com.example.domain.core.task.AutonomyPolicy.valueOf(it)
+                    }.getOrNull()
+                }
+                val effective = moreRestrictiveAutonomy(workspacePolicy, taskPolicy)
+                val evaluation = agentLifecycleService.evaluateAutonomy(
+                    agent.identity.id, effective, action.type.name, isSensitive
+                )
+                if (evaluation.isAllowed) {
+                    evaluation
+                } else if (evaluation.requireHumanConsent && !action.targetId.isNullOrBlank()) {
+                    // An explicit EXECUTE grant IS recorded consent.
+                    val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
+                    val granted = runCatching {
+                        permissionGrantService.check(
+                            principalType = com.example.domain.core.security.governance.PrincipalType.AGENT,
+                            principalId = agent.identity.id.value,
+                            resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
+                            resourceId = action.targetId,
+                            permission = com.example.domain.core.security.governance.Permission.EXECUTE,
+                            workspaceId = workspaceId
+                        )
+                    }.getOrDefault(false)
+                    if (granted) {
+                        evaluation.copy(
+                            isAllowed = true,
+                            requireHumanConsent = false,
+                            reason = "سياسة فعّالة ${effective.name}: الموافقة مُستوفاة بمنح إذن EXECUTE صريح."
+                        )
+                    } else {
+                        evaluation
+                    }
+                } else {
+                    evaluation
+                }
+            }
+            orchestrator.budgetGovernor = { agent, task, accumulatedTokens ->
+                // Effective budget: the AGENT's durable budget intersected
+                // with the task quota (authoritative, not caller-supplied).
+                val effectiveMax = minOf(agent.budget.maxTokens, task.budget.tokenLimit)
+                agentLifecycleService.evaluateBudget(
+                    agent.identity.id,
+                    com.example.domain.core.agent.AgentBudget(
+                        maxTokens = effectiveMax,
+                        usedTokens = accumulatedTokens
+                    )
+                )
+            }
+
+            // CANONICAL AUTHORITY BOUNDARY (defect family 2): even when the
+            // grant service is unavailable, authorization decisions are
+            // audited through the SAME telemetry audit trail (one authority).
+            executionService.authorizationAuditSink = { severity, actor, action, resourceType, resourceId, decision, reason, workspaceId ->
+                telemetryService.recordAudit(
+                    AuditEvent(
+                        id = java.util.UUID.randomUUID().toString(),
+                        severity = when (severity) {
+                            com.example.domain.core.security.governance.AuditSeverity.INFO -> AuditSeverity.INFO
+                            com.example.domain.core.security.governance.AuditSeverity.WARN -> AuditSeverity.WARN
+                            com.example.domain.core.security.governance.AuditSeverity.ERROR -> AuditSeverity.ERROR
+                            com.example.domain.core.security.governance.AuditSeverity.CRITICAL -> AuditSeverity.CRITICAL
+                        },
+                        actor = actor,
+                        action = action,
+                        resourceType = resourceType,
+                        resourceId = resourceId,
+                        decision = decision,
+                        reason = reason,
+                        workspaceId = workspaceId
+                    )
+                )
+            }
         }
     }
 
@@ -819,22 +923,46 @@ class AppContainer(context: Context) {
     /**
      * Canonical-agent resolution policy for workflow steps: durable
      * registry first (pinned id → role match → materialize-and-register).
+     * Every resolution path is AUDITED (defect family 3: explicit fallback
+     * behavior, when legitimately allowed, is an intentional recorded policy
+     * decision) and a failed PIN throws an explicit error the engine turns
+     * into an honest step failure — never a silent role fallback.
      */
     private suspend fun resolveWorkflowStepAgent(
         step: com.example.domain.core.workflow.StepNode
     ): com.example.domain.core.agent.AgentDefinition {
         val workspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull()
-        val resolved = agentRegistryService.resolveStepAgent(
+        when (val resolution = agentRegistryService.resolveStepAgentDetailed(
             role = step.agentRole,
             workspaceId = workspaceId,
             assignedAgentId = step.assignedAgentId
-        )
-        if (resolved != null) {
-            componentRegistry.registerAgent(resolved)
-            return resolved
+        )) {
+            is com.example.application.agent.AgentRegistryService.StepAgentResolution.Pinned -> {
+                auditAgentBinding(step, "PINNED", resolution.agent.identity.id.value)
+                componentRegistry.registerAgent(resolution.agent)
+                return resolution.agent
+            }
+            is com.example.application.agent.AgentRegistryService.StepAgentResolution.RoleMatched -> {
+                auditAgentBinding(step, "ROLE_MATCHED", resolution.agent.identity.id.value)
+                componentRegistry.registerAgent(resolution.agent)
+                return resolution.agent
+            }
+            is com.example.application.agent.AgentRegistryService.StepAgentResolution.PinnedAgentUnavailable -> {
+                if (step.assignedAgentId.isNullOrBlank()) {
+                    // No pin and no role agent yet — the DECLARED materialization
+                    // policy (an intentional decision, audited below).
+                } else {
+                    // REPAIR (defect family 3): an exact pin that cannot be
+                    // honoured FAILS the binding honestly — it must never
+                    // silently degrade into a role/materialized fallback.
+                    auditAgentBinding(step, "PIN_UNAVAILABLE", step.assignedAgentId)
+                    throw IllegalStateException(resolution.reason)
+                }
+            }
         }
         // MATERIALIZE a durable role agent (PLANNER-authored) so future runs
-        // resolve it from the registry — the registry stays canonical.
+        // resolve it from the registry — the registry stays canonical. This
+        // is the DECLARED fallback policy for un-pinned steps and is audited.
         val materialized = agentRegistryService.saveAgent(
             com.example.domain.core.agent.AgentDefinition(
                 identity = com.example.domain.core.agent.AgentIdentity(
@@ -853,8 +981,35 @@ class AppContainer(context: Context) {
             ),
             origin = "PLANNER"
         )
+        auditAgentBinding(step, "MATERIALIZED_ROLE_AGENT", materialized.identity.id.value)
         componentRegistry.registerAgent(materialized)
         return materialized
+    }
+
+    /** Records the agent-binding policy decision in the audit trail. */
+    private suspend fun auditAgentBinding(
+        step: com.example.domain.core.workflow.StepNode,
+        policy: String,
+        resolvedAgentId: String
+    ) {
+        runCatching {
+            telemetryService.recordAudit(
+                AuditEvent(
+                    id = java.util.UUID.randomUUID().toString(),
+                    severity = AuditSeverity.INFO,
+                    actor = "workflow_engine",
+                    action = "WORKFLOW_STEP_AGENT_BINDING",
+                    resourceType = "AGENT",
+                    resourceId = resolvedAgentId,
+                    decision = policy,
+                    reason = "سياسة ربط الوكيل بخطوة '${step.id}' (الدور: ${step.agentRole.name})",
+                    attributes = mapOf(
+                        "stepId" to step.id,
+                        "assignedAgentId" to (step.assignedAgentId ?: "(none)")
+                    )
+                )
+            )
+        }
     }
 
     // Use Cases
@@ -961,7 +1116,8 @@ class AppContainer(context: Context) {
         SearchIntelligenceService(
             searchProvider = com.example.infrastructure.search.MultiSourceSearchAdapter(
                 workspaceStoragePort = workspaceStorage,
-                projectIdProvider = { workspaceRuntimeService.activeProjectIdOrNull() }
+                projectIdProvider = { workspaceRuntimeService.activeProjectIdOrNull() },
+                egressControl = egressControl
             )
         )
     }
@@ -977,7 +1133,58 @@ class AppContainer(context: Context) {
     }
 
     val agentLifecycleService: AgentLifecycleService by lazy {
-        AgentLifecycleService(memoryLifecyclePort = memoryLifecycleService)
+        // REPAIR (defect family 4): dryRun now executes through the REAL
+        // governed kernel (decision → governance → execution) instead of a
+        // validation no-op; agent revisions are persisted in the durable
+        // `agent_revisions` ledger so the version chain survives process
+        // death and remains reproducible.
+        AgentLifecycleService(
+            memoryLifecyclePort = memoryLifecycleService,
+            sandboxExecutor = { agent, testPrompt ->
+                // A REAL governed execution with a bounded SANDBOX budget —
+                // every kernel gate (security, permissions, budget,
+                // telemetry) applies exactly as in production execution.
+                val sandboxTask = com.example.domain.core.task.TaskDefinition(
+                    id = com.example.domain.core.task.TaskId(
+                        "dryrun_${java.util.UUID.randomUUID().toString().take(8)}"
+                    ),
+                    assignedAgentId = agent.identity.id,
+                    input = com.example.domain.core.task.TaskInput(rawPrompt = testPrompt),
+                    constraints = com.example.domain.core.task.TaskConstraints(
+                        autonomyPolicy = com.example.domain.core.task.AutonomyPolicy.SUPERVISED,
+                        maxRetries = 0,
+                        timeoutMs = 30_000L
+                    ),
+                    budget = com.example.domain.core.task.TaskBudget(
+                        tokenLimit = minOf(agent.budget.maxTokens, 4_000)
+                    )
+                )
+                val start = System.currentTimeMillis()
+                val summary = agentOrchestrator.executeTaskDetailed(
+                    agent = agent,
+                    task = sandboxTask,
+                    pinnedWorkspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
+                )
+                com.example.application.agent.SandboxExecutionOutcome(
+                    isSuccessful = summary.outcome is com.example.domain.core.Outcome.Success<*>,
+                    responseSummary = when (val o = summary.outcome) {
+                        is com.example.domain.core.Outcome.Success<*> ->
+                            (o.value as? String)?.take(400) ?: "تم التنفيذ بنجاح"
+                        is com.example.domain.core.Outcome.Degraded<*, *> ->
+                            "تنفيذ متدهور: ${o.diagnosticMessage.take(200)}"
+                        is com.example.domain.core.Outcome.Error<*> ->
+                            "فشل التنفيذ: ${o.diagnosticMessage.take(200)}"
+                        else -> "نتيجة غير معروفة"
+                    },
+                    durationMs = System.currentTimeMillis() - start,
+                    tokensConsumed = summary.totalTokensConsumed,
+                    executionId = summary.executionId
+                )
+            },
+            revisionStore = com.example.infrastructure.persistence.repository.RoomAgentRevisionStore(
+                database.agentRevisionDao()
+            )
+        )
     }
 
     val workflowPersistenceService: WorkflowPersistenceService by lazy {
@@ -1067,18 +1274,46 @@ class AppContainer(context: Context) {
             cbrMdpEngine.loadPersistedQTable()
             // ----------------------------------------------------------------------
             // EGRESS ENFORCEMENT WIRING (report gap: sandbox network-egress
-            // restrictions): the ACTIVE workspace's network policy is pinned
-            // into the transport-layer guard (EgressControl) — ONE policy
-            // drives both resource filtering and raw HTTP egress. An OFFLINE
-            // workspace can never dial out, from any adapter.
+            // restrictions) — REPAIRED (defect family 1): the workspace's
+            // network policy is PINNED per workspace (a registry, so an
+            // execution pinned to a previous workspace keeps its policy after
+            // a mid-run switch), the ACTIVE workspace governs unscoped
+            // user-driven requests, and requests with NO governing policy
+            // fail CLOSED. An OFFLINE workspace can never dial out, from any
+            // adapter — and one blocked sandbox session can never affect
+            // another session or workspace.
             // ----------------------------------------------------------------------
             launch {
                 runCatching {
                     workspaceRuntimeService.activeWorkspace.collect { workspace ->
-                        com.example.infrastructure.network.EgressControl.setActivePolicy(
-                            workspaceId = workspace?.id,
-                            policy = workspace?.networkPolicy
-                        )
+                        if (workspace != null) {
+                            egressControl.pinWorkspacePolicy(workspace.id, workspace.networkPolicy)
+                        }
+                        egressControl.setActiveWorkspace(workspace?.id)
+                    }
+                }
+            }
+            // SESSION-SCOPED EGRESS BLOCKS (defect family 1): a governed
+            // sandbox session with a NO_NETWORK egress policy blocks egress
+            // ONLY for requests carrying that session's scope — never for
+            // unrelated sessions or workspaces. Blocks are released on
+            // terminal states (no stale leaks after sandbox teardown).
+            launch {
+                runCatching {
+                    sandboxLifecycleService.sessionsState.collect { sessions ->
+                        val blocked = sessions.filter { session ->
+                            session.limits.networkPolicy ==
+                                com.example.domain.core.runtime.SandboxNetworkPolicy.NO_NETWORK &&
+                                session.state != com.example.domain.core.runtime.SandboxLifecycleState.DESTROYED &&
+                                session.state != com.example.domain.core.runtime.SandboxLifecycleState.FAILED
+                        }
+                        blocked.forEach { session ->
+                            egressControl.blockSession(session.workspaceId, session.sessionId)
+                        }
+                        val activeIds = blocked.map { it.sessionId }.toSet()
+                        sessions
+                            .filter { it.sessionId !in activeIds }
+                            .forEach { session -> egressControl.unblockSession(session.sessionId) }
                     }
                 }
             }
@@ -1131,6 +1366,25 @@ class AppContainer(context: Context) {
             }
         }
     }
+}
+
+/**
+ * Effective-autonomy ranking (defect family 4): ASSISTED (most restrictive)
+ * < SUPERVISED < AUTONOMOUS (least restrictive). The effective policy is the
+ * MORE RESTRICTIVE of the workspace's authoritative policy and the task's
+ * persisted policy.
+ */
+private fun moreRestrictiveAutonomy(
+    a: com.example.domain.core.task.AutonomyPolicy?,
+    b: com.example.domain.core.task.AutonomyPolicy
+): com.example.domain.core.task.AutonomyPolicy {
+    val rank = mapOf(
+        com.example.domain.core.task.AutonomyPolicy.ASSISTED to 0,
+        com.example.domain.core.task.AutonomyPolicy.SUPERVISED to 1,
+        com.example.domain.core.task.AutonomyPolicy.AUTONOMOUS to 2
+    )
+    val aRank = a?.let { rank[it] } ?: return b
+    return if (aRank <= rank.getValue(b)) a!! else b
 }
 
 class MainViewModelFactory(

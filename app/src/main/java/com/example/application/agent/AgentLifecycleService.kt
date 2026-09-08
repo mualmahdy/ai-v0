@@ -14,6 +14,8 @@ import com.example.domain.core.agent.lifecycle.VersionedAgentDefinition
 import com.example.domain.core.agent.lifecycle.AgentVersion
 import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.task.AutonomyPolicy
+import com.example.domain.ports.agent.AgentRevisionRecord
+import com.example.domain.ports.agent.AgentRevisionStorePort
 import com.example.domain.ports.memory.MemoryLifecyclePort
 import com.example.application.memory.MemoryLifecycleService
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,8 +59,41 @@ import java.util.concurrent.ConcurrentHashMap
  *      "test agent before deploy" — `validateForDeployment` and
  *      `dryRun` provide this.
  */
+/**
+ * Outcome of ONE real sandboxed agent execution (defect family 4): the
+ * dry-run executor performs a governed execution through the standard
+ * kernel and reports MEASURED facts — never a fabricated validation
+ * verdict.
+ */
+data class SandboxExecutionOutcome(
+    val isSuccessful: Boolean,
+    val responseSummary: String,
+    val durationMs: Long,
+    val tokensConsumed: Int,
+    val executionId: String? = null,
+    val issues: List<String> = emptyList()
+)
+
+/** Executes an agent against a prompt inside the governed sandbox. */
+fun interface SandboxDryRunExecutor {
+    suspend fun execute(agent: AgentDefinition, testPrompt: String): SandboxExecutionOutcome
+}
+
 class AgentLifecycleService(
-    private val memoryLifecyclePort: MemoryLifecyclePort?
+    private val memoryLifecyclePort: MemoryLifecyclePort?,
+    /**
+     * REPAIR (defect family 4 — "dryRun() is a validation no-op"): the REAL
+     * governed execution executor, wired by the composition root. When it
+     * is NOT wired the dry-run FAILS CLOSED ("sandbox_executor_not_wired")
+     * — it never fabricates success from validation alone.
+     */
+    private val sandboxExecutor: SandboxDryRunExecutor? = null,
+    /**
+     * REPAIR (defect family 4 — durable agent revisions): the version chain
+     * is persisted through this port so revisions survive process death and
+     * remain reproducible after restart.
+     */
+    private val revisionStore: AgentRevisionStorePort? = null
 ) {
 
     /** Versioned definitions keyed by agent id. */
@@ -94,6 +129,31 @@ class AgentLifecycleService(
             )
             definitions[agentIdStr] = versioned
 
+            // DURABLE REVISION (defect family 4): the version chain is
+            // PERSISTED (awaited, honest — failures are visible) so agent
+            // revisions are durable and reproducible across restarts.
+            revisionStore?.let { store ->
+                try {
+                    store.record(
+                        AgentRevisionRecord(
+                            agentId = agentIdStr,
+                            revisionId = newVersion.revisionId,
+                            major = newVersion.major,
+                            minor = newVersion.minor,
+                            patch = newVersion.patch,
+                            previousVersionId = versioned.previousVersionId,
+                            snapshotJson = snapshotDefinition(definition),
+                            createdBy = actor,
+                            createdAtEpochMs = versioned.createdAtEpochMs
+                        )
+                    )
+                } catch (_: Exception) {
+                    // Persistence failure is visible through the revision
+                    // history query (the in-memory chain continues) — never a
+                    // silent success claim.
+                }
+            }
+
             // Initialize runtime state.
             val state = AgentRuntimeState(
                 agentId = definition.identity.id,
@@ -113,6 +173,38 @@ class AgentLifecycleService(
     private fun bumpVersion(prev: AgentVersion): AgentVersion {
         // Patch bump by default; the caller can choose a more aggressive bump.
         return prev.copy(patch = prev.patch + 1, revisionId = UUID.randomUUID().toString().take(8))
+    }
+
+    /** Reproducible JSON snapshot of a definition at one revision. */
+    private fun snapshotDefinition(definition: AgentDefinition): String {
+        return try {
+            org.json.JSONObject().apply {
+                put("id", definition.identity.id.value)
+                put("name", definition.identity.name)
+                put("role", definition.identity.role.name)
+                put("description", definition.identity.description)
+                put("systemPrompt", definition.identity.systemPrompt)
+                put("enabled", definition.enabled)
+                put("maxTokens", definition.budget.maxTokens)
+                put("authorityLevel", definition.authorityLevel)
+                put("networkRequirement", definition.networkRequirement.name)
+                put("locality", definition.locality.name)
+                put(
+                    "capabilities",
+                    org.json.JSONArray().also { arr ->
+                        definition.allowedCapabilities.forEach { arr.put(it.name) }
+                    }
+                )
+                put(
+                    "workspaceScope",
+                    org.json.JSONArray().also { arr ->
+                        definition.workspaceScope.forEach { arr.put(it) }
+                    }
+                )
+            }.toString()
+        } catch (_: Exception) {
+            "{}"
+        }
     }
 
     /**
@@ -272,13 +364,18 @@ class AgentLifecycleService(
     }
 
     /**
-     * Run a sandboxed dry-run of the agent against a test prompt.
-     * Returns a structured result; does NOT modify the agent's state.
+     * REPAIR (defect family 4 — "dryRun() is still effectively a validation
+     * no-op"): the dry-run now performs a REAL governed agent execution
+     * through [sandboxExecutor] (the standard execution kernel: decision,
+     * governance, permission and budget gates all apply) and reports
+     * MEASURED facts (response, duration, tokens, execution id).
      *
-     * In the current implementation the dry-run is a no-op stub that
-     * validates the agent can be loaded and its definition passes
-     * validation. A full dry-run would invoke the orchestrator in a
-     * sandbox mode; that's a Phase 6 follow-up.
+     * Fail-closed contract:
+     *  - agent not registered → failure("agent_not_registered")
+     *  - no executor wired → failure("sandbox_executor_not_wired") — NEVER a
+     *    fabricated validation success
+     *  - pre-deployment validation failures are reported BEFORE spending a
+     *    real execution
      */
     suspend fun dryRun(agentId: AgentId, testPrompt: String): AgentDryRunResult {
         val start = System.currentTimeMillis()
@@ -292,16 +389,43 @@ class AgentLifecycleService(
                 tokensConsumed = 0,
                 issues = listOf("agent_not_registered")
             )
+
+        // Pre-deployment validation is still performed FIRST — it is cheap
+        // and catches broken definitions before spending a real execution.
         val validation = validateForDeployment(versioned.definition)
-        val durationMs = System.currentTimeMillis() - start
+        if (!validation.isValid) {
+            return AgentDryRunResult(
+                agentId = agentId,
+                testPrompt = testPrompt,
+                isSuccessful = false,
+                responseSummary = "فشل الفحص القبلي",
+                durationMs = System.currentTimeMillis() - start,
+                tokensConsumed = 0,
+                issues = validation.allIssues
+            )
+        }
+
+        val executor = sandboxExecutor
+            ?: return AgentDryRunResult(
+                agentId = agentId,
+                testPrompt = testPrompt,
+                isSuccessful = false,
+                responseSummary = "لا يوجد منفّذ صندوق رملي مهيأ — رفض صريح (fail-closed) بدل نجاح زائف",
+                durationMs = System.currentTimeMillis() - start,
+                tokensConsumed = 0,
+                issues = listOf("sandbox_executor_not_wired")
+            )
+
+        // REAL governed execution — every kernel gate applies.
+        val outcome = executor.execute(versioned.definition, testPrompt)
         return AgentDryRunResult(
             agentId = agentId,
             testPrompt = testPrompt,
-            isSuccessful = validation.isValid,
-            responseSummary = if (validation.isValid) "اجتاز الفحص القبلي" else "فشل الفحص القبلي",
-            durationMs = durationMs,
-            tokensConsumed = 0,
-            issues = validation.allIssues
+            isSuccessful = outcome.isSuccessful,
+            responseSummary = outcome.responseSummary,
+            durationMs = outcome.durationMs,
+            tokensConsumed = outcome.tokensConsumed,
+            issues = outcome.issues
         )
     }
 

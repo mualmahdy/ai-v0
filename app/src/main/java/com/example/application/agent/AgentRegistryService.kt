@@ -69,37 +69,93 @@ class AgentRegistryService(
 
     /**
      * WORKFLOW CANONICAL AGENT BINDING (report gap): resolves the durable
-     * agent a workflow step should execute through.
+     * agent a workflow step should execute through — with an HONEST,
+     * machine-readable outcome (defect family 3 repair).
      *
      * Resolution policy:
      *  1. [assignedAgentId] (when provided) — the user/library-chosen agent,
-     *     returned when it exists, is ENABLED, and its role matches the
-     *     step's declared role. A mismatch fails the binding honestly
-     *     (returns null → caller materializes a role-matching agent) instead
-     *     of silently executing a step through a wrong-role agent.
+     *     returned ONLY when it exists, is ENABLED, and its role matches the
+     *     step's declared role. A missing/disabled/role-mismatched PIN is
+     *     reported as [StepAgentResolution.PinnedAgentUnavailable] — the
+     *     caller decides (fail the step explicitly); it NEVER silently
+     *     degrades into a role fallback.
      *  2. The first ENABLED durable agent whose role matches [role] and
      *     whose workspace scope covers [workspaceId] (or is unscoped
-     *     "default").
+     *     "default") — the DECLARED default policy when no pin exists.
+     */
+    sealed interface StepAgentResolution {
+        /** The pinned agent resolved exactly (id + enabled + role match). */
+        data class Pinned(val agent: AgentDefinition) : StepAgentResolution
+
+        /** No pin existed; the declared role-match policy resolved an agent. */
+        data class RoleMatched(val agent: AgentDefinition) : StepAgentResolution
+
+        /**
+         * A pin existed but is unresolvable (missing / disabled / role
+         * mismatch). NOT a fallback — the caller must surface it.
+         */
+        data class PinnedAgentUnavailable(
+            val assignedAgentId: String,
+            val reason: String
+        ) : StepAgentResolution
+    }
+
+    suspend fun resolveStepAgentDetailed(
+        role: AgentRole,
+        workspaceId: String?,
+        assignedAgentId: String? = null
+    ): StepAgentResolution = withContext(Dispatchers.IO) {
+        if (!assignedAgentId.isNullOrBlank()) {
+            val pinned = dao.getAgentById(assignedAgentId)?.toDomain()
+            when {
+                pinned == null -> return@withContext StepAgentResolution.PinnedAgentUnavailable(
+                    assignedAgentId,
+                    "PINNED_AGENT_NOT_FOUND: الوكيل المثبّت '$assignedAgentId' غير موجود في السجل الدائم."
+                )
+                !pinned.enabled -> return@withContext StepAgentResolution.PinnedAgentUnavailable(
+                    assignedAgentId,
+                    "PINNED_AGENT_DISABLED: الوكيل المثبّت '$assignedAgentId' معطّل."
+                )
+                pinned.identity.role != role -> return@withContext StepAgentResolution.PinnedAgentUnavailable(
+                    assignedAgentId,
+                    "PINNED_AGENT_ROLE_MISMATCH: الوكيل المثبّت '${pinned.identity.name}' دوره " +
+                        "${pinned.identity.role.name} والخطوة تتطلب ${role.name}."
+                )
+                else -> return@withContext StepAgentResolution.Pinned(pinned)
+            }
+        }
+        // No pin: the DECLARED default policy (role match) — an intentional
+        // policy decision, not a silent fallback.
+        val matched = listAgents().firstOrNull { agent ->
+            agent.enabled &&
+                agent.identity.role == role &&
+                (workspaceId == null ||
+                    agent.workspaceScope.isEmpty() ||
+                    agent.workspaceScope.any { it == "default" || it == workspaceId })
+        }
+        if (matched != null) {
+            StepAgentResolution.RoleMatched(matched)
+        } else {
+            StepAgentResolution.PinnedAgentUnavailable(
+                assignedAgentId ?: "(none)",
+                "NO_ROLE_AGENT: لا يوجد وكيل مفعّل مطابق للدور ${role.name} في النطاق."
+            )
+        }
+    }
+
+    /**
+     * Back-compat wrapper: returns the resolved agent or null (pinned
+     * unavailability AND no role match both yield null).
      */
     suspend fun resolveStepAgent(
         role: AgentRole,
         workspaceId: String?,
         assignedAgentId: String? = null
     ): AgentDefinition? = withContext(Dispatchers.IO) {
-        if (!assignedAgentId.isNullOrBlank()) {
-            val pinned = dao.getAgentById(assignedAgentId)?.toDomain()
-            if (pinned != null && pinned.enabled && pinned.identity.role == role) {
-                return@withContext pinned
-            }
-            // Pinned agent missing/disabled/role-mismatch — fall through to
-            // role resolution (honest degradation, no wrong-role execution).
-        }
-        listAgents().firstOrNull { agent ->
-            agent.enabled &&
-                agent.identity.role == role &&
-                (workspaceId == null ||
-                    agent.workspaceScope.isEmpty() ||
-                    agent.workspaceScope.any { it == "default" || it == workspaceId })
+        when (val resolution = resolveStepAgentDetailed(role, workspaceId, assignedAgentId)) {
+            is StepAgentResolution.Pinned -> resolution.agent
+            is StepAgentResolution.RoleMatched -> resolution.agent
+            is StepAgentResolution.PinnedAgentUnavailable -> null
         }
     }
 

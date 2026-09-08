@@ -35,6 +35,11 @@ class PermissionGrantService(
     private val telemetryPort: TelemetryPort
 ) {
 
+    /**
+     * Grants a permission, optionally scoped to ONE workspace (defect
+     * family 2 — workspace context is part of authorization). A null
+     * workspaceId means an explicitly GLOBAL grant.
+     */
     suspend fun grant(
         principalType: PrincipalType,
         principalId: String,
@@ -42,7 +47,8 @@ class PermissionGrantService(
         resourceId: String,
         permission: Permission,
         grantedBy: String,
-        expiresAtEpochMs: Long? = null
+        expiresAtEpochMs: Long? = null,
+        workspaceId: String? = null
     ): Long = withContext(Dispatchers.IO) {
         val entity = PermissionGrantEntity(
             id = 0L,
@@ -54,7 +60,8 @@ class PermissionGrantService(
             isAllowed = true,
             grantedBy = grantedBy,
             grantedAtEpochMs = System.currentTimeMillis(),
-            expiresAtEpochMs = expiresAtEpochMs
+            expiresAtEpochMs = expiresAtEpochMs,
+            workspaceId = workspaceId
         )
         val rowId = permissionGrantDao.upsert(entity)
         // Audit the grant itself.
@@ -68,10 +75,12 @@ class PermissionGrantService(
                 resourceId = resourceId,
                 decision = "ALLOW",
                 reason = "منح $principalType:$principalId إذن ${permission.code}",
+                workspaceId = workspaceId,
                 attributes = mapOf(
                     "principalType" to principalType.code,
                     "principalId" to principalId,
-                    "permission" to permission.code
+                    "permission" to permission.code,
+                    "scope" to (workspaceId ?: "GLOBAL")
                 )
             )
         )
@@ -95,19 +104,27 @@ class PermissionGrantService(
         Unit
     }
 
+    /**
+     * WORKSPACE-SCOPED check (defect family 2): a grant authorizes only
+     * when it is explicitly GLOBAL or scoped to the SAME workspace as the
+     * execution. A grant scoped to another workspace can never authorize
+     * this check.
+     */
     suspend fun check(
         principalType: PrincipalType,
         principalId: String,
         resourceType: SecurableResourceType,
         resourceId: String,
-        permission: Permission
+        permission: Permission,
+        workspaceId: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
-        val grant = permissionGrantDao.lookup(
+        val grant = permissionGrantDao.lookupScoped(
             principalType = principalType.code,
             principalId = principalId,
             resourceType = resourceType.code,
             resourceId = resourceId,
-            permission = permission.code
+            permission = permission.code,
+            workspaceId = workspaceId
         )
         if (grant?.isAllowed != true) return@withContext false
         // Check expiry.

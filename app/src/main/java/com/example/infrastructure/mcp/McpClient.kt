@@ -31,11 +31,13 @@ import java.util.concurrent.TimeUnit
  *    injected executors (FIX F-8: previously returned canned text).
  */
 class McpClient(
+    /** EGRESS ENFORCEMENT: scoped, fail-closed transport guard. */
+    private val egressControl: com.example.infrastructure.network.EgressControl =
+        com.example.infrastructure.network.EgressControl.default,
     private val client: OkHttpClient = OkHttpClient.Builder()
-        // EGRESS ENFORCEMENT (report gap: sandbox network-egress
-        // restrictions): the guard consults the ACTIVE workspace policy
-        // and fails CLOSED (IOException) before any socket is opened.
-        .addInterceptor(com.example.infrastructure.network.EgressControl.interceptor())
+        // EGRESS ENFORCEMENT (report gap: sandbox network-egress restrictions):
+        // scoped, fail-closed evaluation before any socket is opened.
+        .addInterceptor(egressControl.interceptor())
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
@@ -113,12 +115,13 @@ class McpClient(
                     })
                 })
             }
-            val initRequest = Request.Builder()
-                .url(server.endpointUri)
-                .post(initPayload.toString().toRequestBody("application/json".toMediaTypeOrNull()))
-                .header("Accept", "application/json, text/event-stream")
-                .header("User-Agent", "AI-V0-MCP-Client/1.0")
-                .build()
+            val initRequest = egressControl.applyEgressScope(
+                Request.Builder()
+                    .url(server.endpointUri)
+                    .post(initPayload.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+                    .header("Accept", "application/json, text/event-stream")
+                    .header("User-Agent", "AI-V0-MCP-Client/1.0")
+            ).build()
 
             // FIX R-4: responses are closed on every path (.use).
             val initOk = client.newCall(initRequest).execute().use { response ->
@@ -145,11 +148,12 @@ class McpClient(
                 put("params", JSONObject())
             }
             client.newCall(
-                Request.Builder()
-                    .url(server.endpointUri)
-                    .post(initializedPayload.toString().toRequestBody("application/json".toMediaTypeOrNull()))
-                    .header("Accept", "application/json, text/event-stream")
-                    .build()
+                egressControl.applyEgressScope(
+                    Request.Builder()
+                        .url(server.endpointUri)
+                        .post(initializedPayload.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+                        .header("Accept", "application/json, text/event-stream")
+                ).build()
             ).execute().use { /* notification — no response body expected */ }
 
             // Step 3: tools/list (real discovery after capability negotiation).
@@ -160,12 +164,13 @@ class McpClient(
                 put("params", JSONObject())
             }
 
-            val request = Request.Builder()
-                .url(server.endpointUri)
-                .post(listToolsPayload.toString().toRequestBody("application/json".toMediaTypeOrNull()))
-                .header("Accept", "application/json, text/event-stream")
-                .header("User-Agent", "AI-V0-MCP-Client/1.0")
-                .build()
+            val request = egressControl.applyEgressScope(
+                Request.Builder()
+                    .url(server.endpointUri)
+                    .post(listToolsPayload.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+                    .header("Accept", "application/json, text/event-stream")
+                    .header("User-Agent", "AI-V0-MCP-Client/1.0")
+            ).build()
 
             // FIX R-4: response closed on every path.
             val response = client.newCall(request).execute()
@@ -249,12 +254,13 @@ class McpClient(
                 })
             }
 
-            val request = Request.Builder()
-                .url(server.endpointUri)
-                .post(rpcPayload.toString().toRequestBody("application/json".toMediaTypeOrNull()))
-                .header("Accept", "application/json, text/event-stream")
-                .header("User-Agent", "AI-V0-MCP-Client/1.0")
-                .build()
+            val request = egressControl.applyEgressScope(
+                Request.Builder()
+                    .url(server.endpointUri)
+                    .post(rpcPayload.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+                    .header("Accept", "application/json, text/event-stream")
+                    .header("User-Agent", "AI-V0-MCP-Client/1.0")
+            ).build()
 
             val response = client.newCall(request).execute()
             val duration = System.currentTimeMillis() - startTime

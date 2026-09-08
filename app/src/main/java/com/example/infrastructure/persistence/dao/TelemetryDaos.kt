@@ -169,6 +169,28 @@ interface PermissionGrantDao {
     @Query("SELECT * FROM permission_grants WHERE principalType = :principalType AND principalId = :principalId")
     suspend fun forPrincipal(principalType: String, principalId: String): List<PermissionGrantEntity>
 
+    /**
+     * WORKSPACE-SCOPED lookup (defect family 2 — workspace context is part
+     * of authorization): a grant authorizes only when it is explicitly
+     * GLOBAL (workspaceId IS NULL) or scoped to the SAME workspace as the
+     * execution. A grant scoped to another workspace can never authorize.
+     */
+    @Query(
+        "SELECT * FROM permission_grants WHERE principalType = :principalType " +
+            "AND principalId = :principalId AND resourceType = :resourceType " +
+            "AND resourceId = :resourceId AND permission = :permission " +
+            "AND (workspaceId IS NULL OR workspaceId = :workspaceId) LIMIT 1"
+    )
+    suspend fun lookupScoped(
+        principalType: String,
+        principalId: String,
+        resourceType: String,
+        resourceId: String,
+        permission: String,
+        workspaceId: String?
+    ): PermissionGrantEntity?
+
+    /** Legacy unscoped lookup (kept for compatibility paths). */
     @Query("SELECT * FROM permission_grants WHERE principalType = :principalType AND principalId = :principalId AND resourceType = :resourceType AND resourceId = :resourceId AND permission = :permission LIMIT 1")
     suspend fun lookup(
         principalType: String,
@@ -183,6 +205,24 @@ interface PermissionGrantDao {
 
     @Query("DELETE FROM permission_grants WHERE id = :id")
     suspend fun revoke(id: Long)
+}
+
+@Dao
+interface AgentRevisionDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(revision: com.example.infrastructure.persistence.entities.AgentRevisionEntity)
+
+    @Query("SELECT * FROM agent_revisions WHERE agentId = :agentId ORDER BY createdAtEpochMs DESC")
+    suspend fun forAgent(agentId: String): List<com.example.infrastructure.persistence.entities.AgentRevisionEntity>
+
+    @Query("SELECT * FROM agent_revisions WHERE agentId = :agentId ORDER BY createdAtEpochMs DESC LIMIT 1")
+    suspend fun latestForAgent(agentId: String): com.example.infrastructure.persistence.entities.AgentRevisionEntity?
+
+    @Query("SELECT COUNT(*) FROM agent_revisions WHERE agentId = :agentId")
+    suspend fun countForAgent(agentId: String): Int
+
+    @Query("DELETE FROM agent_revisions WHERE agentId = :agentId")
+    suspend fun deleteForAgent(agentId: String)
 }
 
 @Dao
@@ -211,11 +251,20 @@ interface WorkflowExecutionDao {
     @Query("SELECT * FROM workflow_executions WHERE lifecycleState IN ('RUNNING', 'PAUSED', 'COMPENSATING') ORDER BY startedAtEpochMs DESC")
     suspend fun resumable(): List<WorkflowExecutionEntity>
 
+    /** WORKSPACE-SCOPED resumable list (defect family 1). */
+    @Query("SELECT * FROM workflow_executions WHERE lifecycleState IN ('RUNNING', 'PAUSED', 'COMPENSATING') AND workspaceId = :workspaceId ORDER BY startedAtEpochMs DESC")
+    suspend fun resumableForWorkspace(workspaceId: String): List<WorkflowExecutionEntity>
+
     @Query("SELECT * FROM workflow_executions WHERE workspaceId = :workspaceId ORDER BY startedAtEpochMs DESC")
     fun forWorkspace(workspaceId: String): Flow<List<WorkflowExecutionEntity>>
 
     @Query("SELECT * FROM workflow_executions WHERE workflowId = :id LIMIT 1")
     suspend fun byId(id: String): WorkflowExecutionEntity?
+
+    /** WORKSPACE-AUTHORIZED load — another workspace's run is
+     *  indistinguishable from nonexistent. */
+    @Query("SELECT * FROM workflow_executions WHERE workflowId = :id AND workspaceId = :workspaceId LIMIT 1")
+    suspend fun byIdAndWorkspace(id: String, workspaceId: String): WorkflowExecutionEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: WorkflowExecutionEntity)
@@ -223,8 +272,16 @@ interface WorkflowExecutionDao {
     @Query("UPDATE workflow_executions SET lifecycleState = :state, currentStepIndex = :step, lastCheckpointAtEpochMs = :now WHERE workflowId = :id")
     suspend fun checkpoint(id: String, state: String, step: Int, now: Long)
 
+    /** WORKSPACE-AUTHORIZED checkpoint — only the owning workspace's row. */
+    @Query("UPDATE workflow_executions SET lifecycleState = :state, currentStepIndex = :step, lastCheckpointAtEpochMs = :now WHERE workflowId = :id AND workspaceId = :workspaceId")
+    suspend fun checkpointForWorkspace(id: String, workspaceId: String, state: String, step: Int, now: Long)
+
     @Query("UPDATE workflow_executions SET lifecycleState = :state, completedAtEpochMs = :now, failureReason = :reason WHERE workflowId = :id")
     suspend fun terminate(id: String, state: String, now: Long, reason: String?)
+
+    /** WORKSPACE-AUTHORIZED terminal write — only the owning workspace's row. */
+    @Query("UPDATE workflow_executions SET lifecycleState = :state, completedAtEpochMs = :now, failureReason = :reason WHERE workflowId = :id AND workspaceId = :workspaceId")
+    suspend fun terminateForWorkspace(id: String, workspaceId: String, state: String, now: Long, reason: String?)
 }
 
 @Dao
@@ -237,6 +294,10 @@ interface WorkflowStepStateDao {
 
     @Query("UPDATE workflow_step_states SET status = :status, outputSummary = :summary, durationMs = :duration, completedAtEpochMs = :now WHERE workflowId = :workflowId AND stepId = :stepId")
     suspend fun updateStepStatus(workflowId: String, stepId: String, status: String, summary: String?, duration: Long?, now: Long)
+
+    /** Durable artifact payloads (defect family 7). */
+    @Query("UPDATE workflow_step_states SET artifactsJson = :artifactsJson WHERE workflowId = :workflowId AND stepId = :stepId")
+    suspend fun updateStepArtifacts(workflowId: String, stepId: String, artifactsJson: String)
 }
 
 @Dao

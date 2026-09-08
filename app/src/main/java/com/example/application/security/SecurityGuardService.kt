@@ -13,10 +13,37 @@ import com.example.domain.ports.security.SecurityGuardPort
 
 /**
  * Standard Application Service for Pre-Execution Security & Budget Guardrails.
+ *
+ * REPAIR (defect family 2 — "security classification has overly permissive
+ * handling for unknown/unclassified tools"): the previous fallback classified
+ * EVERY unmatched tool name as DEFAULT_SAFE_TOOL / ALLOW / LOW — a fabricated
+ * safety verdict for tools the classifier never saw. The repaired classifier
+ * is closed-world:
+ *
+ *   1. Prohibited tool/parameter patterns (policy-driven, unchanged).
+ *   2. Shell/terminal (consent/danger patterns, unchanged).
+ *   3. File-system tools (path restrictions; explicit read vs mutation,
+ *      unchanged semantics).
+ *   4. KNOWN-SAFE closed list (search / memory / diagnostics / retrieval).
+ *   5. Declaration-backed classification: when the caller supplies the
+ *      ToolDeclaration facts via [ToolInput.contextAttributes] (the
+ *      ExecutionService boundary does), a tool that DECLARES itself
+ *      read-only, non-sensitive, consent-free and local is classified from
+ *      those authoritative facts.
+ *   6. ANYTHING ELSE (truly unclassified) → REQUIRE_CONSENT / MEDIUM —
+ *      FAIL-CLOSED, never a fabricated ALLOW.
  */
 class SecurityGuardService(
     private val defaultPolicy: SecurityPolicy = SecurityPolicy()
 ) : SecurityGuardPort {
+
+    companion object {
+        /** Declaration-derived classification contract (see class KDoc #5). */
+        const val ATTR_DECLARED_SIDE_EFFECTS = "declaredSideEffects"
+        const val ATTR_DECLARED_SENSITIVE = "declaredSensitive"
+        const val ATTR_DECLARED_REQUIRES_CONSENT = "declaredRequiresConsent"
+        const val ATTR_DECLARED_NETWORK_REQUIREMENT = "declaredNetworkRequirement"
+    }
 
     override fun evaluateToolExecution(input: ToolInput, policy: SecurityPolicy): SecurityEvaluation {
         val toolName = input.toolName.lowercase()
@@ -100,16 +127,98 @@ class SecurityGuardService(
                     explanation = "عملية تعديل ملف آمنة داخل مساحة العمل."
                 )
             }
+            // Read-style file tools (list/read/search/inspect) are explicitly
+            // classified safe — they previously fell through to the default
+            // branch (which is now fail-closed).
+            if (toolName.contains("file") || toolName == "read_file" || toolName == "list_files" ||
+                toolName == "search_files"
+            ) {
+                return SecurityEvaluation(
+                    decision = SecurityDecision.ALLOW,
+                    riskLevel = RiskLevel.LOW,
+                    matchedRule = "WORKSPACE_FILE_READ",
+                    explanation = "عملية قراءة ملفات داخل مساحة العمل."
+                )
+            }
         }
 
-        // 3. Default Safe Tools (Search, Memory, Diagnostics)
+        // 3. KNOWN-SAFE closed list (explicit — a tool is safe here ONLY if
+        // its category is enumerated; no category → NOT safe by default).
+        if (isKnownSafeTool(toolName)) {
+            return SecurityEvaluation(
+                decision = SecurityDecision.ALLOW,
+                riskLevel = RiskLevel.LOW,
+                matchedRule = "KNOWN_SAFE_TOOL",
+                explanation = "الأداة مصنفة ضمن الفئات الآمنة المعروفة (بحث/ذاكرة/تشخيص/استرجاع)."
+            )
+        }
+
+        // 4. DECLARATION-BACKED classification (the canonical fact source):
+        // the execution/admission boundaries supply the ToolDeclaration's
+        // authoritative facts. Classification is derived from DECLARED
+        // facts — never fabricated:
+        //   - declared sensitive or consent-requiring → REQUIRE_CONSENT;
+        //   - declared local, non-sensitive → ALLOW with the risk derived
+        //     from the DECLARED side-effect classification;
+        //   - declared non-local (external network effect) without a
+        //     known-safe category → REQUIRE_CONSENT (explicit).
+        if (input.contextAttributes.containsKey(ATTR_DECLARED_SIDE_EFFECTS)) {
+            if (input.contextAttributes[ATTR_DECLARED_SENSITIVE]?.toBoolean() == true ||
+                input.contextAttributes[ATTR_DECLARED_REQUIRES_CONSENT]?.toBoolean() == true
+            ) {
+                return SecurityEvaluation(
+                    decision = SecurityDecision.REQUIRE_CONSENT,
+                    riskLevel = RiskLevel.HIGH,
+                    matchedRule = "DECLARED_SENSITIVE_TOOL",
+                    explanation = "الأداة مُصرَّحة في سجلها كأداة حساسة تتطلب موافقة."
+                )
+            }
+            val sideEffects = input.contextAttributes[ATTR_DECLARED_SIDE_EFFECTS] ?: "READ_ONLY"
+            val network = input.contextAttributes[ATTR_DECLARED_NETWORK_REQUIREMENT] ?: "LOCAL_ONLY"
+            if (network != "LOCAL_ONLY") {
+                return SecurityEvaluation(
+                    decision = SecurityDecision.REQUIRE_CONSENT,
+                    riskLevel = RiskLevel.MEDIUM,
+                    matchedRule = "DECLARED_EXTERNAL_TOOL",
+                    explanation = "الأداة مُصرَّحة بتأثير شبكي خارجي — يلزم تصنيف أو موافقة صريحة."
+                )
+            }
+            val risk = when (sideEffects) {
+                "READ_ONLY", "IDEMPOTENT" -> RiskLevel.LOW
+                "STATE_MUTATION" -> RiskLevel.MEDIUM
+                else -> RiskLevel.HIGH
+            }
+            return SecurityEvaluation(
+                decision = SecurityDecision.ALLOW,
+                riskLevel = risk,
+                matchedRule = "DECLARED_LOCAL_TOOL",
+                explanation = "أداة محلية مُصرَّحة غير حساسة (تأثير معلن: $sideEffects) — " +
+                    "تخضع لسياسة المسارات وحدود مساحة العمل."
+            )
+        }
+
+        // 5. UNCLASSIFIED — fail closed. The previous DEFAULT_SAFE_TOOL
+        // ALLOW verdict for unseen tools was a fabricated safety
+        // classification (defect family 2).
         return SecurityEvaluation(
-            decision = SecurityDecision.ALLOW,
-            riskLevel = RiskLevel.LOW,
-            matchedRule = "DEFAULT_SAFE_TOOL",
-            explanation = "الأداة مصنفة كأداة آمنة وغير حساسة."
+            decision = SecurityDecision.REQUIRE_CONSENT,
+            riskLevel = RiskLevel.MEDIUM,
+            matchedRule = "UNCLASSIFIED_TOOL",
+            explanation = "الأداة غير مصنفة أمنياً (لا تنتمي لفئة معروفة ولا توجد حقائق تصريح) — يلزم تصنيف أو موافقة صريحة قبل التنفيذ."
         )
     }
+
+    /** The closed known-safe category list (name-prefix / contains match). */
+    private fun isKnownSafeTool(toolName: String): Boolean {
+        val knownSafePrefixes = listOf(
+            "search", "tavily", "memory", "diagnostics", "safe_diagnostics",
+            "retrieve_knowledge", "retrieve_memory", "knowledge", "rag",
+            "workspace_summary", "list_files", "read_file", "search_files"
+        )
+        return knownSafePrefixes.any { toolName.startsWith(it) } ||
+            toolName.contains("memory") || toolName.contains("diagnostics")
+    }
+
 
     override fun sanitizeUntrustedOutput(rawOutput: String): String {
         // 1. Redact any sensitive tokens/secrets to prevent leakage

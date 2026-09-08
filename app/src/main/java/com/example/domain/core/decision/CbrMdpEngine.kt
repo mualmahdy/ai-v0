@@ -207,8 +207,23 @@ class CbrMdpEngine(
 
     /**
      * Executes the decision step: State -> CBR-MDP -> Action + Observability Trace.
+     *
+     * DEFECT FAMILY 5 REPAIR (startup-loading race): the case base is gated
+     * on durable-load readiness — the engine WAITS (bounded) for the async
+     * load to complete before consulting historical cases, so early
+     * decisions never silently run against bootstrap-only state. On timeout
+     * the decision proceeds with whatever is loaded (observable through
+     * [CaseBase.isLoadComplete]/[CaseBase.awaitReady]).
      */
-    fun evaluateAndSelectAction(
+    suspend fun evaluateAndSelectAction(
+        state: DecisionState,
+        candidateActions: List<DecisionAction>
+    ): DecisionResult {
+        caseBase.awaitReady()
+        return evaluateAndSelectActionLoaded(state, candidateActions)
+    }
+
+    private fun evaluateAndSelectActionLoaded(
         state: DecisionState,
         candidateActions: List<DecisionAction>
     ): DecisionResult {
@@ -428,7 +443,7 @@ class CbrMdpEngine(
      * on the (region, action) cell, increments visit/success counts (the real
      * transition rate), and marks the cell dirty for persistence (FIX D-4).
      */
-    fun processObservationAndUpdateBelief(
+    suspend fun processObservationAndUpdateBelief(
         state: DecisionState,
         observation: EnvironmentObservation
     ): DecisionState {

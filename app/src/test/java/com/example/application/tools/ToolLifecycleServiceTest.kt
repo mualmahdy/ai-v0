@@ -232,6 +232,12 @@ class ToolLifecycleServiceTest {
                 it.principalType == principalType && it.principalId == principalId &&
                     it.resourceType == resourceType && it.resourceId == resourceId && it.permission == permission
             }
+        override suspend fun lookupScoped(principalType: String, principalId: String, resourceType: String, resourceId: String, permission: String, workspaceId: String?) =
+            grants.firstOrNull {
+                it.principalType == principalType && it.principalId == principalId &&
+                    it.resourceType == resourceType && it.resourceId == resourceId && it.permission == permission &&
+                    (it.workspaceId == null || it.workspaceId == workspaceId)
+            }
         override suspend fun upsert(grant: com.example.infrastructure.persistence.entities.PermissionGrantEntity): Long {
             grants.add(grant.copy(id = grants.size + 1L))
             return grants.size.toLong()

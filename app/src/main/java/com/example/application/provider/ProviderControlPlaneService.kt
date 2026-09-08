@@ -80,6 +80,9 @@ class ProviderControlPlaneService(
     private val secureCredentialStorage: SecureCredentialStoragePort,
     private val adapterFactory: ProtocolAdapterFactory,
     private val validatorRegistry: ResourceValidatorRegistry,
+    /** EGRESS ENFORCEMENT: the shared, composition-root-owned guard. */
+    private val egressControl: com.example.infrastructure.network.EgressControl =
+        com.example.infrastructure.network.EgressControl.default,
     /**
      * FIX F-1/F-2/F-3 (audit c03919d): the authoritative RuntimeAdapterResolver
      * used by ExecutionService. Every materialized/validated resource adapter is
@@ -1038,7 +1041,7 @@ class ProviderControlPlaneService(
                 serviceId = service.id,
                 config = config,
                 transportType = com.example.domain.core.extension.McpTransportType.SSE,
-                mcpClient = com.example.infrastructure.mcp.McpClient()
+                mcpClient = com.example.infrastructure.mcp.McpClient(egressControl = egressControl)
             )
         }
     }

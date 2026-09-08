@@ -201,79 +201,197 @@ class ExecutionService(
         Exception("Tool-call arguments are not valid JSON: $rawSnippet")
 
     /**
-     * Security enforcement boundary (audit 2026 fix).
+     * ============================================================================
+     * THE CANONICAL TOOL-AUTHORIZATION BOUNDARY (defect family 2 repair)
+     * ============================================================================
      *
-     * For SENSITIVE tools (declaration.isSensitive / requiresHumanConsent, or
-     * destructive shell tools) and MCP tools, an explicit permission grant for
-     * (AGENT:<agentId> → TOOL:<toolName> → EXECUTE) is REQUIRED. Without the
-     * grant the execution is BLOCKED and the decision is audited — previously
-     * `PermissionGrantService` existed but was never consulted by any
-     * execution path, so "permission denied" could be recorded while the
-     * operation still ran (a security failure, not a security feature).
+     * ONE ordered authority path for EVERY model-initiated / inline tool
+     * execution (EXECUTE_TOOL, EXECUTE_MCP, MODEL_TOOL_CALL, skills):
      *
-     * Non-sensitive in-app tools (read-only diagnostics, workspace file
-     * listing) execute without a grant but still pass the SecurityGuard.
+     *   1. DECLARATION RESOLUTION — the tool must exist and its declaration
+     *      is the classification source of truth.
+     *   2. SECURITY POLICY (SecurityGuardService, a CEILING) — prohibited
+     *      patterns/params, shell policy, path policy, closed-world
+     *      classification. DENY blocks; REQUIRE_CONSENT FAILS CLOSED in this
+     *      path (there is no interactive consent collector mid-stream — a
+     *      consent-requiring tool is BLOCKED until an explicit grant exists).
+     *   3. SENSITIVE-TOOL PERMISSION GRANT (PermissionGrantService,
+     *      workspace-scoped) — sensitive/MCP/consent-requiring tools REQUIRE
+     *      an explicit EXECUTE grant. When the grant service is UNAVAILABLE
+     *      the decision FAILS CLOSED (previously `?: return null` made the
+     *      whole stage a NO-OP — the defect). Enforcement exceptions also
+     *      fail CLOSED.
+     *   4. AUDIT — every ALLOW/DENY decision is recorded (through the grant
+     *      service when available, otherwise the authorization audit sink).
+     *
+     * Workspace context (from the pinned [ExecutionScope]) is part of the
+     * authorization: grants are scoped to the execution's workspace.
      */
-    private suspend fun enforcePermissions(
+    private sealed interface ToolAuthorization {
+        data object Allowed : ToolAuthorization
+        data class Denied(
+            val failureCode: String,
+            val message: String
+        ) : ToolAuthorization
+    }
+
+    /** Resolves the execution's pinned workspace (null = unattributed). */
+    private suspend fun currentWorkspaceId(): String? {
+        val scope = kotlinx.coroutines.currentCoroutineContext()[com.example.domain.core.execution.ExecutionScope.Key]
+        return scope?.workspaceId?.takeIf { it.isNotBlank() && it != "unattributed" }
+    }
+
+    private suspend fun authorizeToolExecution(
         agent: AgentDefinition,
         toolName: String,
+        arguments: Map<String, Any?>,
         actionType: String,
         executionId: String,
         isMcp: Boolean
-    ): ExecutionResult? {
-        val service = permissionGrantService ?: return null // enforcement unavailable → SecurityGuard still applies
+    ): ToolAuthorization {
+        val workspaceId = currentWorkspaceId()
+
+        // --- 1. Declaration resolution (classification source of truth) ---
         val declaration = runtimeAdapterResolver.listToolDeclarations()
             .firstOrNull { it.name.equals(toolName, ignoreCase = true) }
         val isSensitive = isMcp ||
             (declaration?.isSensitive ?: false) ||
             (declaration?.requiresHumanConsent ?: false)
-        if (!isSensitive) return null
 
-        val allowed = try {
-            service.check(
-                principalType = com.example.domain.core.security.governance.PrincipalType.AGENT,
-                principalId = agent.identity.id.value,
-                resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
-                resourceId = toolName,
-                permission = com.example.domain.core.security.governance.Permission.EXECUTE
+        // --- 2. Security policy ceiling (with declaration facts) ---
+        val toolInput = ToolInput(
+            toolName = toolName,
+            arguments = arguments,
+            executionId = executionId,
+            contextAttributes = declaration?.let {
+                mapOf(
+                    com.example.application.security.SecurityGuardService.ATTR_DECLARED_SIDE_EFFECTS to it.sideEffects.name,
+                    com.example.application.security.SecurityGuardService.ATTR_DECLARED_SENSITIVE to it.isSensitive.toString(),
+                    com.example.application.security.SecurityGuardService.ATTR_DECLARED_REQUIRES_CONSENT to it.requiresHumanConsent.toString(),
+                    com.example.application.security.SecurityGuardService.ATTR_DECLARED_NETWORK_REQUIREMENT to it.networkRequirement.name
+                )
+            } ?: emptyMap()
+        )
+        val secEvaluation = securityGuard.evaluateToolExecution(toolInput, defaultSecurityPolicy)
+        if (secEvaluation.decision == SecurityDecision.DENY) {
+            auditAuthorization(
+                agent, toolName, actionType, executionId, "DENY",
+                "SECURITY_POLICY_DENY:${secEvaluation.matchedRule ?: "POLICY"}: ${secEvaluation.explanation}",
+                workspaceId
             )
-        } catch (_: Exception) {
-            false // enforcement failure must fail CLOSED, never open
+            return ToolAuthorization.Denied(
+                failureCode = "SECURITY_DENIED",
+                message = "تم رفض استدعاء الأداة وفقاً لسياسة الأمان: ${secEvaluation.explanation}"
+            )
         }
+        // Consent-requiring (or sensitive) tools REQUIRE an explicit grant:
+        // REQUIRE_CONSENT FAILS CLOSED — previously it was silently ignored
+        // and the tool executed anyway (fail-open hole). An explicit EXECUTE
+        // grant IS the recorded consent.
+        val requiresExplicitGrant = isSensitive ||
+            secEvaluation.decision == SecurityDecision.REQUIRE_CONSENT
 
-        if (allowed) {
-            runCatching {
-                service.recordSecurityDecision(
-                    severity = com.example.domain.core.security.governance.AuditSeverity.INFO,
-                    actor = "agent:${agent.identity.id.value}",
-                    action = actionType,
-                    resourceType = "TOOL",
-                    resourceId = toolName,
-                    decision = "ALLOW",
-                    reason = "إذن صريح قائم لتنفيذ الأداة الحساسة."
+        // --- 3. Permission grant (fail-closed) ---
+        if (requiresExplicitGrant) {
+            val service = permissionGrantService
+            if (service == null) {
+                // FAIL CLOSED: the governance dependency is unavailable —
+                // previously this made sensitive-tool enforcement a NO-OP.
+                auditAuthorization(
+                    agent, toolName, actionType, executionId, "DENY",
+                    "PERMISSION_ENFORCEMENT_UNAVAILABLE: خدمة منح الأذونات غير متاحة — الرفض الافتراضي (fail-closed).",
+                    workspaceId
+                )
+                return ToolAuthorization.Denied(
+                    failureCode = "PERMISSION_ENFORCEMENT_UNAVAILABLE",
+                    message = "الأداة '$toolName' حساسة/تتطلب موافقة ولا يمكن التحقق من إذن التنفيذ " +
+                        "(خدمة الأذونات غير مهيأة) — رُفض التنفيذ صراحة."
                 )
             }
-            return null
+            val allowed = try {
+                service.check(
+                    principalType = com.example.domain.core.security.governance.PrincipalType.AGENT,
+                    principalId = agent.identity.id.value,
+                    resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
+                    resourceId = toolName,
+                    permission = com.example.domain.core.security.governance.Permission.EXECUTE,
+                    workspaceId = workspaceId
+                )
+            } catch (_: Exception) {
+                false // enforcement failure must fail CLOSED, never open
+            }
+            if (!allowed) {
+                auditAuthorization(
+                    agent, toolName, actionType, executionId, "DENY",
+                    "PERMISSION_DENIED: لا يوجد منح إذن EXECUTE (${workspaceId ?: "unscoped"}) للوكيل ${agent.identity.id.value}.",
+                    workspaceId
+                )
+                return ToolAuthorization.Denied(
+                    failureCode = "PERMISSION_DENIED",
+                    message = "الأداة '$toolName' حساسة/تتطلب موافقة ولا يملك الوكيل ${agent.identity.name} " +
+                        "إذن التنفيذ عليها${workspaceId?.let { " في مساحة العمل $it" } ?: ""}. اطلب منح الإذن ثم أعد المحاولة."
+                )
+            }
         }
 
+        // --- 4. Audited ALLOW ---
+        auditAuthorization(
+            agent, toolName, actionType, executionId, "ALLOW",
+            "إذن صريح قائم (أو أداة مصنفة آمنة) لتنفيذ ${if (isSensitive) "الأداة الحساسة" else "الأداة"}.",
+            workspaceId
+        )
+        return ToolAuthorization.Allowed
+    }
+
+    /** Records an authorization decision through the canonical audit path. */
+    private suspend fun auditAuthorization(
+        agent: AgentDefinition,
+        toolName: String,
+        actionType: String,
+        executionId: String,
+        decision: String,
+        reason: String,
+        workspaceId: String?
+    ) {
+        val severity = if (decision == "ALLOW") {
+            com.example.domain.core.security.governance.AuditSeverity.INFO
+        } else {
+            com.example.domain.core.security.governance.AuditSeverity.WARN
+        }
         runCatching {
-            service.recordSecurityDecision(
-                severity = com.example.domain.core.security.governance.AuditSeverity.WARN,
+            permissionGrantService?.recordSecurityDecision(
+                severity = severity,
                 actor = "agent:${agent.identity.id.value}",
                 action = actionType,
                 resourceType = "TOOL",
                 resourceId = toolName,
-                decision = "DENY",
-                reason = "رُفض تنفيذ الأداة الحساسة '$toolName': لا يوجد منح إذن EXECUTE للوكيل ${agent.identity.id.value}."
+                decision = decision,
+                reason = reason,
+                workspaceId = workspaceId
+            ) ?: authorizationAuditSink?.invoke(
+                severity, "agent:${agent.identity.id.value}", actionType,
+                "TOOL", toolName, decision, reason, workspaceId
             )
         }
-        return ExecutionResult(
-            isSuccess = false,
-            errorDescription = "PERMISSION_DENIED: الأداة '$toolName' حساسة ولا يملك الوكيل ${agent.identity.name} " +
-                "إذن التنفيذ عليها. اطلب منح الإذن ثم أعد المحاولة.",
-            latencyMs = 0L
-        )
+        // Audit failures never block the authorization decision itself, but
+        // the decision above was already made fail-closed.
     }
+
+    /**
+     * Late-bound audit sink for authorization decisions when the
+     * PermissionGrantService is unavailable (wired by the composition root
+     * to the telemetry audit trail — the SAME trail, one authority).
+     */
+    var authorizationAuditSink: (suspend (
+        severity: com.example.domain.core.security.governance.AuditSeverity,
+        actor: String,
+        action: String,
+        resourceType: String,
+        resourceId: String,
+        decision: String,
+        reason: String,
+        workspaceId: String?
+    ) -> Unit)? = null
 
     /**
      * Executes any chosen DecisionAction, emitting fine-grained streaming events
@@ -309,7 +427,7 @@ class ExecutionService(
                 executeMcpAction(action, agent, executionId, startTime, onEvent)
             }
             DecisionActionType.EXECUTE_SKILL -> {
-                executeSkillAction(action, agent, startTime)
+                executeSkillAction(action, agent, executionId, startTime)
             }
             DecisionActionType.USE_INTEGRATION -> {
                 executeIntegrationAction(action, startTime)
@@ -1082,10 +1200,23 @@ class ExecutionService(
             )
         }
 
-        // Fine-grained permission enforcement (audit 2026 fix): sensitive
-        // tools require an explicit grant — a denial BLOCKS the execution.
-        enforcePermissions(agent, toolName, "EXECUTE_TOOL", executionId, isMcp = false)?.let {
-            return it
+        // CANONICAL AUTHORIZATION BOUNDARY (defect family 2): security
+        // ceiling + fail-closed sensitive-tool permission grants. Replaces
+        // the two separate (and separately-bypassable) checks.
+        when (val auth = authorizeToolExecution(
+            agent = agent,
+            toolName = toolName,
+            arguments = action.payload,
+            actionType = "EXECUTE_TOOL",
+            executionId = executionId,
+            isMcp = false
+        )) {
+            is ToolAuthorization.Denied -> return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "${auth.failureCode}: ${auth.message}",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+            ToolAuthorization.Allowed -> Unit
         }
 
         val toolInput = ToolInput(
@@ -1093,16 +1224,6 @@ class ExecutionService(
             arguments = action.payload,
             executionId = executionId
         )
-
-        // Security Guard check
-        val secEval = securityGuard.evaluateToolExecution(toolInput, defaultSecurityPolicy)
-        if (secEval.decision == SecurityDecision.DENY) {
-            return ExecutionResult(
-                isSuccess = false,
-                errorDescription = "تم رفض تنفيذ الأداة وفقاً لسياسة الأمان: ${secEval.explanation}",
-                latencyMs = System.currentTimeMillis() - startTime
-            )
-        }
 
         val callId = "call_${System.currentTimeMillis()}"
         onEvent(
@@ -1204,18 +1325,27 @@ class ExecutionService(
         )
 
         val toolName = tool.declaration.name
-        val toolInput = ToolInput(toolName = toolName, arguments = action.payload, executionId = executionId)
-        val secEval = securityGuard.evaluateToolExecution(toolInput, defaultSecurityPolicy)
-        if (secEval.decision == SecurityDecision.DENY) {
-            return ExecutionResult(
+
+        // CANONICAL AUTHORIZATION BOUNDARY (defect family 2): ALL MCP tools
+        // are sensitive — security ceiling + fail-closed permission grant in
+        // ONE path (replaces the two separate checks).
+        when (val auth = authorizeToolExecution(
+            agent = agent,
+            toolName = toolName,
+            arguments = action.payload,
+            actionType = "EXECUTE_MCP",
+            executionId = executionId,
+            isMcp = true
+        )) {
+            is ToolAuthorization.Denied -> return ExecutionResult(
                 isSuccess = false,
-                errorDescription = "تم حظر استدعاء أداة MCP أمنياً: ${secEval.explanation}",
+                errorDescription = "${auth.failureCode}: ${auth.message}",
                 latencyMs = System.currentTimeMillis() - startTime
             )
+            ToolAuthorization.Allowed -> Unit
         }
 
-        // Fine-grained permission enforcement — ALL MCP tools are sensitive.
-        enforcePermissions(agent, toolName, "EXECUTE_MCP", executionId, isMcp = true)?.let { return it }
+        val toolInput = ToolInput(toolName = toolName, arguments = action.payload, executionId = executionId)
 
         val outcome = tool.execute(toolInput)
         return when (outcome) {
@@ -1243,9 +1373,31 @@ class ExecutionService(
     private suspend fun executeSkillAction(
         action: DecisionAction,
         agent: AgentDefinition,
+        executionId: String,
         startTime: Long
     ): ExecutionResult {
         val skillId = action.targetId ?: "skill"
+        // CANONICAL AUTHORIZATION BOUNDARY (defect family 2/6 — bypass-path
+        // closure): skill execution previously ran with NO security gate at
+        // all (a direct bypass around SecurityGuard + permissions). Skills
+        // execute extension code — a sensitive external action — so they now
+        // pass through the SAME boundary as every other tool action
+        // (fail-closed until an explicit EXECUTE grant exists).
+        when (val auth = authorizeToolExecution(
+            agent = agent,
+            toolName = "skill_$skillId",
+            arguments = action.payload,
+            actionType = "EXECUTE_SKILL",
+            executionId = executionId,
+            isMcp = false
+        )) {
+            is ToolAuthorization.Denied -> return ExecutionResult(
+                isSuccess = false,
+                errorDescription = "${auth.failureCode}: ${auth.message}",
+                latencyMs = System.currentTimeMillis() - startTime
+            )
+            ToolAuthorization.Allowed -> Unit
+        }
         if (extensionManager != null) {
             val outcome = extensionManager.executeSkill(skillId, action.payload)
             return when (outcome) {
@@ -1683,37 +1835,35 @@ class ExecutionService(
             executionId = executionId
         )
 
-        val secEvaluation = securityGuard.evaluateToolExecution(toolInput, defaultSecurityPolicy)
-        if (secEvaluation.decision == SecurityDecision.DENY) {
-            return ExecutionEvent.ToolResult(
-                executionId = executionId,
-                callId = callId,
-                toolName = toolName,
-                outcome = Outcome.Error(
-                    failure = ToolFailure.SecurityDenied(
-                        ruleName = "SECURITY_POLICY_CHECK",
-                        message = "تم حظر استدعاء الأداة وفقاً لسياسة الأمان: ${secEvaluation.explanation}"
-                    ),
-                    diagnosticMessage = secEvaluation.explanation
+        // CANONICAL AUTHORIZATION BOUNDARY (defect family 2): security
+        // ceiling + closed-world classification + fail-closed sensitive-tool
+        // permission grants — ONE path for every model-initiated tool call.
+        when (val auth = authorizeToolExecution(
+            agent = agent,
+            toolName = toolName,
+            arguments = parsedArguments,
+            actionType = "MODEL_TOOL_CALL",
+            executionId = executionId,
+            isMcp = false
+        )) {
+            is ToolAuthorization.Denied -> {
+                val failure = when (auth.failureCode) {
+                    "PERMISSION_DENIED", "PERMISSION_ENFORCEMENT_UNAVAILABLE" ->
+                        ToolFailure.PermissionDenied(pathOrResource = toolName, message = auth.message)
+                    else ->
+                        ToolFailure.SecurityDenied(ruleName = auth.failureCode, message = auth.message)
+                }
+                return ExecutionEvent.ToolResult(
+                    executionId = executionId,
+                    callId = callId,
+                    toolName = toolName,
+                    outcome = Outcome.Error(
+                        failure = failure,
+                        diagnosticMessage = "${auth.failureCode}: ${auth.message}"
+                    )
                 )
-            )
-        }
-
-        // Fine-grained permission enforcement for model-initiated tool calls.
-        val permissionResult = enforcePermissions(agent, toolName, "MODEL_TOOL_CALL", executionId, isMcp = false)
-        if (permissionResult != null) {
-            return ExecutionEvent.ToolResult(
-                executionId = executionId,
-                callId = callId,
-                toolName = toolName,
-                outcome = Outcome.Error(
-                    failure = ToolFailure.PermissionDenied(
-                        pathOrResource = toolName,
-                        message = permissionResult.errorDescription ?: "PERMISSION_DENIED"
-                    ),
-                    diagnosticMessage = permissionResult.errorDescription ?: "PERMISSION_DENIED"
-                )
-            )
+            }
+            ToolAuthorization.Allowed -> Unit
         }
 
         return when (val result = tool.execute(toolInput)) {

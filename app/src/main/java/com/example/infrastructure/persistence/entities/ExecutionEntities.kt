@@ -102,3 +102,30 @@ data class AgentDefinitionEntity(
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long
 )
+
+/**
+ * DURABLE AGENT REVISION LEDGER (defect family 4 — "agent revisions/
+ * versioning must be durable and reproducible"): one row per registered
+ * revision of an agent. The full version chain (major.minor.patch,
+ * previousVersionId, author, snapshot) survives process death, so the
+ * lifecycle service's version history is REPRODUCIBLE after restart —
+ * previously the chain lived only in an in-memory map and evaporated.
+ */
+@Entity(
+    tableName = "agent_revisions",
+    primaryKeys = ["agentId", "revisionId"]
+)
+data class AgentRevisionEntity(
+    val agentId: String,
+    /** Unique revision identifier (VersionedAgentDefinition.version.revisionId). */
+    val revisionId: String,
+    val major: Int,
+    val minor: Int,
+    val patch: Int,
+    /** Version string of the previous revision in the chain (null = first). */
+    val previousVersionId: String?,
+    /** Full snapshot of the definition at this revision (JSON). */
+    val snapshotJson: String,
+    val createdBy: String,
+    val createdAtEpochMs: Long
+)

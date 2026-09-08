@@ -120,7 +120,7 @@ class DecisionIntelligenceService(
      * chosen action TYPE name — exactly what the decision runtime would
      * choose, not a simulation.
      */
-    private fun realPolicyLookup(state: DecisionState): String {
+    private suspend fun realPolicyLookup(state: DecisionState): String {
         val candidates = standardCandidateActions()
         val decision = cbrMdpEngine.evaluateAndSelectAction(state, candidates)
         return decision.chosenAction.type.name

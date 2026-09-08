@@ -7,6 +7,9 @@ import com.example.domain.core.runtime.SandboxResourceLimits
 import com.example.domain.core.runtime.SandboxSession
 import com.example.domain.core.runtime.SandboxTransitions
 import com.example.domain.core.Outcome
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -30,6 +33,20 @@ class SandboxLifecycleService(
 ) {
 
     private val sessions = ConcurrentHashMap<String, SandboxSession>()
+
+    /**
+     * Live snapshot of ALL sandbox sessions (defect family 1 wiring): the
+     * composition root observes this to maintain SESSION-SCOPED egress
+     * blocks — a NO_NETWORK sandbox session blocks egress ONLY for requests
+     * carrying that session's own scope, and blocks are released when the
+     * session reaches a terminal state (no stale leaks).
+     */
+    private val _sessionsState = MutableStateFlow<List<SandboxSession>>(emptyList())
+    val sessionsState: StateFlow<List<SandboxSession>> = _sessionsState.asStateFlow()
+
+    private fun publishSessions() {
+        _sessionsState.value = sessions.values.toList()
+    }
 
     /** True isolation ranking used for comparisons (higher = stronger). */
     private val isolationRank: Map<IsolationLevel, Int> = mapOf(
@@ -77,6 +94,7 @@ class SandboxLifecycleService(
             ?.let { sessions[sessionId] = it; it } ?: sessions[sessionId]!!
         session = advance(sessionId, SandboxLifecycleState.READY)
             ?.let { sessions[sessionId] = it; it } ?: sessions[sessionId]!!
+        publishSessions()
         return Outcome.Success(session)
     }
 
@@ -111,6 +129,7 @@ class SandboxLifecycleService(
             failureReason = "limit:$limitName observed=$observedValue — $message",
             stateHistory = current.stateHistory + (SandboxLifecycleState.FAILED to clock())
         )
+        publishSessions()
         return Outcome.Success(sessions[sessionId]!!)
     }
 
@@ -162,6 +181,7 @@ class SandboxLifecycleService(
             stateHistory = current.stateHistory + (to to clock())
         )
         sessions[sessionId] = updated
+        publishSessions()
         return updated
     }
 }

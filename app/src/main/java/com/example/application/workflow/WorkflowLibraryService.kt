@@ -88,21 +88,33 @@ class WorkflowLibraryService(
         return id
     }
 
-    /** Loads a definition back into a FULL editable plan (resume editing). */
-    suspend fun loadDefinition(id: WorkflowId): WorkflowPlan? {
-        val entity = workflowDefinitionDao.byId(id.value) ?: return null
+    /** Loads a definition back into a FULL editable plan (resume editing) —
+     *  WORKSPACE-AUTHORIZED (defect family 1): a definition owned by another
+     *  workspace is indistinguishable from nonexistent. */
+    suspend fun loadDefinition(
+        id: WorkflowId,
+        workspaceId: String? = null
+    ): WorkflowPlan? {
+        val ws = workspaceId ?: workspaceIdProvider()
+        val entity = workflowDefinitionDao.byIdAndWorkspace(id.value, ws) ?: return null
         val planJson = rebuildPlanJson(entity)
         return planSerializer.deserializePlan(planJson)
     }
 
-    /** Clones a definition (id + fresh timestamps, version 1, runCount 0). */
-    suspend fun cloneDefinition(id: WorkflowId): WorkflowId? {
-        val entity = workflowDefinitionDao.byId(id.value) ?: return null
+    /** Clones a definition (id + fresh timestamps, version 1, runCount 0) —
+     *  WORKSPACE-AUTHORIZED: returns null for another workspace's asset. */
+    suspend fun cloneDefinition(
+        id: WorkflowId,
+        workspaceId: String? = null
+    ): WorkflowId? {
+        val ws = workspaceId ?: workspaceIdProvider()
+        val entity = workflowDefinitionDao.byIdAndWorkspace(id.value, ws) ?: return null
         val now = System.currentTimeMillis()
         val cloneId = WorkflowId("wfl_${UUID.randomUUID().toString().take(12)}")
         workflowDefinitionDao.upsert(
             entity.copy(
                 workflowId = cloneId.value,
+                workspaceId = ws,
                 name = "${entity.name} (نسخة)",
                 version = 1,
                 runCount = 0,
@@ -114,13 +126,23 @@ class WorkflowLibraryService(
         return cloneId
     }
 
-    /** Records that a definition was executed (run history). */
-    suspend fun recordRun(id: WorkflowId) {
-        workflowDefinitionDao.recordRun(id.value, System.currentTimeMillis())
+    /** Records that a definition was executed (run history) —
+     *  WORKSPACE-AUTHORIZED. */
+    suspend fun recordRun(
+        id: WorkflowId,
+        workspaceId: String? = null
+    ) {
+        val ws = workspaceId ?: workspaceIdProvider()
+        workflowDefinitionDao.recordRunForWorkspace(id.value, ws, System.currentTimeMillis())
     }
 
-    suspend fun deleteDefinition(id: WorkflowId) {
-        workflowDefinitionDao.delete(id.value)
+    /** WORKSPACE-AUTHORIZED delete — returns whether anything was deleted. */
+    suspend fun deleteDefinition(
+        id: WorkflowId,
+        workspaceId: String? = null
+    ): Boolean {
+        val ws = workspaceId ?: workspaceIdProvider()
+        return workflowDefinitionDao.deleteForWorkspace(id.value, ws) > 0
     }
 
     // ------------------------------------------------------------------

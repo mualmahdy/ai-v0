@@ -64,89 +64,97 @@ class ResourceAwareDecisionLearningTest {
 
     @Test
     fun `two resources under the same action learn into SEPARATE cells`() {
-        val engine = CbrMdpEngine(caseBase = CaseBase())
+        kotlinx.coroutines.runBlocking {
+            val engine = CbrMdpEngine(caseBase = CaseBase())
 
-        val resA = "res_cloud/providerA/modelX"
-        val resB = "res_local/providerB/modelY"
+            val resA = "res_cloud/providerA/modelX"
+            val resB = "res_local/providerB/modelY"
 
-        engine.processObservationAndUpdateBelief(
-            state(),
-            EnvironmentObservation(action = selectModelAction(resA), isSuccess = true, actualLatencyMs = 100)
-        )
-        engine.processObservationAndUpdateBelief(
-            state(),
-            EnvironmentObservation(action = selectModelAction(resB), isSuccess = false, actualLatencyMs = 900)
-        )
+            engine.processObservationAndUpdateBelief(
+                state(),
+                EnvironmentObservation(action = selectModelAction(resA), isSuccess = true, actualLatencyMs = 100)
+            )
+            engine.processObservationAndUpdateBelief(
+                state(),
+                EnvironmentObservation(action = selectModelAction(resB), isSuccess = false, actualLatencyMs = 900)
+            )
 
-        val region = engine.stateRegionKey(state())
-        val cellA = engine.getQEntry(region, "R:$resA", DecisionActionType.SELECT_MODEL)
-        val cellB = engine.getQEntry(region, "R:$resB", DecisionActionType.SELECT_MODEL)
+            val region = engine.stateRegionKey(state())
+            val cellA = engine.getQEntry(region, "R:$resA", DecisionActionType.SELECT_MODEL)
+            val cellB = engine.getQEntry(region, "R:$resB", DecisionActionType.SELECT_MODEL)
 
-        assertNotNull("Resource A must have its own learned cell", cellA)
-        assertNotNull("Resource B must have its own learned cell", cellB)
-        assertNotEquals(
-            "The success and the failure must NOT collapse into one cell (the old defect)",
-            cellA!!.successCount, cellB!!.successCount
-        )
-        assertEquals(1, cellA.successCount)
-        assertEquals(0, cellB.successCount)
+            assertNotNull("Resource A must have its own learned cell", cellA)
+            assertNotNull("Resource B must have its own learned cell", cellB)
+            assertNotEquals(
+                "The success and the failure must NOT collapse into one cell (the old defect)",
+                cellA!!.successCount, cellB!!.successCount
+            )
+            assertEquals(1, cellA.successCount)
+            assertEquals(0, cellB.successCount)
+        }
     }
 
     @Test
     fun `a resource's learning does not leak into another resource's cold cell`() {
-        val engine = CbrMdpEngine(caseBase = CaseBase())
-        val resA = "res_x"
-        val resB = "res_y"
+        kotlinx.coroutines.runBlocking {
+            val engine = CbrMdpEngine(caseBase = CaseBase())
+            val resA = "res_x"
+            val resB = "res_y"
 
-        // Only resource A ever executes.
-        repeat(5) {
-            engine.processObservationAndUpdateBelief(
-                state(),
-                EnvironmentObservation(action = selectModelAction(resA), isSuccess = true, actualLatencyMs = 50)
+            // Only resource A ever executes.
+            repeat(5) {
+                engine.processObservationAndUpdateBelief(
+                    state(),
+                    EnvironmentObservation(action = selectModelAction(resA), isSuccess = true, actualLatencyMs = 50)
+                )
+            }
+
+            val region = engine.stateRegionKey(state())
+            val warmA = engine.getQEntry(region, "R:$resA", DecisionActionType.SELECT_MODEL)
+            val coldB = engine.getQEntry(region, "R:$resB", DecisionActionType.SELECT_MODEL)
+
+            assertEquals(5, warmA!!.visitCount)
+            assertNull(
+                "Resource B must stay cold — A's experience must not silently vouch for B",
+                coldB
             )
         }
-
-        val region = engine.stateRegionKey(state())
-        val warmA = engine.getQEntry(region, "R:$resA", DecisionActionType.SELECT_MODEL)
-        val coldB = engine.getQEntry(region, "R:$resB", DecisionActionType.SELECT_MODEL)
-
-        assertEquals(5, warmA!!.visitCount)
-        assertNull(
-            "Resource B must stay cold — A's experience must not silently vouch for B",
-            coldB
-        )
     }
 
     @Test
     fun `resource-less actions keep learning on the R none axis`() {
-        val engine = CbrMdpEngine(caseBase = CaseBase())
-        engine.processObservationAndUpdateBelief(
-            state(),
-            EnvironmentObservation(
-                action = DecisionAction(DecisionActionType.COMPLETE),
-                isSuccess = true, actualLatencyMs = 10
+        kotlinx.coroutines.runBlocking {
+            val engine = CbrMdpEngine(caseBase = CaseBase())
+            engine.processObservationAndUpdateBelief(
+                state(),
+                EnvironmentObservation(
+                    action = DecisionAction(DecisionActionType.COMPLETE),
+                    isSuccess = true, actualLatencyMs = 10
+                )
             )
-        )
-        val region = engine.stateRegionKey(state())
-        val cell = engine.getQEntry(region, RESOURCE_AXIS_NONE, DecisionActionType.COMPLETE)
-        assertNotNull("Resource-less actions learn on the R:none axis (legacy rows migrate here)", cell)
-        assertEquals(1, cell!!.visitCount)
+            val region = engine.stateRegionKey(state())
+            val cell = engine.getQEntry(region, RESOURCE_AXIS_NONE, DecisionActionType.COMPLETE)
+            assertNotNull("Resource-less actions learn on the R:none axis (legacy rows migrate here)", cell)
+            assertEquals(1, cell!!.visitCount)
+        }
     }
 
     @Test
     fun `the aggregate Q lookup still sees the most-visited resource cell`() {
-        val engine = CbrMdpEngine(caseBase = CaseBase())
-        val resA = "res_agg_a"
-        repeat(3) {
-            engine.processObservationAndUpdateBelief(
-                state(),
-                EnvironmentObservation(action = selectModelAction(resA), isSuccess = true, actualLatencyMs = 10)
-            )
+        kotlinx.coroutines.runBlocking {
+            val engine = CbrMdpEngine(caseBase = CaseBase())
+            val resA = "res_agg_a"
+            repeat(3) {
+                engine.processObservationAndUpdateBelief(
+                    state(),
+                    EnvironmentObservation(action = selectModelAction(resA), isSuccess = true, actualLatencyMs = 10)
+                )
+            }
+            val region = engine.stateRegionKey(state())
+            val aggregate = engine.getQEntry(region, DecisionActionType.SELECT_MODEL)
+            assertNotNull(aggregate)
+            assertEquals(3, aggregate!!.visitCount)
         }
-        val region = engine.stateRegionKey(state())
-        val aggregate = engine.getQEntry(region, DecisionActionType.SELECT_MODEL)
-        assertNotNull(aggregate)
-        assertEquals(3, aggregate!!.visitCount)
     }
 
     @Test
@@ -181,23 +189,25 @@ class ResourceAwareDecisionLearningTest {
     @Test
     fun `resource-aware learning survives the persistent store round-trip`() {
         kotlinx.coroutines.runBlocking {
-            val store = InMemoryMdpLearningStore()
-            val engine = CbrMdpEngine(caseBase = CaseBase(), mdpStore = store)
-            val res = "res_persist"
-            engine.processObservationAndUpdateBelief(
-                state(),
-                EnvironmentObservation(action = selectModelAction(res), isSuccess = true, actualLatencyMs = 10)
-            )
-            val region = engine.stateRegionKey(state())
-            val cell = engine.getQEntry(region, "R:$res", DecisionActionType.SELECT_MODEL)
-            store.persist(listOf(cell!!))
+            kotlinx.coroutines.runBlocking {
+                val store = InMemoryMdpLearningStore()
+                val engine = CbrMdpEngine(caseBase = CaseBase(), mdpStore = store)
+                val res = "res_persist"
+                engine.processObservationAndUpdateBelief(
+                    state(),
+                    EnvironmentObservation(action = selectModelAction(res), isSuccess = true, actualLatencyMs = 10)
+                )
+                val region = engine.stateRegionKey(state())
+                val cell = engine.getQEntry(region, "R:$res", DecisionActionType.SELECT_MODEL)
+                store.persist(listOf(cell!!))
 
-            // A NEW engine (post-restart) restores the resource-aware cell.
-            val restarted = CbrMdpEngine(caseBase = CaseBase(), mdpStore = store)
-            restarted.loadPersistedQTable()
-            val restored = restarted.getQEntry(region, "R:$res", DecisionActionType.SELECT_MODEL)
-            assertNotNull("The resource-aware cell must survive the store round-trip", restored)
-            assertEquals(cell.visitCount, restored!!.visitCount)
+                // A NEW engine (post-restart) restores the resource-aware cell.
+                val restarted = CbrMdpEngine(caseBase = CaseBase(), mdpStore = store)
+                restarted.loadPersistedQTable()
+                val restored = restarted.getQEntry(region, "R:$res", DecisionActionType.SELECT_MODEL)
+                assertNotNull("The resource-aware cell must survive the store round-trip", restored)
+                assertEquals(cell.visitCount, restored!!.visitCount)
+            }
         }
     }
 }

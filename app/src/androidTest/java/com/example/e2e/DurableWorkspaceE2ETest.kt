@@ -81,7 +81,7 @@ class DurableWorkspaceE2ETest {
                 sessionDao = reopened.conversationSessionDao(),
                 turnDao = reopened.conversationTurnDao()
             )
-            .getSessionWithTurns(session.id)
+            .getSessionWithTurnsForWorkspace(session.id, "ws_e2e")
         assertNotNull("الجلسة يجب أن تنجو من إعادة الفتح", loaded)
         assertEquals(1, loaded!!.turns.size)
         assertEquals("اختبار E2E", loaded.turns.first().prompt)

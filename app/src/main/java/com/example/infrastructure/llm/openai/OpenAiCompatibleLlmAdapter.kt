@@ -62,11 +62,15 @@ class OpenAiCompatibleLlmAdapter(
     private val apiKeyProvider: suspend () -> String?,
     private val defaultModel: String = "gpt-4o-mini",
     override val providerId: String = "openai_compatible",
+    /** EGRESS ENFORCEMENT: scoped, fail-closed transport guard. */
+    private val egressControl: com.example.infrastructure.network.EgressControl =
+        com.example.infrastructure.network.EgressControl.default,
     private val client: OkHttpClient = OkHttpClient.Builder()
-        // EGRESS ENFORCEMENT (report gap: sandbox network-egress
-        // restrictions): the guard consults the ACTIVE workspace policy
-        // and fails CLOSED (IOException) before any socket is opened.
-        .addInterceptor(com.example.infrastructure.network.EgressControl.interceptor())
+        // EGRESS ENFORCEMENT (report gap: sandbox network-egress restrictions):
+        // the guard evaluates the REQUEST-SCOPED workspace policy and fails
+        // CLOSED (IOException) before any socket is opened. No pinned policy
+        // for the governing workspace = deny (never allow-by-default).
+        .addInterceptor(egressControl.interceptor())
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
@@ -97,6 +101,7 @@ class OpenAiCompatibleLlmAdapter(
                 val builder = Request.Builder()
                     .url(url)
                     .post(body.toString().toRequestBody("application/json".toMediaType()))
+                egressControl.applyEgressScope(builder)
                 apiKeyProvider()?.takeIf { it.isNotBlank() }?.let { key ->
                     builder.addHeader("Authorization", "Bearer $key")
                 }
@@ -196,6 +201,7 @@ class OpenAiCompatibleLlmAdapter(
                 .url(url)
                 .post(body.toString().toRequestBody("application/json".toMediaType()))
                 .header("Accept", "text/event-stream")
+            egressControl.applyEgressScope(reqBuilder)
             apiKeyProvider()?.takeIf { it.isNotBlank() }?.let { key ->
                 reqBuilder.addHeader("Authorization", "Bearer $key")
             }
@@ -229,6 +235,23 @@ class OpenAiCompatibleLlmAdapter(
                 }
 
                 var sequenceIndex = 0
+                // ------------------------------------------------------------------
+                // TOOL-CALL FRAGMENT ACCUMULATION (defect family 6 — streamed
+                // tool calls under fragmented SSE chunks):
+                // OpenAI-style streaming delivers tool calls as INDEX-KEYED
+                // deltas: the first delta carries (id, name, first arguments
+                // fragment); continuation deltas carry ONLY (index,
+                // function.arguments). The previous implementation emitted a
+                // ToolRequested PER DELTA — executing the FIRST fragment with
+                // truncated/empty arguments and silently DROPPING every
+                // continuation fragment. Now: id, name and argument fragments
+                // are accumulated until the stream terminates, and a tool call
+                // is emitted ONLY when a complete, valid JSON argument object
+                // exists. Incomplete/malformed accumulations are NEVER
+                // executed and are surfaced as an honest Degraded event.
+                // ------------------------------------------------------------------
+                val toolCallAccumulator = StreamedToolCallAccumulator(executionId)
+                var malformedChunks = 0
                 val reader = BufferedReader(InputStreamReader(responseBody.byteStream(), Charsets.UTF_8))
                 var line: String?
                 while (reader.readLine().also { line = it } != null) {
@@ -254,22 +277,18 @@ class OpenAiCompatibleLlmAdapter(
                                     )
                                 )
                             }
-                            // Streamed tool calls arrive as deltas with tool_calls arrays.
+                            // Streamed tool calls arrive as index-keyed deltas —
+                            // ACCUMULATE, never execute a fragment.
                             delta.optJSONArray("tool_calls")?.let { arr ->
                                 for (i in 0 until arr.length()) {
                                     val tc = arr.optJSONObject(i) ?: continue
-                                    val fn = tc.optJSONObject("function") ?: continue
-                                    val name = fn.optString("name", "")
-                                    if (name.isNotBlank()) {
-                                        emit(
-                                            ExecutionEvent.ToolRequested(
-                                                executionId = executionId,
-                                                callId = tc.optString("id", "call_${System.currentTimeMillis()}_$i"),
-                                                toolName = name,
-                                                argumentsJson = fn.optString("arguments", "{}").ifBlank { "{}" }
-                                            )
-                                        )
-                                    }
+                                    val fn = tc.optJSONObject("function")
+                                    toolCallAccumulator.offer(
+                                        index = tc.optInt("index", i),
+                                        id = tc.optString("id", "").takeIf { it.isNotBlank() },
+                                        name = fn?.optString("name", "")?.takeIf { it.isNotBlank() },
+                                        argumentsFragment = fn?.optString("arguments", "") ?: ""
+                                    )
                                 }
                             }
                         }
@@ -281,7 +300,45 @@ class OpenAiCompatibleLlmAdapter(
                                 ?.optInt("cached_tokens", cachedTokens) ?: cachedTokens
                             if (u.has("total_tokens")) providerTotalTokens = u.optInt("total_tokens", 0)
                         }
-                    }
+                    }.onFailure { malformedChunks++ }
+                }
+
+                // FAIL-SAFE: chunks that could not be parsed are counted and
+                // surfaced honestly — never silently dropped.
+                if (malformedChunks > 0) {
+                    emit(
+                        ExecutionEvent.Degraded(
+                            executionId = executionId,
+                            reason = com.example.domain.core.DegradedReason.UNKNOWN_DEGRADATION,
+                            message = "TOOL_STREAM_MALFORMED_CHUNKS: تعذّر تحليل $malformedChunks مقطعاً من مقاطع البث — لم تُنفّذ أي استدعاءات أدوات مستمدة منها."
+                        )
+                    )
+                }
+
+                // FINAL FLUSH: emit accumulated COMPLETE tool calls only. A
+                // call executes ONLY when its accumulated arguments form a
+                // valid JSON object (or the provider sent no argument
+                // fragments at all = empty args).
+                toolCallAccumulator.drainComplete().forEach { call ->
+                    emit(
+                        ExecutionEvent.ToolRequested(
+                            executionId = executionId,
+                            callId = call.callId,
+                            toolName = call.toolName,
+                            argumentsJson = call.argumentsJson
+                        )
+                    )
+                }
+                // Incomplete/malformed accumulations FAIL SAFELY: they are
+                // never executed, and the loss is reported.
+                toolCallAccumulator.drainIncomplete().forEach { incomplete ->
+                    emit(
+                        ExecutionEvent.Degraded(
+                            executionId = executionId,
+                            reason = com.example.domain.core.DegradedReason.UNKNOWN_DEGRADATION,
+                            message = incomplete
+                        )
+                    )
                 }
 
                 // Heuristic fallback ONLY when the provider reported nothing —
@@ -400,13 +457,112 @@ class OpenAiCompatibleLlmAdapter(
             if (name.isBlank()) continue
             calls.add(
                 ToolCallRequest(
-                    callId = tc.optString("id", "call_${System.currentTimeMillis()}_$i"),
+                    // Deterministic fallback id (unique per message, never a
+                    // wall-clock collision across parallel calls).
+                    callId = tc.optString("id", "").takeIf { it.isNotBlank() }
+                        ?: "call_msg_${tc.hashCode()}_$i",
                     toolName = name,
                     argumentsJson = fn.optString("arguments", "{}").ifBlank { "{}" }
                 )
             )
         }
         return calls
+    }
+
+    /**
+     * TOOL-CALL FRAGMENT ACCUMULATOR (defect family 6).
+     *
+     * Accumulates streamed tool-call deltas keyed by their `index`:
+     *  - the first delta carries `id` + `function.name` + the FIRST
+     *    `function.arguments` fragment;
+     *  - continuation deltas carry ONLY `index` + `function.arguments`.
+     *
+     * A call becomes executable only when (a) a tool name is known and
+     * (b) the accumulated arguments parse as a valid JSON object (or no
+     * argument fragments arrived at all = `{}`). Anything else is
+     * incomplete — it is NEVER executed and is reported for honest
+     * degradation instead.
+     */
+    private class StreamedToolCallAccumulator(
+        private val executionId: String
+    ) {
+        private class Partial {
+            var id: String? = null
+            var name: String? = null
+            var sawAnyArgumentFragment = false
+            val arguments = StringBuilder()
+        }
+
+        private val byIndex = LinkedHashMap<Int, Partial>()
+
+        fun offer(
+            index: Int,
+            id: String?,
+            name: String?,
+            argumentsFragment: String
+        ) {
+            val partial = byIndex.getOrPut(index) { Partial() }
+            if (id != null) partial.id = id
+            if (name != null) partial.name = name
+            if (argumentsFragment.isNotEmpty()) {
+                partial.sawAnyArgumentFragment = true
+                partial.arguments.append(argumentsFragment)
+            }
+        }
+
+        /** Complete, VALID calls — the only ones allowed to execute. */
+        fun drainComplete(): List<ToolCallRequest> {
+            val complete = mutableListOf<ToolCallRequest>()
+            for ((index, partial) in byIndex) {
+                val name = partial.name
+                if (name.isNullOrBlank()) continue // incomplete — handled below
+                val rawArgs = partial.arguments.toString()
+                val args = when {
+                    !partial.sawAnyArgumentFragment -> "{}" // provider sent no args = empty args
+                    else -> if (isValidJsonObject(rawArgs)) rawArgs else continue
+                }
+                complete.add(
+                    ToolCallRequest(
+                        callId = partial.id ?: "call_${executionId}_$index",
+                        toolName = name,
+                        argumentsJson = args
+                    )
+                )
+            }
+            return complete
+        }
+
+        /** Human-readable reports for accumulations that must NOT execute. */
+        fun drainIncomplete(): List<String> {
+            val reports = mutableListOf<String>()
+            for ((index, partial) in byIndex) {
+                val name = partial.name
+                if (name.isNullOrBlank()) {
+                    reports.add(
+                        "TOOL_CALL_INCOMPLETE: استدعاء أداة #$index وصل بدون اسم — لم يُنفّذ."
+                    )
+                    continue
+                }
+                val rawArgs = partial.arguments.toString()
+                if (partial.sawAnyArgumentFragment && !isValidJsonObject(rawArgs)) {
+                    reports.add(
+                        "TOOL_CALL_ARGUMENTS_INCOMPLETE: استدعاء '$name' (#$index) وصلت وسائطه مجزّأة غير قابلة للتحليل — لم يُنفّذ."
+                    )
+                }
+            }
+            return reports
+        }
+
+        private fun isValidJsonObject(text: String): Boolean {
+            val trimmed = text.trim()
+            if (trimmed.isEmpty()) return false
+            return try {
+                org.json.JSONObject(trimmed)
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
     }
 
     companion object {

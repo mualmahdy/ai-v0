@@ -118,7 +118,33 @@ class AgentOrchestrator(
      * re-target agent file operations. Never an implicit 1L (null = not
      * bound; the fail-closed contract lives in FileSystemTool/skills/MCP).
      */
-    var projectIdProvider: (() -> Long?)? = null
+    var projectIdProvider: (() -> Long?)? = null,
+    /**
+     * REPAIR (defect family 4 — "agent autonomy/budget governance must
+     * derive from authoritative effective policy rather than caller-supplied
+     * authority"): autonomy governance hook, wired by the composition root
+     * to the agent lifecycle service with the EFFECTIVE policy (the more
+     * restrictive of the workspace's authoritative policy and the task's
+     * persisted policy — never raw caller authority). When wired, sensitive
+     * actions that the effective policy does not allow FAIL CLOSED.
+     */
+    var autonomyGovernor: (suspend (
+        agent: AgentDefinition,
+        action: DecisionAction,
+        isSensitiveTool: Boolean,
+        taskPolicy: AutonomyPolicy
+    ) -> com.example.domain.core.agent.lifecycle.AutonomyPolicyEvaluation)? = null,
+    /**
+     * REPAIR (defect family 4): budget governance hook — the agent-budget
+     * evaluation derives from the AGENT's durable budget intersected with
+     * the task quota (authoritative effective budget), not caller-supplied
+     * numbers. BLOCK stops further paid actions.
+     */
+    var budgetGovernor: (suspend (
+        agent: AgentDefinition,
+        task: TaskDefinition,
+        accumulatedTokens: Int
+    ) -> com.example.domain.core.agent.lifecycle.BudgetEvaluation)? = null
 ) {
 
     private val idempotency: ActionIdempotencyService = ActionIdempotencyService(actionIntentDao)
@@ -736,6 +762,85 @@ class AgentOrchestrator(
             )
 
             // ------------------------------------------------------------
+            // AUTONOMY GOVERNANCE (defect family 4): sensitive actions are
+            // evaluated against the EFFECTIVE autonomy policy (the more
+            // restrictive of the workspace's authoritative policy and the
+            // task's persisted policy) — NOT raw caller-supplied authority.
+            // A policy that does not allow the action FAILS CLOSED: the task
+            // stops honestly, waiting for explicit user consent/grants.
+            // ------------------------------------------------------------
+            if (chosenAction.type in SENSITIVE_AUTONOMY_ACTIONS) {
+                val governor = autonomyGovernor
+                if (governor != null) {
+                    val evaluation = governor(
+                        agent, chosenAction, true,
+                        currentTask.constraints.autonomyPolicy
+                    )
+                    if (!evaluation.isAllowed || evaluation.requireHumanConsent) {
+                        val autonomyMsg = "AUTONOMY_POLICY_BLOCKED: ${evaluation.reason}"
+                        collector.emit(
+                            ExecutionEvent.BudgetGateDecision(
+                                executionId = executionId,
+                                decision = com.example.domain.core.budget.EconomicGateDecision.DENIED.name,
+                                reason = autonomyMsg
+                            )
+                        )
+                        collector.emit(
+                            ExecutionEvent.Degraded(
+                                executionId = executionId,
+                                reason = DegradedReason.UNKNOWN_DEGRADATION,
+                                message = autonomyMsg
+                            )
+                        )
+                        isDegraded = true
+                        degradedReason = DegradedReason.UNKNOWN_DEGRADATION
+                        accumulatedOutputText.append("\n[حوكمة الاستقلالية]: $autonomyMsg")
+                        persistTaskFinal(
+                            currentTask.id.value, "WAITING", autonomyMsg,
+                            accumulatedTokens, System.currentTimeMillis() - startTime,
+                            isDegraded, degradedReason?.name, null
+                        )
+                        isTerminal = true
+                        break
+                    }
+                }
+            }
+
+            // ------------------------------------------------------------
+            // AGENT BUDGET GOVERNANCE (defect family 4): the effective budget
+            // is the AGENT's durable budget intersected with the task quota
+            // (authoritative), and a BLOCK verdict stops further paid actions.
+            // ------------------------------------------------------------
+            if (chosenAction.type in TOKEN_QUOTA_GATED_ACTIONS) {
+                val budgetEvaluation = budgetGovernor?.invoke(agent, currentTask, accumulatedTokens)
+                if (budgetEvaluation != null &&
+                    budgetEvaluation.recommendedAction ==
+                    com.example.domain.core.agent.lifecycle.BudgetRecommendedAction.BLOCK
+                ) {
+                    val blockMsg = "AGENT_BUDGET_DEPLETED: لا توجد ميزانية متبقية للوكيل " +
+                        "(${budgetEvaluation.remainingTokens} توكن متبقٍ) — توقّف الإنفاق."
+                    collector.emit(
+                        ExecutionEvent.BudgetGateDecision(
+                            executionId = executionId,
+                            decision = com.example.domain.core.budget.EconomicGateDecision.DENIED.name,
+                            reason = blockMsg
+                        )
+                    )
+                    collector.emit(
+                        ExecutionEvent.Degraded(
+                            executionId = executionId,
+                            reason = DegradedReason.BUDGET_APPROACHING_LIMIT,
+                            message = blockMsg
+                        )
+                    )
+                    isDegraded = true
+                    degradedReason = DegradedReason.BUDGET_APPROACHING_LIMIT
+                    accumulatedOutputText.append("\n[حوكمة ميزانية الوكيل]: $blockMsg")
+                    break
+                }
+            }
+
+            // ------------------------------------------------------------
             // GOVERNANCE PHASE — PRE-EXECUTION TOKEN QUOTA GATE (execution
             // limit enforcement). TaskBudget.tokenLimit is the TOKEN QUOTA
             // (migration of the legacy tokenBudget concept): exceeding it now
@@ -1189,6 +1294,15 @@ class AgentOrchestrator(
         DecisionActionType.RETRIEVE_KNOWLEDGE,
         DecisionActionType.DELEGATE,
         DecisionActionType.RETRY
+    )
+
+    /** Sensitive actions gated by the EFFECTIVE autonomy policy (family 4). */
+    private val SENSITIVE_AUTONOMY_ACTIONS = setOf(
+        DecisionActionType.EXECUTE_TOOL,
+        DecisionActionType.SELECT_TOOL,
+        DecisionActionType.EXECUTE_MCP,
+        DecisionActionType.EXECUTE_SKILL,
+        DecisionActionType.USE_INTEGRATION
     )
 
     /**

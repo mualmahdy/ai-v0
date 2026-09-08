@@ -442,8 +442,19 @@ class DecisionService(
                 if (pinnedModelId.isNullOrBlank()) {
                     capabilityFiltered
                 } else {
+                    // REPAIR (defect family 3 — canonical identity):
+                    // provider identity and model-resource identity are
+                    // STRICTLY separated. The pinned id must match the
+                    // candidate's MODEL-RESOURCE id exactly — the previous
+                    // `|| cand.providerId == pinnedModelId` made a provider
+                    // id stored in a model field silently authorize EVERY
+                    // LLM candidate of that provider (a provider-level
+                    // fallback masquerading as an exact pin). A pin that
+                    // matches nothing now falls through to the explicit
+                    // PINNED_MODEL_UNAVAILABLE ask below — never a silent
+                    // substitution.
                     capabilityFiltered.filter { cand ->
-                        cand.resourceId.value == pinnedModelId || cand.providerId == pinnedModelId
+                        cand.resourceId.value == pinnedModelId
                     }
                 }
             }
@@ -962,7 +973,7 @@ class DecisionService(
     /**
      * Updates CBR-MDP transition beliefs and case memory upon receiving an execution observation.
      */
-    fun recordObservation(
+    suspend fun recordObservation(
         state: DecisionState,
         observation: EnvironmentObservation
     ): DecisionState = cbrMdpEngine.processObservationAndUpdateBelief(state, observation)

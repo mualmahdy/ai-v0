@@ -30,7 +30,14 @@ class ExecutionScope(
     val executionId: String,
     val workspaceId: String,
     /** The pinned workspace's sandbox project id (null = not bound; NEVER 1L). */
-    val projectId: Long? = null
+    val projectId: Long? = null,
+    /**
+     * The governed sandbox session this execution segment runs under (null =
+     * not sandbox-scoped). Egress control consults this to enforce
+     * session-scoped network blocks — one blocked session can never affect
+     * another session or workspace.
+     */
+    val sessionId: String? = null
 ) : AbstractCoroutineContextElement(Key) {
 
     companion object Key : CoroutineContext.Key<ExecutionScope>

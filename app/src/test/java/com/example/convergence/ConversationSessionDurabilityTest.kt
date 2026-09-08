@@ -117,7 +117,7 @@ class ConversationSessionDurabilityTest {
             sessionDao = db.conversationSessionDao(),
             turnDao = db.conversationTurnDao()
         )
-        val reopened = reopenedRepository.getSessionWithTurns(session.id)
+        val reopened = reopenedRepository.getSessionWithTurnsForWorkspace(session.id, "ws_alpha")
 
         assertNotNull("الجلسة يجب أن تنجو من موت العملية", reopened)
         assertEquals(2, reopened!!.turns.size)
@@ -179,7 +179,7 @@ class ConversationSessionDurabilityTest {
 
         assertNull(repository.getSession(session.id))
         assertEquals(0, repository.observeSessions("ws_alpha").first().size)
-        assertNull(repository.getSessionWithTurns(session.id))
+        assertNull(repository.getSessionWithTurnsForWorkspace(session.id, "ws_alpha"))
     }
 
     @Test

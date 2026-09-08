@@ -25,7 +25,10 @@ class GeminiModelDiscoveryAdapter(
             } catch (e: Exception) {
                 null
             }
-    }
+    },
+    /** EGRESS ENFORCEMENT: scoped, fail-closed guard (bypass-path closure). */
+    private val egressControl: com.example.infrastructure.network.EgressControl =
+        com.example.infrastructure.network.EgressControl.default
 ) : ModelDiscoveryPort {
 
     override val providerId: String = "gemini_google"
@@ -41,6 +44,11 @@ class GeminiModelDiscoveryAdapter(
             // FIX P0-8 (audit c03919d): API key moved from URL query param to
             // the x-goog-api-key request header (no key leakage in URLs).
             val endpoint = "https://generativelanguage.googleapis.com/v1beta/models"
+            // EGRESS (defect family 6 — bypass-path closure): raw
+            // HttpURLConnection previously dialed out with NO network-policy
+            // check. Same scoped decision as the OkHttp path, before any
+            // connection is opened.
+            egressControl.assertEgressAllowedForCurrentScope(endpoint)
             val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 setRequestProperty("x-goog-api-key", apiKey)

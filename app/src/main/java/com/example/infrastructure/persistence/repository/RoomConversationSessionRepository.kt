@@ -43,8 +43,18 @@ class RoomConversationSessionRepository(
         return sessionDao.byId(id.value)?.toDomain()
     }
 
-    override suspend fun getSessionWithTurns(id: ConversationSessionId): ConversationSessionWithTurns? {
-        val session = sessionDao.byId(id.value)?.toDomain() ?: return null
+    override suspend fun getSessionForWorkspace(
+        id: ConversationSessionId,
+        workspaceId: String
+    ): ConversationSession? {
+        return sessionDao.byIdAndWorkspace(id.value, workspaceId)?.toDomain()
+    }
+
+    override suspend fun getSessionWithTurnsForWorkspace(
+        id: ConversationSessionId,
+        workspaceId: String
+    ): ConversationSessionWithTurns? {
+        val session = sessionDao.byIdAndWorkspace(id.value, workspaceId)?.toDomain() ?: return null
         val turns = turnDao.forSessionOnce(id.value).map { it.toDomain() }
         return ConversationSessionWithTurns(session = session, turns = turns)
     }
@@ -68,7 +78,15 @@ class RoomConversationSessionRepository(
         )
     }
 
-    override suspend fun appendTurn(turn: ConversationTurn) {
+    override suspend fun appendTurnForWorkspace(
+        turn: ConversationTurn,
+        workspaceId: String
+    ): Boolean {
+        // WORKSPACE AUTHORIZATION (defect family 1): turns can only be
+        // appended to a session owned by the authorized workspace — an
+        // id-only append can no longer write into another workspace's
+        // conversation.
+        val owner = sessionDao.byIdAndWorkspace(turn.sessionId.value, workspaceId) ?: return false
         val entity = ConversationTurnEntity(
             turnId = turn.id,
             sessionId = turn.sessionId.value,
@@ -89,33 +107,53 @@ class RoomConversationSessionRepository(
         database.withTransaction {
             turnDao.insert(entity)
             sessionDao.bumpAggregates(
-                id = entity.sessionId,
+                id = owner.sessionId,
                 tokens = entity.tokensConsumed,
                 now = entity.createdAtEpochMs
             )
         }
+        return true
     }
 
-    override suspend fun deleteSession(id: ConversationSessionId) {
-        turnDao.deleteForSession(id.value)
-        sessionDao.delete(id.value)
-    }
-
-    override suspend fun updateSessionModel(
+    override suspend fun deleteSessionForWorkspace(
         id: ConversationSessionId,
+        workspaceId: String
+    ): Boolean {
+        // WORKSPACE AUTHORIZATION (defect family 1): deletes cascade to turns
+        // ONLY for the owning workspace — a cross-workspace delete is a
+        // no-op that deletes nothing.
+        val existing = sessionDao.byIdAndWorkspace(id.value, workspaceId) ?: return false
+        turnDao.deleteForSession(existing.sessionId)
+        sessionDao.deleteForWorkspace(existing.sessionId, workspaceId)
+        return true
+    }
+
+    override suspend fun updateSessionModelForWorkspace(
+        id: ConversationSessionId,
+        workspaceId: String,
         modelResourceId: String?,
         modelDisplayName: String?
     ) {
-        sessionDao.updateModel(
+        sessionDao.updateModelForWorkspace(
             id = id.value,
+            workspaceId = workspaceId,
             modelId = modelResourceId,
             modelDisplayName = modelDisplayName,
             now = System.currentTimeMillis()
         )
     }
 
-    override suspend fun renameSession(id: ConversationSessionId, title: String) {
-        sessionDao.rename(id.value, title, System.currentTimeMillis())
+    override suspend fun renameSessionForWorkspace(
+        id: ConversationSessionId,
+        workspaceId: String,
+        title: String
+    ): Boolean {
+        return sessionDao.renameForWorkspace(
+            id = id.value,
+            workspaceId = workspaceId,
+            title = title,
+            now = System.currentTimeMillis()
+        ) > 0
     }
 
     // ------------------------------------------------------------------

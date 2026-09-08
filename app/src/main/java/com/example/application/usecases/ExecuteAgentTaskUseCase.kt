@@ -34,11 +34,22 @@ class ExecuteAgentTaskUseCase(
         isNetworkAvailable: Boolean = true,
         includeWebSearch: Boolean = false
     ): Flow<ExecutionEvent> {
+        // REPAIR (defect family 3 — canonical identity & reproducibility):
+        // `assignedModelId` previously fell back to `preferredProviderId`,
+        // storing a PROVIDER id in a MODEL-RESOURCE field. Provider identity
+        // and model-resource identity are now STRICTLY separated:
+        //   - [assignedModelId] accepts ONLY model-resource ids
+        //     (res:provider:service:type:offering).
+        //   - [preferredProviderId] remains a routing PREFERENCE hint, never
+        //     an exact pin.
+        // A pin that is not a model-resource id matches no candidate and
+        // surfaces as an explicit PINNED_MODEL_UNAVAILABLE decision — no
+        // silent degradation.
         val task = TaskDefinition(
             id = TaskId(taskId),
             assignedAgentId = agent.identity.id,
             input = TaskInput(rawPrompt = prompt),
-            assignedModelId = assignedModelId ?: preferredProviderId
+            assignedModelId = assignedModelId
         )
 
         return orchestrator.executeTaskStream(

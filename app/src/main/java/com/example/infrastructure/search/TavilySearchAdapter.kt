@@ -28,11 +28,13 @@ import java.util.concurrent.TimeUnit
  */
 class TavilySearchAdapter(
     private val apiKeyProvider: () -> String?,
+    /** EGRESS ENFORCEMENT: scoped, fail-closed transport guard. */
+    private val egressControl: com.example.infrastructure.network.EgressControl =
+        com.example.infrastructure.network.EgressControl.default,
     private val client: OkHttpClient = OkHttpClient.Builder()
-        // EGRESS ENFORCEMENT (report gap: sandbox network-egress
-        // restrictions): the guard consults the ACTIVE workspace policy
-        // and fails CLOSED (IOException) before any socket is opened.
-        .addInterceptor(com.example.infrastructure.network.EgressControl.interceptor())
+        // EGRESS ENFORCEMENT (report gap: sandbox network-egress restrictions):
+        // scoped, fail-closed evaluation before any socket is opened.
+        .addInterceptor(egressControl.interceptor())
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
@@ -69,10 +71,11 @@ class TavilySearchAdapter(
                 put("include_answer", true)
             }
 
-            val request = Request.Builder()
-                .url("https://api.tavily.com/search")
-                .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-                .build()
+            val request = egressControl.applyEgressScope(
+                Request.Builder()
+                    .url("https://api.tavily.com/search")
+                    .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+            ).build()
 
             client.newCall(request).execute().use { response ->
                 val duration = System.currentTimeMillis() - startTime

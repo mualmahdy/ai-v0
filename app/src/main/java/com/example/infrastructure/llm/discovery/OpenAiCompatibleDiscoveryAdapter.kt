@@ -40,12 +40,20 @@ import java.net.URL
 class OpenAiCompatibleDiscoveryAdapter(
     override val providerId: String = "local_ollama",
     private val baseUrl: String = "http://10.0.2.2:11434",
-    private val apiKeyProvider: () -> String? = { null }
+    private val apiKeyProvider: () -> String? = { null },
+    /** EGRESS ENFORCEMENT: scoped, fail-closed guard (bypass-path closure). */
+    private val egressControl: com.example.infrastructure.network.EgressControl =
+        com.example.infrastructure.network.EgressControl.default
 ) : ModelDiscoveryPort {
 
     override suspend fun discoverModels(): Outcome<List<ModelDescriptor>, DiscoveryFailure> = withContext(Dispatchers.IO) {
         try {
             val endpoint = "$baseUrl/v1/models"
+            // EGRESS (defect family 6 — bypass-path closure): raw
+            // HttpURLConnection previously dialed out with NO network-policy
+            // check. Same scoped decision as the OkHttp path, before any
+            // connection is opened.
+            egressControl.assertEgressAllowedForCurrentScope(endpoint)
             val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 3000

@@ -188,7 +188,13 @@ data class WorkflowStepStateEntity(
     val startedAtEpochMs: Long?,
     val completedAtEpochMs: Long?,
     val attemptCount: Int = 0,
-    val lastErrorMessage: String?
+    val lastErrorMessage: String?,
+    /**
+     * Durable ARTIFACT/DATAFLOW payloads (defect family 7): step outputs
+     * consumed by later steps survive process death, so resume restores
+     * the explicit dataflow — not just a 200-char summary.
+     */
+    val artifactsJson: String? = null
 )
 
 /**
@@ -225,6 +231,11 @@ data class ToolAuditEntity(
 /**
  * Per-agent per-tool permission grant. Closes the Security Governance gap
  * "no fine-grained authorization, no per-agent or per-tool permissions".
+ *
+ * REPAIR (defect family 2 — workspace context is part of authorization):
+ * a grant may be scoped to ONE workspace. `workspaceId = null` means a
+ * GLOBAL grant (explicitly unscoped — the only grants that authorize
+ * executions with no workspace attribution).
  */
 @Entity(
     tableName = "permission_grants",
@@ -232,7 +243,8 @@ data class ToolAuditEntity(
         Index("principalType"),
         Index("principalId"),
         Index("resourceType"),
-        Index("resourceId")
+        Index("resourceId"),
+        Index("workspaceId")
     ]
 )
 data class PermissionGrantEntity(
@@ -246,7 +258,9 @@ data class PermissionGrantEntity(
     val isAllowed: Boolean,
     val grantedBy: String,
     val grantedAtEpochMs: Long,
-    val expiresAtEpochMs: Long?
+    val expiresAtEpochMs: Long?,
+    /** Workspace scope (null = explicitly GLOBAL). */
+    val workspaceId: String? = null
 )
 
 /**
