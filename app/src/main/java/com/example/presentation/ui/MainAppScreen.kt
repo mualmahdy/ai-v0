@@ -2,6 +2,7 @@ package com.example.presentation.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -19,38 +21,39 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountTree
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.NotificationsActive
-import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.Radar
-import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ListItem
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,41 +61,44 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
 import com.example.domain.core.resource.ResourceLifecycleState
-import com.example.presentation.state.ActiveNavigationTab
-import com.example.presentation.state.UiState
-import com.example.presentation.ui.screens.AgentStudioScreen
-import com.example.presentation.ui.screens.DecisionIntelligenceScreen
+import com.example.presentation.ui.components.DiagnosticBanner
+import com.example.presentation.ui.navigation.WorkspaceRoutes
 import com.example.presentation.ui.screens.activity.UnifiedActivityFeedScreen
-import com.example.presentation.ui.screens.ExtensionsScreen
-import com.example.presentation.ui.screens.FilesWorkspaceScreen
-import com.example.presentation.ui.screens.GovernanceObservatoryScreen
-import com.example.presentation.ui.screens.KnowledgeRagScreen
-import com.example.presentation.ui.screens.ProviderServiceManagerScreen
-import com.example.presentation.ui.screens.RadarEvolutionScreen
-import com.example.presentation.ui.screens.TasksWorkflowsScreen
+import com.example.presentation.ui.screens.dashboard.DashboardScreen
+import com.example.presentation.ui.screens.decision.DecisionScreen
+import com.example.presentation.ui.screens.extensions.ExtensionsScreen
+import com.example.presentation.ui.screens.files.FilesScreen
+import com.example.presentation.ui.screens.governance.GovernanceScreen
+import com.example.presentation.ui.screens.knowledge.KnowledgeScreen
+import com.example.presentation.ui.screens.radar.RadarScreen
+import com.example.presentation.ui.screens.settings.SettingsScreen
+import com.example.presentation.ui.screens.studio.StudioScreen
+import com.example.presentation.ui.screens.tasks.TasksScreen
 import com.example.presentation.viewmodel.MainViewModel
 
 /**
  * ============================================================================
- * MainAppScreen — smart-workspace shell (redesign)
+ * MainAppScreen — the REAL smart-workspace shell (UI revamp)
  * ============================================================================
  *
- * Replaced the redundant double navigation (scrollable top TabRow + bottom
- * NavigationBar both navigating) with a single coherent structure:
+ * Rebuilt on a real navigation architecture (androidx.navigation NavHost
+ * with a back stack, state restoration and single-top destinations) instead
+ * of the previous flat tab-swap:
  *
- *   - TopAppBar: workspace brand + live intelligence status chip (active LLM
- *     resources count) so the user always knows if the workspace "has a brain".
- *   - Bottom NavigationBar: 5 CONTEXT-CENTRIC primary destinations
- *     (Studio / unified Activity / Knowledge / Files / More) — gap-closure
- *     P1-19: the workspace shell centers on Context → Work → Activity →
- *     Artifacts, not on tool pages.
- *   - GAP-CLOSURE P1-18: the Unified Activity Feed (proactive suggestions +
- *     execution trace + audit events) is a FIRST-CLASS bottom destination —
- *     previously the screen existed but was unreachable.
- *   - "More": ModalBottomSheet with the secondary destinations (Providers,
- *     Tasks & Workflows, Decision Intelligence, Radar, Governance,
- *     Extensions).
+ *   - TopAppBar: workspace SWITCHER (multi-workspace is a real backend
+ *     capability: WorkspaceRuntimeService) + live intelligence status chip.
+ *   - Bottom NavigationBar: 5 context-centric primary destinations
+ *     (Studio / unified Activity / Knowledge / Files / More).
+ *   - "More": a full dashboard screen (not a modal sheet) that routes to the
+ *     secondary capability surfaces (Providers, Tasks & Workflows, Decision
+ *     Intelligence, Radar, Governance, Extensions, Settings).
+ *   - Global diagnostic banner + snackbar error surfaces in ONE place.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -101,8 +107,11 @@ fun MainAppScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
+    val allWorkspaces by viewModel.allWorkspaces.collectAsState()
+    val activeWorkspace by viewModel.activeWorkspace.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
-    var moreSheetOpen by remember { mutableStateOf(false) }
+    val navController = rememberNavController()
+    var createWorkspaceOpen by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(state.errorMessage) {
         state.errorMessage?.let { error ->
@@ -119,47 +128,25 @@ fun MainAppScreen(
         it.lifecycleState == ResourceLifecycleState.ENABLED
     }
 
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = backStackEntry?.destination?.route
+
     Scaffold(
         modifier = modifier
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Default.Psychology,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Column {
-                            Text(
-                                text = "مساحة العمل الذكية",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = state.activeProject?.name ?: "AI Studio V0",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                },
-                actions = {
-                    StatusChip(
-                        label = if (activeLlmCount > 0) "ذكاء نشط ×$activeLlmCount" else "لا ذكاء نشط",
-                        isActive = activeLlmCount > 0,
-                        detail = "$activeResourceCount مورد مفعّل"
-                    )
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                modifier = Modifier.testTag("main_top_bar")
+            WorkspaceTopBar(
+                workspaceName = activeWorkspace?.name ?: state.activeProject?.name ?: "مساحة العمل الذكية",
+                workspaceSubtitle = state.activeProject?.name ?: "AI Studio V0",
+                activeLlmCount = activeLlmCount,
+                activeResourceCount = activeResourceCount,
+                allWorkspaces = allWorkspaces.map { it.name to it.id },
+                activeWorkspaceId = activeWorkspace?.id,
+                onSwitchWorkspace = { viewModel.switchWorkspace(it) },
+                onCreateWorkspace = { createWorkspaceOpen = true },
+                onOpenSettings = { navController.navigate(WorkspaceRoutes.SETTINGS) }
             )
         },
         bottomBar = {
@@ -169,36 +156,36 @@ fun MainAppScreen(
                     .testTag("main_bottom_nav")
             ) {
                 BottomDestination(
-                    selected = state.activeTab == ActiveNavigationTab.STUDIO,
-                    onClick = { viewModel.selectTab(ActiveNavigationTab.STUDIO) },
+                    selected = currentRoute == WorkspaceRoutes.STUDIO,
+                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.STUDIO) },
                     icon = Icons.Default.Psychology,
                     label = "الاستوديو",
                     tag = "nav_tab_studio"
                 )
                 BottomDestination(
-                    selected = state.activeTab == ActiveNavigationTab.UNIFIED_ACTIVITY,
-                    onClick = { viewModel.selectTab(ActiveNavigationTab.UNIFIED_ACTIVITY) },
+                    selected = currentRoute == WorkspaceRoutes.ACTIVITY,
+                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.ACTIVITY) },
                     icon = Icons.Default.NotificationsActive,
                     label = "النشاط",
                     tag = "nav_tab_activity"
                 )
                 BottomDestination(
-                    selected = state.activeTab == ActiveNavigationTab.KNOWLEDGE_RAG,
-                    onClick = { viewModel.selectTab(ActiveNavigationTab.KNOWLEDGE_RAG) },
+                    selected = currentRoute == WorkspaceRoutes.KNOWLEDGE,
+                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.KNOWLEDGE) },
                     icon = Icons.Default.MenuBook,
                     label = "المعرفة",
                     tag = "nav_tab_knowledge"
                 )
                 BottomDestination(
-                    selected = state.activeTab == ActiveNavigationTab.FILES,
-                    onClick = { viewModel.selectTab(ActiveNavigationTab.FILES) },
+                    selected = currentRoute == WorkspaceRoutes.FILES,
+                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.FILES) },
                     icon = Icons.Default.Folder,
                     label = "الملفات",
                     tag = "nav_tab_files"
                 )
                 BottomDestination(
-                    selected = moreSheetOpen,
-                    onClick = { moreSheetOpen = true },
+                    selected = currentRoute == WorkspaceRoutes.MORE,
+                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.MORE) },
                     icon = Icons.Default.MoreHoriz,
                     label = "المزيد",
                     tag = "nav_tab_more"
@@ -211,87 +198,294 @@ fun MainAppScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            when (state.activeTab) {
-                ActiveNavigationTab.STUDIO -> AgentStudioScreen(state = state, viewModel = viewModel)
-                ActiveNavigationTab.UNIFIED_ACTIVITY -> UnifiedActivityFeedScreen(viewModel = viewModel)
-                ActiveNavigationTab.TASKS_WORKFLOWS -> TasksWorkflowsScreen(state = state, viewModel = viewModel)
-                ActiveNavigationTab.DECISION_INTELLIGENCE -> DecisionIntelligenceScreen(state = state, viewModel = viewModel)
-                ActiveNavigationTab.RADAR_EVOLUTION -> RadarEvolutionScreen(state = state, viewModel = viewModel)
-                ActiveNavigationTab.GOVERNANCE -> GovernanceObservatoryScreen(state = state, viewModel = viewModel)
-                ActiveNavigationTab.EXTENSIONS -> ExtensionsScreen(state = state, viewModel = viewModel)
-                ActiveNavigationTab.MODELS_CAPABILITIES -> ProviderServiceManagerScreen(state = state, viewModel = viewModel)
-                ActiveNavigationTab.KNOWLEDGE_RAG -> KnowledgeRagScreen(state = state, viewModel = viewModel)
-                ActiveNavigationTab.FILES -> FilesWorkspaceScreen(state = state, viewModel = viewModel)
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Global honest diagnostic surface (degradation / results info).
+                state.diagnosticBanner?.let { banner ->
+                    DismissibleInfoBanner(
+                        message = banner,
+                        isDegraded = state.isDegraded,
+                        onDismiss = { viewModel.dismissDiagnosticBanner() }
+                    )
+                }
+
+                WorkspaceNavHost(
+                    navController = navController,
+                    viewModel = viewModel,
+                    modifier = Modifier.weight(1f)
+                )
             }
         }
     }
 
-    if (moreSheetOpen) {
-        ModalBottomSheet(
-            onDismissRequest = { moreSheetOpen = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ) {
-            Text(
-                text = "أقسام إضافية",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+    if (createWorkspaceOpen) {
+        CreateWorkspaceDialog(
+            onConfirm = { name, description ->
+                viewModel.createWorkspace(name, description)
+                createWorkspaceOpen = false
+            },
+            onDismiss = { createWorkspaceOpen = false }
+        )
+    }
+}
+
+/** Single-top + state-restoring navigation for the five primary tabs. */
+private fun NavHostController.navigateToTopLevel(route: String) {
+    navigate(route) {
+        popUpTo(graph.startDestinationId) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
+    }
+}
+
+@Composable
+private fun WorkspaceNavHost(
+    navController: NavHostController,
+    viewModel: MainViewModel,
+    modifier: Modifier = Modifier
+) {
+    val navigate: (String) -> Unit = { route ->
+        navController.navigate(route) { launchSingleTop = true }
+    }
+    NavHost(
+        navController = navController,
+        startDestination = WorkspaceRoutes.STUDIO,
+        modifier = modifier
+    ) {
+        composable(WorkspaceRoutes.STUDIO) {
+            StudioScreen(
+                viewModel = viewModel,
+                onNavigate = navigate,
+                modifier = Modifier.fillMaxSize().imePadding()
             )
-            MoreDestination(
-                icon = Icons.Default.Dns,
-                label = "المزوّدون والنماذج",
-                description = "إدارة مزودي LLM/البحث/التضمين والخدمات والتكوينات",
-                tag = "more_tab_providers"
+        }
+        composable(WorkspaceRoutes.ACTIVITY) {
+            UnifiedActivityFeedScreen(
+                viewModel = viewModel,
+                onNavigate = navigate,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        composable(WorkspaceRoutes.KNOWLEDGE) {
+            KnowledgeScreen(
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        composable(WorkspaceRoutes.FILES) {
+            FilesScreen(
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        composable(WorkspaceRoutes.MORE) {
+            DashboardScreen(
+                viewModel = viewModel,
+                onNavigate = navigate,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        composable(WorkspaceRoutes.PROVIDERS) {
+            com.example.presentation.ui.screens.ProviderServiceManagerScreen(
+                state = viewModel.uiState.collectAsState().value,
+                viewModel = viewModel
+            )
+        }
+        composable(WorkspaceRoutes.TASKS) {
+            TasksScreen(
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        composable(WorkspaceRoutes.DECISION) {
+            DecisionScreen(
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        composable(WorkspaceRoutes.RADAR) {
+            RadarScreen(
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        composable(WorkspaceRoutes.GOVERNANCE) {
+            GovernanceScreen(
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        composable(WorkspaceRoutes.EXTENSIONS) {
+            ExtensionsScreen(
+                viewModel = viewModel,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        composable(WorkspaceRoutes.SETTINGS) {
+            SettingsScreen(
+                viewModel = viewModel,
+                onNavigate = navigate,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WorkspaceTopBar(
+    workspaceName: String,
+    workspaceSubtitle: String,
+    activeLlmCount: Int,
+    activeResourceCount: Int,
+    allWorkspaces: List<Pair<String, String>>,
+    activeWorkspaceId: String?,
+    onSwitchWorkspace: (String) -> Unit,
+    onCreateWorkspace: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    var switcherOpen by remember { mutableStateOf(false) }
+
+    TopAppBar(
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clickable { switcherOpen = true }
+                    .testTag("workspace_switcher")
             ) {
-                viewModel.selectTab(ActiveNavigationTab.MODELS_CAPABILITIES)
-                moreSheetOpen = false
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .background(
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                            shape = CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.Psychology,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = workspaceName,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Icon(
+                            Icons.Default.ArrowDropDown,
+                            contentDescription = "تبديل مساحة العمل",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = workspaceSubtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                DropdownMenu(
+                    expanded = switcherOpen,
+                    onDismissRequest = { switcherOpen = false }
+                ) {
+                    allWorkspaces.forEach { (name, id) ->
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = name,
+                                        fontWeight = if (id == activeWorkspaceId) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                    if (id == activeWorkspaceId) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .size(7.dp)
+                                                .background(
+                                                    MaterialTheme.colorScheme.tertiary,
+                                                    CircleShape
+                                                )
+                                        )
+                                    }
+                                }
+                            },
+                            onClick = {
+                                onSwitchWorkspace(id)
+                                switcherOpen = false
+                            }
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.Add,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("إنشاء مساحة عمل جديدة", color = MaterialTheme.colorScheme.primary)
+                            }
+                        },
+                        onClick = {
+                            onCreateWorkspace()
+                            switcherOpen = false
+                        }
+                    )
+                }
             }
-            MoreDestination(
-                icon = Icons.Default.AccountTree,
-                label = "المهام وخطط العمل",
-                description = "تعريف المهام وتنفيذ خطط العمل متعددة الخطوات",
-                tag = "more_tab_tasks"
+        },
+        actions = {
+            StatusChip(
+                label = if (activeLlmCount > 0) "ذكاء نشط ×$activeLlmCount" else "لا ذكاء نشط",
+                isActive = activeLlmCount > 0,
+                detail = "$activeResourceCount مورد مفعّل"
+            )
+            IconButton(
+                onClick = onOpenSettings,
+                modifier = Modifier.testTag("btn_open_settings")
             ) {
-                viewModel.selectTab(ActiveNavigationTab.TASKS_WORKFLOWS)
-                moreSheetOpen = false
+                Icon(
+                    Icons.Default.Settings,
+                    contentDescription = "الإعدادات",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-            MoreDestination(
-                icon = Icons.Default.AutoAwesome,
-                label = "ذكاء القرار (CBR-MDP)",
-                description = "محرك القرار القائم على الحالات والتعلم المعزّز",
-                tag = "more_tab_decision"
-            ) {
-                viewModel.selectTab(ActiveNavigationTab.DECISION_INTELLIGENCE)
-                moreSheetOpen = false
+        },
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        modifier = Modifier.testTag("main_top_bar")
+    )
+}
+
+@Composable
+private fun DismissibleInfoBanner(
+    message: String,
+    isDegraded: Boolean,
+    onDismiss: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.End,
+            modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 0.dp, bottom = 0.dp)
+        ) {
+            Box(modifier = Modifier.weight(1f)) {
+                DiagnosticBanner(title = "تنبيه", message = message, isDegraded = isDegraded)
             }
-            MoreDestination(
-                icon = Icons.Default.Radar,
-                label = "رادار التطور",
-                description = "مسح التقنيات ومرشّحات تطوير القدرات",
-                tag = "more_tab_radar"
-            ) {
-                viewModel.selectTab(ActiveNavigationTab.RADAR_EVOLUTION)
-                moreSheetOpen = false
+            TextButton(onClick = onDismiss, modifier = Modifier.testTag("btn_dismiss_banner")) {
+                Text("إخفاء")
             }
-            MoreDestination(
-                icon = Icons.Default.Verified,
-                label = "مرصد الحوكمة والاستدامة",
-                description = "حالة القدرات المشتقة من الأدلة + الميزانية والتكلفة وحدود المعدل",
-                tag = "more_tab_governance"
-            ) {
-                viewModel.selectTab(ActiveNavigationTab.GOVERNANCE)
-                moreSheetOpen = false
-            }
-            MoreDestination(
-                icon = Icons.Default.Extension,
-                label = "الملحقات والمهارات",
-                description = "MCP والمهارات والبرامج المساعدة",
-                tag = "more_tab_extensions"
-            ) {
-                viewModel.selectTab(ActiveNavigationTab.EXTENSIONS)
-                moreSheetOpen = false
-            }
-            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 }
@@ -310,33 +504,6 @@ private fun androidx.compose.foundation.layout.RowScope.BottomDestination(
         icon = { Icon(icon, contentDescription = label) },
         label = { Text(label) },
         modifier = Modifier.testTag(tag)
-    )
-}
-
-@Composable
-private fun MoreDestination(
-    icon: ImageVector,
-    label: String,
-    description: String,
-    tag: String,
-    onClick: () -> Unit
-) {
-    ListItem(
-        headlineContent = { Text(label, fontWeight = FontWeight.SemiBold) },
-        supportingContent = {
-            Text(description, style = MaterialTheme.typography.bodySmall)
-        },
-        leadingContent = {
-            Icon(
-                icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary
-            )
-        },
-        modifier = Modifier
-            .testTag(tag)
-            .padding(horizontal = 8.dp)
-            .clickable(onClick = onClick)
     )
 }
 
@@ -377,4 +544,49 @@ private fun StatusChip(label: String, isActive: Boolean, detail: String) {
             }
         }
     }
+}
+
+@Composable
+private fun CreateWorkspaceDialog(
+    onConfirm: (String, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by rememberSaveable { mutableStateOf("") }
+    var description by rememberSaveable { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("إنشاء مساحة عمل جديدة", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("اسم مساحة العمل") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("new_workspace_name")
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("الوصف (اختياري)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = "تنشئ مساحة عمل بملعب (Sandbox) وملفات وقاعدة معرفة وذاكرة وميزانية مستقلة.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(name.trim(), description.trim()) },
+                enabled = name.isNotBlank()
+            ) {
+                Text("إنشاء", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("إلغاء") } }
+    )
 }

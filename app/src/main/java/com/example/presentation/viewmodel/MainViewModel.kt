@@ -56,6 +56,7 @@ import com.example.domain.core.workspace.ResourceGraph
 import com.example.domain.core.workspace.ResourceNode
 import com.example.domain.core.workspace.ResourceType
 import com.example.presentation.state.ActiveNavigationTab
+import com.example.presentation.state.StudioTurn
 import com.example.presentation.state.UiState
 import com.example.presentation.ui.screens.ProviderPreset
 import kotlinx.coroutines.Job
@@ -365,18 +366,33 @@ class MainViewModel(
      */
     fun provisionLocalSemanticModel() {
         viewModelScope.launch {
+            _uiState.update { it.copy(isProvisioningSemanticModel = true) }
             runCatching {
                 when (val r = ragPipelineService.provisionSemanticModel()) {
                     is Outcome.Success -> _uiState.update {
-                        it.copy(diagnosticBanner = "النموذج الدلالي المحلي جاهز — استرجاع دلالي حقيقي على الجهاز.")
+                        it.copy(
+                            semanticModelReady = true,
+                            isProvisioningSemanticModel = false,
+                            diagnosticBanner = "النموذج الدلالي المحلي جاهز — استرجاع دلالي حقيقي على الجهاز."
+                        )
                     }
                     is Outcome.Error -> _uiState.update {
-                        it.copy(diagnosticBanner = "تعذر تجهيز النموذج الدلالي المحلي: ${r.failure}")
+                        it.copy(
+                            isProvisioningSemanticModel = false,
+                            diagnosticBanner = "تعذر تجهيز النموذج الدلالي المحلي: ${r.failure}"
+                        )
                     }
-                    else -> Unit
+                    else -> _uiState.update { it.copy(isProvisioningSemanticModel = false) }
                 }
+            }.onFailure {
+                _uiState.update { it.copy(isProvisioningSemanticModel = false) }
             }
         }
+    }
+
+    /** Refreshes the honest on-device semantic-model readiness flag. */
+    fun refreshSemanticModelStatus() {
+        _uiState.update { it.copy(semanticModelReady = ragPipelineService.isLocalSemanticModelReady) }
     }
 
     private fun observeSubsystems() {
@@ -598,6 +614,38 @@ class MainViewModel(
         _uiState.update { it.copy(promptInput = "") }
     }
 
+    /** Clears the in-memory Studio conversation transcript (session only). */
+    fun clearStudioSession() {
+        _uiState.update { it.copy(studioSession = emptyList()) }
+    }
+
+    /**
+     * Appends a finished conversational turn to the Studio session transcript.
+     * Called from the terminal execution events (Completed / Error).
+     */
+    private fun appendStudioTurn(
+        state: com.example.presentation.state.UiState,
+        prompt: String,
+        agentName: String,
+        agentRole: String,
+        answer: String,
+        isSuccessful: Boolean
+    ): List<StudioTurn> {
+        val turn = StudioTurn(
+            id = "turn_${System.currentTimeMillis()}",
+            prompt = prompt,
+            agentName = agentName,
+            agentRole = agentRole,
+            answer = answer,
+            eventCount = state.executionLog.size,
+            tokensConsumed = state.currentTokensConsumed,
+            durationMs = state.sessionTurnStartMs.takeIf { it > 0L }
+                ?.let { System.currentTimeMillis() - it } ?: 0L,
+            isSuccessful = isSuccessful
+        )
+        return state.studioSession + turn
+    }
+
     fun cancelExecution() {
         currentExecutionTaskId?.let { com.example.application.execution.ExecutionHost.cancel(it) }
         currentExecutionJob?.cancel()
@@ -626,6 +674,7 @@ class MainViewModel(
                 isExecuting = true,
                 streamText = "",
                 executionLog = emptyList(),
+                sessionTurnStartMs = System.currentTimeMillis(),
                 isDegraded = false,
                 degradedReason = null,
                 diagnosticBanner = null,
@@ -701,6 +750,14 @@ class MainViewModel(
                                     isExecuting = false,
                                     streamText = if (event.finalText.isNotBlank()) event.finalText else state.streamText,
                                     executionLog = updatedLogs,
+                                    studioSession = appendStudioTurn(
+                                        state = state,
+                                        prompt = prompt,
+                                        agentName = agent.identity.name,
+                                        agentRole = agent.identity.role.displayName,
+                                        answer = if (event.finalText.isNotBlank()) event.finalText else state.streamText,
+                                        isSuccessful = true
+                                    ),
                                     caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
                                 )
                             }
@@ -709,6 +766,14 @@ class MainViewModel(
                                     isExecuting = false,
                                     errorMessage = event.message,
                                     executionLog = updatedLogs,
+                                    studioSession = appendStudioTurn(
+                                        state = state,
+                                        prompt = prompt,
+                                        agentName = agent.identity.name,
+                                        agentRole = agent.identity.role.displayName,
+                                        answer = state.streamText.ifBlank { event.message },
+                                        isSuccessful = false
+                                    ),
                                     caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
                                 )
                             }
@@ -1484,6 +1549,21 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Deletes a knowledge document from BOTH the in-memory index and the
+     * durable Room store (honest outcome surfaced to the user).
+     */
+    fun deleteKnowledgeDocument(documentId: String) {
+        viewModelScope.launch {
+            when (val outcome = ragPipelineService.deleteDocument(documentId)) {
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.failure) }
+                else -> _uiState.update {
+                    it.copy(diagnosticBanner = "تم حذف المستند من قاعدة المعرفة.")
+                }
+            }
+        }
+    }
+
     // --- Workflow & Task ---
     fun executeWorkflow(plan: WorkflowPlan) {
         if (_uiState.value.isExecutingWorkflow) return
@@ -1563,6 +1643,36 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Creates a new file in the active workspace project (create + write in
+     * one governed operation), then refreshes the file list.
+     */
+    fun createWorkspaceFile(relativePath: String, content: String) {
+        if (relativePath.isBlank()) return
+        saveFile(relativePath, content)
+    }
+
+    /** Deletes a workspace project file (governed, fail-closed, audited). */
+    fun deleteWorkspaceFile(relativePath: String) {
+        val projectId = currentProjectIdOrInform() ?: return
+        viewModelScope.launch {
+            when (val outcome = manageWorkspaceFilesUseCase.deleteProjectFile(projectId, relativePath)) {
+                is Outcome.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            diagnosticBanner = "تم حذف الملف: $relativePath",
+                            selectedFilePath = null,
+                            selectedFileContent = null
+                        )
+                    }
+                    refreshFiles()
+                }
+                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                else -> refreshFiles()
+            }
+        }
+    }
+
     // --- Memory Operations ---
     fun updateMemoryQuery(q: String) {
         _uiState.update { it.copy(memoryQuery = q) }
@@ -1625,5 +1735,10 @@ class MainViewModel(
 
     fun clearErrorMessage() {
         _uiState.update { it.copy(errorMessage = null) }
+    }
+
+    /** Dismisses the transient diagnostic banner shown in the app shell. */
+    fun dismissDiagnosticBanner() {
+        _uiState.update { it.copy(diagnosticBanner = null) }
     }
 }

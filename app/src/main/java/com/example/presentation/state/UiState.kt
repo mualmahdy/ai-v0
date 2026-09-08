@@ -56,6 +56,24 @@ enum class ActiveNavigationTab(val displayName: String, val iconName: String) {
     FILES("ملفات مساحة العمل", "ic_files")
 }
 
+/**
+ * One conversational turn in the Studio session transcript: the user prompt,
+ * the agent that ran it, the final streamed answer, the event count and the
+ * outcome. Turns accumulate for the lifetime of the ViewModel so the Studio
+ * behaves like a real conversation console instead of a one-shot prompt box.
+ */
+data class StudioTurn(
+    val id: String,
+    val prompt: String,
+    val agentName: String,
+    val agentRole: String,
+    val answer: String,
+    val eventCount: Int,
+    val tokensConsumed: Int,
+    val durationMs: Long,
+    val isSuccessful: Boolean
+)
+
 data class ExecutionStepItem(
     val id: String,
     val title: String,
@@ -91,6 +109,9 @@ data class UiState(
     val isExecuting: Boolean = false,
     val executionLog: List<ExecutionEvent> = emptyList(),
     val streamText: String = "",
+    // Session transcript (Studio as a real conversation console).
+    val studioSession: List<StudioTurn> = emptyList(),
+    val sessionTurnStartMs: Long = 0L,
     val isDegraded: Boolean = false,
     val degradedReason: DegradedReason? = null,
     val diagnosticBanner: String? = null,
@@ -172,6 +193,9 @@ data class UiState(
     val allMemories: List<MemoryEntry> = emptyList(),
     val isSearchingMemory: Boolean = false,
     val newMemoryContent: String = "",
+    // TRUE when the on-device ONNX semantic embedding model is provisioned.
+    val semanticModelReady: Boolean = false,
+    val isProvisioningSemanticModel: Boolean = false,
     val knowledgeDocuments: List<KnowledgeDocument> = emptyList(),
     val assembledRagContext: AssembledRagContext? = null,
     val newDocTitle: String = "",

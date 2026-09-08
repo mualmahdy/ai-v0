@@ -10,6 +10,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.unit.LayoutDirection
 import com.example.presentation.di.AppContainer
 import com.example.presentation.di.MainViewModelFactory
 import com.example.presentation.ui.MainAppScreen
@@ -42,11 +45,16 @@ class MainActivity : ComponentActivity() {
         appContainer.bootstrapRuntime()
         setContent {
             MyApplicationTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    MainAppScreen(viewModel = viewModel)
+                // The app is Arabic-first (all user-facing copy is Arabic), so the
+                // layout direction is pinned to RTL regardless of device locale —
+                // mirrors, paddings and navigation follow the reading direction.
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
+                        MainAppScreen(viewModel = viewModel)
+                    }
                 }
             }
         }

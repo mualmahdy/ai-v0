@@ -128,6 +128,33 @@ class RagPipelineService(
     }
 
     /**
+     * Deletes a document from the knowledge base: removes it (and its chunks)
+     * from the in-memory index AND deletes it durably from Room. Honest
+     * outcome — when no durable store is wired the deletion is reported as
+     * volatile-only instead of pretending persistence.
+     */
+    suspend fun deleteDocument(documentId: String): Outcome<Unit, String> {
+        // 1. Durable deletion (Room) — the authoritative store.
+        val durableDelete: Boolean = persistenceService?.let { persistence ->
+            runCatching { persistence.deleteDocument(documentId) }.isSuccess
+        } ?: false
+
+        // 2. In-memory index removal (documents flow + chunk index).
+        _documents.update { docs -> docs.filterNot { it.id == documentId } }
+        chunksMutex.withLock {
+            chunks.removeAll { it.documentId == documentId }
+        }
+
+        return when {
+            persistenceService == null -> Outcome.Error(
+                "لا يوجد مخزن دائم للمعرفة في هذا التكوين — الحذف كان في الذاكرة فقط."
+            )
+            durableDelete -> Outcome.Success(Unit)
+            else -> Outcome.Error("تعذر حذف المستند من المخزن الدائم (راجع سجل الأخطاء).")
+        }
+    }
+
+    /**
      * Audit 2026 fix: delegates to the local embedding router so the ONNX
      * semantic model can be provisioned on demand. When the fallback provider
      * is not a LocalSemanticEmbeddingRouter, this is an honest no-op error
