@@ -187,9 +187,14 @@ class AdmissionControlService(
         )
 
         // -------- 5. WORKSPACE SCOPE VALIDATION ---------------------------
+        // P1-7 (audit 2026 §6): workspace IDENTITY is mandatory for
+        // workspace-bound tools (fail-closed — no unattributed execution).
+        // The projectId PATH ANCHOR is optional here: the path-policy stage
+        // requires a resolvable root when paths+projectId exist, and the
+        // tools themselves fail honestly without a project anchor.
         val scopeStart = clock()
-        if (profile.isWorkspaceBound && (request.projectId == null || request.workspaceId == null)) {
-            trace += AdmissionStageOutcome(AdmissionStage.WORKSPACE_SCOPE_VALIDATION, false, AdmissionDecision.DENIED, "الأداة ${request.toolName} مقيّدة بمساحة عمل، والطلب لا يحمل نطاقاً.", clock() - scopeStart)
+        if (profile.isWorkspaceBound && request.workspaceId == null) {
+            trace += AdmissionStageOutcome(AdmissionStage.WORKSPACE_SCOPE_VALIDATION, false, AdmissionDecision.DENIED, "الأداة ${request.toolName} مقيّدة بمساحة عمل، والطلب لا يحمل نطاق مساحة عمل.", clock() - scopeStart)
             val result = buildDenied(request, trace, AdmissionStage.WORKSPACE_SCOPE_VALIDATION, "WORKSPACE_SCOPE_REQUIRED", risk)
             auditAdmission(request, result)
             return result
@@ -427,6 +432,69 @@ class AdmissionControlService(
     }
 
     companion object {
+        /**
+         * P0-1 (audit 2026 §15/§33 — Universal Execution Authority): a
+         * REGISTRY-BACKED default admission gate, used by the orchestrator's
+         * default ExecutionService so even the convenience default
+         * construction runs every tool execution through the ordered
+         * pipeline (there is no ungoverned default path). Production wiring
+         * (AppContainer) still injects the FULL gate — Room-backed principal
+         * authorization, economic budget, durable approvals, telemetry
+         * audit, real workspace roots.
+         *
+         * Default-port semantics (honest, fail-closed where it matters):
+         *  - tool declarations resolve from the live adapter registry;
+         *    UNKNOWN tools are DENIED (no fabricated declarations);
+         *  - principal authorization: non-sensitive tools pass; SENSITIVE
+         *    tools are denied (no grant authority exists in this default —
+         *    sensitive execution REQUIRES the production wiring);
+         *  - budget: honest ALLOWED ("no budget configured") — no fabricated
+         *    limits;
+         *  - rate limit: a real governor with NO configured limits (honest
+         *    untracked), using the ATOMIC tryAcquire;
+         *  - approvals: volatile in-memory store (fail-safe direction — a
+         *    lost approval re-requests, never authorizes);
+         *  - audit: no-op sink (production routes to the telemetry trail).
+         */
+        fun forRegistry(
+            registry: com.example.application.registry.ComponentRegistry,
+            policy: SecurityPolicy = SecurityPolicy(),
+            rateLimitGovernor: com.example.application.budget.RateLimitGovernor =
+                com.example.application.budget.RateLimitGovernor()
+        ): AdmissionControlService {
+            fun resolveDeclaration(name: String): ToolDeclaration? = runCatching {
+                registry.runtimeAdapterResolver.listToolDeclarations()
+                    .firstOrNull { it.name.equals(name, ignoreCase = true) }
+            }.getOrNull()
+            return AdmissionControlService(
+                toolDeclarations = ToolDeclarationResolver { name -> resolveDeclaration(name) },
+                principalAuthorization = PrincipalAuthorizationPort { _, _, _, resourceId, _, _ ->
+                    // Sensitive/consent tools REQUIRE the production grant
+                    // authority; this default has none → fail closed.
+                    val declaration = resolveDeclaration(resourceId)
+                    val sensitive = declaration?.isSensitive == true ||
+                        declaration?.requiresHumanConsent == true
+                    !sensitive
+                },
+                securityGuard = com.example.application.security.SecurityGuardService(),
+                budgetAuthorization = BudgetAuthorizationPort { _ ->
+                    BudgetAuthorizationOutcome(
+                        BudgetAuthorizationVerdict.ALLOWED,
+                        "لا ميزانية مُعرّفة في هذه التهيئة — سماح مُعلن (وليس ميزانية مُخترعة)."
+                    )
+                },
+                rateLimitCheck = RateLimitCheckPort { scopeKey -> rateLimitGovernor.tryAcquire(scopeKey) },
+                approvalGate = HumanApprovalGate(
+                    store = com.example.infrastructure.governed.InMemoryHumanApprovalStore()
+                ),
+                sandboxService = SandboxLifecycleService(
+                    hostIsolationLevel = com.example.domain.core.runtime.IsolationLevel.APP_SANDBOX_BEST_EFFORT
+                ),
+                auditSink = AdmissionAuditPort { _, _, _, _, _, _, _, _, _ -> },
+                policy = policy
+            )
+        }
+
         fun defaultRiskProfiles(): Map<String, ToolRiskProfile> = mapOf(
             "list_files" to ToolRiskProfile("list_files", RiskLevel.LOW, isWorkspaceBound = true),
             "read_file" to ToolRiskProfile("read_file", RiskLevel.LOW, isWorkspaceBound = true),

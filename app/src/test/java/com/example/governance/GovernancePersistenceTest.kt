@@ -264,8 +264,11 @@ class GovernancePersistenceTest {
         // grants (permission_grants.workspaceId), the durable agent revision
         // ledger (agent_revisions), and durable workflow artifacts
         // (workflow_step_states.artifactsJson).
+        // AUDIT 2026 REMEDIATION (v15): workspace identity on
+        // tasks/execution_logs/execution_trace_nodes and the DURABLE human
+        // approval requests table (§17).
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(14, dbVersion)
+        assertEquals(15, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))
@@ -277,7 +280,9 @@ class GovernancePersistenceTest {
             // v13 — report gap-closure tables.
             "chat_sessions", "chat_turns", "workflow_definitions",
             // v14 — correctness & authority repair tables.
-            "agent_revisions"
+            "agent_revisions",
+            // v15 — audit 2026 remediation: durable human approvals.
+            "human_approval_requests"
         ).forEach { tableName ->
             assertTrue("missing table: $tableName", tables.contains(tableName))
         }

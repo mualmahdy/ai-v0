@@ -68,8 +68,15 @@ class ExecutionHostMultiExecutionTest {
 
         awaitTrue { ExecutionHost.isExecuting("task_B") }
         ExecutionHost.cancel("task_A")
+        // DETERMINISTIC job-state assertion (the block's catch never runs
+        // when cancellation lands before first dispatch — the relaunch test
+        // documents this exact semantic, so job state is the authoritative
+        // signal; the catch flag remains a best-effort secondary signal).
+        awaitTrue { jobA.isCancelled && jobA.isCompleted }
+        assertTrue("cancel(task_A) must cancel task_A only", jobA.isCancelled)
+        assertTrue(jobA.isCompleted)
         awaitTrue { aCancelled.get() }
-        assertTrue("cancel(task_A) must cancel task_A only", aCancelled.get())
+        assertTrue(aCancelled.get())
 
         awaitTrue { bCompleted.get() }
         assertTrue("task_B must keep running after task_A was cancelled", bCompleted.get())

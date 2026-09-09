@@ -89,7 +89,14 @@ class AgentOrchestrator(
         resourceRegistry = registry.resourceRegistry,
         securityGuard = securityGuard,
         memoryRepositoryProvider = { registry.getMemoryRepository() }
-    ),
+    ).apply {
+        // P0-1 (audit 2026 §15/§33): even the CONVENIENCE default execution
+        // service runs every tool execution through the ordered admission
+        // pipeline (registry-backed gate). Production wiring (AppContainer)
+        // injects the full Room-backed gate; there is no ungoverned default
+        // path left in the runtime.
+        admissionControl = com.example.application.governed.AdmissionControlService.forRegistry(registry)
+    },
     private val observationService: ObservationService = ObservationService(),
     private val outcomeService: OutcomeService = OutcomeService(),
     private val taskDao: TaskDao? = null,

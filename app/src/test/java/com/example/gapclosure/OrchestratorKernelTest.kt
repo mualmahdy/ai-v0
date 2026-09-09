@@ -94,6 +94,10 @@ class OrchestratorKernelTest {
         val stored = linkedMapOf<String, TaskEntity>()
         override fun getAllTasksFlow(): Flow<List<TaskEntity>> = MutableStateFlow(stored.values.toList())
         override suspend fun getAllTasks(): List<TaskEntity> = stored.values.toList()
+        override fun getTasksForWorkspaceFlow(workspaceId: String): Flow<List<TaskEntity>> =
+            MutableStateFlow(stored.values.filter { it.workspaceId == workspaceId })
+        override suspend fun getTasksForWorkspace(workspaceId: String): List<TaskEntity> =
+            stored.values.filter { it.workspaceId == workspaceId }
         override suspend fun getTaskById(id: String): TaskEntity? = stored[id]
         override suspend fun insertOrUpdateTask(task: TaskEntity) { stored[task.id] = task }
         override suspend fun updateTaskStatus(

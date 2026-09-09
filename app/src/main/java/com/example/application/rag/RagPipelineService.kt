@@ -64,7 +64,16 @@ class RagPipelineService(
     private val runtimeAdapterResolver: RuntimeAdapterResolver,
     private val fallbackEmbeddingProvider: EmbeddingProviderPort? = null,
     private val persistenceService: KnowledgePersistenceService? = null,
-    private val workspaceIdProvider: () -> String = { "default" }
+    private val workspaceIdProvider: () -> String = { "default" },
+    /**
+     * Audit 2026 (§29 — workspace knowledge has NO size limit): bounded
+     * corpus. Ingesting beyond [maxDocumentsPerWorkspace] /
+     * [maxChunksPerWorkspace] evicts the OLDEST documents (insertion order)
+     * and reports every eviction in the observable [corpusEvictions] flow —
+     * the corpus degrades HONESTLY instead of growing without bound in RAM.
+     */
+    private val maxDocumentsPerWorkspace: Int = 256,
+    private val maxChunksPerWorkspace: Int = 24_000
 ) {
     private val _documents = MutableStateFlow<List<KnowledgeDocument>>(emptyList())
     val documents: StateFlow<List<KnowledgeDocument>> = _documents.asStateFlow()
@@ -90,6 +99,64 @@ class RagPipelineService(
 
     /** P1-5: honest bound on the per-query scan (degrades instead of stalling). */
     private val maxScanChunks = 8_000
+
+    /**
+     * Audit 2026 (§29 — no workspace-knowledge size limit): the LAST
+     * [EVICTION_LOG_WINDOW] corpus evictions, observable. Non-empty means
+     * the workspace corpus is at its bound and the OLDEST knowledge was
+     * dropped — an honest degradation signal, never silent loss.
+     */
+    private val _corpusEvictions = MutableStateFlow<List<String>>(emptyList())
+    val corpusEvictions: StateFlow<List<String>> = _corpusEvictions.asStateFlow()
+
+    private fun recordEviction(entry: String) {
+        _corpusEvictions.value = (listOf(entry) + _corpusEvictions.value).take(EVICTION_LOG_WINDOW)
+    }
+
+    private companion object {
+        const val EVICTION_LOG_WINDOW = 64
+    }
+
+    /**
+     * Audit 2026 (§29): enforce the corpus bounds — evict the OLDEST
+     * documents (and all their chunks + index entries) while the corpus is
+     * over [maxDocumentsPerWorkspace] or [maxChunksPerWorkspace]. Every
+     * eviction is recorded in [corpusEvictions] (honest, observable).
+     */
+    private fun enforceCorpusBounds() {
+        var evictedDocs = 0
+        var evictedChunks = 0
+        // 1) Total-chunk bound (evict oldest documents until under it).
+        while (chunks.size > maxChunksPerWorkspace && _documents.value.isNotEmpty()) {
+            val victim = _documents.value.first()
+            evictedDocs++
+            evictedChunks += chunks.count { it.documentId == victim.id }
+            removeDocumentWorkingSet(victim.id)
+        }
+        // 2) Document-count bound.
+        while (_documents.value.size > maxDocumentsPerWorkspace) {
+            val victim = _documents.value.first()
+            evictedDocs++
+            evictedChunks += chunks.count { it.documentId == victim.id }
+            removeDocumentWorkingSet(victim.id)
+        }
+        if (evictedDocs > 0) {
+            recordEviction(
+                "CORPUS_BOUND: evicted $evictedDocs document(s) / $evictedChunks chunk(s) " +
+                    "(limits: docs=$maxDocumentsPerWorkspace, chunks=$maxChunksPerWorkspace)"
+            )
+        }
+    }
+
+    /** Removes a document's RAM working set (document row, chunks, index). */
+    private fun removeDocumentWorkingSet(documentId: String) {
+        _documents.update { docs -> docs.filterNot { it.id == documentId } }
+        // NOTE: CopyOnWriteArrayList iterators do NOT support remove() — the
+        // Kotlin removeAll(predicate) extension would throw. removeIf is the
+        // COW-safe atomic removal.
+        chunks.removeIf { it.documentId == documentId }
+        indexedChunks.removeIf { it.chunk.documentId == documentId }
+    }
 
     private fun indexChunk(chunk: DocumentChunk): IndexedChunk {
         val normalizedLower = com.example.infrastructure.memory.semantic.ArabicTextNormalizer
@@ -129,6 +196,9 @@ class RagPipelineService(
      */
     @Volatile
     private var activeEmbeddingResourceId: ResourceId? = null
+
+    /** Audit 2026: collision-free document id generator (see ingestDocument). */
+    private val docIdCounter = AtomicLong(0)
 
     init {
         bootstrapDefaultKnowledge()
@@ -174,7 +244,9 @@ class RagPipelineService(
         // 2. In-memory index removal (documents flow + chunk index).
         _documents.update { docs -> docs.filterNot { it.id == documentId } }
         chunksMutex.withLock {
-            chunks.removeAll { it.documentId == documentId }
+            // COW-safe removal (CopyOnWriteArrayList iterators do NOT support
+            // remove() — the removeAll(predicate) extension would throw).
+            chunks.removeIf { it.documentId == documentId }
             indexedChunks.removeIf { it.chunk.documentId == documentId }
         }
 
@@ -247,6 +319,8 @@ class RagPipelineService(
         chunks.addAll(generatedChunks)
         // P1-5: keep the retrieval index in sync with ingested chunks.
         generatedChunks.forEach { indexedChunks.add(indexChunk(it)) }
+        // Audit 2026 (§29): bounded corpus — evict oldest when over the limits.
+        enforceCorpusBounds()
     }
 
     /**
@@ -262,7 +336,10 @@ class RagPipelineService(
      * different embedding resources.
      */
     suspend fun ingestDocument(title: String, content: String, sourceUri: String, tags: List<String> = emptyList()): KnowledgeDocument = withContext(Dispatchers.Default) {
-        val docId = "doc_${System.currentTimeMillis()}"
+        // Audit 2026: collision-free document id. A timestamp-only id made
+        // two documents ingested within the same millisecond THE SAME
+        // document (eviction/deletion then wiped them all at once).
+        val docId = "doc_${System.currentTimeMillis()}_${docIdCounter.incrementAndGet()}"
         val doc = KnowledgeDocument(
             id = docId, title = title, sourceUri = sourceUri, content = content, tags = tags
         )
@@ -307,6 +384,8 @@ class RagPipelineService(
         chunks.addAll(embeddedChunks)
         // P1-5: keep the retrieval index in sync with ingested chunks.
         embeddedChunks.forEach { indexedChunks.add(indexChunk(it)) }
+        // Audit 2026 (§29): bounded corpus — evict oldest when over the limits.
+        enforceCorpusBounds()
 
         // ------------------------------------------------------------
         // GAP-CLOSURE P1-14 (honest RAG persistence): a failed write is NO

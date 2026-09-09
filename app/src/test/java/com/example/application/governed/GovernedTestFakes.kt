@@ -166,6 +166,72 @@ class ScriptableSecurityGuard(
 /** Shared factory: a fully wired pipeline with fakes + REAL patch engine. */
 object GovernedPipelineFactory {
 
+    /**
+     * P0-1 (audit 2026 §15): LIVE-registry admission gate for tests that
+     * register their tools AFTER the service graph is built (the declarations
+     * resolve at ADMISSION time, not at wiring time).
+     */
+    fun admissionForRegistry(
+        registry: com.example.application.registry.ComponentRegistry
+    ): AdmissionControlService {
+        fun liveDeclarations(): List<com.example.domain.core.tools.ToolDeclaration> =
+            runCatching { registry.runtimeAdapterResolver.listToolDeclarations() }.getOrDefault(emptyList())
+        return AdmissionControlService(
+            toolDeclarations = ToolDeclarationResolver { name ->
+                CodingToolchainService.declarations[name]
+                    ?: liveDeclarations().firstOrNull { it.name.equals(name, ignoreCase = true) }
+            },
+            principalAuthorization = FakePrincipalAuthorization(),
+            securityGuard = com.example.application.security.SecurityGuardService(),
+            budgetAuthorization = ScriptableBudgetGate {
+                BudgetAuthorizationOutcome(
+                    com.example.domain.core.security.governance.BudgetAuthorizationVerdict.ALLOWED,
+                    "لا ميزانية مُعرّفة — سماح."
+                )
+            },
+            rateLimitCheck = ScriptableRateLimit(),
+            approvalGate = HumanApprovalGate(store = InMemoryHumanApprovalStore()),
+            sandboxService = SandboxLifecycleService(
+                hostIsolationLevel = com.example.domain.core.runtime.IsolationLevel.APP_SANDBOX_BEST_EFFORT
+            ),
+            auditSink = RecordingAuditSink(),
+            workspaceRootResolver = { null }
+        )
+    }
+
+    /**
+     * P0-1 (audit 2026 §15): an admission gate for tests that exercise the
+     * ExecutionService tool paths — the SAME ordered pipeline as production,
+     * resolving the GOVERNED CODING declarations PLUS any extra tool
+     * declarations the test registers (e.g. workspace_file_tool fakes), so
+     * the universal boundary is enforced in tests exactly as in production.
+     */
+    fun admissionForTools(
+        vararg extraDeclarations: com.example.domain.core.tools.ToolDeclaration
+    ): AdmissionControlService {
+        val extras = extraDeclarations.associateBy { it.name }
+        return AdmissionControlService(
+            toolDeclarations = ToolDeclarationResolver { name ->
+                CodingToolchainService.declarations[name] ?: extras[name]
+            },
+            principalAuthorization = FakePrincipalAuthorization(),
+            securityGuard = com.example.application.security.SecurityGuardService(),
+            budgetAuthorization = ScriptableBudgetGate {
+                BudgetAuthorizationOutcome(
+                    com.example.domain.core.security.governance.BudgetAuthorizationVerdict.ALLOWED,
+                    "لا ميزانية مُعرّفة — سماح."
+                )
+            },
+            rateLimitCheck = ScriptableRateLimit(),
+            approvalGate = HumanApprovalGate(store = InMemoryHumanApprovalStore()),
+            sandboxService = SandboxLifecycleService(
+                hostIsolationLevel = com.example.domain.core.runtime.IsolationLevel.APP_SANDBOX_BEST_EFFORT
+            ),
+            auditSink = RecordingAuditSink(),
+            workspaceRootResolver = { null }
+        )
+    }
+
     fun build(
         storage: FakeWorkspaceStorage = FakeWorkspaceStorage(),
         approvalStore: HumanApprovalStorePort = InMemoryHumanApprovalStore(),

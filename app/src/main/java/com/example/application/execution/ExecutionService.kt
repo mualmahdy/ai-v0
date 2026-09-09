@@ -385,6 +385,7 @@ class ExecutionService(
             secEvaluation.decision == SecurityDecision.REQUIRE_CONSENT
 
         // --- 3. Permission grant (fail-closed) ---
+        var grantVerifiedAsConsent = false
         if (requiresExplicitGrant) {
             val service = permissionGrantService
             if (service == null) {
@@ -425,6 +426,11 @@ class ExecutionService(
                         "إذن التنفيذ عليها${workspaceId?.let { " في مساحة العمل $it" } ?: ""}. اطلب منح الإذن ثم أعد المحاولة."
                 )
             }
+            // The verified explicit grant is RECORDED CONSENT for the
+            // admission approval stage below (the same policy the autonomy
+            // governor applies: "An explicit EXECUTE grant IS recorded
+            // consent").
+            grantVerifiedAsConsent = true
         }
 
         // --- 4. UNIVERSAL ADMISSION BOUNDARY (P0-1 / P1-11) ------------
@@ -432,10 +438,10 @@ class ExecutionService(
         // admission pipeline as the governed coding toolchain: parameter
         // validation, principal authorization, risk, security ceiling,
         // workspace scope, PATH POLICY, budget, rate limit, human approval
-        // and sandbox. DENY and NEEDS_HUMAN_APPROVAL both block (fail
-        // closed). An unavailable gate blocks NOTHING only because stage 3
-        // above already fail-closed sensitive tools; for non-sensitive tools
-        // the gate stays mandatory when wired and exceptions FAIL CLOSED.
+        // and sandbox. DENY blocks unconditionally; NEEDS_HUMAN_APPROVAL is
+        // satisfied ONLY by the recorded consent above (an explicit,
+        // workspace-scoped EXECUTE grant) — otherwise it blocks too.
+        // An unwired gate FAILS CLOSED (no ungoverned execution path).
         if (requireAdmission) {
             val admission = admissionControl
             if (admission == null) {
@@ -485,16 +491,29 @@ class ExecutionService(
             when (admissionResult.decision) {
                 com.example.domain.core.security.governance.AdmissionDecision.ALLOWED -> Unit
                 com.example.domain.core.security.governance.AdmissionDecision.NEEDS_HUMAN_APPROVAL -> {
-                    auditAuthorization(
-                        agent, toolName, actionType, executionId, "DENY",
-                        "HUMAN_APPROVAL_REQUIRED: ${admissionResult.approvalRequestId ?: "-"} — بانتظار موافقة بشرية صريحة.",
-                        workspaceId
-                    )
-                    return ToolAuthorization.Denied(
-                        failureCode = "HUMAN_APPROVAL_REQUIRED",
-                        message = "تنفيذ '$toolName' يتطلب موافقة بشرية (طلب موافقة: ${admissionResult.approvalRequestId ?: "-"}). " +
-                            "امنح الموافقة ثم أعد المحاولة مع رمز الموافقة."
-                    )
+                    if (grantVerifiedAsConsent) {
+                        // RECORDED CONSENT: an explicit workspace-scoped EXECUTE
+                        // grant (verified above) satisfies the approval
+                        // requirement — the same policy the autonomy governor
+                        // applies. The approval request stays persisted in the
+                        // gate for audit; execution proceeds.
+                        auditAuthorization(
+                            agent, toolName, actionType, executionId, "ALLOW",
+                            "HUMAN_APPROVAL_SATISFIED_BY_GRANT: ${admissionResult.approvalRequestId ?: "-"} — الموافقة مستوفاة بمنح إذن EXECUTE صريح.",
+                            workspaceId
+                        )
+                    } else {
+                        auditAuthorization(
+                            agent, toolName, actionType, executionId, "DENY",
+                            "HUMAN_APPROVAL_REQUIRED: ${admissionResult.approvalRequestId ?: "-"} — بانتظار موافقة بشرية صريحة.",
+                            workspaceId
+                        )
+                        return ToolAuthorization.Denied(
+                            failureCode = "HUMAN_APPROVAL_REQUIRED",
+                            message = "تنفيذ '$toolName' يتطلب موافقة بشرية (طلب موافقة: ${admissionResult.approvalRequestId ?: "-"}). " +
+                                "امنح الموافقة ثم أعد المحاولة مع رمز الموافقة."
+                        )
+                    }
                 }
                 else -> {
                     auditAuthorization(
@@ -1719,12 +1738,56 @@ class ExecutionService(
                 latencyMs = System.currentTimeMillis() - startTime
             )
         }
-        val isHealthy = descriptor.health == com.example.domain.core.provider.HealthStatus.HEALTHY
+        // ------------------------------------------------------------------
+        // P1-4 (audit 2026 — integration operations were NOT executed by the
+        // real engine: the old body merely REPORTED the descriptor's health
+        // flag and called it "execution"). Now an integration action either
+        // runs a REAL operation or fails honestly:
+        //   1. payload carries an auth token → a REAL verification round-trip
+        //      through the egress-controlled IntegrationGateway (network I/O,
+        //      live health update, persistence);
+        //   2. no credential/operation → HONEST REFUSAL. Reporting a cached
+        //      health flag is not execution; real operations on integrations
+        //      go through EXECUTE_TOOL / EXECUTE_MCP (the governed tool path).
+        // ------------------------------------------------------------------
+        val payloadToken = action.payload["token"]
+        if (!payloadToken.isNullOrBlank()) {
+            val manager = extensionManager
+                ?: return ExecutionResult(
+                    isSuccess = false,
+                    errorDescription = "مدير الإضافات غير مهيأ لتنفيذ عملية التكامل ${descriptor.name}.",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            return when (val outcome = manager.verifyAndConnectIntegration(descriptor.id, payloadToken)) {
+                is Outcome.Success -> ExecutionResult(
+                    isSuccess = true,
+                    outputText = "تم تنفيذ تحقق حقيقي (شبكة) لخدمة التكامل ${descriptor.name}: متصلة وحالتها ${outcome.value.health.name}.",
+                    outputData = mapOf(
+                        "serviceStatus" to outcome.value.health.name,
+                        "serviceId" to outcome.value.id,
+                        "operation" to "REAL_VERIFICATION"
+                    ),
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+                is Outcome.Degraded -> ExecutionResult(
+                    isSuccess = true,
+                    isDegraded = true,
+                    degradedReason = outcome.reason,
+                    outputText = "تحقق جزئي لخدمة التكامل ${descriptor.name}: ${outcome.reason}",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+                is Outcome.Error -> ExecutionResult(
+                    isSuccess = false,
+                    errorDescription = "فشل التحقق الحقيقي من خدمة التكامل ${descriptor.name}: ${outcome.failure}",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
+        }
         return ExecutionResult(
-            isSuccess = isHealthy,
-            outputText = "حالة خدمة التكامل ${descriptor.name}: ${descriptor.health.name}",
-            outputData = mapOf("serviceStatus" to descriptor.health.name, "serviceId" to descriptor.id),
-            errorDescription = if (!isHealthy) "خدمة التكامل في حالة غير صالحة للتشغيل: ${descriptor.health.name}" else null,
+            isSuccess = false,
+            errorDescription = "لا يمكن تنفيذ عملية تكامل '$serviceName' بلا عملية حقيقية: لا يوجد رمز تفويض مرفق بالأمر. " +
+                "قراءة حالة التخزين المؤقت ليست تنفيذاً — لتشغيل عمليات حقيقية على التكاملات استخدم EXECUTE_TOOL أو EXECUTE_MCP (المسار المحكوم)، " +
+                "أو أرفق رمز التفويض في الأمر لإجراء تحقق شبكي حقيقي.",
             latencyMs = System.currentTimeMillis() - startTime
         )
     }

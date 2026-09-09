@@ -246,6 +246,9 @@ class FullProductPathE2ETest {
             securityGuard = securityGuard
         )
         executionService.permissionGrantService = permissionGrantService
+        // P0-1: universal admission boundary wired exactly as production.
+        executionService.admissionControl =
+            com.example.application.governed.GovernedPipelineFactory.admissionForRegistry(registry)
 
         val orchestrator = AgentOrchestrator(
             registry = registry,

@@ -51,7 +51,16 @@ object ExecutionHost {
     data class ExecutionHandle(
         val key: String,
         val job: Job,
-        val startedAtEpochMs: Long
+        val startedAtEpochMs: Long,
+        /**
+         * P1-14 (audit 2026 §7/§25 — no execution drain before workspace
+         * deletion): the workspace this execution is attributed to. The
+         * delete path CANCELS and DRAINS these jobs BEFORE removing the
+         * workspace — an execution can never outlive the workspace whose
+         * sandbox/authz scope it executes in (no orphaned jobs writing into
+         * a deleted workspace root).
+         */
+        val workspaceId: String? = null
     )
 
     private val handles = ConcurrentHashMap<String, ExecutionHandle>()
@@ -106,12 +115,25 @@ object ExecutionHost {
      * cancel any OTHER execution. Re-launching the same key replaces that
      * key's previous job only — ATOMICALLY (see [launchMonitor]).
      */
-    fun launch(key: String, block: suspend () -> Unit): Job = synchronized(launchMonitor) {
+    fun launch(key: String, block: suspend () -> Unit): Job =
+        launch(key, workspaceId = null, block = block)
+
+    /**
+     * P1-14: [launch] with WORKSPACE ATTRIBUTION — the handle records the
+     * workspace whose scope the execution runs in, so workspace deletion can
+     * drain exactly the executions it would orphan.
+     */
+    fun launch(key: String, workspaceId: String?, block: suspend () -> Unit): Job = synchronized(launchMonitor) {
         handles.remove(key)?.job?.cancel()
         val job = scope.launch {
             block()
         }
-        val handle = ExecutionHandle(key = key, job = job, startedAtEpochMs = System.currentTimeMillis())
+        val handle = ExecutionHandle(
+            key = key,
+            job = job,
+            startedAtEpochMs = System.currentTimeMillis(),
+            workspaceId = workspaceId
+        )
         handles[key] = handle
         publishState()
         job.invokeOnCompletion { unregisterIfCurrent(key, job) }
@@ -140,6 +162,34 @@ object ExecutionHost {
     fun isExecuting(key: String): Boolean = handles.containsKey(key)
 
     fun handleFor(key: String): ExecutionHandle? = handles[key]
+
+    /**
+     * P1-14: executions currently attributed to [workspaceId]
+     * (unattributed executions are NOT affected).
+     */
+    fun executionsFor(workspaceId: String): List<ExecutionHandle> =
+        handles.values.filter { it.workspaceId == workspaceId }
+
+    /**
+     * P1-14 (audit 2026 — "deleting a workspace while executions are still
+     * running"): CANCELS every execution attributed to [workspaceId] and
+     * AWAITS their completion (bounded by [timeoutMs]). Returns TRUE when
+     * fully drained. The delete path REFUSES the deletion when this returns
+     * false (fail-closed: a stuck execution must never leave the workspace
+     * half-deleted) — honest refusal beats silent orphaning.
+     */
+    suspend fun drainWorkspace(workspaceId: String, timeoutMs: Long = 5_000L): Boolean {
+        val jobs = synchronized(launchMonitor) {
+            handles.values.filter { it.workspaceId == workspaceId }
+                .onEach { it.job.cancel() }
+                .map { it.job }
+        }
+        if (jobs.isEmpty()) return true
+        val drained = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+            jobs.forEach { it.join() }
+        }
+        return drained != null
+    }
 
     // --- internals ---
 

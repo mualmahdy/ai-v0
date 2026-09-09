@@ -1,5 +1,6 @@
 package com.example.application.workspace
 
+import com.example.application.execution.ExecutionHost
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.workspace.Workspace
 import com.example.infrastructure.persistence.dao.ProjectDao
@@ -289,23 +290,44 @@ class WorkspaceRuntimeService(
      * Deletes a workspace. Refuses to delete if it's the only workspace left
      * (returns false). If the deleted workspace was active, activates the most
      * recently accessed remaining workspace.
+     *
+     * P1-14 (audit 2026 §7/§25 — no execution drain before deletion):
+     * executions attributed to this workspace are CANCELLED AND DRAINED
+     * first. If they cannot be drained within the bounded timeout the
+     * deletion is REFUSED (returns false) — a live execution must never be
+     * orphaned above a deleted workspace root.
      */
-    suspend fun deleteWorkspace(workspaceId: String): Boolean = mutex.withLock {
-        val all = workspaceDao.getAllWorkspaces()
-        if (all.size <= 1) return@withLock false // never let the user delete the last workspace
-        val target = all.firstOrNull { it.id == workspaceId } ?: return@withLock false
-        workspaceDao.deleteById(workspaceId)
-        if (target.isActive) {
-            val nextActive = all.filter { it.id != workspaceId }.maxByOrNull { it.lastAccessedEpochMs }
-            if (nextActive != null) {
-                workspaceDao.deactivateAll()
-                workspaceDao.setActive(nextActive.id, System.currentTimeMillis())
+    suspend fun deleteWorkspace(workspaceId: String): Boolean {
+        // P1-14: drain this workspace's executions BEFORE taking the lock
+        // (draining joins the jobs; a job that calls back into this service
+        // must never wait on the mutex we hold — that would deadlock). The
+        // authoritative emptiness re-check happens INSIDE the lock below.
+        ExecutionHost.drainWorkspace(workspaceId, drainTimeoutMs)
+        return mutex.withLock {
+            val all = workspaceDao.getAllWorkspaces()
+            if (all.size <= 1) return@withLock false // never let the user delete the last workspace
+            val target = all.firstOrNull { it.id == workspaceId } ?: return@withLock false
+            // P1-14 fail-closed gate: if executions are STILL live for this
+            // workspace (started after the drain, or refusing to die), the
+            // deletion is REFUSED — a live execution must never be orphaned
+            // above a deleted workspace root.
+            if (ExecutionHost.executionsFor(workspaceId).isNotEmpty()) return@withLock false
+            workspaceDao.deleteById(workspaceId)
+            if (target.isActive) {
+                val nextActive = all.filter { it.id != workspaceId }.maxByOrNull { it.lastAccessedEpochMs }
+                if (nextActive != null) {
+                    workspaceDao.deactivateAll()
+                    workspaceDao.setActive(nextActive.id, System.currentTimeMillis())
+                }
             }
+            refreshAllWorkspaces()
+            refreshActiveWorkspace()
+            true
         }
-        refreshAllWorkspaces()
-        refreshActiveWorkspace()
-        true
     }
+
+    /** P1-14: bounded drain wait for [deleteWorkspace] (overridable in tests). */
+    var drainTimeoutMs: Long = 5_000L
 
     /**
      * GAP-CLOSURE P0-03 — FAIL-CLOSED accessor: the id of the ACTIVE

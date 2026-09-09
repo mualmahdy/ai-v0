@@ -182,6 +182,7 @@ class ToolLifecycleServiceTest {
     private class FakeToolLifecycleDao : com.example.infrastructure.persistence.dao.ToolLifecycleDao {
         private val states = mutableMapOf<String, com.example.infrastructure.persistence.entities.ToolLifecycleStateEntity>()
         override suspend fun byName(toolName: String) = states.values.firstOrNull { it.toolName == toolName }
+        override suspend fun allByName(toolName: String) = states.values.filter { it.toolName == toolName }
         override suspend fun active() = states.values.filter { it.isEnabled && it.lifecycleState != "REVOKED" }
         override fun allFlow(): kotlinx.coroutines.flow.Flow<List<com.example.infrastructure.persistence.entities.ToolLifecycleStateEntity>> =
             kotlinx.coroutines.flow.flowOf(states.values.toList())

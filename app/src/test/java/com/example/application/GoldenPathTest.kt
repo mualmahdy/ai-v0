@@ -193,6 +193,8 @@ class GoldenPathTest {
             resourceRegistry = registry.resourceRegistry,
             securityGuard = SecurityGuardService()
         )
+        executionService.admissionControl =
+            com.example.application.governed.GovernedPipelineFactory.admissionForRegistry(registry)
 
         val decisionContext = com.example.application.decision.DecisionContext(
             task = newTask()
@@ -213,16 +215,22 @@ class GoldenPathTest {
         )
 
         val seenEvents = mutableListOf<String>()
-        val result = executionService.executeAction(
-            action = action,
-            context = decisionContext,
-            agent = testAgent,
-            executionId = "exec-a",
-            onEvent = { ev ->
-                seenEvents.add(ev::class.simpleName ?: "?")
-                if (ev is ExecutionEvent.ToolResult) println("DEBUG toolOutcome=${ev.outcome}")
-            }
-        )
+        // P0-1/P1-7: production executions carry a pinned workspace identity —
+        // the admission gate fail-closes unattributed tool executions.
+        val result = kotlinx.coroutines.withContext(
+            com.example.domain.core.execution.ExecutionScope("exec-a", "ws_golden_path")
+        ) {
+            executionService.executeAction(
+                action = action,
+                context = decisionContext,
+                agent = testAgent,
+                executionId = "exec-a",
+                onEvent = { ev ->
+                    seenEvents.add(ev::class.simpleName ?: "?")
+                    if (ev is ExecutionEvent.ToolResult) println("DEBUG toolOutcome=${ev.outcome}")
+                }
+            )
+        }
         println("DEBUG events=$seenEvents result=${result.isSuccess} err=${result.errorDescription} count=${tool.executeCount}")
 
         assertEquals("Tool should have been executed once", 1, tool.executeCount)
@@ -272,6 +280,8 @@ class GoldenPathTest {
             resourceRegistry = registry.resourceRegistry,
             securityGuard = SecurityGuardService()
         ).apply {
+            // P0-1: universal admission boundary wired exactly as production.
+            admissionControl = com.example.application.governed.GovernedPipelineFactory.admissionForRegistry(registry)
             registryAgentResolver = { id -> registry.getAgent(id) }
             delegationExecutor = { childDef, childTask ->
                 orchestrator.executeTask(childDef, childTask)
@@ -318,6 +328,8 @@ class GoldenPathTest {
             resourceRegistry = registry.resourceRegistry,
             securityGuard = SecurityGuardService()
         ).apply {
+            // P0-1: universal admission boundary wired exactly as production.
+            admissionControl = com.example.application.governed.GovernedPipelineFactory.admissionForRegistry(registry)
             registryAgentResolver = { id -> registry.getAgent(id) }
         }
 
@@ -387,6 +399,8 @@ class GoldenPathTest {
             resourceRegistry = registry.resourceRegistry,
             securityGuard = SecurityGuardService()
         )
+        executionService.admissionControl =
+            com.example.application.governed.GovernedPipelineFactory.admissionForRegistry(registry)
 
         val decisionContext = com.example.application.decision.DecisionContext(
             task = newTask(),
@@ -434,6 +448,8 @@ class GoldenPathTest {
             resourceRegistry = registry.resourceRegistry,
             securityGuard = SecurityGuardService()
         ).apply {
+            // P0-1: universal admission boundary wired exactly as production.
+            admissionControl = com.example.application.governed.GovernedPipelineFactory.admissionForRegistry(registry)
             ragRetrievalProvider = { query, topK ->
                 com.example.domain.core.rag.AssembledRagContext(
                     query = query,
@@ -497,6 +513,8 @@ class GoldenPathTest {
             resourceRegistry = registry.resourceRegistry,
             securityGuard = SecurityGuardService()
         ).apply {
+            // P0-1: universal admission boundary wired exactly as production.
+            admissionControl = com.example.application.governed.GovernedPipelineFactory.admissionForRegistry(registry)
             permissionGrantService = permissionService
         }
 

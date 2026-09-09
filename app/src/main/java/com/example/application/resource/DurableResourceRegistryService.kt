@@ -9,7 +9,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -30,9 +32,13 @@ import kotlinx.coroutines.sync.withLock
  *     ComponentRegistry and referenced by the control plane through
  *     RegistryBackedResourceRecordRepository).
  *
- * Persistence failures are logged-by-degradation: the in-memory registry stays
- * authoritative so the runtime keeps working even if the disk write fails —
- * but the failure is never silently reported as success.
+ * Persistence failures are DEGRADED HONESTLY (P1-13, audit 2026 §19 —
+ * RAM/Room non-atomicity): the in-memory registry stays authoritative so
+ * the runtime keeps working even if the disk write fails, but the failure
+ * is NEVER silently reported as success — every swallowed repository
+ * error is (a) recorded in [persistenceFailures] (bounded, observable
+ * StateFlow) and (b) reported to the [persistenceFailureHandler] hook
+ * when wired, so the control plane and observability can SEE the divergence.
  */
 class DurableResourceRegistryService(
     private val repository: ResourceRecordRepository? = null,
@@ -42,8 +48,32 @@ class DurableResourceRegistryService(
      * (previously mirrorPersist used runBlocking on the MAIN thread during
      * graph construction and every registerTool call).
      */
-    private val mirrorScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val mirrorScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    /**
+     * P1-13: observability hook for mirror-path persistence failures
+     * (production wiring routes this to the telemetry/log trail).
+     */
+    private val persistenceFailureHandler: ((String, Throwable) -> Unit)? = null
 ) : ResourceRegistryService() {
+
+    /**
+     * P1-13: the LAST [PERSISTENCE_FAILURE_WINDOW] persistence failures,
+     * observable. Non-empty means memory is AUTHORITATIVE and Room has
+     * DIVERGED — an honest degradation signal, never silent success.
+     */
+    private val _persistenceFailures = MutableStateFlow<List<String>>(emptyList())
+    val persistenceFailures: StateFlow<List<String>> = _persistenceFailures.asStateFlow()
+
+    private fun recordPersistenceFailure(op: String, error: Throwable) {
+        val entry = "$op: ${error.javaClass.simpleName}: ${error.message ?: "-"}"
+        _persistenceFailures.value = (listOf(entry) + _persistenceFailures.value)
+            .take(PERSISTENCE_FAILURE_WINDOW)
+        persistenceFailureHandler?.invoke(entry, error)
+    }
+
+    private companion object {
+        const val PERSISTENCE_FAILURE_WINDOW = 32
+    }
 
     /**
      * FIX R-1: persisted records are now loaded via the explicit suspend
@@ -64,9 +94,15 @@ class DurableResourceRegistryService(
         loadMutex.withLock {
             if (eagerLoadAttempted) return
             eagerLoadAttempted = true
-            runCatching { repo.getAllResources() }
-                .getOrDefault(emptyList())
-                .forEach { record -> super.registerResource(record) }
+            val persisted = try {
+                repo.getAllResources()
+            } catch (error: Throwable) {
+                // P1-13: an unreadable store is HONEST degradation — memory
+                // stays empty/authoritative and the failure is observable.
+                recordPersistenceFailure("eagerLoad(getAllResources)", error)
+                emptyList()
+            }
+            persisted.forEach { record -> super.registerResource(record) }
         }
     }
 
@@ -77,14 +113,27 @@ class DurableResourceRegistryService(
     /** Single write path: memory + persistence, returns the stored record. */
     suspend fun saveResource(record: ResourceRecord): ResourceRecord {
         super.registerResource(record)
-        repository?.let { repo -> runCatching { repo.saveResource(record) } }
+        val repo = repository
+        if (repo != null) {
+            try {
+                repo.saveResource(record)
+            } catch (error: Throwable) {
+                // P1-13: honest degradation — memory keeps the record (runtime
+                // stays up) but the divergence is RECORDED, not swallowed.
+                recordPersistenceFailure("saveResource(${record.resourceId})", error)
+            }
+        }
         return record
     }
 
     suspend fun getResourceById(resourceId: ResourceId): ResourceRecord? {
         resources[resourceId]?.let { return it }
-        val persisted = repository?.let { repo ->
-            runCatching { repo.getResourceById(resourceId) }.getOrNull()
+        val repo = repository ?: return null
+        val persisted = try {
+            repo.getResourceById(resourceId)
+        } catch (error: Throwable) {
+            recordPersistenceFailure("getResourceById($resourceId)", error)
+            null
         }
         if (persisted != null) {
             super.registerResource(persisted)
@@ -100,23 +149,34 @@ class DurableResourceRegistryService(
         healthStatus: HealthStatus
     ) {
         super.updateRuntimeState(resourceId, lifecycleState, runtimeSupported, healthStatus)
-        repository?.let { repo ->
-            runCatching {
-                repo.updateRuntimeState(resourceId, lifecycleState, runtimeSupported, healthStatus)
-            }
+        val repo = repository ?: return
+        try {
+            repo.updateRuntimeState(resourceId, lifecycleState, runtimeSupported, healthStatus)
+        } catch (error: Throwable) {
+            recordPersistenceFailure("updateRuntimeState($resourceId)", error)
         }
     }
 
     suspend fun deleteResource(resourceId: ResourceId) {
         super.unregisterResource(resourceId)
-        repository?.let { repo -> runCatching { repo.deleteResource(resourceId) } }
+        val repo = repository ?: return
+        try {
+            repo.deleteResource(resourceId)
+        } catch (error: Throwable) {
+            recordPersistenceFailure("deleteResource($resourceId)", error)
+        }
     }
 
     suspend fun deleteResourcesForService(serviceId: String) {
         resources.values.filter { it.serviceId == serviceId }.forEach { record ->
             super.unregisterResource(record.resourceId)
         }
-        repository?.let { repo -> runCatching { repo.deleteResourcesForService(serviceId) } }
+        val repo = repository ?: return
+        try {
+            repo.deleteResourcesForService(serviceId)
+        } catch (error: Throwable) {
+            recordPersistenceFailure("deleteResourcesForService($serviceId)", error)
+        }
     }
 
     /** Continuous flow of all resources (UI + control plane observation). */
@@ -161,7 +221,15 @@ class DurableResourceRegistryService(
     /** Best-effort asynchronous mirror for non-suspend call sites (FIX R-1: no runBlocking). */
     private fun mirrorPersist(block: suspend (ResourceRecordRepository) -> Unit) {
         val repo = repository ?: return
-        mirrorScope.launch { runCatching { block(repo) } }
+        mirrorScope.launch {
+            try {
+                block(repo)
+            } catch (error: Throwable) {
+                // P1-13: the async mirror path is best-effort, but the failure
+                // is OBSERVABLE (never silently reported as success).
+                recordPersistenceFailure("mirrorPersist", error)
+            }
+        }
     }
 }
 

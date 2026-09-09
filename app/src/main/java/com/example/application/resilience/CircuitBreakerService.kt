@@ -141,7 +141,11 @@ class CircuitBreakerService(
                 consecutiveFailures = newConsecutive,
                 lastFailureCode = failureCode,
                 lastErrorMessage = errorMessage,
-                openedAtEpochMs = if (newState == CircuitBreakerState.OPEN && it.openedAtEpochMs == null) System.currentTimeMillis() else it.openedAtEpochMs,
+                // P1-12: opening (or re-opening after a failed HALF_OPEN probe)
+                // RESTARTS the cooldown clock from NOW — keeping a stale
+                // openedAt would let the very next call immediately arm a new
+                // probe.
+                openedAtEpochMs = if (newState == CircuitBreakerState.OPEN) System.currentTimeMillis() else it.openedAtEpochMs,
                 lastUpdatedEpochMs = System.currentTimeMillis()
             )
         }

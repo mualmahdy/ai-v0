@@ -1090,7 +1090,12 @@ class MainViewModel(
         // ------------------------------------------------------------------
         val sessionService = conversationSessionService
         val turnStartedAt = System.currentTimeMillis()
-        com.example.application.execution.ExecutionHost.launch(executionTaskId) {
+        // P1-14 (audit 2026 — no execution drain before workspace deletion):
+        // the execution is ATTRIBUTED to the workspace whose scope it runs
+        // in, so deleting that workspace cancels+drains exactly these jobs
+        // instead of orphaning them.
+        val executionWorkspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull()
+        com.example.application.execution.ExecutionHost.launch(executionTaskId, executionWorkspaceId) {
             var sessionId: com.example.domain.core.session.ConversationSessionId? = null
             try {
                 if (sessionService != null) {

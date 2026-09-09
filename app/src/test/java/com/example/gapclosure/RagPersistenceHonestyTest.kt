@@ -165,4 +165,70 @@ class RagPersistenceHonestyTest {
             titles
         )
     }
+
+    // ---------------- audit 2026 §29 (bounded corpus) ----------------
+
+    @Test
+    fun `workspace knowledge corpus is BOUNDED with honest eviction reporting`() = runBlocking {
+        // Tiny bounds so the eviction path is exercised quickly. NOTE: the
+        // constructor bootstraps 2 default knowledge documents, so the bound
+        // counts them too (that is the honest corpus semantics).
+        val registry = ComponentRegistry()
+        val pipeline = RagPipelineService(
+            resourceRegistry = registry.resourceRegistry,
+            runtimeAdapterResolver = registry.runtimeAdapterResolver,
+            fallbackEmbeddingProvider = null,
+            persistenceService = null,
+            workspaceIdProvider = { "ws_bound" },
+            maxDocumentsPerWorkspace = 3,
+            maxChunksPerWorkspace = 10_000
+        )
+
+        repeat(6) { i ->
+            pipeline.ingestDocument("doc-$i", "content $i", "workspace://docs/$i.md")
+        }
+
+        assertEquals(
+            "Corpus must stay at the document bound (was ${pipeline.documents.value.size})",
+            3,
+            pipeline.documents.value.size
+        )
+        assertEquals(
+            "The OLDEST documents (2 bootstrap + doc-0/doc-1) must be the evicted ones",
+            listOf("doc-3", "doc-4", "doc-5"),
+            pipeline.documents.value.map { it.title }
+        )
+        assertTrue(
+            "Evictions must be REPORTED honestly (observable corpusEvictions flow)",
+            pipeline.corpusEvictions.value.isNotEmpty()
+        )
+        assertTrue(
+            "Eviction entries must describe what was dropped (was: ${pipeline.corpusEvictions.value.firstOrNull()})",
+            pipeline.corpusEvictions.value.first().contains("evicted")
+        )
+    }
+
+    @Test
+    fun `ingest under the bounds records NO eviction`() = runBlocking {
+        val registry = ComponentRegistry()
+        val pipeline = RagPipelineService(
+            resourceRegistry = registry.resourceRegistry,
+            runtimeAdapterResolver = registry.runtimeAdapterResolver,
+            fallbackEmbeddingProvider = null,
+            persistenceService = null,
+            workspaceIdProvider = { "ws_bound" },
+            maxDocumentsPerWorkspace = 10,
+            maxChunksPerWorkspace = 10_000
+        )
+
+        pipeline.ingestDocument("only", "content", "workspace://docs/only.md")
+
+        assertTrue("No eviction may be recorded under the bound", pipeline.corpusEvictions.value.isEmpty())
+        // 2 constructor-bootstrapped documents + the one we ingested.
+        assertEquals(3, pipeline.documents.value.size)
+        assertTrue(
+            "The freshly ingested document must be present",
+            pipeline.documents.value.any { it.title == "only" }
+        )
+    }
 }

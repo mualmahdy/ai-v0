@@ -166,6 +166,11 @@ class FailClosedSecurityTest {
             resourceRegistry = registry.resourceRegistry,
             securityGuard = SecurityGuardService()
         )
+        // P0-1: the universal admission gate is wired here too — the SAME
+        // ordered pipeline as production (allow-all principal fake; sensitive
+        // flows stay governed by the grant boundary above).
+        executionService.admissionControl =
+            com.example.application.governed.GovernedPipelineFactory.admissionForTools(tool.declaration)
         // Wire a permissionGrantService-compatible object when provided
         // (structural compatibility with PermissionGrantService.check).
         if (grantServiceLike != null) {

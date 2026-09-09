@@ -129,6 +129,9 @@ class IntelligencePipelineComprehensiveTest {
             securityGuard = securityGuard,
             memoryRepositoryProvider = { registry.getMemoryRepository() }
         )
+        // P0-1: universal admission boundary wired exactly as production.
+        executionService.admissionControl =
+            com.example.application.governed.GovernedPipelineFactory.admissionForRegistry(registry)
         observationService = ObservationService()
         outcomeService = OutcomeService()
         orchestrator = AgentOrchestrator(
@@ -279,7 +282,10 @@ class IntelligencePipelineComprehensiveTest {
             )
         )
 
-        val result = executionService.executeAction(action, context, testAgent)
+        // P0-1/P1-7: production executions carry a pinned workspace identity.
+        val result = kotlinx.coroutines.withContext(
+            com.example.domain.core.execution.ExecutionScope("exec-tool-4", "ws_pipeline")
+        ) { executionService.executeAction(action, context, testAgent) }
         assertTrue(result.isSuccess)
         assertEquals("file content: build.gradle.kts", result.outputText)
     }
@@ -485,7 +491,10 @@ class IntelligencePipelineComprehensiveTest {
             )
         )
 
-        val result = executionService.executeAction(action, context, testAgent)
+        // P0-1/P1-7: production executions carry a pinned workspace identity.
+        val result = kotlinx.coroutines.withContext(
+            com.example.domain.core.execution.ExecutionScope("exec-deg-14", "ws_pipeline")
+        ) { executionService.executeAction(action, context, testAgent) }
         assertTrue(result.isSuccess)
         assertTrue(result.isDegraded)
         assertEquals(DegradedReason.CACHE_FALLBACK, result.degradedReason)
@@ -514,6 +523,9 @@ class IntelligencePipelineComprehensiveTest {
             defaultSecurityPolicy = strictPolicy,
             memoryRepositoryProvider = { registry.getMemoryRepository() }
         )
+        // P0-1: universal admission boundary wired exactly as production.
+        strictExecutionService.admissionControl =
+            com.example.application.governed.GovernedPipelineFactory.admissionForRegistry(registry)
 
         val task = TaskDefinition(id = TaskId("task-sec-15"), assignedAgentId = testAgent.identity.id, input = TaskInput("Delete system files"))
         val context = decisionService.buildDecisionContext(task)

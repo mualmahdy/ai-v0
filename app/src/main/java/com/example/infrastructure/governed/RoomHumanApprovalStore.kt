@@ -72,6 +72,9 @@ class RoomHumanApprovalStore(
 
     override suspend fun markTokenConsumed(approvalId: String): Boolean = mutationMutex.withLock {
         withContext(Dispatchers.IO) {
+            // ONE-SHOT semantics: an already-consumed token never authorizes
+            // again (returns false — same contract as the in-memory store).
+            if (dao.isTokenConsumed(approvalId) > 0) return@withContext false
             val exists = dao.find(approvalId) != null
             if (exists) dao.markTokenConsumed(approvalId)
             exists

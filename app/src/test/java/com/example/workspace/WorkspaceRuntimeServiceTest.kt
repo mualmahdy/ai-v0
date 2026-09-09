@@ -88,6 +88,15 @@ class WorkspaceRuntimeServiceTest {
             stored.values.filter { !it.isArchived }
 
         override suspend fun getProjectById(id: Long): ProjectEntity? = stored[id]
+        override fun getActiveProjectsForWorkspace(workspaceId: String): Flow<List<ProjectEntity>> =
+            MutableStateFlow(stored.values.filter { !it.isArchived && it.workspaceId == workspaceId })
+        override suspend fun getActiveProjectsForWorkspaceList(workspaceId: String): List<ProjectEntity> =
+            stored.values.filter { !it.isArchived && it.workspaceId == workspaceId }
+        override suspend fun getProjectByIdForWorkspace(id: Long, workspaceId: String): ProjectEntity? =
+            stored[id]?.takeIf { it.workspaceId == workspaceId }
+        override suspend fun archiveProjectForWorkspace(id: Long, workspaceId: String) {
+            stored[id]?.let { if (it.workspaceId == workspaceId) stored[id] = it.copy(isArchived = true) }
+        }
 
         override suspend fun insertProject(project: ProjectEntity): Long {
             val id = nextId++
@@ -211,6 +220,11 @@ class WorkspaceRuntimeServiceTest {
                 MutableStateFlow(emptyList())
             override suspend fun getAllActiveProjectsList(): List<com.example.infrastructure.persistence.entities.ProjectEntity> = emptyList()
             override suspend fun getProjectById(id: Long): com.example.infrastructure.persistence.entities.ProjectEntity? = null
+            override fun getActiveProjectsForWorkspace(workspaceId: String): Flow<List<com.example.infrastructure.persistence.entities.ProjectEntity>> =
+                MutableStateFlow(emptyList())
+            override suspend fun getActiveProjectsForWorkspaceList(workspaceId: String): List<com.example.infrastructure.persistence.entities.ProjectEntity> = emptyList()
+            override suspend fun getProjectByIdForWorkspace(id: Long, workspaceId: String): com.example.infrastructure.persistence.entities.ProjectEntity? = null
+            override suspend fun archiveProjectForWorkspace(id: Long, workspaceId: String) {}
             override suspend fun insertProject(project: com.example.infrastructure.persistence.entities.ProjectEntity): Long = 77L
             override suspend fun updateProject(project: com.example.infrastructure.persistence.entities.ProjectEntity) {}
             override suspend fun archiveProject(id: Long) {}
@@ -392,5 +406,138 @@ class WorkspaceRuntimeServiceTest {
 
         val result = service.renameWorkspace("nonexistent", newName = "X")
         assertFalse("Rename should fail for non-existent workspace", result)
+    }
+
+    // ------------------------------------------------------------------
+    // P1-14 (audit 2026 — no execution drain before workspace deletion)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `deleteWorkspace DRAINS executions attributed to the workspace before deleting`() = runBlocking {
+        val dao = FakeWorkspaceDao()
+        val now = System.currentTimeMillis()
+        dao.stored["ws_active"] = WorkspaceEntity(
+            id = "ws_active", name = "Active", description = "",
+            networkPolicy = "HYBRID", autonomyPolicy = "SUPERVISED",
+            settingsJson = "{}", isActive = true,
+            lastActiveProjectId = 1L,
+            createdAtEpochMs = now - 2000, lastAccessedEpochMs = now - 100
+        )
+        dao.stored["ws_other"] = WorkspaceEntity(
+            id = "ws_other", name = "Other", description = "",
+            networkPolicy = "HYBRID", autonomyPolicy = "SUPERVISED",
+            settingsJson = "{}", isActive = false,
+            lastActiveProjectId = null,
+            createdAtEpochMs = now - 1000, lastAccessedEpochMs = now - 50
+        )
+        val service = newService(dao)
+        Thread.sleep(50)
+
+        // A live execution attributed to the workspace being deleted —
+        // it suspends until cancelled (cooperative).
+        var completionObserved = false
+        val key = "p114-drain-" + java.util.UUID.randomUUID()
+        val job = com.example.application.execution.ExecutionHost.launch(key, "ws_active") {
+            try {
+                kotlinx.coroutines.awaitCancellation()
+            } finally {
+                completionObserved = true
+            }
+        }
+
+        val result = service.deleteWorkspace("ws_active")
+
+        assertTrue("Delete should succeed (drain cancelled the execution)", result)
+        assertTrue("ws_active should be deleted", dao.stored.containsKey("ws_active").not())
+        assertTrue("The drained execution must have completed (join observed)", completionObserved)
+        job.join()
+        assertFalse(
+            "No handle may remain for the drained execution",
+            com.example.application.execution.ExecutionHost.isExecuting(key)
+        )
+    }
+
+    @Test
+    fun `deleteWorkspace REFUSES when executions cannot be drained in time (fail-closed)`() = runBlocking {
+        val dao = FakeWorkspaceDao()
+        val now = System.currentTimeMillis()
+        dao.stored["ws_active"] = WorkspaceEntity(
+            id = "ws_active", name = "Active", description = "",
+            networkPolicy = "HYBRID", autonomyPolicy = "SUPERVISED",
+            settingsJson = "{}", isActive = true,
+            lastActiveProjectId = 1L,
+            createdAtEpochMs = now - 2000, lastAccessedEpochMs = now - 100
+        )
+        dao.stored["ws_other"] = WorkspaceEntity(
+            id = "ws_other", name = "Other", description = "",
+            networkPolicy = "HYBRID", autonomyPolicy = "SUPERVISED",
+            settingsJson = "{}", isActive = false,
+            lastActiveProjectId = null,
+            createdAtEpochMs = now - 1000, lastAccessedEpochMs = now - 50
+        )
+        val service = newService(dao)
+        Thread.sleep(50)
+        // Bounded drain wait is TINY so the un-cancellable region overruns it.
+        service.drainTimeoutMs = 50L
+
+        // A stuck execution: an un-interruptible region longer than the
+        // drain timeout (a job that refuses to die within the bound).
+        val key = "p114-stuck-" + java.util.UUID.randomUUID()
+        val job = com.example.application.execution.ExecutionHost.launch(key, "ws_active") {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                Thread.sleep(300) // longer than drainTimeoutMs
+            }
+        }
+
+        val result = service.deleteWorkspace("ws_active")
+
+        assertFalse(
+            "P1-14 fail-closed: a workspace with undrainable executions must NOT be deleted",
+            result
+        )
+        assertTrue("ws_active must still exist", dao.stored.containsKey("ws_active"))
+        assertEquals("deleteById must NOT be called", 0, dao.deleteByIdCalls.size)
+
+        // Cleanup: let the stuck job finish so it unregisters.
+        job.join()
+        assertFalse(com.example.application.execution.ExecutionHost.isExecuting(key))
+    }
+
+    @Test
+    fun `deleteWorkspace is NOT blocked by executions of OTHER workspaces`() = runBlocking {
+        val dao = FakeWorkspaceDao()
+        val now = System.currentTimeMillis()
+        dao.stored["ws_a"] = WorkspaceEntity(
+            id = "ws_a", name = "A", description = "",
+            networkPolicy = "HYBRID", autonomyPolicy = "SUPERVISED",
+            settingsJson = "{}", isActive = true,
+            lastActiveProjectId = null,
+            createdAtEpochMs = now - 2000, lastAccessedEpochMs = now - 100
+        )
+        dao.stored["ws_b"] = WorkspaceEntity(
+            id = "ws_b", name = "B", description = "",
+            networkPolicy = "HYBRID", autonomyPolicy = "SUPERVISED",
+            settingsJson = "{}", isActive = false,
+            lastActiveProjectId = null,
+            createdAtEpochMs = now - 1000, lastAccessedEpochMs = now - 50
+        )
+        val service = newService(dao)
+        Thread.sleep(50)
+
+        // A live execution attributed to ws_b (NOT ws_a) — deleting ws_a
+        // must neither cancel it nor wait for it.
+        val key = "p114-other-" + java.util.UUID.randomUUID()
+        val job = com.example.application.execution.ExecutionHost.launch(key, "ws_b") {
+            kotlinx.coroutines.awaitCancellation()
+        }
+
+        val result = service.deleteWorkspace("ws_a")
+
+        assertTrue("Delete of ws_a must succeed despite ws_b executions", result)
+        assertTrue("ws_b execution must still be live", job.isActive)
+
+        // Cleanup.
+        com.example.application.execution.ExecutionHost.cancel(key)
+        job.join()
     }
 }

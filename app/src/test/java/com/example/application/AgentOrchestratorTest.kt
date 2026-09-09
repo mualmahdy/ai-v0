@@ -71,6 +71,10 @@ class AgentOrchestratorTest {
         val cbrMdpEngine = com.example.domain.core.decision.CbrMdpEngine()
         val decisionService = com.example.application.decision.DecisionService(cbrMdpEngine, registry, securityGuard)
         orchestrator = AgentOrchestrator(registry, securityGuard, decisionService)
+        // P0-1/P1-7: production executions carry a pinned workspace identity —
+        // the (now universal) admission gate fail-closes unattributed
+        // workspace-bound tool executions.
+        orchestrator.workspaceIdProvider = { "ws_orchestrator_test" }
     }
 
     @Test
