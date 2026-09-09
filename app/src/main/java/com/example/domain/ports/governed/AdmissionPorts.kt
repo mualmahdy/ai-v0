@@ -18,6 +18,15 @@ import com.example.domain.core.security.governance.ApprovalResolution
  * Principal authorization check: does principal [principalId] of type
  * [principalType] hold [permission] on resource [resourceId]?
  * Production adapter delegates to PermissionGrantService (Room-backed).
+ *
+ * P0-1/P1-11 FIX (audit 2026 §15/§33): the check is WORKSPACE-AWARE — a
+ * grant authorizes only when it is explicitly GLOBAL (workspaceId null) or
+ * scoped to the SAME workspace as the request. A grant scoped to another
+ * workspace can never authorize. Production wiring additionally applies
+ * the canonical policy: an explicit grant is REQUIRED for sensitive /
+ * consent-requiring resources (fail closed); ordinary non-sensitive tools
+ * remain permitted for authenticated principals (the security-ceiling and
+ * approval stages still gate them).
  */
 fun interface PrincipalAuthorizationPort {
     suspend fun check(
@@ -25,7 +34,8 @@ fun interface PrincipalAuthorizationPort {
         principalId: String,
         resourceType: SecurableResourceType,
         resourceId: String,
-        permission: Permission
+        permission: Permission,
+        workspaceId: String?
     ): Boolean
 }
 

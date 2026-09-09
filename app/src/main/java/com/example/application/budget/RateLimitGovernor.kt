@@ -88,6 +88,48 @@ class RateLimitGovernor(
     fun allowsRequest(scopeKey: String): Boolean = !statusFor(scopeKey).isRateLimited
 
     /**
+     * P1-12 FIX (audit 2026 §25 — TOCTOU): ATOMIC check-and-reserve.
+     * Validates the sliding window (blocked / RPM limit) and increments the
+     * request count under the SAME lock, so N concurrent callers can never
+     * all pass a limit meant to admit fewer than N. Returns true when the
+     * slot was reserved for the caller.
+     */
+    fun tryAcquire(scopeKey: String): Boolean {
+        val now = System.currentTimeMillis()
+        val (rpm, _) = configuredLimits[scopeKey] ?: (null to null)
+        val state = scopes.computeIfAbsent(scopeKey) {
+            val (r, t) = configuredLimits[scopeKey] ?: (null to null)
+            ScopeState(scopeKey, r, t, now, 0, 0L, null)
+        }
+        val effective = rollWindowIfExpired(state, now)
+        synchronized(effective) {
+            val blocked = effective.blockedUntilMs?.let { it > now } == true
+            val rpmExceeded = rpm != null && effective.requestCount >= rpm
+            if (blocked || rpmExceeded) return false
+            effective.requestCount += 1
+            return true
+        }
+    }
+
+    /**
+     * P1-12: records TOKEN consumption only (TPM accounting) — the request
+     * slot was already reserved atomically by [tryAcquire] at admission,
+     * so the post-completion accounting path must NOT increment RPM again
+     * (double counting).
+     */
+    fun recordTokens(scopeKey: String, tokens: Int) {
+        val now = System.currentTimeMillis()
+        val state = scopes.computeIfAbsent(scopeKey) {
+            val (r, t) = configuredLimits[scopeKey] ?: (null to null)
+            ScopeState(scopeKey, r, t, now, 0, 0L, null)
+        }
+        val effective = rollWindowIfExpired(state, now)
+        synchronized(effective) {
+            effective.tokenCount += tokens
+        }
+    }
+
+    /**
      * Records an issued request (RPM+1) plus its token consumption (TPM+N).
      * Called by the accounting path AFTER a real interaction (not before —
      * prediction of usage belongs to estimation).

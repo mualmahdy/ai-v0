@@ -100,8 +100,13 @@ interface ExecutionTraceDao {
     @Query("SELECT * FROM execution_trace_nodes ORDER BY startedAtEpochMs DESC LIMIT :limit")
     fun recent(limit: Int = 200): Flow<List<ExecutionTraceNodeEntity>>
 
-    @Query("SELECT * FROM execution_trace_nodes ORDER BY startedAtEpochMs DESC LIMIT :limit")
-    fun forWorkspace(limit: Int = 200): Flow<List<ExecutionTraceNodeEntity>>
+    /**
+     * P1-10 FIX (audit 2026 §20 — forWorkspace had NO workspace predicate in
+     * SQL; it was byte-identical to recent()): the trace query is now
+     * workspace-scoped at the SQL boundary using the v15 workspaceId column.
+     */
+    @Query("SELECT * FROM execution_trace_nodes WHERE workspaceId = :workspaceId ORDER BY startedAtEpochMs DESC LIMIT :limit")
+    fun forWorkspace(workspaceId: String, limit: Int = 200): Flow<List<ExecutionTraceNodeEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(node: ExecutionTraceNodeEntity): Long
@@ -132,6 +137,14 @@ interface ToolAuditDao {
 interface ToolLifecycleDao {
     @Query("SELECT * FROM tool_lifecycle_states WHERE toolName = :toolName LIMIT 1")
     suspend fun byName(toolName: String): ToolLifecycleStateEntity?
+
+    /**
+     * P1-2 (audit 2026 §10): ALL lifecycle rows for a tool NAME — including
+     * REVOKED/disabled ones. The execution boundary uses this to enforce
+     * that a revoked tool can never run again through ANY path.
+     */
+    @Query("SELECT * FROM tool_lifecycle_states WHERE toolName = :toolName")
+    suspend fun allByName(toolName: String): List<ToolLifecycleStateEntity>
 
     @Query("SELECT * FROM tool_lifecycle_states WHERE lifecycleState != 'REVOKED' AND isEnabled = 1")
     suspend fun active(): List<ToolLifecycleStateEntity>

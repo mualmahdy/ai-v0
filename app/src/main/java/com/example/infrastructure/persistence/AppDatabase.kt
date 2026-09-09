@@ -179,9 +179,12 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         // library + full-fidelity durable agents
         com.example.infrastructure.persistence.entities.ConversationSessionEntity::class,
         com.example.infrastructure.persistence.entities.ConversationTurnEntity::class,
-        com.example.infrastructure.persistence.entities.WorkflowDefinitionEntity::class
+        com.example.infrastructure.persistence.entities.WorkflowDefinitionEntity::class,
+        // v15 — DURABLE human approval requests (audit 2026 §17) + explicit
+        // workspace identity on tasks / execution logs / trace nodes (P1-7/P1-10)
+        com.example.infrastructure.persistence.entities.HumanApprovalRequestEntity::class
     ],
-    version = 14,
+    version = 15,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -261,6 +264,9 @@ abstract class AppDatabase : RoomDatabase() {
 
     // v13 — user-authored workflow library (report gap: workflow assets)
     abstract fun workflowDefinitionDao(): com.example.infrastructure.persistence.dao.WorkflowDefinitionDao
+
+    // v15 — DURABLE human approval requests (audit 2026 §17)
+    abstract fun humanApprovalRequestDao(): com.example.infrastructure.persistence.dao.HumanApprovalRequestDao
 
     companion object {
         @Volatile
@@ -1498,6 +1504,64 @@ abstract class AppDatabase : RoomDatabase() {
 
 
 
+        /**
+         * v14 → v15 (audit 2026 remediation — P1-7 / P1-10 / §17):
+         *  1. Explicit workspace identity on `tasks`, `execution_logs` and
+         *     `execution_trace_nodes` (+ indices) — ownership queries are
+         *     now workspace-scoped at the SQL boundary.
+         *  2. Delegation lineage index on `tasks(parentTaskId)` for the
+         *     orphaned-children recovery reconciliation.
+         *  3. NEW `human_approval_requests` table — DURABLE approval state
+         *     (previously in-memory only; approvals died with the process).
+         * All additions are nullable/defaulted columns and a new table —
+         * existing data survives untouched.
+         */
+        private val MIGRATION_14_TO_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // --- 1. Workspace identity columns ---
+                db.execSQL("ALTER TABLE tasks ADD COLUMN workspaceId TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_tasks_workspaceId ON tasks(workspaceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_tasks_parentTaskId ON tasks(parentTaskId)")
+                db.execSQL("ALTER TABLE execution_logs ADD COLUMN workspaceId TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_execution_logs_workspaceId ON execution_logs(workspaceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_execution_logs_executionId ON execution_logs(executionId)")
+                db.execSQL("ALTER TABLE execution_trace_nodes ADD COLUMN workspaceId TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_execution_trace_nodes_workspaceId ON execution_trace_nodes(workspaceId)")
+
+                // --- 2. Durable human approval requests ---
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS human_approval_requests (
+                        approvalId TEXT NOT NULL PRIMARY KEY,
+                        executionId TEXT NOT NULL,
+                        toolName TEXT NOT NULL,
+                        riskLevel TEXT NOT NULL,
+                        prompt TEXT NOT NULL,
+                        justification TEXT NOT NULL,
+                        requestedAtEpochMs INTEGER NOT NULL,
+                        expiresAtEpochMs INTEGER NOT NULL,
+                        resolution TEXT NOT NULL,
+                        resolvedBy TEXT,
+                        resolvedAtEpochMs INTEGER,
+                        isTokenConsumed INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_human_approval_requests_executionId ON human_approval_requests(executionId)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_human_approval_requests_toolName ON human_approval_requests(toolName)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_human_approval_requests_resolution ON human_approval_requests(resolution)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_human_approval_requests_expiresAtEpochMs ON human_approval_requests(expiresAtEpochMs)"
+                )
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1514,6 +1578,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_11_TO_12,
             MIGRATION_12_TO_13,
             MIGRATION_13_TO_14,
+            MIGRATION_14_TO_15,
         )
 
         fun getInstance(context: Context): AppDatabase {

@@ -73,7 +73,7 @@ data class MemoryEntity(
     val lastDecayEvaluatedAtEpochMs: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "execution_logs")
+@Entity(tableName = "execution_logs", indices = [Index("executionId"), Index("workspaceId")])
 data class ExecutionLogEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0L,
@@ -81,10 +81,17 @@ data class ExecutionLogEntity(
     val sessionId: String,
     val eventType: String,
     val payloadJson: String,
-    val timestampEpochMs: Long
+    val timestampEpochMs: Long,
+    /**
+     * P1-7 (audit 2026 §6 — ExecutionLog relies on executionId instead of
+     * explicit workspace identity): owning workspace id, written from the
+     * trace node's attribution (pinned execution→workspace binding).
+     * Null = honestly UNATTRIBUTED (legacy rows before v15).
+     */
+    val workspaceId: String? = null
 )
 
-@Entity(tableName = "tasks")
+@Entity(tableName = "tasks", indices = [Index("workspaceId"), Index("parentTaskId")])
 data class TaskEntity(
     @PrimaryKey
     val id: String,
@@ -130,7 +137,14 @@ data class TaskEntity(
     // workspaceId/projectId/agentId/agentRole/modelId + attempt counter.
     // Restored on resume so a resumed execution keeps its identity (P1-03)
     // and refuses silent agent migration (P1-04).
-    val executionContextJson: String? = null
+    val executionContextJson: String? = null,
+    /**
+     * P1-7 (audit 2026 §6 — TaskEntity does not carry workspaceId as a
+     * first-class identity): explicit owning-workspace column (from the
+     * pinned canonical execution context at insert time). Null = honestly
+     * UNATTRIBUTED (legacy rows before v15 — never implicitly re-assigned).
+     */
+    val workspaceId: String? = null
 )
 
 @Entity(tableName = "decision_cases")

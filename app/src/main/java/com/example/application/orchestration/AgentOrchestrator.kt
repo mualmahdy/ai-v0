@@ -150,14 +150,29 @@ class AgentOrchestrator(
     private val idempotency: ActionIdempotencyService = ActionIdempotencyService(actionIntentDao)
 
     /**
-     * Observability bus (audit 2026 fix): every emitted execution event is also
-     * published here so TelemetryService can persist traces/metrics WITHOUT
-     * the orchestrator depending on the telemetry layer. Fire-and-forget
-     * (DROP_OLDEST) — observability must never backpressure the runtime.
+     * P1-8 (audit 2026 §18 — startup race): readiness gate wired by the
+     * composition root to `AppContainer.awaitRuntimeReadiness`. Executions
+     * started before bootstrap completed (resource restore, Q-table load,
+     * canonical agent sync) WAIT here instead of racing a half-initialized
+     * runtime. Null = no gate (tests / legacy wiring).
+     */
+    var readinessGate: (suspend () -> Unit)? = null
+
+    /**
+     * Observability bus (audit 2026 fix): every emitted execution event is
+     * also published here so TelemetryService can persist traces/metrics
+     * WITHOUT the orchestrator depending on the telemetry layer.
+     *
+     * P1-10 FIX (audit 2026 §20 — telemetry events can be LOST): the bus is
+     * no longer DROP_OLDEST/tryEmit (which silently discarded the OLDEST
+     * events — traces and audit rows — under a burst > 256). It is now a
+     * large BACKPRESSURED channel: the emitter SUSPENDS when the buffer is
+     * full instead of losing evidence. Slow persistence throttles the
+     * runtime rather than corrupting the audit trail.
      */
     private val _executionEventPublisher = MutableSharedFlow<ExecutionEvent>(
-        extraBufferCapacity = 256,
-        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
+        extraBufferCapacity = 2048,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.SUSPEND
     )
     val executionEventPublisher: SharedFlow<ExecutionEvent> = _executionEventPublisher.asSharedFlow()
 
@@ -246,6 +261,12 @@ class AgentOrchestrator(
         isNetworkAvailable: Boolean = true,
         pinnedWorkspaceId: String? = null
     ): TaskExecutionSummary {
+        // P1-8 (audit 2026 §18 — startup race): wait for runtime readiness
+        // (resource restore / Q-table load / canonical agent sync) BEFORE
+        // any execution can start. The gate itself enforces its own timeout
+        // and audits a warning when bootstrap is late; it never deadlocks
+        // the execution layer.
+        readinessGate?.invoke()
         var finalResult = ""
         var isDegraded = false
         var degradedReason: DegradedReason? = null
@@ -468,8 +489,10 @@ class AgentOrchestrator(
         // channelFlow closes its channel when this block returns — no
         // awaitClose needed (events are produced sequentially here).
     }.onEach { event ->
-        // Mirror every event to the observability bus (fire-and-forget).
-        _executionEventPublisher.tryEmit(event)
+        // Mirror every event to the observability bus. P1-10: SUSPENDING
+        // emit — backpressure instead of silent event loss (see the
+        // publisher declaration above).
+        _executionEventPublisher.emit(event)
     }
 
     /** The actual closed-loop body, extracted for cancellation-safe wrapping. */
@@ -1458,7 +1481,8 @@ class AgentOrchestrator(
         coroutineScope.launch {
             try {
                 val dao = taskDao ?: return@launch
-                val interrupted = dao.getAllTasks()
+                val allTasks = dao.getAllTasks()
+                val interrupted = allTasks
                     .filter {
                         it.lifecycleState == "RUNNING" &&
                             it.parentTaskId == null &&
@@ -1469,6 +1493,43 @@ class AgentOrchestrator(
                     resumedIds.add(entity.id)
                     launch {
                         resumeTask(entity.id).collect { /* events flow through telemetry bus */ }
+                    }
+                }
+                // ------------------------------------------------------------
+                // P1-9 FIX (audit 2026 §19 — recovery does not cover the
+                // delegated execution graph): ORPHANED delegated children
+                // left RUNNING by process death are RECONCILED instead of
+                // lingering as zombie rows forever:
+                //  - child whose parent is also RUNNING → left untouched
+                //    (the resumed parent re-drives its delegation subtree);
+                //  - child whose parent is TERMINAL (COMPLETED / FAILED /
+                //    CANCELLED / DEGRADED) or MISSING → marked CANCELLED
+                //    with an explicit reason. No re-execution of an orphan
+                //    (that could duplicate side effects); no zombie rows.
+                // ------------------------------------------------------------
+                val runningParents = allTasks
+                    .filter { it.lifecycleState == "RUNNING" }
+                    .map { it.id }
+                    .toSet()
+                val orphanedChildren = allTasks.filter { entity ->
+                    entity.lifecycleState == "RUNNING" &&
+                        (entity.parentTaskId != null || entity.delegationDepth > 0) &&
+                        entity.parentTaskId !in runningParents
+                }
+                for (orphan in orphanedChildren) {
+                    runCatching {
+                        dao.updateTaskStatus(
+                            id = orphan.id,
+                            state = "CANCELLED",
+                            summary = "أُلغيت المهمة المفوَّضة اليتيمة أثناء استرداد الإقلاع: لم يعد الأب قابلاً للاستئناف " +
+                                "(حالته: ${allTasks.firstOrNull { it.id == orphan.parentTaskId }?.lifecycleState ?: "غير موجودة"}).",
+                            tokens = orphan.totalTokensConsumed,
+                            duration = orphan.durationMs,
+                            isDegraded = false,
+                            degradedReason = null,
+                            errorMsg = "ORPHANED_DELEGATED_CHILD_RECONCILED",
+                            now = System.currentTimeMillis()
+                        )
                     }
                 }
             } finally {
@@ -1567,7 +1628,10 @@ class AgentOrchestrator(
                     delegationDepth = task.input.parameters["delegationDepth"]?.toString()?.toIntOrNull() ?: 0,
                     // Canonical execution context (gap-closure): stable
                     // identity + pinned scope, restored on resume.
-                    executionContextJson = ExecutionContextCodec.encode(context)
+                    executionContextJson = ExecutionContextCodec.encode(context),
+                    // P1-7: explicit owning-workspace identity on the task row
+                    // (from the pinned canonical context — never implicit).
+                    workspaceId = context.workspaceId
                 )
             )
         } catch (_: Exception) {

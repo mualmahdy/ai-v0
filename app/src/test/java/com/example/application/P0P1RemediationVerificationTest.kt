@@ -339,6 +339,12 @@ class P0P1RemediationVerificationTest {
             componentRegistry = com.example.application.registry.ComponentRegistry(
                 resourceRegistry = com.example.application.resource.DurableResourceRegistryService(repository = null)
             ),
+            // P1-15: the integration gateway is now explicitly injected (no
+            // ungoverned default self-construction). A plain instance is fine
+            // for this state-shape test — no network verification runs here.
+            integrationGateway = com.example.infrastructure.integration.IntegrationGateway(
+                egressControl = com.example.infrastructure.network.EgressControl()
+            ),
             extensionConfigDao = null,
             executableSkills = emptyList()
         )

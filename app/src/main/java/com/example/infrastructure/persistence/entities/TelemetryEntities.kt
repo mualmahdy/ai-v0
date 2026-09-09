@@ -114,7 +114,8 @@ data class HealthProbeEntity(
     indices = [
         Index("executionId"),
         Index("stepIndex"),
-        Index("startedAtEpochMs")
+        Index("startedAtEpochMs"),
+        Index("workspaceId")
     ]
 )
 data class ExecutionTraceNodeEntity(
@@ -130,7 +131,13 @@ data class ExecutionTraceNodeEntity(
     val durationMs: Long?,
     val outcome: String,
     val summary: String,
-    val observationSummary: String?
+    val observationSummary: String?,
+    /**
+     * P1-10 (audit 2026 §20 — trace workspace query has no workspace
+     * predicate): owning workspace id from the pinned execution→workspace
+     * binding. Null = honestly UNATTRIBUTED (legacy rows before v15).
+     */
+    val workspaceId: String? = null
 )
 
 /**

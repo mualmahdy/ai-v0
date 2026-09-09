@@ -28,6 +28,29 @@ interface ProjectDao {
     @Query("SELECT * FROM projects WHERE id = :id LIMIT 1")
     suspend fun getProjectById(id: Long): ProjectEntity?
 
+    // ------------------------------------------------------------------
+    // P1-7 (audit 2026 §6 — ProjectDao does not enforce workspace
+    // ownership): workspace-scoped ownership queries. The legacy global
+    // queries above remain for system-maintenance paths ONLY — every
+    // workspace-facing surface must use the scoped variants, where another
+    // workspace's project is indistinguishable from nonexistent.
+    // ------------------------------------------------------------------
+
+    /** Projects OWNED by [workspaceId] (another workspace's are invisible). */
+    @Query("SELECT * FROM projects WHERE isArchived = 0 AND workspaceId = :workspaceId ORDER BY updatedAtEpochMs DESC")
+    fun getActiveProjectsForWorkspace(workspaceId: String): Flow<List<ProjectEntity>>
+
+    @Query("SELECT * FROM projects WHERE isArchived = 0 AND workspaceId = :workspaceId ORDER BY updatedAtEpochMs DESC")
+    suspend fun getActiveProjectsForWorkspaceList(workspaceId: String): List<ProjectEntity>
+
+    /** WORKSPACE-AUTHORIZED load — another workspace's project is NOT FOUND. */
+    @Query("SELECT * FROM projects WHERE id = :id AND workspaceId = :workspaceId LIMIT 1")
+    suspend fun getProjectByIdForWorkspace(id: Long, workspaceId: String): ProjectEntity?
+
+    /** WORKSPACE-AUTHORIZED archive — only the owning workspace's row. */
+    @Query("UPDATE projects SET isArchived = 1 WHERE id = :id AND workspaceId = :workspaceId")
+    suspend fun archiveProjectForWorkspace(id: Long, workspaceId: String)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertProject(project: ProjectEntity): Long
 
@@ -133,6 +156,19 @@ interface TaskDao {
 
     @Query("SELECT * FROM tasks ORDER BY createdAtEpochMs DESC")
     suspend fun getAllTasks(): List<TaskEntity>
+
+    // ------------------------------------------------------------------
+    // P1-7 (audit 2026 §6 — TaskEntity carries no workspace identity):
+    // workspace-scoped task queries (v15 column). Legacy rows with NULL
+    // workspaceId are visible ONLY through the global maintenance queries
+    // above — never through a workspace's scoped view.
+    // ------------------------------------------------------------------
+
+    @Query("SELECT * FROM tasks WHERE workspaceId = :workspaceId ORDER BY createdAtEpochMs DESC")
+    fun getTasksForWorkspaceFlow(workspaceId: String): Flow<List<TaskEntity>>
+
+    @Query("SELECT * FROM tasks WHERE workspaceId = :workspaceId ORDER BY createdAtEpochMs DESC")
+    suspend fun getTasksForWorkspace(workspaceId: String): List<TaskEntity>
 
     @Query("SELECT * FROM tasks WHERE id = :id LIMIT 1")
     suspend fun getTaskById(id: String): TaskEntity?

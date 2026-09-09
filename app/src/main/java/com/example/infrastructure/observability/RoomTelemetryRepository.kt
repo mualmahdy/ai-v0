@@ -290,7 +290,9 @@ class RoomTelemetryRepository(
                     sessionId = node.agentId ?: "agent",
                     eventType = "TRACE_NODE",
                     payloadJson = payloadJson,
-                    timestampEpochMs = node.startedAtEpochMs
+                    timestampEpochMs = node.startedAtEpochMs,
+                    // P1-7: explicit workspace identity on the execution log row.
+                    workspaceId = node.workspaceId
                 )
             )
         } catch (_: Throwable) { /* best-effort */ }
@@ -309,7 +311,9 @@ class RoomTelemetryRepository(
                     durationMs = node.durationMs,
                     outcome = node.outcome,
                     summary = node.summary,
-                    observationSummary = node.observationSummary
+                    observationSummary = node.observationSummary,
+                    // P1-10: explicit workspace identity on the durable trace row.
+                    workspaceId = node.workspaceId
                 )
             )
         } catch (_: Throwable) { /* best-effort */ }
@@ -340,21 +344,30 @@ class RoomTelemetryRepository(
                         ?.toList()
                         ?.sorted()
                         ?: emptyList()
-                    val count = snapshots.sumOf { it.count }
-                    val sum = snapshots.sumOf { it.sum }
                     val p50 = latencies.elementAtOrNull((latencies.size * 0.5).toInt().coerceAtMost(latencies.size - 1)) ?: 0L
                     val p95 = latencies.elementAtOrNull((latencies.size * 0.95).toInt().coerceAtMost(latencies.size - 1)) ?: 0L
                     val p99 = latencies.elementAtOrNull((latencies.size * 0.99).toInt().coerceAtMost(latencies.size - 1)) ?: 0L
+                    // P1-10 FIX (audit 2026 §20 — averageLatencyMs mixes
+                    // metric types): the count/sum pair previously summed
+                    // COUNTER increments, TOKEN_USAGE token counts, COST_USD
+                    // micro-dollars and LATENCY_HISTOGRAM milliseconds into
+                    // ONE bucket, then divided — producing a meaningless
+                    // "latency". Latency statistics now aggregate ONLY
+                    // LATENCY_HISTOGRAM snapshots.
+                    val latencySnapshots = snapshots.filter { it.type == MetricType.LATENCY_HISTOGRAM }
+                    val latencyCount = latencySnapshots.sumOf { it.count }
+                    val latencySum = latencySnapshots.sumOf { it.sum }
+                    val latencyMean = if (latencyCount > 0) latencySum.toDouble() / latencyCount else 0.0
                     DimensionSummary(
                         dimensionKey = first.dimensions.toKey(),
                         providerId = dimensions.providerId,
                         toolName = dimensions.toolName,
                         agentId = dimensions.agentId,
-                        callCount = count,
+                        callCount = snapshots.sumOf { it.count },
                         successCount = snapshots.firstOrNull { it.type == MetricType.COUNTER && it.dimensions.actionType == "SUCCESS" }?.count ?: 0L,
                         failureCount = snapshots.firstOrNull { it.type == MetricType.FAILURE_RATE }?.count ?: 0L,
                         degradedCount = snapshots.firstOrNull { it.type == MetricType.COUNTER && it.dimensions.actionType == "DEGRADED" }?.count ?: 0L,
-                        averageLatencyMs = if (count > 0) sum.toDouble() / count else 0.0,
+                        averageLatencyMs = latencyMean,
                         p50LatencyMs = p50,
                         p95LatencyMs = p95,
                         p99LatencyMs = p99,

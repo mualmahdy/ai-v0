@@ -38,7 +38,14 @@ import kotlinx.coroutines.launch
 class ExtensionManager(
     private val componentRegistry: ComponentRegistry,
     private val mcpClient: McpClient = McpClient(),
-    private val integrationGateway: IntegrationGateway = IntegrationGateway(),
+    /**
+     * P1-15 FIX (audit 2026 §28): the integration gateway is now ALWAYS
+     * injected by the composition root as an EGRESS-CONTROLLED instance —
+     * no default self-construction outside the workspace network-policy
+     * authority. (No production or test call site relies on the removed
+     * default.)
+     */
+    private val integrationGateway: IntegrationGateway,
     private val extensionConfigDao: ExtensionConfigDao? = null,
     private val executableSkills: List<ExecutableSkill> = emptyList(),
     private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)

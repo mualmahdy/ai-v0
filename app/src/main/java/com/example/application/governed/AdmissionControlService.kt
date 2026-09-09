@@ -61,9 +61,16 @@ data class BudgetAuthorizationOutcome(
     val reason: String
 )
 
-/** Rate-limit boundary (production: RateLimitGovernor). */
+/** Rate-limit boundary (production: RateLimitGovernor).
+ *
+ * P1-12 FIX (audit 2026 §25 — TOCTOU): the check-and-reserve operation is
+ * ATOMIC. The legacy `allowsRequest()` pure read + separately-invoked
+ * `recordRequest()` allowed N concurrent callers to all pass the check
+ * before any of them incremented the window. The admission gate now calls
+ * [tryAcquire], which validates the window AND reserves the request slot
+ * under the same lock. */
 fun interface RateLimitCheckPort {
-    fun allowsRequest(scopeKey: String): Boolean
+    fun tryAcquire(scopeKey: String): Boolean
 }
 
 class AdmissionControlService(
@@ -113,10 +120,13 @@ class AdmissionControlService(
         trace += AdmissionStageOutcome(AdmissionStage.PARAMETER_VALIDATION, true, AdmissionDecision.ALLOWED, "المعاملات مطابقة لمخطط الأداة.", clock() - start)
 
         // -------- 2. PRINCIPAL AUTHORIZATION ------------------------------
+        // P0-1/P1-11: workspace-aware check — a grant authorizes only when
+        // GLOBAL or scoped to the SAME workspace as the request.
         val authStart = clock()
         val authorized = principalAuthorization.check(
             request.principalType, request.principalId,
-            SecurableResourceType.TOOL, request.toolName, Permission.EXECUTE
+            SecurableResourceType.TOOL, request.toolName, Permission.EXECUTE,
+            request.workspaceId
         )
         if (!authorized) {
             trace += AdmissionStageOutcome(AdmissionStage.PRINCIPAL_AUTHORIZATION, false, AdmissionDecision.DENIED, "الهوية ${request.principalId} لا تملك تصريح EXECUTE على الأداة ${request.toolName}.", clock() - authStart)
@@ -233,10 +243,10 @@ class AdmissionControlService(
             )
         }
 
-        // -------- 8. RATE LIMIT -------------------------------------------
+        // -------- 8. RATE LIMIT (P1-12: atomic check-and-reserve) --------
         val rateStart = clock()
         val scopeKey = request.budgetScopeKey ?: "admission:tool:${request.toolName}"
-        if (!rateLimitCheck.allowsRequest(scopeKey)) {
+        if (!rateLimitCheck.tryAcquire(scopeKey)) {
             trace += AdmissionStageOutcome(AdmissionStage.RATE_LIMIT, false, AdmissionDecision.DENIED, "حدود المعدل مُفعَّلة على $scopeKey.", clock() - rateStart)
             val result = buildDenied(request, trace, AdmissionStage.RATE_LIMIT, "RATE_LIMITED", risk)
             auditAdmission(request, result)

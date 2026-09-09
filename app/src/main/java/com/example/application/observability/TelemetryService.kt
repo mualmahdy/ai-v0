@@ -172,7 +172,8 @@ class TelemetryService(
         completedAtEpochMs: Long?,
         outcome: String,
         summary: String,
-        observationSummary: String? = null
+        observationSummary: String? = null,
+        workspaceId: String? = null
     ) {
         val durationMs = completedAtEpochMs?.let { it - startedAtEpochMs }
         telemetryPort.recordTraceNode(
@@ -187,7 +188,9 @@ class TelemetryService(
                 durationMs = durationMs,
                 outcome = outcome,
                 summary = summary,
-                observationSummary = observationSummary
+                observationSummary = observationSummary,
+                // P1-10: explicit workspace attribution on the durable trace row.
+                workspaceId = workspaceId
             )
         )
     }
@@ -251,7 +254,8 @@ class TelemetryService(
                     startedAtEpochMs = event.timestampMs,
                     completedAtEpochMs = null,
                     outcome = "STARTED",
-                    summary = "بدء التنفيذ بالوكيل ${event.agentId.value} عبر ${event.modelId}"
+                    summary = "بدء التنفيذ بالوكيل ${event.agentId.value} عبر ${event.modelId}",
+                    workspaceId = dims.workspaceId
                 )
             }
             is ExecutionEvent.DecisionMade -> {
@@ -265,7 +269,8 @@ class TelemetryService(
                     startedAtEpochMs = event.timestampMs,
                     completedAtEpochMs = event.timestampMs,
                     outcome = "DECISION",
-                    summary = "قرار: ${event.decision.chosenAction.type.name} → ${event.decision.chosenAction.targetId ?: "-"}"
+                    summary = "قرار: ${event.decision.chosenAction.type.name} → ${event.decision.chosenAction.targetId ?: "-"}",
+                    workspaceId = dims.workspaceId
                 )
             }
             is ExecutionEvent.ActionStarted -> {
@@ -284,7 +289,8 @@ class TelemetryService(
                     completedAtEpochMs = event.timestampMs,
                     outcome = "SUCCESS",
                     summary = event.outputSummary,
-                    observationSummary = event.observation.action.type.code
+                    observationSummary = event.observation.action.type.code,
+                    workspaceId = dims.workspaceId
                 )
             }
             is ExecutionEvent.ActionFailed -> {
@@ -299,7 +305,8 @@ class TelemetryService(
                     completedAtEpochMs = event.timestampMs,
                     outcome = "FAILURE",
                     summary = event.errorDescription,
-                    observationSummary = event.observation.action.type.code
+                    observationSummary = event.observation.action.type.code,
+                    workspaceId = dims.workspaceId
                 )
             }
             is ExecutionEvent.ObservationRecorded -> {
@@ -316,7 +323,8 @@ class TelemetryService(
                     startedAtEpochMs = event.timestampMs,
                     completedAtEpochMs = event.timestampMs,
                     outcome = "REPLANNED",
-                    summary = event.reason
+                    summary = event.reason,
+                    workspaceId = dims.workspaceId
                 )
             }
             is ExecutionEvent.ContentChunk -> {
@@ -412,7 +420,8 @@ class TelemetryService(
                     completedAtEpochMs = event.timestampMs,
                     outcome = if (event.isDegraded) "DEGRADED" else "SUCCESS",
                     summary = event.finalText.take(200),
-                    observationSummary = event.degradedReason?.userFriendlyLabel
+                    observationSummary = event.degradedReason?.userFriendlyLabel,
+                    workspaceId = dims.workspaceId
                 )
             }
             is ExecutionEvent.Cancelled -> {
@@ -426,7 +435,8 @@ class TelemetryService(
                     startedAtEpochMs = event.timestampMs,
                     completedAtEpochMs = event.timestampMs,
                     outcome = "CANCELLED",
-                    summary = event.reason
+                    summary = event.reason,
+                    workspaceId = dims.workspaceId
                 )
             }
         }

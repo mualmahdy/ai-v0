@@ -98,6 +98,26 @@ class ToolLifecycleService(
         return declarationProvider(toolId)
     }
 
+    /**
+     * P1-2 FIX (audit 2026 §10 — tool lifecycle can be bypassed): EXECUTION
+     * verdict for a tool NAME, consulted by the canonical authorization
+     * boundary in ExecutionService (late-bound `toolLifecycleEnforcer`).
+     *
+     * Semantics:
+     *  - No lifecycle rows for the name → executable (the tool's lifecycle
+     *    is governed by the resource registry + admission boundary; in-app
+     *    tools registered directly into ComponentRegistry have no rows).
+     *  - ANY row REVOKED or disabled → NOT executable, from EVERY path.
+     *  - All rows enabled and non-revoked → executable.
+     */
+    suspend fun isToolExecutable(toolName: String): Boolean = withContext(Dispatchers.IO) {
+        val rows = toolLifecycleDao.allByName(toolName)
+        if (rows.isEmpty()) return@withContext true
+        rows.all { row ->
+            row.isEnabled && row.lifecycleState != ToolLifecycleState.REVOKED.storageCode
+        }
+    }
+
     override suspend fun register(
         declaration: ToolDeclaration,
         version: String,

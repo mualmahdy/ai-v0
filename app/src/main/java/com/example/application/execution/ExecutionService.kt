@@ -149,7 +149,51 @@ class ExecutionService(
      * Late-bound to avoid a hard dependency cycle. Null = no governor
      * (fail-open on rate tracking, never on security).
      */
-    var rateLimitRecorder: ((providerId: String?, modelId: String?, resourceId: String?, resourceType: String, retryAfterMs: Long?) -> Unit)? = null
+    var rateLimitRecorder: ((providerId: String?, modelId: String?, resourceId: String?, resourceType: String, retryAfterMs: Long?) -> Unit)? = null,
+
+    /**
+     * P0-1 / P1-11 (audit 2026 §15/§33 — Universal Execution Authority):
+     * late-bound wiring of THE admission gate. When present, EVERY tool /
+     * MCP / model-initiated tool-call execution passes through
+     * [com.example.application.governed.AdmissionControlService.admit] —
+     * the SAME ordered pipeline the governed coding toolchain uses
+     * (validation → principal authorization → risk → security ceiling →
+     * workspace scope → path policy → budget → rate limit → human approval
+     * → sandbox). There is no bypass parameter; an exception inside the
+     * gate FAILS CLOSED.
+     */
+    var admissionControl: com.example.application.governed.AdmissionControlService? = null,
+
+    /**
+     * P1-2 (audit 2026 §10 — tool lifecycle can be bypassed from other
+     * execution paths): late-bound lifecycle verdict provider. When present,
+     * a tool whose lifecycle rows are REVOKED (or disabled) is REFUSED here
+     * even if its runtime adapter is still registered — the lifecycle
+     * service becomes an EXECUTION authority, not an advisory registry.
+     * Exceptions fail CLOSED.
+     */
+    var toolLifecycleEnforcer: (suspend (toolName: String) -> Boolean)? = null,
+
+    /**
+     * P1-12 (audit 2026 §25): late-bound circuit-breaker gate. When present,
+     * LLM and search provider calls are fail-fast guarded per resourceId and
+     * their outcomes feed the breaker (success closes, failure opens) — the
+     * resilience layer becomes a real production authority instead of dead
+     * wiring.
+     */
+    var circuitBreakerGate: com.example.application.resilience.CircuitBreakerService? = null,
+
+    /**
+     * P1-3 (audit 2026 §11 — SearchIntelligenceService not on the production
+     * path): late-bound intelligence hook. When present, SEARCH actions run
+     * the full intelligence pipeline (query decomposition → multi-query →
+     * dedup → rerank → citations) OVER the authoritatively resolved adapter,
+     * instead of a single verbatim query.
+     */
+    var searchIntelligence: (suspend (
+        query: String,
+        provider: com.example.domain.ports.search.SearchProviderPort
+    ) -> com.example.domain.core.search.intelligence.SearchIntelligenceResult)? = null
 ) {
 
     companion object {
@@ -201,6 +245,24 @@ class ExecutionService(
         Exception("Tool-call arguments are not valid JSON: $rawSnippet")
 
     /**
+     * P0-1: extracts the filesystem path arguments from a tool call so the
+     * admission PATH POLICY stage can validate them against the workspace
+     * root (boundary-safe containment + forbidden targets + write
+     * protection). Mirrors the coding toolchain's extraction, but tolerates
+     * the heterogeneous argument names of agent-loop tools.
+     */
+    private fun extractAdmissionPathArguments(
+        toolName: String,
+        arguments: Map<String, Any?>
+    ): List<String> {
+        val pathKeys = listOf("path", "file_path", "filePath", "relativePath", "relative_path", "from_path", "to_path", "sub_directory", "directory", "dir")
+        return arguments.entries
+            .filter { it.key in pathKeys }
+            .mapNotNull { entry -> entry.value?.toString()?.takeIf { it.isNotBlank() } }
+            .filter { it.length <= 4096 }
+    }
+
+    /**
      * ============================================================================
      * THE CANONICAL TOOL-AUTHORIZATION BOUNDARY (defect family 2 repair)
      * ============================================================================
@@ -247,7 +309,14 @@ class ExecutionService(
         arguments: Map<String, Any?>,
         actionType: String,
         executionId: String,
-        isMcp: Boolean
+        isMcp: Boolean,
+        /**
+         * P0-1: admission applies to every ToolPort-backed execution
+         * (EXECUTE_TOOL / EXECUTE_MCP / MODEL_TOOL_CALL). Extension-managed
+         * SKILLS keep the grant-gated path (their governance authority is
+         * the permission-grant boundary; they are not ToolPort adapters).
+         */
+        requireAdmission: Boolean = true
     ): ToolAuthorization {
         val workspaceId = currentWorkspaceId()
 
@@ -257,6 +326,30 @@ class ExecutionService(
         val isSensitive = isMcp ||
             (declaration?.isSensitive ?: false) ||
             (declaration?.requiresHumanConsent ?: false)
+
+        // --- 1.5 TOOL LIFECYCLE ENFORCEMENT (P1-2: no execution of a
+        // revoked/disabled tool from ANY path — the lifecycle authority is
+        // part of the execution boundary now, not an advisory registry).
+        // Enforcer exceptions FAIL CLOSED.
+        val lifecycleEnforcer = toolLifecycleEnforcer
+        if (lifecycleEnforcer != null) {
+            val executable = try {
+                lifecycleEnforcer(toolName)
+            } catch (_: Exception) {
+                false
+            }
+            if (!executable) {
+                auditAuthorization(
+                    agent, toolName, actionType, executionId, "DENY",
+                    "TOOL_LIFECYCLE_BLOCKED: الأداة '$toolName' مسحوبة (REVOKED) أو معطلة في سجل دورة الحياة — يرفض التنفيذ من كل المسارات.",
+                    workspaceId
+                )
+                return ToolAuthorization.Denied(
+                    failureCode = "TOOL_REVOKED",
+                    message = "الأداة '$toolName' مُسحوبة أو معطلة (lifecycle state) ولا يمكن تنفيذها عبر أي مسار تنفيذ."
+                )
+            }
+        }
 
         // --- 2. Security policy ceiling (with declaration facts) ---
         val toolInput = ToolInput(
@@ -334,7 +427,91 @@ class ExecutionService(
             }
         }
 
-        // --- 4. Audited ALLOW ---
+        // --- 4. UNIVERSAL ADMISSION BOUNDARY (P0-1 / P1-11) ------------
+        // Every ToolPort-backed execution passes through the SAME ordered
+        // admission pipeline as the governed coding toolchain: parameter
+        // validation, principal authorization, risk, security ceiling,
+        // workspace scope, PATH POLICY, budget, rate limit, human approval
+        // and sandbox. DENY and NEEDS_HUMAN_APPROVAL both block (fail
+        // closed). An unavailable gate blocks NOTHING only because stage 3
+        // above already fail-closed sensitive tools; for non-sensitive tools
+        // the gate stays mandatory when wired and exceptions FAIL CLOSED.
+        if (requireAdmission) {
+            val admission = admissionControl
+            if (admission == null) {
+                // FAIL CLOSED: the universal gate is wired in production by
+                // the composition root; its absence in an execution path is
+                // a governance configuration error, not a license to run.
+                auditAuthorization(
+                    agent, toolName, actionType, executionId, "DENY",
+                    "ADMISSION_ENFORCEMENT_UNAVAILABLE: بوابة القبول الموحدة غير مهيأة — الرفض الافتراضي (fail-closed).",
+                    workspaceId
+                )
+                return ToolAuthorization.Denied(
+                    failureCode = "ADMISSION_ENFORCEMENT_UNAVAILABLE",
+                    message = "بوابة القبول الموحدة (AdmissionControl) غير مهيأة لمسار التنفيذ — رُفض تنفيذ '$toolName' صراحة."
+                )
+            }
+            val scope = kotlinx.coroutines.currentCoroutineContext()[
+                com.example.domain.core.execution.ExecutionScope.Key
+            ]
+            val request = com.example.domain.core.security.governance.ToolAdmissionRequest(
+                requestId = "adm_${UUID.randomUUID()}",
+                executionId = executionId,
+                toolName = toolName,
+                arguments = arguments,
+                principalType = com.example.domain.core.security.governance.PrincipalType.AGENT,
+                principalId = agent.identity.id.value,
+                workspaceId = workspaceId,
+                projectId = scope?.projectId?.takeIf { it > 0 },
+                pathArguments = extractAdmissionPathArguments(toolName, arguments),
+                estimatedTokens = null, // honest: unknown before execution
+                budgetScopeKey = "admission:tool:$toolName"
+            )
+            val admissionResult = try {
+                admission.admit(request)
+            } catch (e: Exception) {
+                // Gate failure must fail CLOSED, never open.
+                auditAuthorization(
+                    agent, toolName, actionType, executionId, "DENY",
+                    "ADMISSION_GATE_ERROR: ${e::class.simpleName}: ${e.message?.take(160)}",
+                    workspaceId
+                )
+                return ToolAuthorization.Denied(
+                    failureCode = "ADMISSION_GATE_ERROR",
+                    message = "خطأ داخل بوابة القبول أثناء تقييم '$toolName' — رُفض التنفيذ صراحة (fail-closed)."
+                )
+            }
+            when (admissionResult.decision) {
+                com.example.domain.core.security.governance.AdmissionDecision.ALLOWED -> Unit
+                com.example.domain.core.security.governance.AdmissionDecision.NEEDS_HUMAN_APPROVAL -> {
+                    auditAuthorization(
+                        agent, toolName, actionType, executionId, "DENY",
+                        "HUMAN_APPROVAL_REQUIRED: ${admissionResult.approvalRequestId ?: "-"} — بانتظار موافقة بشرية صريحة.",
+                        workspaceId
+                    )
+                    return ToolAuthorization.Denied(
+                        failureCode = "HUMAN_APPROVAL_REQUIRED",
+                        message = "تنفيذ '$toolName' يتطلب موافقة بشرية (طلب موافقة: ${admissionResult.approvalRequestId ?: "-"}). " +
+                            "امنح الموافقة ثم أعد المحاولة مع رمز الموافقة."
+                    )
+                }
+                else -> {
+                    auditAuthorization(
+                        agent, toolName, actionType, executionId, "DENY",
+                        "ADMISSION_DENIED:${admissionResult.denyStage?.stageCode ?: "-"}: ${admissionResult.denyReason ?: "-"}",
+                        workspaceId
+                    )
+                    return ToolAuthorization.Denied(
+                        failureCode = "ADMISSION_DENIED",
+                        message = "رفضت بوابة القبول تنفيذ '$toolName' " +
+                            "(${admissionResult.denyStage?.stageCode ?: "-"}): ${admissionResult.denyReason ?: "-"}"
+                    )
+                }
+            }
+        }
+
+        // --- 5. Audited ALLOW ---
         auditAuthorization(
             agent, toolName, actionType, executionId, "ALLOW",
             "إذن صريح قائم (أو أداة مصنفة آمنة) لتنفيذ ${if (isSensitive) "الأداة الحساسة" else "الأداة"}.",
@@ -578,6 +755,28 @@ class ExecutionService(
                 errorDescription = errorMsg,
                 latencyMs = System.currentTimeMillis() - startTime
             )
+        }
+
+        // P1-12 (audit 2026 §25): circuit-breaker fail-fast guard on the
+        // AUTHORITATIVE LLM resource. Repeated provider failures open the
+        // breaker; subsequent calls fail fast instead of each burning its
+        // full timeout. The outcome is recorded back into the breaker at
+        // the end of this step (success closes, failure opens).
+        val breakerResourceId = decisionRecord!!.selectedResourceId
+        val breaker = circuitBreakerGate
+        if (breaker != null) {
+            val allowed = try {
+                breaker.allowCall(breakerResourceId.value)
+            } catch (_: Exception) {
+                true // enforcement failure must not add a new failure mode
+            }
+            if (!allowed) {
+                return ExecutionResult(
+                    isSuccess = false,
+                    errorDescription = "CIRCUIT_OPEN: قاطع الدائرة مفتوح لمورد النموذج '${breakerResourceId.value}' — رفض سريع (fail-fast) بدلاً من استدعاء فاشل آخر.",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
         }
 
         // Build messages injecting System Prompt, gathered evidence, and conversation history.
@@ -913,6 +1112,17 @@ class ExecutionService(
             .ifPositiveOr(textAccumulator.length / 4)
         val latency = System.currentTimeMillis() - startTime
 
+        // P1-12: breaker outcome accounting (never blocks the result path).
+        if (breaker != null) {
+            runCatching {
+                if (isSuccess) {
+                    breaker.recordSuccess(breakerResourceId.value)
+                } else {
+                    breaker.recordFailure(breakerResourceId.value, "LLM_STEP_FAILED", errorMessage?.take(200))
+                }
+            }
+        }
+
         return ExecutionResult(
             isSuccess = isSuccess,
             outputText = textAccumulator.toString(),
@@ -978,6 +1188,64 @@ class ExecutionService(
         }
 
         val query = action.payload["query"] ?: context.task.input.rawPrompt.take(100)
+
+        // P1-12 (audit 2026 §25): circuit-breaker fail-fast guard on the
+        // AUTHORITATIVE resource — repeated failures open the breaker and
+        // later calls fail fast instead of each waiting for its own timeout.
+        val breakerResourceId = decisionRecord!!.selectedResourceId
+        val breaker = circuitBreakerGate
+        if (breaker != null) {
+            val allowed = try {
+                breaker.allowCall(breakerResourceId.value)
+            } catch (_: Exception) {
+                true // enforcement failure must not block; the resolver validated health
+            }
+            if (!allowed) {
+                return ExecutionResult(
+                    isSuccess = false,
+                    errorDescription = "CIRCUIT_OPEN: قاطع الدائرة مفتوح لمورد البحث '${breakerResourceId.value}' — رفض سريع (fail-fast) بدلاً من انتظار مهلة أخرى.",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
+        }
+
+        // P1-3 (audit 2026 §11): the intelligent search pipeline IS the
+        // production path — query decomposition, multi-query fan-out,
+        // deduplication, re-ranking and citation chains run over the
+        // AUTHORITATIVELY RESOLVED adapter (resource authority is preserved:
+        // no provider substitution happens inside the intelligence layer).
+        val intelligenceHook = searchIntelligence
+        if (intelligenceHook != null) {
+            val intelligentResult = try {
+                intelligenceHook(query, searchProvider)
+            } catch (_: Exception) {
+                null // honest degradation to the plain path — never a crash
+            }
+            if (intelligentResult != null && intelligentResult.rankedItems.isNotEmpty()) {
+                if (breaker != null) {
+                    runCatching { breaker.recordSuccess(breakerResourceId.value) }
+                }
+                val rankedItems = intelligentResult.rankedItems
+                val formattedItems = rankedItems.map { ranked ->
+                    "[${ranked.item.title}] (${ranked.item.url}) [درجة=${"%.2f".format(ranked.finalScore)}]"
+                }
+                return ExecutionResult(
+                    isSuccess = true,
+                    outputText = "تم استرجاع ${rankedItems.size} نتيجة عبر مسار البحث الذكي " +
+                        "(${intelligentResult.decomposition.subQueries.size} استعلام فرعي، ${intelligentResult.citations.size} استشهاد).",
+                    outputData = mapOf(
+                        "searchResults" to formattedItems,
+                        "searchRawItems" to rankedItems.map { it.item },
+                        "searchCitations" to intelligentResult.citations,
+                        "searchIntelligent" to true
+                    ),
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
+        }
+
+        // Plain single-query path (honest fallback when the intelligence
+        // layer is unavailable or returned nothing).
         return when (val outcome = searchProvider.search(SearchQuery(query = query))) {
             is Outcome.Success -> {
                 val items = outcome.value.items
@@ -1013,6 +1281,10 @@ class ExecutionService(
                 )
             }
             is Outcome.Error -> {
+                // P1-12: breaker outcome accounting (never blocks the result path).
+                if (breaker != null) {
+                    runCatching { breaker.recordFailure(breakerResourceId.value, "SEARCH_FAILED", outcome.diagnosticMessage?.take(200)) }
+                }
                 val errorMsg = when (val failure = outcome.failure) {
                     is SearchFailure.NetworkError -> "خطأ في الاتصال بالشبكة: ${failure.message}"
                     is SearchFailure.RateLimited -> "تم تجاوز حد استعلامات البحث. يرجى المحاولة لاحقاً."
@@ -1383,13 +1655,18 @@ class ExecutionService(
         // execute extension code — a sensitive external action — so they now
         // pass through the SAME boundary as every other tool action
         // (fail-closed until an explicit EXECUTE grant exists).
+        // P0-1 note: skills are NOT ToolPort adapters — their governance
+        // authority is this grant-gated boundary (requireAdmission=false);
+        // every ToolPort-backed execution (tools/MCP/model tool calls) goes
+        // through the universal admission gate instead.
         when (val auth = authorizeToolExecution(
             agent = agent,
             toolName = "skill_$skillId",
             arguments = action.payload,
             actionType = "EXECUTE_SKILL",
             executionId = executionId,
-            isMcp = false
+            isMcp = false,
+            requireAdmission = false
         )) {
             is ToolAuthorization.Denied -> return ExecutionResult(
                 isSuccess = false,

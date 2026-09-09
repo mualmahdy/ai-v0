@@ -424,9 +424,13 @@ class EconomicGovernanceService(
             costLedger.insert(record)
 
             // Rate-limit window accounting (real interaction happened).
+            // P1-12 FIX: TOKENS ONLY — the request slot was already reserved
+            // atomically by RateLimitGovernor.tryAcquire() at admission
+            // time; incrementing RPM here as well would double-count every
+            // admitted request.
             val rateKey = rateScopeKeyFor(input.providerId, input.modelId, input.resourceId)
             if (rateKey != null) {
-                rateLimitGovernor.recordRequest(rateKey, input.usage.totalTokens)
+                rateLimitGovernor.recordTokens(rateKey, input.usage.totalTokens)
             }
 
             // Telemetry (never blocking, never throwing into the runtime)

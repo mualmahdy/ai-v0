@@ -60,6 +60,46 @@ data class WorkspacePathPolicy(
 }
 
 /**
+ * BOUNDARY-SAFE path containment (audit 2026 §6 — P0 fix).
+ *
+ * The legacy check `candidate.startsWith(root)` accepts a SIBLING directory
+ * that merely shares a string prefix (e.g. root `/…/proj_1` wrongly admits
+ * `/…/proj_10`), which breaks workspace filesystem isolation between
+ * projects 1 and 10. A path is contained ONLY when it equals the root or
+ * continues AFTER the root's path-separator boundary.
+ *
+ * PURE — no I/O, deterministic, fully testable.
+ */
+object PathContainment {
+
+    /** Filesystem path separator used by the host platform. */
+    private const val SEPARATOR = '/'
+
+    /**
+     * True iff [candidateCanonical] is [rootCanonical] itself or a path
+     * strictly INSIDE it (one real directory boundary, not a string prefix).
+     * Both inputs MUST already be canonical/normalized absolute paths.
+     */
+    fun isContained(candidateCanonical: String, rootCanonical: String): Boolean {
+        val root = trimTrailingSeparators(rootCanonical)
+        if (root.isEmpty()) return false
+        if (candidateCanonical == root) return true
+        if (!candidateCanonical.startsWith(root)) return false
+        // The character right after the root must be a path separator —
+        // otherwise the candidate is a SIBLING sharing a prefix (proj_1 vs
+        // proj_10), which is NOT containment.
+        val charAfterRoot = candidateCanonical.getOrNull(root.length) ?: return false
+        return charAfterRoot == SEPARATOR
+    }
+
+    private fun trimTrailingSeparators(path: String): String {
+        var end = path.length
+        while (end > 1 && path[end - 1] == SEPARATOR) end--
+        return path.substring(0, end)
+    }
+}
+
+/**
  * The policy decision engine. PURE — no I/O, deterministic, fully testable.
  * Callers must provide a canonical resolver function appropriate to their
  * platform (java.io.File.getCanonicalPath in production).

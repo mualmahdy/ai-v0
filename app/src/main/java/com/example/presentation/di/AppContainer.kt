@@ -490,7 +490,11 @@ class AppContainer(context: Context) {
                 egressControl = egressControl,
                 inProcessTools = inProcessMcpTools
             ),
-            integrationGateway = IntegrationGateway(),
+            // P1-15 (audit 2026 §28): ONE egress-controlled IntegrationGateway
+            // for the whole process (previously this constructed an UNGOVERNED
+            // OkHttpClient outside EgressControl, and ExtensionManager could
+            // silently build a SECOND one).
+            integrationGateway = IntegrationGateway(egressControl = egressControl),
             extensionConfigDao = database.extensionConfigDao(),
             executableSkills = listOf(cleanArchitectureSkill, securityAuditorSkill)
         )
@@ -610,8 +614,18 @@ class AppContainer(context: Context) {
         SandboxLifecycleService(hostIsolationLevel = IsolationLevel.APP_SANDBOX_BEST_EFFORT)
     }
 
-    /** Volatile (fail-safe) approval store; see InMemoryHumanApprovalStore KDoc. */
-    val humanApprovalStore: HumanApprovalStorePort by lazy { InMemoryHumanApprovalStore() }
+    /**
+     * P1-15 / §17 FIX (audit 2026 — human approval was NOT durable): the
+     * production approval store is now Room-backed (`human_approval_requests`,
+     * v15) — approvals and one-shot tokens survive process death. The
+     * volatile [InMemoryHumanApprovalStore] remains available for tests that
+     * explicitly want volatile semantics; production wiring never uses it.
+     */
+    val humanApprovalStore: HumanApprovalStorePort by lazy {
+        com.example.infrastructure.governed.RoomHumanApprovalStore(
+            dao = database.humanApprovalRequestDao()
+        )
+    }
 
     val humanApprovalGate: HumanApprovalGate by lazy {
         HumanApprovalGate(store = humanApprovalStore)
@@ -640,9 +654,41 @@ class AppContainer(context: Context) {
 
     /** Principal authorization via the Room-backed PermissionGrantService. */
     val principalAuthorizationPort: PrincipalAuthorizationPort by lazy {
-        PrincipalAuthorizationPort { principalType, principalId, resourceType, resourceId, permission ->
-            permissionGrantService.check(principalType, principalId, resourceType, resourceId, permission)
+        PrincipalAuthorizationPort { principalType, principalId, resourceType, resourceId, permission, workspaceId ->
+            // P0-1 (audit 2026 §15 — Universal Admission): the principal
+            // authorization stage follows the SAME policy the canonical
+            // execution boundary applies — an explicit workspace-scoped (or
+            // global) grant is REQUIRED for sensitive / consent-requiring
+            // resources and fail-closes without one; ordinary non-sensitive
+            // tools remain permitted for authenticated principals (the
+            // security-ceiling, risk, budget, approval and sandbox stages of
+            // the admission pipeline still gate them).
+            val declaration = resolveToolDeclarationFor(resourceId)
+            val sensitive = declaration?.isSensitive == true ||
+                declaration?.requiresHumanConsent == true
+            if (sensitive) {
+                permissionGrantService.check(
+                    principalType, principalId, resourceType, resourceId, permission, workspaceId
+                )
+            } else {
+                true
+            }
         }
+    }
+
+    /**
+     * P0-1: single declaration lookup shared by the admission pipeline —
+     * the governed coding toolchain's STATIC registry first (no service
+    * construction — the companion exists precisely to avoid the circular
+    * dependency), then the live runtime adapter declarations (in-app tools,
+    * MCP bridge tools). NEVER null for a tool that is actually registered.
+     */
+    private fun resolveToolDeclarationFor(toolName: String): com.example.domain.core.tools.ToolDeclaration? {
+        com.example.application.governed.CodingToolchainService.Companion.declarations[toolName]?.let { return it }
+        return runCatching {
+            componentRegistry.runtimeAdapterResolver.listToolDeclarations()
+                .firstOrNull { it.name.equals(toolName, ignoreCase = true) }
+        }.getOrNull()
     }
 
     /** Budget gate adapter over EconomicGovernanceService.authorize(). */
@@ -683,13 +729,15 @@ class AppContainer(context: Context) {
      * sandboxed directories SandboxWorkspaceStorageAdapter uses.
      */
     val admissionControlService: AdmissionControlService by lazy {
-        val declarations = codingToolchainService.declarations
+        // P0-1: the STATIC coding declarations (companion) are used to avoid
+        // the AdmissionControlService ⇄ CodingToolchainService construction
+        // cycle; live adapter declarations resolve the rest.
         AdmissionControlService(
-            toolDeclarations = ToolDeclarationResolver { name -> declarations[name] },
+            toolDeclarations = ToolDeclarationResolver { name -> resolveToolDeclarationFor(name) },
             principalAuthorization = principalAuthorizationPort,
             securityGuard = securityGuardService,
             budgetAuthorization = budgetAuthorizationPort,
-            rateLimitCheck = { scopeKey -> rateLimitGovernor.allowsRequest(scopeKey) },
+            rateLimitCheck = { scopeKey -> rateLimitGovernor.tryAcquire(scopeKey) },
             approvalGate = humanApprovalGate,
             sandboxService = sandboxLifecycleService,
             auditSink = admissionAuditPort,
@@ -721,7 +769,39 @@ class AppContainer(context: Context) {
             // GOVERNANCE PHASE: pre-execution economic + capability gates.
             economicGovernance = economicGovernanceService,
             capabilityRadar = capabilityRadarService
-        )
+        ).apply {
+            // P1-1 (audit 2026 §8 — DecisionContext truth): the planner sees
+            // the REAL capability graph derived from the authoritative
+            // DurableResourceRegistryService, and the REAL registered tool
+            // names from the RuntimeAdapterResolver. Planner state == world
+            // state; no more empty capabilities/tools.
+            liveCapabilityDescriptorsProvider = {
+                durableResourceRegistryService.listResources().flatMap { record ->
+                    record.capabilities.map { cap ->
+                        com.example.domain.core.capability.CapabilityDescriptor(
+                            type = cap,
+                            providerId = record.providerId,
+                            resourceType = record.resourceType.name,
+                            isLocal = record.isLocal,
+                            state = when (record.healthStatus) {
+                                com.example.domain.core.provider.HealthStatus.HEALTHY ->
+                                    com.example.domain.core.capability.CapabilityState.AVAILABLE
+                                com.example.domain.core.provider.HealthStatus.DEGRADED ->
+                                    com.example.domain.core.capability.CapabilityState.DEGRADED
+                                else -> com.example.domain.core.capability.CapabilityState.UNAVAILABLE
+                            },
+                            attributes = mapOf(
+                                "resourceId" to record.resourceId.value,
+                                "lifecycleState" to record.lifecycleState.name
+                            )
+                        )
+                    }
+                }
+            }
+            liveToolNamesProvider = {
+                componentRegistry.runtimeAdapterResolver.listToolDeclarations().map { it.name }
+            }
+        }
     }
 
     val executionService: ExecutionService by lazy {
@@ -737,6 +817,27 @@ class AppContainer(context: Context) {
             // executes them through the orchestrator with structured
             // concurrency (parent cancellation cancels the child).
             registryAgentResolver = { agentId -> componentRegistry.getAgent(agentId) }
+            // -----------------------------------------------------------
+            // P0-1 / P1-11 (audit 2026 §15/§33 — Universal Execution
+            // Authority): THE admission gate is wired into the agent-loop
+            // execution kernel itself. Every EXECUTE_TOOL / EXECUTE_MCP /
+            // MODEL_TOOL_CALL now passes through the SAME ordered pipeline
+            // as the governed coding toolchain — no parallel ungoverned
+            // execution path remains.
+            admissionControl = admissionControlService
+            // P1-2: tool lifecycle authority — a REVOKED tool can no longer
+            // be executed through any path even if its adapter is registered.
+            toolLifecycleEnforcer = { toolName ->
+                toolLifecycleService.isToolExecutable(toolName)
+            }
+            // P1-12: circuit breaker becomes a real fail-fast authority for
+            // provider-backed actions (LLM / search).
+            circuitBreakerGate = circuitBreakerService
+            // P1-3: search intelligence runs INSIDE the production search
+            // path, over the authoritatively resolved adapter.
+            searchIntelligence = { query, provider ->
+                searchIntelligenceService.searchIntelligent(query, provider)
+            }
         }
     }
 
@@ -759,6 +860,11 @@ class AppContainer(context: Context) {
             // usage accounting into the cost ledger).
             economicGovernanceService = economicGovernanceService
         ).also { orchestrator ->
+            // P1-8 (audit 2026 §18 — startup race): every execution awaits the
+            // bootstrap readiness barrier before entering the loop — resource
+            // restore, Q-table load, canonical agent sync and the recovery
+            // sweep complete BEFORE any execution runs.
+            orchestrator.readinessGate = { awaitRuntimeReadiness() }
             // GOVERNANCE PHASE: workspace scoping for accounting/evidence/
             // decision context. GAP-CLOSURE P0-02/P0-03: the provider is
             // consulted ONCE at execution start to PIN the canonical context;
@@ -1259,6 +1365,44 @@ class AppContainer(context: Context) {
     }
 
     /**
+     * P1-8 FIX (audit 2026 §18 — bootstrap not synchronized with runtime
+     * readiness): the bootstrap completion BARRIER. `bootstrapRuntime()`
+     * completes it when resource restore, Q-table load, canonical agent
+     * sync, recovery sweep and budget seeding are DONE. Executions gate on
+     * [awaitRuntimeReadiness] (wired into AgentOrchestrator.readinessGate)
+     * so no execution can race a half-initialized runtime. A timeout
+     * (15s) audits an honest warning and proceeds — the gate must never
+     * deadlock the app on a slow/failed bootstrap step.
+     */
+    private val runtimeReadiness = kotlinx.coroutines.CompletableDeferred<Unit>()
+
+    /** TRUE once the runtime bootstrap completed successfully. */
+    val isRuntimeReady: Boolean get() = runtimeReadiness.isCompleted
+
+    /**
+     * Awaits bootstrap completion with a bounded timeout. Returns false
+     * (and records an honest WARN audit event) when bootstrap is late —
+     * callers proceed with a degraded-but-attributed runtime.
+     */
+    suspend fun awaitRuntimeReadiness(timeoutMs: Long = 15_000L): Boolean {
+        val ready = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { runtimeReadiness.await() }
+        if (ready == null) {
+            runCatching {
+                telemetryService.recordAudit(
+                    AuditSeverity.WARN,
+                    actor = "bootstrap",
+                    action = "runtime_readiness_timeout",
+                    resourceType = "runtime",
+                    resourceId = "bootstrap",
+                    decision = "DEGRADED",
+                    reason = "انتهت مهلة انتظار جهوزية التشغيل (${timeoutMs}ms) — يُتابع التنفيذ بتشغيل غير مكتمل التهيئة (مُسجَّل بأمانة)."
+                )
+            }
+        }
+        return ready != null
+    }
+
+    /**
      * First-run bootstrap (parity with the legacy default providers): seeds
      * local embedding + multi-source search + Gemini provider records, then
      * validates ONLY the zero-network in-process resources.
@@ -1270,8 +1414,9 @@ class AppContainer(context: Context) {
      */
     fun bootstrapRuntime() {
         applicationScope.launch {
-            durableResourceRegistryService.eagerLoad()
-            cbrMdpEngine.loadPersistedQTable()
+            try {
+                durableResourceRegistryService.eagerLoad()
+                cbrMdpEngine.loadPersistedQTable()
             // ----------------------------------------------------------------------
             // EGRESS ENFORCEMENT WIRING (report gap: sandbox network-egress
             // restrictions) — REPAIRED (defect family 1): the workspace's
@@ -1363,6 +1508,29 @@ class AppContainer(context: Context) {
                         )
                     )
                 }
+            }
+            } catch (t: Throwable) {
+                // P1-8: a bootstrap step threw. The readiness gate is STILL
+                // released below — the failure is attributed honestly so the
+                // audit trail carries it, and the runtime proceeds in a
+                // degraded-but-attributed state instead of deadlocking every
+                // execution behind a gate that never opens.
+                runCatching {
+                    telemetryService.recordAudit(
+                        AuditSeverity.ERROR,
+                        actor = "bootstrap",
+                        action = "bootstrap_step_failed",
+                        resourceType = "runtime",
+                        resourceId = "bootstrap",
+                        decision = "ERROR",
+                        reason = "فشلت خطوة في تهيئة التشغيل: ${t::class.simpleName}: ${t.message?.take(200)}"
+                    )
+                }
+            } finally {
+                // P1-8: the barrier ALWAYS opens — success, failure or late
+                // bootstrap. Executions waiting on awaitRuntimeReadiness()
+                // resume here.
+                runtimeReadiness.complete(Unit)
             }
         }
     }

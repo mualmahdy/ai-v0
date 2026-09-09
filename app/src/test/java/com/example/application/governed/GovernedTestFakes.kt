@@ -87,7 +87,8 @@ class FakePrincipalAuthorization(private val denied: Set<String> = emptySet()) :
         principalId: String,
         resourceType: SecurableResourceType,
         resourceId: String,
-        permission: Permission
+        permission: Permission,
+        workspaceId: String?
     ): Boolean = "$principalId|$resourceId" !in denied
 }
 
@@ -134,7 +135,7 @@ class ScriptableBudgetGate(
 
 /** Scriptable rate-limit gate (default: allow). */
 class ScriptableRateLimit(private var allow: Boolean = true) : com.example.application.governed.RateLimitCheckPort {
-    override fun allowsRequest(scopeKey: String): Boolean = allow
+    override fun tryAcquire(scopeKey: String): Boolean = allow
     fun deny() { allow = false }
     fun allowAll() { allow = true }
 }

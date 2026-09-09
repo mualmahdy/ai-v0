@@ -125,7 +125,8 @@ class AdmissionControlServiceTest {
                 principalId: String,
                 resourceType: com.example.domain.core.security.governance.SecurableResourceType,
                 resourceId: String,
-                permission: com.example.domain.core.security.governance.Permission
+                permission: com.example.domain.core.security.governance.Permission,
+                workspaceId: String?
             ): Boolean = false
         }
         // Rebuild admission with the denying principal port

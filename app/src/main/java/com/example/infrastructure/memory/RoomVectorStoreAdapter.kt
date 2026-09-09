@@ -277,11 +277,19 @@ class RoomVectorStoreAdapter(
 
     /**
      * Workspace-scoped active memories: only the resolved workspace's (and
-     * legacy global workspaceId-null) rows are visible; without any context
-     * the legacy global behavior applies.
+     * legacy global workspaceId-null) rows are visible.
+     *
+     * P1-6 FIX (audit 2026 §9 — fail-open isolation): when NO workspace can
+     * be resolved (no pinned ExecutionScope AND no active workspace) this
+     * previously fell back to the GLOBAL memory set — a cross-workspace
+     * memory leak. It now FAILS CLOSED: scope-less callers see an EMPTY
+     * set. The global view remains available only to the explicit
+     * system-maintenance path ([com.example.application.memory.MemoryLifecycleService]),
+     * never to workspace-scoped retrieval.
      */
     private suspend fun scopedActiveMemories(): List<MemoryEntity> {
-        val workspaceId = currentWorkspaceId() ?: return memoryDao.getAllActiveMemories()
+        val workspaceId = currentWorkspaceId()
+            ?: return emptyList() // FAIL CLOSED: no workspace = no memories visible
         return memoryDao.getActiveForWorkspace(workspaceId)
     }
 

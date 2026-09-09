@@ -5,11 +5,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
@@ -43,13 +40,12 @@ object ExecutionHost {
 
     val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val _events = MutableSharedFlow<ExecutionEvent>(
-        extraBufferCapacity = 256,
-        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
-    )
-
-    /** Live stream of ALL execution events (each event carries its executionId). */
-    val events: SharedFlow<ExecutionEvent> = _events.asSharedFlow()
+    // P1-10 (audit 2026 §20): the legacy `_events` SharedFlow
+    // (extraBufferCapacity=256, DROP_OLDEST, tryEmit) had ZERO consumers —
+    // it was dead wiring whose only possible behaviour under a burst was
+    // SILENT EVENT LOSS. It is removed; the ONE real execution event bus is
+    // the orchestrator's backpressured publisher, to which telemetry and
+    // radar subscribe. No second, lossy bus remains.
 
     /** One live execution registered under its key (convention: taskId). */
     data class ExecutionHandle(
@@ -59,6 +55,16 @@ object ExecutionHost {
     )
 
     private val handles = ConcurrentHashMap<String, ExecutionHandle>()
+
+    /**
+     * P1-12 (audit 2026 §25 — same-key relaunch is not atomic): the
+     * cancel → launch → replace-handle sequence is now guarded by ONE
+     * monitor, so two concurrent `launch("same-key")` calls can never
+     * interleave into "A cancels, B cancels, A registers, B registers"
+     * (which previously left TWO live jobs under one key — the first job
+     * leaked, uncancellable through the host).
+     */
+    private val launchMonitor = Any()
 
     private val _activeExecutions = MutableStateFlow<Map<String, ExecutionHandle>>(emptyMap())
     val activeExecutions: StateFlow<Map<String, ExecutionHandle>> = _activeExecutions.asStateFlow()
@@ -90,16 +96,18 @@ object ExecutionHost {
     }
 
     fun publish(event: ExecutionEvent) {
-        _events.tryEmit(event)
+        // Removed with the dead `_events` flow (P1-10): kept as a no-op for
+        // source compatibility — the real event bus is the orchestrator's
+        // backpressured publisher.
     }
 
     /**
      * Launches ONE execution under [key] (convention: the taskId). Does NOT
      * cancel any OTHER execution. Re-launching the same key replaces that
-     * key's previous job only.
+     * key's previous job only — ATOMICALLY (see [launchMonitor]).
      */
-    fun launch(key: String, block: suspend () -> Unit): Job {
-        cancel(key)
+    fun launch(key: String, block: suspend () -> Unit): Job = synchronized(launchMonitor) {
+        handles.remove(key)?.job?.cancel()
         val job = scope.launch {
             block()
         }
@@ -107,11 +115,11 @@ object ExecutionHost {
         handles[key] = handle
         publishState()
         job.invokeOnCompletion { unregisterIfCurrent(key, job) }
-        return job
+        job
     }
 
     /** Cancels exactly ONE execution (no-op if not running). */
-    fun cancel(key: String) {
+    fun cancel(key: String) = synchronized(launchMonitor) {
         handles.remove(key)?.job?.cancel()
         publishState()
     }

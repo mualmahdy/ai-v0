@@ -2,6 +2,7 @@ package com.example.infrastructure.storage
 
 import android.content.Context
 import com.example.domain.core.Outcome
+import com.example.domain.core.security.governance.PathContainment
 import com.example.domain.core.storage.StorageFailure
 import com.example.domain.core.storage.WorkspaceFileEntry
 import com.example.domain.ports.storage.WorkspaceStoragePort
@@ -36,6 +37,20 @@ class SandboxWorkspaceStorageAdapter(
         return File(baseProjectsDir, "proj_$projectId").apply { if (!exists()) mkdirs() }
     }
 
+    /**
+     * P0-2 FIX (audit 2026 §6 — workspace filesystem containment flaw):
+     * the legacy check `canonicalPath.startsWith(projectDir.canonicalPath)`
+     * accepted SIBLING directories that share a string prefix — a path under
+     * `proj_10` passed the containment check of `proj_1`. Containment is now
+     * boundary-safe: the candidate must equal the root or continue AFTER the
+     * root's path-separator boundary (see [PathContainment]).
+     */
+    private fun isContainedInProject(targetCanonical: String, projectDir: File): Boolean =
+        PathContainment.isContained(
+            candidateCanonical = targetCanonical.replace('\\', '/'),
+            rootCanonical = projectDir.canonicalPath.replace('\\', '/')
+        )
+
     // --- WorkspaceStoragePort Implementation ---
 
     override suspend fun readFile(projectId: Long, relativePath: String): Outcome<String, StorageFailure> = withContext(Dispatchers.IO) {
@@ -44,7 +59,7 @@ class SandboxWorkspaceStorageAdapter(
             val targetFile = File(projectDir, relativePath)
 
             // Security containment check (No path traversal outside sandbox)
-            if (!targetFile.canonicalPath.startsWith(projectDir.canonicalPath)) {
+            if (!isContainedInProject(targetFile.canonicalPath, projectDir)) {
                 return@withContext Outcome.Error(
                     StorageFailure.AccessDenied(relativePath, "تم حظر محاولة الوصول خارج نطاق مساحة العمل.")
                 )
@@ -71,7 +86,7 @@ class SandboxWorkspaceStorageAdapter(
             val targetFile = File(projectDir, relativePath)
 
             // Containment check
-            if (!targetFile.canonicalPath.startsWith(projectDir.canonicalPath)) {
+            if (!isContainedInProject(targetFile.canonicalPath, projectDir)) {
                 return@withContext Outcome.Error(
                     StorageFailure.AccessDenied(relativePath, "محاولة كتابة خارج نطاق مساحة العمل.")
                 )
@@ -92,7 +107,7 @@ class SandboxWorkspaceStorageAdapter(
             val projectDir = getProjectDir(projectId)
             val targetDir = if (subDirectory.isNullOrBlank()) projectDir else File(projectDir, subDirectory)
 
-            if (!targetDir.canonicalPath.startsWith(projectDir.canonicalPath)) {
+            if (!isContainedInProject(targetDir.canonicalPath, projectDir)) {
                 return@withContext Outcome.Error(
                     StorageFailure.AccessDenied(subDirectory ?: "", "محاولة وصول غير مصرح خارج مساحة العمل.")
                 )
@@ -125,7 +140,7 @@ class SandboxWorkspaceStorageAdapter(
             val projectDir = getProjectDir(projectId)
             val targetFile = File(projectDir, relativePath)
 
-            if (!targetFile.canonicalPath.startsWith(projectDir.canonicalPath)) {
+            if (!isContainedInProject(targetFile.canonicalPath, projectDir)) {
                 return@withContext Outcome.Error(
                     StorageFailure.AccessDenied(relativePath, "محاولة حذف ملف خارج مساحة العمل.")
                 )
@@ -145,6 +160,6 @@ class SandboxWorkspaceStorageAdapter(
     override suspend fun fileExists(projectId: Long, relativePath: String): Boolean = withContext(Dispatchers.IO) {
         val projectDir = getProjectDir(projectId)
         val targetFile = File(projectDir, relativePath)
-        targetFile.exists() && targetFile.canonicalPath.startsWith(projectDir.canonicalPath)
+        targetFile.exists() && isContainedInProject(targetFile.canonicalPath, projectDir)
     }
 }

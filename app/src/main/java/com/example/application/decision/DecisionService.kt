@@ -93,6 +93,21 @@ class DecisionService(
 ) {
 
     /**
+     * P1-1 FIX (audit 2026 §8 — DecisionContext does not reflect real
+     * capabilities/tools): late-bound providers of the LIVE resource
+     * capability truth. Wired by the composition root from the
+     * DurableResourceRegistryService (capabilities) and the
+     * RuntimeAdapterResolver (registered tool names). The planner state now
+     * matches the real world state — every resource's capabilities feed the
+     * CapabilityResourceGraph, and every registered tool feeds
+     * `availableTools`.
+     */
+    var liveCapabilityDescriptorsProvider: () -> List<com.example.domain.core.capability.CapabilityDescriptor> = { emptyList() }
+
+    /** P1-1: live registered tool names (adapter declarations). */
+    var liveToolNamesProvider: () -> List<String> = { emptyList() }
+
+    /**
      * Backwards-compat constructor: takes a `ComponentRegistry` and uses its
      * `resourceCapabilityGraph`. This is used by tests that pre-date the Phase 4
      * refactor. Production code uses the primary constructor with
@@ -171,8 +186,18 @@ class DecisionService(
             }
         }
 
-        val capabilities = emptyList<com.example.domain.core.capability.CapabilityDescriptor>()  // not used; resource graph derives from ResourceRegistry
+        // P1-1 (audit 2026 §8): capabilities now come from the AUTHORITATIVE
+        // resource registry (one capability truth) — not an empty list. Each
+        // ENABLED/ACTIVE resource contributes a descriptor per capability it
+        // provides; health maps to the descriptor state honestly.
+        val capabilities: List<com.example.domain.core.capability.CapabilityDescriptor> =
+            runCatching { liveCapabilityDescriptorsProvider() }.getOrDefault(emptyList())
         val graph = CapabilityResourceGraph(capabilities)
+
+        // P1-1: availableTools now lists the tools actually REGISTERED in the
+        // runtime adapter resolver (the tools the execution layer can really
+        // resolve) instead of the previous hard-coded emptyList().
+        val availableTools: List<String> = runCatching { liveToolNamesProvider() }.getOrDefault(emptyList())
 
         val gapAnalysis = graph.analyzeGap(
             taskId = taskWithRequirements.id.value,
@@ -191,7 +216,7 @@ class DecisionService(
             capabilityGap = gapAnalysis,
             satisfiedCapabilities = gapAnalysis.satisfiedCapabilities,
             missingCapabilities = gapAnalysis.missingCapabilities,
-            availableTools = emptyList(),
+            availableTools = availableTools,
             networkPolicy = networkPolicy,
             isNetworkAvailable = isNetworkAvailable,
             remainingTokenBudget = remainingTokens,

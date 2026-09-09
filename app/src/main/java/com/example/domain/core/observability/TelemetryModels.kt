@@ -172,5 +172,11 @@ data class ExecutionTraceNode(
     val durationMs: Long?,
     val outcome: String,
     val summary: String,
-    val observationSummary: String?
+    val observationSummary: String?,
+    /**
+     * P1-10 (audit 2026 §20): owning workspace attribution, resolved from
+     * the pinned execution→workspace binding at trace time. Null = honestly
+     * UNATTRIBUTED (never a fabricated default scope).
+     */
+    val workspaceId: String? = null
 )

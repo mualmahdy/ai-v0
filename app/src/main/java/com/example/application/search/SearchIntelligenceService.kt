@@ -70,7 +70,34 @@ class SearchIntelligenceService(
         query: String,
         maxResultsPerSubQuery: Int = 5,
         maxTotalResults: Int = 10
+    ): SearchIntelligenceResult = searchIntelligent(query, searchProvider, maxResultsPerSubQuery, maxTotalResults)
+
+    /**
+     * P1-3 FIX (audit 2026 §11 — SearchIntelligenceService was NOT on the
+     * production path): intelligence pipeline executed OVER the
+     * AUTHORITATIVELY RESOLVED adapter. The production SEARCH action in
+     * ExecutionService resolves the search provider via its DecisionRecord
+     * and RuntimeAdapterResolver (resource authority — no substitution),
+     * then invokes this method so query decomposition, multi-query fan-out,
+     * deduplication, re-ranking and citation chains apply to the governed
+     * execution path too. Additional providers (when configured) still
+     * fan out for RESEARCH intents.
+     */
+    suspend fun searchIntelligent(
+        query: String,
+        provider: SearchProviderPort,
+        maxResultsPerSubQuery: Int = 5,
+        maxTotalResults: Int = 10
     ): SearchIntelligenceResult = withContext(Dispatchers.IO) {
+        runPipeline(query, provider, maxResultsPerSubQuery, maxTotalResults)
+    }
+
+    private suspend fun runPipeline(
+        query: String,
+        primaryProvider: SearchProviderPort,
+        maxResultsPerSubQuery: Int,
+        maxTotalResults: Int
+    ): SearchIntelligenceResult {
         val decomposition = decompose(query)
         val sourceSelection = selectSources(decomposition.primaryIntent)
 
@@ -83,7 +110,8 @@ class SearchIntelligenceService(
                             subQuery = subQuery,
                             subQueryIndex = subQueryIndex,
                             preference = pref,
-                            maxResults = maxResultsPerSubQuery
+                            maxResults = maxResultsPerSubQuery,
+                            provider = additionalProviders[pref.providerId] ?: primaryProvider
                         )
                     }
                 }
@@ -108,7 +136,7 @@ class SearchIntelligenceService(
             )
         }
 
-        SearchIntelligenceResult(
+        return SearchIntelligenceResult(
             originalQuery = query,
             decomposition = decomposition,
             rankedItems = ranked,
@@ -195,9 +223,9 @@ class SearchIntelligenceService(
         subQuery: SubQuery,
         subQueryIndex: Int,
         preference: SourcePreference,
-        maxResults: Int
+        maxResults: Int,
+        provider: SearchProviderPort
     ): List<RankedSearchItem> {
-        val provider = additionalProviders[preference.providerId] ?: searchProvider
         val searchQuery = SearchQuery(
             query = subQuery.text,
             maxResults = minOf(maxResults, preference.maxResults),
