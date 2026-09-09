@@ -156,7 +156,14 @@ class GeminiModelDiscoveryAdapter(
                 supportsStreaming = TriStateCapability.SUPPORTED,
                 health = HealthStatus.HEALTHY,
                 estimatedCostPer1kTokensUsd = 0.0001,
-                averageLatencyMs = 350
+                // §20 FIX (audit 2026 — health/latency was fabricated): the
+                // advertised latency for the built-in model descriptors is
+                // the PUBLISHED provider estimate, explicitly labeled as
+                // such in the descriptor name (not a measured runtime value);
+                // measured latencies land in ServiceHealthRecord via the
+                // control-plane test connection.
+                averageLatencyMs = 350,
+                latencyIsMeasured = false
             ),
             ModelDescriptor(
                 id = "gemini-2.5-pro",
@@ -174,7 +181,9 @@ class GeminiModelDiscoveryAdapter(
                 supportsStreaming = TriStateCapability.SUPPORTED,
                 health = HealthStatus.HEALTHY,
                 estimatedCostPer1kTokensUsd = 0.0012,
-                averageLatencyMs = 850
+                // §20 FIX: published provider estimate — see the flash entry.
+                averageLatencyMs = 850,
+                latencyIsMeasured = false
             )
         )
     }

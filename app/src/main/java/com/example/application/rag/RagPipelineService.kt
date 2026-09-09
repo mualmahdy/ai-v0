@@ -74,6 +74,37 @@ class RagPipelineService(
     private val chunksMutex = Mutex()
 
     /**
+     * P1-5 (audit 2026 §29 — RAG full-scan architecture): the retrieval
+     * index. Normalized text + precomputed token set per chunk — the
+     * legacy path re-normalized and re-tokenized the ENTIRE corpus on EVERY
+     * query, which is what actually degraded with knowledge growth (not the
+     * cosine dot products, which are cheap).
+     */
+    private data class IndexedChunk(
+        val chunk: DocumentChunk,
+        val normalizedLower: String,
+        val tokens: Set<String>
+    )
+
+    private val indexedChunks = CopyOnWriteArrayList<IndexedChunk>()
+
+    /** P1-5: honest bound on the per-query scan (degrades instead of stalling). */
+    private val maxScanChunks = 8_000
+
+    private fun indexChunk(chunk: DocumentChunk): IndexedChunk {
+        val normalizedLower = com.example.infrastructure.memory.semantic.ArabicTextNormalizer
+            .normalize(chunk.text).lowercase()
+        val tokens = normalizedLower
+            .split(Regex("[^\\w\\d\\u0600-\\u06FF]+")).filter { it.isNotBlank() }.toSet()
+        return IndexedChunk(chunk, normalizedLower, tokens)
+    }
+
+    private fun reindexAll() {
+        indexedChunks.clear()
+        chunks.forEach { indexedChunks.add(indexChunk(it)) }
+    }
+
+    /**
      * GAP-CLOSURE P1-15 (stale async load guard): monotonic generation
      * counter for workspace knowledge loads. A load started for workspace A
      * that finishes AFTER a newer load for workspace B is DISCARDED — the
@@ -123,6 +154,7 @@ class RagPipelineService(
         chunksMutex.withLock {
             chunks.clear()
             chunks.addAll(loadedChunks)
+            reindexAll()
         }
         _documents.update { docs }
     }
@@ -143,6 +175,7 @@ class RagPipelineService(
         _documents.update { docs -> docs.filterNot { it.id == documentId } }
         chunksMutex.withLock {
             chunks.removeAll { it.documentId == documentId }
+            indexedChunks.removeIf { it.chunk.documentId == documentId }
         }
 
         return when {
@@ -212,6 +245,8 @@ class RagPipelineService(
         val updatedDoc = doc.copy(totalChunks = generatedChunks.size)
         _documents.update { it + updatedDoc }
         chunks.addAll(generatedChunks)
+        // P1-5: keep the retrieval index in sync with ingested chunks.
+        generatedChunks.forEach { indexedChunks.add(indexChunk(it)) }
     }
 
     /**
@@ -237,15 +272,19 @@ class RagPipelineService(
         val (embeddingProvider, usedResourceId) = resolveEmbeddingProvider()
         activeEmbeddingResourceId = usedResourceId
 
-        val embeddedChunks = mutableListOf<DocumentChunk>()
-        for (chunk in splitChunks) {
-            var vector: EmbeddingVector? = null
-            if (embeddingProvider != null) {
-                val embOutcome = embeddingProvider.generateEmbeddings(listOf(chunk.text))
-                if (embOutcome is Outcome.Success) {
-                    vector = embOutcome.value.firstOrNull()
-                }
+        // P1-5 (audit 2026 §29 — ingestion embedding was NOT batched): ONE
+        // batched embedding call for the whole document's chunks instead of
+        // a provider round-trip per chunk (N provider calls → 1).
+        val batchVectors: List<EmbeddingVector>? = if (embeddingProvider != null) {
+            when (val batchOutcome = embeddingProvider.generateEmbeddings(splitChunks.map { it.text })) {
+                is Outcome.Success -> batchOutcome.value
+                else -> null
             }
+        } else null
+
+        val embeddedChunks = mutableListOf<DocumentChunk>()
+        for ((index, chunk) in splitChunks.withIndex()) {
+            var vector: EmbeddingVector? = batchVectors?.getOrNull(index)
             if (vector == null) {
                 vector = generateLexicalVector(chunk.text)
             }
@@ -266,6 +305,8 @@ class RagPipelineService(
         val completedDoc = doc.copy(totalChunks = embeddedChunks.size)
         _documents.update { it + completedDoc }
         chunks.addAll(embeddedChunks)
+        // P1-5: keep the retrieval index in sync with ingested chunks.
+        embeddedChunks.forEach { indexedChunks.add(indexChunk(it)) }
 
         // ------------------------------------------------------------
         // GAP-CLOSURE P1-14 (honest RAG persistence): a failed write is NO
@@ -437,7 +478,29 @@ class RagPipelineService(
         val queryTokens = normalizedQuery.lowercase()
             .split(Regex("[^\\w\\d\\u0600-\\u06FF]+")).filter { it.isNotBlank() }.toSet()
 
-        val scoredChunks = chunks.map { chunk ->
+        // ------------------------------------------------------------------
+        // P1-5 (audit 2026 §29 — retrieval was a FULL re-tokenized scan +
+        // two full sorts): the scan now uses the PRECOMPUTED per-chunk index
+        // (normalized text + token set — computed once at ingest/load, not
+        // per query), a LEXICAL PRE-FILTER (only chunks sharing at least one
+        // query token are lexically scored — irrelevant chunks skip token
+        // arithmetic entirely), a BOUNDED scan (maxScanChunks; a larger
+        // corpus degrades HONESTLY via isTruncated instead of stalling) and
+        // a single bounded top-K selection instead of two O(N log N) sorts.
+        // ------------------------------------------------------------------
+        val candidates = indexedChunks
+        val scanBound = minOf(candidates.size, maxScanChunks)
+        val scanWasTruncated = candidates.size > maxScanChunks
+
+        // Bounded top-(topK*2) selection via a min-heap of relevance.
+        val bound = (topK * 2).coerceAtLeast(2)
+        val heap = java.util.PriorityQueue<RetrievedContextChunk>(
+            compareBy<RetrievedContextChunk> { it.relevanceScore }
+        )
+
+        for (i in 0 until scanBound) {
+            val indexed = candidates[i]
+            val chunk = indexed.chunk
             val chunkEmbeddingId = chunk.metadata["embeddingResourceId"]
             // Compatibility boundary: chunks embedded by a DIFFERENT embedding
             // resource than the active one cannot be compared semantically.
@@ -446,22 +509,19 @@ class RagPipelineService(
                 chunkEmbeddingId == usedResourceId.value ||
                 chunkEmbeddingId == "local_lexical"
 
-            val chunkVector = chunk.vector
-                ?: generateLexicalVector(chunk.text).also { /* lazy lexical for legacy chunks */ }
-
             val sim = if (vectorCompatible) {
+                val chunkVector = chunk.vector ?: generateLexicalVector(chunk.text)
                 computeCosineSimilarity(queryVector.values, chunkVector.values)
             } else 0.0f
 
-            // Arabic-normalized lexical overlap (token-level F1 score).
-            val normalizedChunk = com.example.infrastructure.memory.semantic.ArabicTextNormalizer
-                .normalize(chunk.text).lowercase()
-            val chunkTokens = normalizedChunk
-                .split(Regex("[^\\w\\d\\u0600-\\u06FF]+")).filter { it.isNotBlank() }.toSet()
-            val overlap = if (queryTokens.isEmpty() || chunkTokens.isEmpty()) 0.0f
+            // P1-5 LEXICAL PRE-FILTER: with precomputed token sets, a chunk
+            // sharing NO query token cannot have a positive lexical F1 — skip
+            // the scoring work for it entirely.
+            val overlap = if (queryTokens.isEmpty() || indexed.tokens.isEmpty()) 0.0f
+            else if (queryTokens.none { it in indexed.tokens }) 0.0f
             else {
-                val common = queryTokens.intersect(chunkTokens).size.toFloat()
-                val precision = common / chunkTokens.size
+                val common = queryTokens.intersect(indexed.tokens).size.toFloat()
+                val precision = common / indexed.tokens.size
                 val recall = common / queryTokens.size
                 if (precision + recall > 0f) 2f * precision * recall / (precision + recall) else 0f
             }
@@ -469,17 +529,24 @@ class RagPipelineService(
             val semanticWeight = if (vectorCompatible && providerIsSemantic) 0.6f else 0.0f
             val lexicalWeight = 1.0f - semanticWeight
             val combinedScore = (sim * semanticWeight + overlap * lexicalWeight).coerceIn(0.0f, 1.0f)
+            if (combinedScore <= 0.05f) continue
 
-            RetrievedContextChunk(
+            val scored = RetrievedContextChunk(
                 chunk = chunk,
                 relevanceScore = combinedScore,
                 retrievalMode = retrievalMode,
                 snippet = chunk.text
             )
+            if (heap.size < bound) {
+                heap.add(scored)
+            } else if (heap.peek().relevanceScore < combinedScore) {
+                heap.poll()
+                heap.add(scored)
+            }
         }
-            .filter { it.relevanceScore > 0.05f }
-            .sortedByDescending { it.relevanceScore }
-            .take(topK * 2)
+
+        val scoredChunks = heap.toList()
+            .asSequence()
             // Lexical rerank pass: boost candidates whose text actually
             // contains the (normalized) query tokens verbatim.
             .map { scored ->
@@ -491,6 +558,7 @@ class RagPipelineService(
             }
             .sortedByDescending { it.relevanceScore }
             .take(topK)
+            .toList()
 
         val assembledText = buildString {
             appendLine("=== سياق المعرفة المسترجع (RAG Knowledge Base) ===")
@@ -506,7 +574,9 @@ class RagPipelineService(
             formattedContextText = assembledText,
             retrievedChunks = scoredChunks,
             totalTokensEstimated = assembledText.length / 4,
-            isTruncated = false
+            // P1-5: honest truncation flag when the corpus exceeded the
+            // bounded scan (never a silent partial scan).
+            isTruncated = scanWasTruncated
         )
     }
 

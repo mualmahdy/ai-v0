@@ -265,13 +265,17 @@ fun StudioScreen(
     // ---- Agent builder dialog ----
     if (agentBuilderOpen) {
         AgentBuilderDialog(
-            onConfirm = { name, role, description, systemPrompt ->
+            onConfirm = { name, role, description, systemPrompt, capabilities ->
                 viewModel.createAgent(
                     name = name,
                     role = role,
                     description = description,
                     systemPrompt = systemPrompt,
-                    capabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.STREAMING)
+                    // §23 FIX (audit 2026 — Agent Builder capabilities were
+                    // hard-coded to LLM_GENERATION+STREAMING): the user now
+                    // AUTHORS the agent's execution capabilities here (the
+                    // contract surface), instead of an implicit cap.
+                    capabilities = capabilities
                 )
                 agentBuilderOpen = false
             },
@@ -892,13 +896,19 @@ private fun PromptComposer(
 
 @Composable
 private fun AgentBuilderDialog(
-    onConfirm: (String, AgentRole, String, String) -> Unit,
+    onConfirm: (String, AgentRole, String, String, Set<CapabilityType>) -> Unit,
     onDismiss: () -> Unit
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var role by rememberSaveable { mutableStateOf(AgentRole.GENERAL_ASSISTANT) }
     var description by rememberSaveable { mutableStateOf("") }
     var systemPrompt by rememberSaveable { mutableStateOf("") }
+    // §23 (audit 2026 — Agent Builder = Execution Contract Builder): the
+    // user authors the capability contract. LLM generation + streaming are
+    // pre-selected sensible defaults; the rest are explicit opt-ins.
+    var selectedCapabilities by rememberSaveable {
+        mutableStateOf(setOf(CapabilityType.LLM_GENERATION.name, CapabilityType.STREAMING.name))
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -935,20 +945,90 @@ private fun AgentBuilderDialog(
                         .testTag("agent_builder_prompt"),
                     placeholder = { Text(role.defaultSystemPrompt) }
                 )
+                Text(
+                    text = "عقد التنفيذ — القدرات المسموحة",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "حدّد ما يستطيع هذا الوكيل فعله فعلياً. القدرات غير المحددة ستُرفض عند التنفيذ (fail-closed).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                FlowCapabilityChips(
+                    selected = selectedCapabilities,
+                    onToggle = { capName ->
+                        selectedCapabilities = if (capName in selectedCapabilities) {
+                            selectedCapabilities - capName
+                        } else {
+                            selectedCapabilities + capName
+                        }
+                    }
+                )
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    onConfirm(name.trim(), role, description.trim(), systemPrompt.trim())
+                    val capabilities = selectedCapabilities
+                        .mapNotNull { capName -> runCatching { CapabilityType.valueOf(capName) }.getOrNull() }
+                        .toSet()
+                    onConfirm(name.trim(), role, description.trim(), systemPrompt.trim(), capabilities)
                 },
-                enabled = name.isNotBlank()
+                enabled = name.isNotBlank() && selectedCapabilities.isNotEmpty()
             ) {
                 Text("إنشاء وتفعيل", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("إلغاء") } }
     )
+}
+
+/**
+ * §23 (audit 2026 — Agent Builder capabilities): multi-select capability
+ * chips authoring the agent's execution contract.
+ */
+@Composable
+private fun FlowCapabilityChips(
+    selected: Set<String>,
+    onToggle: (String) -> Unit
+) {
+    val buildable = listOf(
+        CapabilityType.LLM_GENERATION,
+        CapabilityType.STREAMING,
+        CapabilityType.SEARCH,
+        CapabilityType.TOOL_EXECUTION,
+        CapabilityType.FILE_STORAGE,
+        CapabilityType.FILE_READ,
+        CapabilityType.FILE_WRITE,
+        CapabilityType.MEMORY_RETRIEVAL,
+        CapabilityType.MCP_INVOCATION,
+        CapabilityType.AGENT_DELEGATION,
+        CapabilityType.CODE_ANALYSIS,
+        CapabilityType.CODE_ENGINEERING,
+        CapabilityType.SECURITY_AUDIT
+    )
+    Column {
+        buildable.chunked(3).forEach { rowCaps ->
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(vertical = 2.dp)
+            ) {
+                rowCaps.forEach { cap ->
+                    FilterChip(
+                        selected = cap.name in selected,
+                        onClick = { onToggle(cap.name) },
+                        label = {
+                            Text(
+                                cap.displayName.substringBefore(" ("),
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable

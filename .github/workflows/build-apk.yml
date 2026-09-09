@@ -40,11 +40,12 @@ jobs:
               -keystore debug.keystore -storepass android -keypass android \
               -dname "CN=Android Debug, O=Android, C=US"
           fi
+          # P0-3: the wrapper jar is COMMITTED — never substitute an
+          # unpinned download from gradle/gradle@master.
           chmod +x ./gradlew || true
-          mkdir -p gradle/wrapper
           if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "Downloading gradle-wrapper.jar..."
-            curl -fsSL https://raw.githubusercontent.com/gradle/gradle/master/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar || true
+            echo "::error::gradle/wrapper/gradle-wrapper.jar is missing from the repository."
+            exit 1
           fi
 
       - name: Build Debug APK with Gradle

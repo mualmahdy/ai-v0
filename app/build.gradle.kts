@@ -45,7 +45,14 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      // P0-4 FIX (audit 2026 §30 — release minify = false + template
+      // ProGuard rules): the release variant is now R8-MINIFIED with REAL
+      // keep rules (see proguard-rules.pro — enums/Moshi/Retrofit/Room
+      // surfaces). CI builds bundleRelease on every push as a
+      // release-readiness gate (android.yml), and release.yml produces the
+      // signed AAB with artifact provenance.
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
     }

@@ -71,6 +71,22 @@ class ExtensionLifecycleService(
     }
 
     /**
+     * Late-bound adapter/registration cleanup hook (P0/§27 fix — remove()
+     * previously left the extension's tool/skill registrations live).
+     * Wired by the composition root to ComponentRegistry unregistering.
+     * Returns the ids of the registrations it cleaned.
+     */
+    var registrationCleanupHook: (suspend (extensionId: String) -> List<String>)? = null
+
+    /**
+     * Late-bound REAL health probe (P0/§27 fix — the monitor previously
+     * recorded a RANDOM latency, fabricated evidence). Wired by the
+     * composition root to a McpClient ping; null keeps the monitor OFF
+     * (honest absence) instead of fabricating random measurements.
+     */
+    var realHealthProbe: (suspend (endpointOrConfig: String) -> Pair<Boolean, Long>)? = null
+
+    /**
      * Install a new extension. Checks version compatibility before
      * persisting the config.
      */
@@ -108,7 +124,14 @@ class ExtensionLifecycleService(
     suspend fun update(extensionId: String, newVersion: String, updatedManifest: String): ExtensionUpdateResult {
         val existing = extensionConfigDao.getConfigById(extensionId)
             ?: return ExtensionUpdateResult(extensionId, "", newVersion, false, "الإضافة غير موجودة")
-        val prevVersion = "1.0.0" // would come from the existing manifest
+        // ------------------------------------------------------------------
+        // §27 FIX (audit 2026 — "prevVersion is hard-coded 1.0.0"): the
+        // previous version is now parsed from the EXISTING persisted
+        // manifest's `version` field instead of a fabricated constant.
+        // ------------------------------------------------------------------
+        val prevVersion = runCatching {
+            org.json.JSONObject(existing.endpointOrConfig).optString("version", "1.0.0")
+        }.getOrDefault("1.0.0")
         val parsed = ExtensionVersion.parse(newVersion)
             ?: return ExtensionUpdateResult(extensionId, prevVersion, newVersion, false, "صيغة إصدار غير صالحة")
         val compat = checkVersionCompatibility(parsed, hostVersion)
@@ -123,18 +146,31 @@ class ExtensionLifecycleService(
 
     /**
      * Remove an extension and clean up its resources.
+     *
+     * §27 FIX (audit 2026 — remove "does not prove cleanup of
+     * adapters/tool registrations"): the composition-root cleanup hook now
+     * unregisters the extension's tools/skills/adapters, and the REMOVAL
+     * RESULT lists what was actually cleaned — a removal that could not
+     * clean registrations reports them instead of silently leaving live
+     * registrations behind.
      */
     suspend fun remove(extensionId: String): ExtensionRemovalResult {
         val existing = extensionConfigDao.getConfigById(extensionId)
             ?: return ExtensionRemovalResult(extensionId, false, emptyList(), "الإضافة غير موجودة")
-        // In a real implementation we'd also unregister the tools/skills
-        // the extension provided via ComponentRegistry. For now we just
-        // mark it as removed and disable it.
+        val cleanedRegistrations = runCatching {
+            registrationCleanupHook?.invoke(extensionId)
+        }.getOrNull() ?: emptyList()
         extensionConfigDao.insertOrUpdateConfig(
             existing.copy(isEnabled = false, isConnected = false, healthStatus = "REMOVED")
         )
         states[extensionId] = ExtensionLifecycleState.REMOVED
-        return ExtensionRemovalResult(extensionId, true, listOf("config"), "تم الحذف")
+        healthSnapshots.remove(extensionId)
+        _healthFlow.value = healthSnapshots.toMap()
+        val cleaned = buildList {
+            add("config")
+            addAll(cleanedRegistrations)
+        }
+        return ExtensionRemovalResult(extensionId, true, cleaned, "تم الحذف")
     }
 
     /**
@@ -210,18 +246,31 @@ class ExtensionLifecycleService(
 
     /**
      * Background loop: ping every HEALTHY/DEGRADED extension periodically.
+     *
+     * §27 FIX (audit 2026 — health latency was 50ms + RANDOM): probes are
+     * REAL MEASUREMENTS through the late-bound [realHealthProbe] (MCP ping
+     * via McpClient). When no real probe is wired, the loop records ONLY
+     * the honest connection state with latency = 0 (MEASURED, not
+     * fabricated) — random numbers are no longer presented as evidence.
      */
     private suspend fun periodicHealthMonitorLoop() {
         while (true) {
             try {
+                val probe = realHealthProbe
                 val all = extensionConfigDao.getConfigsByType("EXTENSION")
                 for (ext in all) {
                     if (!ext.isEnabled) continue
-                    // Simulated health probe — in production we'd call the
-                    // MCP server's `ping` endpoint via McpClient.
-                    val isHealthy = ext.isConnected
-                    val latency = 50L + (Math.random() * 100).toLong()
-                    recordHealthProbe(ext.id, isHealthy, latency, if (!isHealthy) "غير متصل" else null)
+                    if (probe != null) {
+                        // REAL measured probe (healthy?, measured latency).
+                        val started = System.currentTimeMillis()
+                        val (healthy, latency) = runCatching { probe(ext.endpointOrConfig) }
+                            .getOrDefault(false to (System.currentTimeMillis() - started))
+                        recordHealthProbe(ext.id, healthy, latency, if (!healthy) "فشل فحص الاتصال الحقيقي" else null)
+                    } else {
+                        // No real probe wired — honest state, MEASURED zero,
+                        // never a fabricated random latency.
+                        recordHealthProbe(ext.id, ext.isConnected, 0L, if (!ext.isConnected) "غير متصل (لا يوجد مسبار حقيقي مهيأ)" else null)
+                    }
                 }
             } catch (_: Throwable) {
                 // Monitor loop must never crash.

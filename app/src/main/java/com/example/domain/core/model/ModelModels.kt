@@ -49,6 +49,14 @@ data class ModelDescriptor(
     val health: HealthStatus = HealthStatus.UNKNOWN,
     val estimatedCostPer1kTokensUsd: Double? = null,
     val averageLatencyMs: Long? = null,
+    /**
+     * §20 FIX (audit 2026 — health/latency honesty): TRUE when the latency
+     * was MEASURED from a real interaction (control-plane test connection);
+     * FALSE when it is a published provider estimate advertised in a
+     * built-in model descriptor. Consumers must never present an estimate
+     * as a measured runtime value.
+     */
+    val latencyIsMeasured: Boolean = false,
     val discoverySource: String = "UNSPECIFIED",
     val confidence: Float = 0.0f,
     val lastDiscoveredTimestampMs: Long = System.currentTimeMillis()

@@ -22,33 +22,18 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    - name: Debug repo files
+    # P0-3 FIX (audit 2026 §30): the wrapper JAR is COMMITTED in this
+    # repository (gradle/wrapper/gradle-wrapper.jar) — the previous job
+    # curl'ed the wrapper from gradle/gradle@master, silently substituting
+    # an UNVERIFIED, UNPINNED binary into the build (a supply-chain hole and
+    # a source of build divergence). We now FAIL if the committed wrapper is
+    # missing instead of downloading a different one.
+    - name: Verify committed Gradle wrapper
       run: |
-        echo "Listing repo root:"
-        ls -la
-        echo "Listing app dir if exists:"
-        ls -la app || true
-        echo "Check for gradlew and debug.keystore:"
-        [ -f "./gradlew" ] && echo "gradlew: present" || echo "gradlew: missing"
-        [ -f "./debug.keystore" ] && echo "debug.keystore: present" || echo "debug.keystore: missing"
-
-    - name: Ensure Gradle Wrapper and Keystore
-      run: |
-        chmod +x ./gradlew || true
-        mkdir -p gradle/wrapper
+        chmod +x ./gradlew
         if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-          echo "Downloading gradle-wrapper.jar..."
-          curl -fsSL https://raw.githubusercontent.com/gradle/gradle/master/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar || true
-        fi
-        if [ ! -f "debug.keystore" ]; then
-          if [ -f "debug.keystore.base64" ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-          else
-            echo "Generating debug.keystore for CI"
-            keytool -genkeypair -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-              -keystore debug.keystore -storepass android -keypass android \
-              -dname "CN=Android Debug, O=Android, C=US"
-          fi
+          echo "::error::gradle/wrapper/gradle-wrapper.jar is missing from the repository — refusing to substitute an unpinned download."
+          exit 1
         fi
 
     - name: Compile (fail fast on Kotlin errors)
@@ -63,11 +48,30 @@ jobs:
       run: |
         ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
+    # P0-4 (audit 2026 §30 — no release pipeline): the PR gate now ALSO
+    # proves the RELEASE variant builds (R8 minification, real keep rules,
+    # AAB bundling) BEFORE release day. Unsigned here — signing secrets are
+    # exercised by release.yml; a CI proof that minification does not break
+    # the build is the minimum release-readiness bar.
+    - name: Build Release AAB (minified, unsigned — release-readiness gate)
+      run: |
+        ./gradlew :app:bundleRelease --no-daemon --stacktrace \
+          -Pandroid.injected.signing.store.file= \
+          -Pandroid.injected.signing.store.password= \
+          -Pandroid.injected.signing.key.alias= \
+          -Pandroid.injected.signing.key.password=
+
     - name: Upload APK artifacts
       uses: actions/upload-artifact@v4
       with:
         name: app-debug-apks
         path: app/build/outputs/**/*.apk
+
+    - name: Upload release AAB artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-release-aab-unsigned
+        path: app/build/outputs/bundle/release/*.aab
 
     - name: Upload test reports
       if: always()
