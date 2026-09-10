@@ -84,6 +84,14 @@ class HumanApprovalGate(
     /** Housekeeping: expire stale pending requests; returns how many. */
     suspend fun expireStale(): Int = store.expireStale(clock())
 
+    /**
+     * REPAIR ORDER §3B/§2.2 — the approval SURFACE: all pending requests
+     * (the user can finally SEE and RESOLVE consent requests; previously
+     * approve/reject had ZERO production callers — governance was enforced
+     * with no possible human-in-the-loop).
+     */
+    suspend fun pendingApprovals(limit: Int = 50): List<HumanApprovalRequest> = store.findPending(limit)
+
     private suspend fun resolveInternal(
         approvalId: String,
         resolution: ApprovalResolution,

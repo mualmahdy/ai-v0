@@ -49,6 +49,22 @@ import kotlin.math.sqrt
  *      expected value of information justifies interrupting the user
  *      (high uncertainty or repeated failures); otherwise it is heavily
  *      penalized so the engine prefers autonomous progress.
+ *
+ * ============================================================================
+ * REPAIR ORDER §19 — HONEST REPRESENTATION + ACTION-SPACE VERSIONING
+ * ============================================================================
+ * HONESTY: this engine is a HEURISTIC SCORING + TABULAR-Q APPROXIMATION —
+ * cosine case retrieval blended with hand-tuned immediate-reward priors and
+ * a TD-learned per-(region, resource, action) table. It does NOT implement
+ * the full axiomatic CBR-MDP model (Bayesian belief measures, Wasserstein
+ * penalties, contraction/recurrence proofs) of cbr-mdp.txt. It is correctly
+ * described as a DECISION/RANKING LAYER with learned value estimates.
+ *
+ * STALENESS (§19/§18): [ACTION_SPACE_VERSION] binds the learned Q-table to
+ * the action-space semantics it was learned under. When action definitions,
+ * capability semantics, or decision policy change MATERIALLY, the version is
+ * bumped and previously persisted rows are INVALIDATED (dropped honestly at
+ * load) instead of silently contaminating the new semantics.
  */
 class CbrMdpEngine(
     private val caseBase: CaseBase = CaseBase(),
@@ -57,6 +73,16 @@ class CbrMdpEngine(
     /** Scope used to persist dirty Q-table cells asynchronously. */
     private val persistenceScope: CoroutineScope? = null
 ) {
+    companion object {
+        /**
+         * REPAIR ORDER §19/§3B — the learned Q-table is version-bound to the
+         * action-space semantics. v2 (2026-09): admissible-action-set
+         * filtering introduced (task contract + agent-capability binding);
+         * action families now have different admissibility conditions, so
+         * legacy v1 scores are INVALID and dropped at load.
+         */
+        const val ACTION_SPACE_VERSION = "asv2-2026-09"
+    }
     // Discount factor gamma for MDP
     private val gamma: Float = 0.9f
     private val cbrWeight: Float = 0.55f
@@ -180,13 +206,27 @@ class CbrMdpEngine(
     /**
      * FIX D-4: loads the persisted Q-table into memory. Called once at
      * bootstrap (AppContainer) BEFORE any decision is evaluated.
+     *
+     * REPAIR ORDER §19: rows persisted under an INCOMPATIBLE action-space
+     * version are DROPPED honestly (never applied to new semantics). The
+     * drop count is observable via [invalidatedLegacyRows].
      */
+    @Volatile
+    var invalidatedLegacyRows: Int = 0
+        private set
+
     suspend fun loadPersistedQTable() {
         val store = mdpStore ?: return
         runCatching {
+            var dropped = 0
             for (entry in store.loadAll()) {
+                if (entry.actionSpaceVersion != null && entry.actionSpaceVersion != ACTION_SPACE_VERSION) {
+                    dropped++
+                    continue
+                }
                 qTable[cellKey(entry.regionKey, entry.resourceKey, entry.actionType)] = entry
             }
+            invalidatedLegacyRows = dropped
         }
     }
 

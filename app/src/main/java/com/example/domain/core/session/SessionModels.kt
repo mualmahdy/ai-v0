@@ -52,7 +52,13 @@ data class ConversationSession(
     val turnCount: Int = 0,
     val totalTokensConsumed: Int = 0,
     val createdAtEpochMs: Long = 0L,
-    val lastActiveAtEpochMs: Long = 0L
+    val lastActiveAtEpochMs: Long = 0L,
+    /**
+     * REPAIR ORDER §5/§15 — project-scoped sessions: NULL = workspace-scoped
+     * (shared) session, non-null = project-private session. Sessions of
+     * project A are invisible to project B (sibling isolation).
+     */
+    val projectId: Long? = null
 )
 
 /** One durable conversational turn (the real executed outcome). */

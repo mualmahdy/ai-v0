@@ -252,7 +252,7 @@ class GovernancePersistenceTest {
     }
 
     @Test
-    fun `db version is 14 with all governance + execution-kernel + convergence tables`() {
+    fun `db version is 16 with all governance + execution-kernel + convergence + portability tables`() {
         // Gap-closure: v11 added action_intents + agent_definitions + the
         // tasks.executionContextJson column (canonical execution kernel).
         // P0 convergence (v12): workspace-owned projects, RAG metadata
@@ -267,8 +267,12 @@ class GovernancePersistenceTest {
         // AUDIT 2026 REMEDIATION (v15): workspace identity on
         // tasks/execution_logs/execution_trace_nodes and the DURABLE human
         // approval requests table (§17).
+        // REPAIR ORDER (v16): project lifecycle state machine, projectId on
+        // knowledge_documents/chat_sessions/tasks, action-space version on
+        // mdp_q_values, artifacts, project_dependencies, project_snapshots,
+        // audit_events.
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(15, dbVersion)
+        assertEquals(16, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))

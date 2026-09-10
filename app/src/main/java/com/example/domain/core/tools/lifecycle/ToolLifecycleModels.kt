@@ -177,7 +177,13 @@ data class ToolPermissionGrant(
     val isAllowed: Boolean,
     val grantedBy: String,
     val grantedAtEpochMs: Long = System.currentTimeMillis(),
-    val expiresAtEpochMs: Long? = null
+    val expiresAtEpochMs: Long? = null,
+    /**
+     * REPAIR ORDER §6/§8 — EXPLICIT grant scope: null = GLOBAL grant
+     * (visible to every workspace), non-null = workspace-scoped grant.
+     * Absence of a grant remains "private/denied" by default.
+     */
+    val workspaceId: String? = null
 )
 
 enum class PrincipalType { AGENT, WORKSPACE, USER, EXTENSION }

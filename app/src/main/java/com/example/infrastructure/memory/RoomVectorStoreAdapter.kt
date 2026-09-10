@@ -60,7 +60,16 @@ class RoomVectorStoreAdapter(
                 source = record.metadata["source"] ?: "USER_INPUT",
                 confidence = record.metadata["confidence"]?.toFloatOrNull() ?: 1.0f,
                 createdAtEpochMs = System.currentTimeMillis(),
-                lastAccessedEpochMs = System.currentTimeMillis()
+                lastAccessedEpochMs = System.currentTimeMillis(),
+                // ------------------------------------------------------------
+                // REPAIR ORDER §15 — workspace attribution on the VectorStorePort
+                // path. Previously `upsert` wrote MemoryEntity WITHOUT a
+                // workspaceId while every READ was workspace-scoped — rows
+                // written through this path landed in the invisible legacy
+                // null-workspace scope (silent data loss). Writes now carry
+                // the pinned/current workspace, mirroring storeMemory().
+                // ------------------------------------------------------------
+                workspaceId = currentWorkspaceId()
             )
             memoryDao.insertMemory(entity)
             Outcome.Success(Unit)

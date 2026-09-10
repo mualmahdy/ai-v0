@@ -170,6 +170,19 @@ data class UiState(
     val remainingBudget: Int = 30000,
     val networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
     val autonomyPolicy: AutonomyPolicy = AutonomyPolicy.SUPERVISED,
+    /**
+     * REPAIR ORDER §3A — the bootstrap state machine phase label
+     * (BOOTSTRAPPING / WORKSPACE_READY / PROJECT_RESOLVED / CONTEXT_READY /
+     * READY / FAILED) and its explicit failure message, if any. UI gates
+     * project-dependent features on READY and renders honest failure states.
+     */
+    val bootstrapPhase: String = "BOOTSTRAPPING",
+    val bootstrapFailureMessage: String? = null,
+    /**
+     * REPAIR ORDER §5 — projects of the active workspace (authoritative
+     * list from ProjectRuntimeService; UI project pickers render THIS).
+     */
+    val availableProjects: List<com.example.domain.core.project.Project> = emptyList(),
     val resourceGraph: ResourceGraph = ResourceGraph(),
 
     // Tasks & Workflows

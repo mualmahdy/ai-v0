@@ -10,15 +10,14 @@ import androidx.room.PrimaryKey
  * legacy rows whose owner could not be determined during migration —
  * they remain readable but are never implicitly re-assigned).
  *
- * Previously the projects table had no workspace back-reference at all:
- * ownership had to be inferred through `workspaces.lastActiveProjectId`,
- * which is ambiguous (nothing prevented two workspaces pointing at the
- * same project) and left the Project as a floating anchor. MIGRATION_11_TO_12
- * backfills `workspaceId` from the existing bridge column.
+ * REPAIR ORDER §27 (DB v16): full safe lifecycle state machine —
+ * ACTIVE / ARCHIVED / TRASHED / DELETED / PURGED — replacing the boolean
+ * isArchived as the authority (isArchived is kept as a DERIVED compatibility
+ * column: lifecycleState == ARCHIVED). Deletion is NEVER the first action.
  */
 @Entity(
     tableName = "projects",
-    indices = [Index("workspaceId")]
+    indices = [Index("workspaceId"), Index("lifecycleState")]
 )
 data class ProjectEntity(
     @PrimaryKey(autoGenerate = true)
@@ -30,8 +29,22 @@ data class ProjectEntity(
     val updatedAtEpochMs: Long,
     val isArchived: Boolean = false,
     /** Owning workspace id — set at creation, never implicit. */
-    val workspaceId: String? = null
-)
+    val workspaceId: String? = null,
+    /** REPAIR ORDER §27: authoritative lifecycle state (DB v16). */
+    val lifecycleState: String = "ACTIVE",
+    val archivedAtEpochMs: Long? = null,
+    val trashedAtEpochMs: Long? = null
+) {
+    val effectiveLifecycleState: String
+        get() = when {
+            lifecycleState.isBlank() -> if (isArchived) "ARCHIVED" else "ACTIVE"
+            // Legacy authority: pre-v16 rows whose isArchived was the only
+            // lifecycle signal (migrated rows are set explicitly, but any
+            // straggler with isArchived=1 + default state resolves honestly).
+            isArchived && lifecycleState == "ACTIVE" -> "ARCHIVED"
+            else -> lifecycleState
+        }
+}
 
 /*
  * P0 CONVERGENCE REMOVAL: `SessionEntity` (table `sessions`) was deleted.
@@ -144,7 +157,13 @@ data class TaskEntity(
      * pinned canonical execution context at insert time). Null = honestly
      * UNATTRIBUTED (legacy rows before v15 — never implicitly re-assigned).
      */
-    val workspaceId: String? = null
+    val workspaceId: String? = null,
+    /**
+     * REPAIR ORDER §5 (DB v16): project ownership promoted out of
+     * executionContextJson into a QUERYABLE column. Backfilled from the
+     * serialized context during migration; null = unattributed.
+     */
+    val projectId: Long? = null
 )
 
 @Entity(tableName = "decision_cases")
@@ -256,5 +275,7 @@ data class MdpQValueEntity(
     val qValue: Float,
     val visitCount: Int,
     val successCount: Int,
-    val lastUpdatedEpochMs: Long
+    val lastUpdatedEpochMs: Long,
+    /** REPAIR ORDER §19 (DB v16): action-space version binding. */
+    val actionSpaceVersion: String? = null
 )

@@ -48,6 +48,13 @@ class RagPersistenceHonestyTest {
         override suspend fun deleteById(id: String) {}
         override suspend fun deleteAllForWorkspace(workspaceId: String) {}
         override suspend fun countForWorkspace(workspaceId: String): Int = 0
+        override suspend fun getWorkspaceSharedDocuments(workspaceId: String): List<KnowledgeDocumentEntity> = emptyList()
+        override suspend fun getProjectPrivateDocuments(projectId: Long): List<KnowledgeDocumentEntity> = emptyList()
+        override suspend fun getDocumentsForRetrieval(workspaceId: String, projectId: Long?): List<KnowledgeDocumentEntity> = emptyList()
+        override suspend fun getDocumentByIdForWorkspace(id: String, workspaceId: String): KnowledgeDocumentEntity? = null
+        override suspend fun deleteByIdForWorkspace(id: String, workspaceId: String) {}
+        override suspend fun deleteAllForProject(projectId: Long) {}
+        override suspend fun reassignProject(ids: List<String>, projectId: Long?) {}
     }
 
     private class ThrowingChunkDao : DocumentChunkDao {
@@ -66,7 +73,8 @@ class RagPersistenceHonestyTest {
         var docsByWorkspace: Map<String, List<KnowledgeDocumentEntity>> = emptyMap()
     ) : KnowledgePersistenceService(ThrowingDocumentDao(), ThrowingChunkDao()) {
         override suspend fun loadWorkspaceKnowledge(
-            workspaceId: String
+            workspaceId: String,
+            projectId: Long?
         ): Pair<List<com.example.domain.core.rag.KnowledgeDocument>, List<com.example.domain.core.rag.DocumentChunk>> {
             delayByWorkspace[workspaceId]?.let { delay(it) }
             val docs = docsByWorkspace[workspaceId].orEmpty().map {

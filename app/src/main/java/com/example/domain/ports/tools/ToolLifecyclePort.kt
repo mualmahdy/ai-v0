@@ -32,12 +32,18 @@ interface ToolLifecyclePort {
     /** REGISTERED → VALIDATED: validate the declaration schema and security posture. */
     suspend fun validate(toolId: String): ToolValidationResult
 
-    /** VALIDATED → AUTHORIZED: authorize a principal to execute the tool. */
+    /** VALIDATED → AUTHORIZED: authorize a principal to execute the tool.
+     *
+     * REPAIR ORDER §6 — workspace-scoped authorization: [workspaceId]
+     * scopes the grant lookup (GLOBAL or same-workspace grants match; a
+     * grant scoped to ANOTHER workspace never authorizes). Default null =
+     * explicit GLOBAL scope only — never an unscoped cross-workspace match. */
     suspend fun authorize(
         toolId: String,
         principalType: PrincipalType,
         principalId: String,
-        permission: ToolPermission = ToolPermission.EXECUTE
+        permission: ToolPermission = ToolPermission.EXECUTE,
+        workspaceId: String? = null
     ): ToolAuthorizationResult
 
     /** AUTHORIZED → EXPOSED: expose the tool to the LLM tool catalog. */
@@ -52,12 +58,15 @@ interface ToolLifecyclePort {
     /** Revoke a previously-granted permission. */
     suspend fun revokePermission(grantId: Long)
 
-    /** Check whether a principal has a specific permission on a tool. */
+    /** Check whether a principal has a specific permission on a tool.
+     *
+     * REPAIR ORDER §6 — workspace-scoped (see [authorize]). */
     suspend fun checkPermission(
         toolName: String,
         principalType: PrincipalType,
         principalId: String,
-        permission: ToolPermission = ToolPermission.EXECUTE
+        permission: ToolPermission = ToolPermission.EXECUTE,
+        workspaceId: String? = null
     ): Boolean
 
     /** Record an audit entry after a tool call. */

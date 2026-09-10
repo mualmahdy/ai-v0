@@ -43,12 +43,22 @@ open class KnowledgePersistenceService(
      * from the document map — previously titles and metadata silently
      * vanished on reload, collapsing the embedding-compatibility boundary,
      * authority/recency signals and metadata filters after restart.
+     *
+     * REPAIR ORDER §15: [projectId] selects the RETRIEVAL SCOPE MODE —
+     * null loads ALL workspace knowledge (workspace-wide view);
+     * non-null loads only that project's private documents + workspace-
+     * shared documents (PROJECT_AND_WORKSPACE semantics).
      */
-    open suspend fun loadWorkspaceKnowledge(workspaceId: String): Pair<List<KnowledgeDocument>, List<DocumentChunk>> = withContext(Dispatchers.IO) {
-        val docEntities = documentDao.getDocumentsForWorkspace(workspaceId)
+    open suspend fun loadWorkspaceKnowledge(workspaceId: String, projectId: Long? = null): Pair<List<KnowledgeDocument>, List<DocumentChunk>> = withContext(Dispatchers.IO) {
+        val docEntities = if (projectId != null) {
+            documentDao.getDocumentsForRetrieval(workspaceId, projectId)
+        } else {
+            documentDao.getDocumentsForWorkspace(workspaceId)
+        }
         if (docEntities.isEmpty()) return@withContext emptyList<KnowledgeDocument>() to emptyList()
 
-        val chunkEntities = chunkDao.getChunksForWorkspace(workspaceId)
+        val docIds = docEntities.map { it.id }.toSet()
+        val chunkEntities = chunkDao.getChunksForWorkspace(workspaceId).filter { it.documentId in docIds }
         val titlesByDocId = docEntities.associate { it.id to it.title }
 
         val documents = docEntities.map { entity ->
@@ -88,7 +98,9 @@ open class KnowledgePersistenceService(
             totalTokensEstimated = chunks.sumOf { it.tokenCount },
             createdAtEpochMs = document.createdAtTimestampMs.takeIf { it > 0 } ?: now,
             updatedAtEpochMs = now,
-            isArchived = false
+            isArchived = false,
+            // REPAIR ORDER §15: project ownership — null = workspace-shared.
+            projectId = document.projectId
         )
         documentDao.insertOrUpdate(docEntity)
 
@@ -156,7 +168,9 @@ open class KnowledgePersistenceService(
         content = content,
         tags = decodeStringArray(tagsJson),
         totalChunks = totalChunks,
-        createdAtTimestampMs = createdAtEpochMs
+        createdAtTimestampMs = createdAtEpochMs,
+        // REPAIR ORDER §15: project ownership round-trips through persistence.
+        projectId = projectId
     )
 
     private fun DocumentChunkEntity.toDomain(documentTitle: String): DocumentChunk {

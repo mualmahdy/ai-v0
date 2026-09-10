@@ -74,6 +74,15 @@ class WorkspaceRuntimeServiceTest {
             stored.remove(id)
             deleteByIdCalls.add(id)
         }
+
+        override suspend fun updateAutonomyPolicy(workspaceId: String, policy: String, now: Long) {
+            stored[workspaceId]?.let {
+                stored[workspaceId] = it.copy(autonomyPolicy = policy, lastAccessedEpochMs = now)
+            }
+        }
+
+        override suspend fun autonomyPolicyFor(workspaceId: String): String? =
+            stored[workspaceId]?.autonomyPolicy
     }
 
     /** In-memory fake of ProjectDao (P0 convergence: workspace-owned projects). */
@@ -97,6 +106,40 @@ class WorkspaceRuntimeServiceTest {
         override suspend fun archiveProjectForWorkspace(id: Long, workspaceId: String) {
             stored[id]?.let { if (it.workspaceId == workspaceId) stored[id] = it.copy(isArchived = true) }
         }
+        override suspend fun forWorkspaceInState(workspaceId: String, state: String): List<ProjectEntity> =
+            stored.values.filter { it.workspaceId == workspaceId && it.effectiveLifecycleState == state }
+        override suspend fun activeProjectsForWorkspaceList(workspaceId: String): List<ProjectEntity> =
+            stored.values.filter { it.workspaceId == workspaceId && it.effectiveLifecycleState == "ACTIVE" }
+        override suspend fun mostRecentActiveProjectForWorkspace(workspaceId: String): ProjectEntity? =
+            stored.values.filter { it.workspaceId == workspaceId && it.effectiveLifecycleState == "ACTIVE" }
+                .maxByOrNull { it.updatedAtEpochMs }
+        override suspend fun resolvableProjectForWorkspace(id: Long, workspaceId: String): ProjectEntity? =
+            stored[id]?.takeIf { it.workspaceId == workspaceId && it.effectiveLifecycleState == "ACTIVE" }
+        override suspend fun setLifecycleState(id: Long, workspaceId: String, state: String, now: Long, archived: Boolean, archivedAt: Long?, trashedAt: Long?) {
+            stored[id]?.let {
+                if (it.workspaceId == workspaceId) {
+                    stored[id] = it.copy(
+                        lifecycleState = state, isArchived = archived,
+                        archivedAtEpochMs = archivedAt, trashedAtEpochMs = trashedAt,
+                        updatedAtEpochMs = now
+                    )
+                }
+            }
+        }
+        override suspend fun renameProjectForWorkspace(id: Long, workspaceId: String, name: String, description: String?, now: Long) {
+            stored[id]?.let {
+                if (it.workspaceId == workspaceId) stored[id] = it.copy(name = name, description = description, updatedAtEpochMs = now)
+            }
+        }
+        override suspend fun moveProjectToWorkspace(id: Long, sourceWorkspaceId: String, targetWorkspaceId: String, now: Long): Int {
+            val p = stored[id] ?: return 0
+            if (p.workspaceId != sourceWorkspaceId) return 0
+            stored[id] = p.copy(workspaceId = targetWorkspaceId, updatedAtEpochMs = now)
+            return 1
+        }
+        override suspend fun countByNameForWorkspace(workspaceId: String, name: String): Int =
+            stored.values.count { it.workspaceId == workspaceId && it.name.equals(name, ignoreCase = true) }
+        override suspend fun deleteProjectRow(id: Long) { stored.remove(id) }
 
         override suspend fun insertProject(project: ProjectEntity): Long {
             val id = nextId++
@@ -228,6 +271,15 @@ class WorkspaceRuntimeServiceTest {
             override suspend fun insertProject(project: com.example.infrastructure.persistence.entities.ProjectEntity): Long = 77L
             override suspend fun updateProject(project: com.example.infrastructure.persistence.entities.ProjectEntity) {}
             override suspend fun archiveProject(id: Long) {}
+            override suspend fun forWorkspaceInState(workspaceId: String, state: String): List<com.example.infrastructure.persistence.entities.ProjectEntity> = emptyList()
+            override suspend fun activeProjectsForWorkspaceList(workspaceId: String): List<com.example.infrastructure.persistence.entities.ProjectEntity> = emptyList()
+            override suspend fun mostRecentActiveProjectForWorkspace(workspaceId: String): com.example.infrastructure.persistence.entities.ProjectEntity? = null
+            override suspend fun resolvableProjectForWorkspace(id: Long, workspaceId: String): com.example.infrastructure.persistence.entities.ProjectEntity? = null
+            override suspend fun setLifecycleState(id: Long, workspaceId: String, state: String, now: Long, archived: Boolean, archivedAt: Long?, trashedAt: Long?) {}
+            override suspend fun renameProjectForWorkspace(id: Long, workspaceId: String, name: String, description: String?, now: Long) {}
+            override suspend fun moveProjectToWorkspace(id: Long, sourceWorkspaceId: String, targetWorkspaceId: String, now: Long): Int = 0
+            override suspend fun countByNameForWorkspace(workspaceId: String, name: String): Int = 0
+            override suspend fun deleteProjectRow(id: Long) {}
         }
         val service = WorkspaceRuntimeService(
             workspaceDao = dao,
@@ -482,12 +534,22 @@ class WorkspaceRuntimeServiceTest {
 
         // A stuck execution: an un-interruptible region longer than the
         // drain timeout (a job that refuses to die within the bound).
+        // REPAIR ORDER (test stability): a CountDownLatch guarantees the
+        // un-cancellable region is ENTERED before deletion is attempted —
+        // without it, cancel-before-start makes the drain trivially succeed
+        // (a launch/cancel race, not the behavior under test).
+        val enteredUncancellable = java.util.concurrent.CountDownLatch(1)
         val key = "p114-stuck-" + java.util.UUID.randomUUID()
         val job = com.example.application.execution.ExecutionHost.launch(key, "ws_active") {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                enteredUncancellable.countDown()
                 Thread.sleep(300) // longer than drainTimeoutMs
             }
         }
+        org.junit.Assert.assertTrue(
+            "test precondition: the un-cancellable region must be entered before deletion",
+            enteredUncancellable.await(2, java.util.concurrent.TimeUnit.SECONDS)
+        )
 
         val result = service.deleteWorkspace("ws_active")
 

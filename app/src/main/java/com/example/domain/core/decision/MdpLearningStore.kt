@@ -57,7 +57,13 @@ data class MdpQEntry(
     val qValue: Float,
     val visitCount: Int,
     val successCount: Int,
-    val lastUpdatedEpochMs: Long = 0L
+    val lastUpdatedEpochMs: Long = 0L,
+    /**
+     * REPAIR ORDER §19 — action-space version binding. Null = legacy row
+     * (pre-versioning); the engine validates compatibility at load and
+     * drops rows whose semantics no longer match the current action space.
+     */
+    val actionSpaceVersion: String? = null
 )
 
 /**

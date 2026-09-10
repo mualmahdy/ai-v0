@@ -241,7 +241,8 @@ class ToolLifecycleService(
         toolId: String,
         principalType: PrincipalType,
         principalId: String,
-        permission: ToolPermission
+        permission: ToolPermission,
+        workspaceId: String?
     ): ToolAuthorizationResult = withContext(Dispatchers.IO) {
         val entity = toolLifecycleDao.active().firstOrNull { it.toolId == toolId }
         if (entity == null) {
@@ -264,13 +265,20 @@ class ToolLifecycleService(
             )
         }
 
-        // Check the grant table.
-        val grant = permissionGrantDao.lookup(
+        // ------------------------------------------------------------------
+        // REPAIR ORDER §6 — WORKSPACE-SCOPED grant lookup. The legacy
+        // UNSCOPED `lookup` matched grants from ANY workspace — a
+        // cross-workspace authorization bypass on the same table. The
+        // scoped lookup honors GLOBAL (null) or SAME-workspace grants
+        // ONLY.
+        // ------------------------------------------------------------------
+        val grant = permissionGrantDao.lookupScoped(
             principalType = principalType.name,
             principalId = principalId,
             resourceType = "TOOL",
             resourceId = entity.toolName,
-            permission = permission.name
+            permission = permission.name,
+            workspaceId = workspaceId
         )
 
         val isAuthorized = grant?.isAllowed == true
@@ -317,7 +325,12 @@ class ToolLifecycleService(
             isAllowed = grant.isAllowed,
             grantedBy = grant.grantedBy,
             grantedAtEpochMs = grant.grantedAtEpochMs,
-            expiresAtEpochMs = grant.expiresAtEpochMs
+            expiresAtEpochMs = grant.expiresAtEpochMs,
+            // REPAIR ORDER §6: grants are recorded with an EXPLICIT scope —
+            // null means GLOBAL (previously every tool-lifecycle grant was
+            // implicitly global; now the scope is honest and the scoped
+            // lookup enforces it).
+            workspaceId = grant.workspaceId
         )
         permissionGrantDao.upsert(entity)
     }
@@ -331,14 +344,17 @@ class ToolLifecycleService(
         toolName: String,
         principalType: PrincipalType,
         principalId: String,
-        permission: ToolPermission
+        permission: ToolPermission,
+        workspaceId: String?
     ): Boolean = withContext(Dispatchers.IO) {
-        val grant = permissionGrantDao.lookup(
+        // REPAIR ORDER §6 — workspace-scoped (see authorize()).
+        val grant = permissionGrantDao.lookupScoped(
             principalType = principalType.name,
             principalId = principalId,
             resourceType = "TOOL",
             resourceId = toolName,
-            permission = permission.name
+            permission = permission.name,
+            workspaceId = workspaceId
         )
         grant?.isAllowed == true
     }
@@ -463,12 +479,11 @@ class ToolLifecycleService(
         toolAuditDao.recent(200).map { _ ->
             // Map audit rows to health snapshots — we read the latest from the
             // tool_health_snapshots table on each emission so the dashboard sees
-            // live data. We don't have a Flow on tool_health_snapshots itself
-            // (no @Query returning Flow), so we approximate by reading recent
-            // audit events and producing a synthetic snapshot list.
-            kotlinx.coroutines.runBlocking {
-                toolHealthDao.all().map { it.toDomain() }
-            }
+            // live data.
+            // REPAIR ORDER §1-11/§18 — REMOVED runBlocking (was blocking the
+            // emitting thread inside a Flow.map; kotlinx Flow.map accepts a
+            // SUSPEND transform, so the DAO call is properly suspended).
+            toolHealthDao.all().map { it.toDomain() }
         }
 
     override fun auditTrail(limit: Int): Flow<List<ToolAuditEntry>> =

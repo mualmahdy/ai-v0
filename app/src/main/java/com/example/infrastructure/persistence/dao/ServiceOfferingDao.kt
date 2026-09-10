@@ -22,6 +22,10 @@ interface ServiceOfferingDao {
     @Query("SELECT * FROM service_offerings WHERE serviceId = :serviceId")
     suspend fun getByServiceId(serviceId: String): List<ServiceOfferingEntity>
 
+    /** REPAIR ORDER §24 — dependency resolution for import compatibility. */
+    @Query("SELECT * FROM service_offerings")
+    suspend fun all(): List<ServiceOfferingEntity>
+
     @Query("DELETE FROM service_offerings WHERE serviceId = :serviceId")
     suspend fun deleteByServiceId(serviceId: String)
 }

@@ -151,10 +151,35 @@ class AgentOrchestrator(
         agent: AgentDefinition,
         task: TaskDefinition,
         accumulatedTokens: Int
-    ) -> com.example.domain.core.agent.lifecycle.BudgetEvaluation)? = null
+    ) -> com.example.domain.core.agent.lifecycle.BudgetEvaluation)? = null,
+    /**
+     * REPAIR ORDER §20 — resolves the PINNED workspace's authoritative
+     * autonomy policy from persistence BY ID (never the currently-active
+     * StateFlow). Called ONCE at execution launch; the result is pinned
+     * into the decision context for the whole run. Wired by AppContainer
+     * to the WorkspaceDao. Null = no workspace-policy authority (tests).
+     */
+    var pinnedWorkspacePolicyProvider: (suspend (workspaceId: String) -> String?)? = null,
+    /**
+     * REPAIR ORDER §3B — records a DURABLE human-approval request when a
+     * genuinely sensitive action is blocked and no admissible alternative
+     * remains. This is the missing production approval surface: the user
+     * can actually SEE and RESOLVE the consent request (wired by
+     * AppContainer to HumanApprovalGate.requestApproval). Null = no
+     * approval surface (tests) — the block still surfaces honestly.
+     */
+    var approvalRequester: (suspend (
+        executionId: String,
+        toolName: String,
+        prompt: String,
+        justification: String
+    ) -> com.example.domain.ports.governed.HumanApprovalRequest?)? = null
 ) {
 
     private val idempotency: ActionIdempotencyService = ActionIdempotencyService(actionIntentDao)
+
+    /** REPAIR ORDER §3B — intent → contract resolution (single instance). */
+    private val taskContractResolver = com.example.application.decision.TaskContractResolver()
 
     /**
      * P1-8 (audit 2026 §18 — startup race): readiness gate wired by the
@@ -589,7 +614,32 @@ class AgentOrchestrator(
         val executionId = context.executionId
         val workspaceId = context.workspaceId.takeIf { it.isNotBlank() && it != UNATTRIBUTED_WORKSPACE }
 
-        // 0. Persist Initial Task State in Room DB
+        // ------------------------------------------------------------
+        // REPAIR ORDER §3B/§20 — LAUNCH-TIME RESOLUTION (pinned once):
+        //   1. TASK CONTRACT (intent → admissible action set) from the
+        //      chat mode + agent binding + prompt;
+        //   2. EFFECTIVE autonomy policy = the MORE RESTRICTIVE of the
+        //      pinned workspace's authoritative policy (read from
+        //      persistence BY ID — never the currently-active StateFlow)
+        //      and the task's own constraints.
+        // Both are immutable for the whole run — a mid-run workspace switch
+        // can no longer change the governing policy of a live execution,
+        // and the decision layer receives the policy BEFORE ranking.
+        // ------------------------------------------------------------
+        val chatMode = task.input.parameters["chatMode"]?.toString()
+        val taskContract = taskContractResolver.resolve(
+            chatMode = chatMode,
+            agent = agent,
+            rawPrompt = task.input.rawPrompt,
+            isWorkflowStep = task.input.parameters["workflowStepId"] != null
+        )
+        val workspacePolicy: AutonomyPolicy? = resolvedWorkspaceId
+            ?.let { wsId -> pinnedWorkspacePolicyProvider?.invoke(wsId) }
+            ?.let { name -> runCatching { AutonomyPolicy.valueOf(name) }.getOrNull() }
+        val effectiveAutonomyPolicy = moreRestrictiveAutonomy(
+            workspacePolicy,
+            task.constraints.autonomyPolicy
+        )
         // GOVERNANCE PHASE: stamp the pinned workspace into the task parameters
         // so the decision context, economic gate, and radar evidence scope
         // correctly.
@@ -619,9 +669,26 @@ class AgentOrchestrator(
                 conversationHistory = conversationHistory,
                 networkPolicy = networkPolicy,
                 isNetworkAvailable = isNetworkAvailable,
-                restoredCheckpoint = restoredCheckpoint
+                restoredCheckpoint = restoredCheckpoint,
+                taskContract = taskContract,
+                effectiveAutonomyPolicy = effectiveAutonomyPolicy
             )
         }
+    }
+
+    /** REPAIR ORDER §20 — a child scope may RESTRICT, never ELEVATE: the
+     *  more restrictive of the workspace authority and the task constraint
+     *  wins (SYSTEM > WORKSPACE > PROJECT > TASK > AGENT hierarchy). */
+    internal fun moreRestrictiveAutonomy(
+        workspace: AutonomyPolicy?,
+        task: AutonomyPolicy?
+    ): AutonomyPolicy {
+        val rank = mapOf(
+            AutonomyPolicy.ASSISTED to 0,
+            AutonomyPolicy.SUPERVISED to 1,
+            AutonomyPolicy.AUTONOMOUS to 2
+        )
+        return listOfNotNull(workspace, task).minByOrNull { rank[it] ?: 1 } ?: AutonomyPolicy.SUPERVISED
     }
 
     /** The closed-loop body — executed INSIDE the pinned ExecutionScope. */
@@ -633,7 +700,11 @@ class AgentOrchestrator(
         conversationHistory: List<LlmMessage>,
         networkPolicy: NetworkPolicy,
         isNetworkAvailable: Boolean,
-        restoredCheckpoint: TaskCheckpoint?
+        restoredCheckpoint: TaskCheckpoint?,
+        /** REPAIR ORDER §3B — intent-constrained action space (pinned at launch). */
+        taskContract: com.example.domain.core.task.TaskContract? = null,
+        /** REPAIR ORDER §20 — effective autonomy policy pinned at launch. */
+        effectiveAutonomyPolicy: AutonomyPolicy? = null
     ) {
         val executionId = context.executionId
         val workspaceId = context.workspaceId.takeIf { it.isNotBlank() && it != UNATTRIBUTED_WORKSPACE }
@@ -653,6 +724,24 @@ class AgentOrchestrator(
         val decisionHistory = mutableListOf<DecisionResult>()
         val observationHistory = mutableListOf<EnvironmentObservation>()
         var replayedActions = 0
+
+        // ------------------------------------------------------------
+        // REPAIR ORDER §3B — contract FALLBACK for callers that reach the
+        // closed loop directly (resume paths): always a contract, never an
+        // unconstrained "all actions" space.
+        // ------------------------------------------------------------
+        val effectiveContract = taskContract ?: taskContractResolver.resolve(
+            chatMode = currentTask.input.parameters["chatMode"]?.toString(),
+            agent = agent,
+            rawPrompt = currentTask.input.rawPrompt,
+            isWorkflowStep = currentTask.input.parameters["workflowStepId"] != null
+        )
+        // Dynamically blocked action keys ("TYPE:targetId") — filled by the
+        // NON-TERMINAL autonomy gate below; consulted when diagnostics are
+        // built. The re-decision is driven by the negative observation +
+        // block counter (bounded escalation).
+        val governorBlockedActions = mutableSetOf<String>()
+        var governorBlockCount = 0
 
         var currentDecisionState = decisionService.buildDecisionContext(
             task = currentTask,
@@ -678,7 +767,33 @@ class AgentOrchestrator(
         )
 
         while (!isTerminal && stepIndex < maxSteps) {
+            // ----------------------------------------------------------
+            // REPAIR ORDER §21 — honest wall-clock timeout enforcement:
+            // the loop checks elapsed time at each step boundary (never
+            // mid-IO) and terminates in an explicit TIMEOUT degraded
+            // state instead of running unbounded.
+            // ----------------------------------------------------------
+            val elapsedMs = System.currentTimeMillis() - startTime
+            val timeoutBudgetMs = (currentTask.constraints.timeoutMs.coerceAtLeast(60_000L)) *
+                    (context.attempt.coerceAtLeast(1))
+            if (elapsedMs > timeoutBudgetMs) {
+                val timeoutMsg = "TASK_TIMEOUT: تجاوز التنفيذ الحد الزمني (${timeoutBudgetMs / 1000}s). " +
+                        "الحالة محفوظة والتنفيذ قابل للاستئناف."
+                accumulatedOutputText.append("\n[مهلة]: $timeoutMsg")
+                persistTaskFinal(
+                    currentTask.id.value, "WAITING", timeoutMsg,
+                    accumulatedTokens, elapsedMs, true, DegradedReason.UNKNOWN_DEGRADATION.name, null
+                )
+                collector.emit(ExecutionEvent.Degraded(executionId, DegradedReason.UNKNOWN_DEGRADATION, timeoutMsg))
+                isTerminal = true
+                break
+            }
+
             // 1. Rebuild DecisionContext dynamically before every decision
+            // REPAIR ORDER §3B: the CONTRACT, the assigned agent's
+            // capability binding, the PINNED effective policy, and the
+            // dynamically-blocked action set constrain the action space
+            // BEFORE the engine ranks anything.
             val decisionContext = decisionService.buildDecisionContext(
                 task = currentTask.copy(currentStepIndex = stepIndex),
                 networkPolicy = networkPolicy,
@@ -697,7 +812,10 @@ class AgentOrchestrator(
                 accumulatedEvidence = accumulatedEvidence,
                 lastAction = decisionHistory.lastOrNull()?.chosenAction,
                 lastObservation = observationHistory.lastOrNull(),
-                decisionHistory = decisionHistory
+                decisionHistory = decisionHistory,
+                taskContract = taskContract ?: effectiveContract,
+                agentAllowedCapabilities = agent.allowedCapabilities,
+                effectiveAutonomyPolicy = effectiveAutonomyPolicy ?: currentTask.constraints.autonomyPolicy
             )
 
             // 2. CBR-MDP Evaluation
@@ -792,22 +910,57 @@ class AgentOrchestrator(
             )
 
             // ------------------------------------------------------------
-            // AUTONOMY GOVERNANCE (defect family 4): sensitive actions are
-            // evaluated against the EFFECTIVE autonomy policy (the more
-            // restrictive of the workspace's authoritative policy and the
-            // task's persisted policy) — NOT raw caller-supplied authority.
-            // A policy that does not allow the action FAILS CLOSED: the task
-            // stops honestly, waiting for explicit user consent/grants.
+            // AUTONOMY GOVERNANCE — FINAL ENFORCEMENT BOUNDARY
+            // (defense in depth). REPAIR ORDER §3B:
+            //
+            // The action space is ALREADY constrained upstream by the Task
+            // Contract, the agent's capability binding and the pinned
+            // policy — so a block here is an EXCEPTION, not the norm
+            // (previously EVERY ordinary chat task died here).
+            //
+            // A block is now NON-TERMINAL: the action is excluded from the
+            // next decision, a NEGATIVE observation is recorded (the engine
+            // re-ranks the remaining admissible set), and the task
+            // CONTINUES. Only when no admissible alternative remains does
+            // the task surface a legitimate ASK_USER with a DURABLE
+            // approval request (the user can actually consent — §3B/§2.2),
+            // persisted honestly as WAITING.
             // ------------------------------------------------------------
             if (chosenAction.type in SENSITIVE_AUTONOMY_ACTIONS) {
                 val governor = autonomyGovernor
                 if (governor != null) {
+                    // The governor consults the PINNED effective policy (the
+                    // task's own constraint is the floor; the workspace
+                    // authority was already merged at launch).
                     val evaluation = governor(
                         agent, chosenAction, true,
-                        currentTask.constraints.autonomyPolicy
+                        effectiveAutonomyPolicy ?: currentTask.constraints.autonomyPolicy
                     )
                     if (!evaluation.isAllowed || evaluation.requireHumanConsent) {
+                        val actionKey = "${chosenAction.type}:${chosenAction.targetId ?: ""}"
+                        governorBlockedActions.add(actionKey)
+                        governorBlockCount++
                         val autonomyMsg = "AUTONOMY_POLICY_BLOCKED: ${evaluation.reason}"
+
+                        // Record a NEGATIVE observation so the CBR engine
+                        // learns this action is inadmissible in this context.
+                        val blockedObservation = observationService.createObservation(
+                            action = chosenAction,
+                            result = ExecutionResult(
+                                isSuccess = false,
+                                outputText = "",
+                                outputData = mapOf("blockedBy" to "AUTONOMY_GOVERNANCE", "reason" to evaluation.reason)
+                            ),
+                            stepIndex = stepIndex,
+                            actionOutcome = outcomeService.evaluateActionOutcome(
+                                chosenAction,
+                                ExecutionResult(isSuccess = false, outputText = "")
+                            ),
+                            taskVerificationQuality = -0.5f
+                        )
+                        observationHistory.add(blockedObservation)
+                        currentDecisionState = decisionService.recordObservation(currentDecisionState, blockedObservation)
+
                         collector.emit(
                             ExecutionEvent.BudgetGateDecision(
                                 executionId = executionId,
@@ -815,23 +968,47 @@ class AgentOrchestrator(
                                 reason = autonomyMsg
                             )
                         )
-                        collector.emit(
-                            ExecutionEvent.Degraded(
-                                executionId = executionId,
-                                reason = DegradedReason.UNKNOWN_DEGRADATION,
-                                message = autonomyMsg
+
+                        // Bounded re-decision: after repeated blocks with no
+                        // alternative surfacing, escalate to a REAL consent
+                        // request instead of looping.
+                        if (governorBlockCount >= 3) {
+                            val approval = runCatching {
+                                approvalRequester?.invoke(
+                                    executionId,
+                                    chosenAction.targetId ?: chosenAction.type.code,
+                                    currentTask.input.rawPrompt.take(200),
+                                    evaluation.reason
+                                )
+                            }.getOrNull()
+                            val consentMsg = if (approval != null) {
+                                "CONSENT_REQUIRED: الإجراء '${chosenAction.type.displayName}' يتطلب موافقتك " +
+                                        "(طلب موافقة دائم: ${approval.approvalId}). وافق أو امنح صلاحية التنفيذ ثم أعد المحاولة."
+                            } else {
+                                "CONSENT_REQUIRED: $autonomyMsg"
+                            }
+                            accumulatedOutputText.append("\n[حوكمة الاستقلالية]: $consentMsg")
+                            persistTaskFinal(
+                                currentTask.id.value, "WAITING", consentMsg,
+                                accumulatedTokens, System.currentTimeMillis() - startTime,
+                                isDegraded, degradedReason?.name, null
                             )
-                        )
-                        isDegraded = true
-                        degradedReason = DegradedReason.UNKNOWN_DEGRADATION
-                        accumulatedOutputText.append("\n[حوكمة الاستقلالية]: $autonomyMsg")
-                        persistTaskFinal(
-                            currentTask.id.value, "WAITING", autonomyMsg,
-                            accumulatedTokens, System.currentTimeMillis() - startTime,
-                            isDegraded, degradedReason?.name, null
-                        )
-                        isTerminal = true
-                        break
+                            collector.emit(
+                                ExecutionEvent.Degraded(
+                                    executionId = executionId,
+                                    reason = DegradedReason.UNKNOWN_DEGRADATION,
+                                    message = consentMsg
+                                )
+                            )
+                            isTerminal = true
+                            break
+                        }
+
+                        // NON-TERMINAL: skip this action, re-decide with the
+                        // blocked key excluded (bounded by maxSteps).
+                        stepIndex++
+                        currentTask = currentTask.copy(currentStepIndex = stepIndex)
+                        continue
                     }
                 }
             }

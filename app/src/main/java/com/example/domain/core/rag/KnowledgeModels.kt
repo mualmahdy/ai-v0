@@ -38,7 +38,13 @@ data class KnowledgeDocument(
     /** P1-14: honest durability state of this document. */
     val persistenceState: KnowledgePersistenceState = KnowledgePersistenceState.PERSISTED,
     /** P1-14: human-readable diagnostic when persistence FAILED/PENDING. */
-    val persistenceDiagnostic: String? = null
+    val persistenceDiagnostic: String? = null,
+    /**
+     * REPAIR ORDER §15 — knowledge ownership: projectId is NULL for
+     * WORKSPACE-scoped (shared) knowledge, non-null for PROJECT-private
+     * knowledge. Retrieval NEVER crosses the boundary implicitly.
+     */
+    val projectId: Long? = null
 )
 
 /**
@@ -64,6 +70,22 @@ data class RetrievedContextChunk(
     val retrievalMode: RetrievalMode,
     val snippet: String
 )
+
+/**
+ * REPAIR ORDER §15 — explicit retrieval scope modes. Retrieval is bounded
+ * by the caller's pinned scope; cross-project knowledge is NEVER silently
+ * retrieved.
+ */
+enum class RetrievalScopeMode {
+    /** Only the pinned project's private knowledge. */
+    PROJECT_ONLY,
+    /** Pinned project's private knowledge + workspace-shared knowledge. */
+    PROJECT_AND_WORKSPACE,
+    /** Only workspace-shared knowledge (no project-private). */
+    WORKSPACE_ONLY,
+    /** Application-scoped shared knowledge (explicitly shared app-wide only). */
+    APPLICATION
+}
 
 /**
  * Complete assembled RAG prompt context with safety and token limits.

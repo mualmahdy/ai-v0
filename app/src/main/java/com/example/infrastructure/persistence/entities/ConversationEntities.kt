@@ -22,7 +22,7 @@ import androidx.room.PrimaryKey
 
 @Entity(
     tableName = "chat_sessions",
-    indices = [Index("workspaceId"), Index("lastActiveAtEpochMs")]
+    indices = [Index("workspaceId"), Index("lastActiveAtEpochMs"), Index("projectId")]
 )
 data class ConversationSessionEntity(
     @PrimaryKey val sessionId: String,
@@ -37,7 +37,13 @@ data class ConversationSessionEntity(
     val turnCount: Int = 0,
     val totalTokensConsumed: Int = 0,
     val createdAtEpochMs: Long,
-    val lastActiveAtEpochMs: Long
+    val lastActiveAtEpochMs: Long,
+    /**
+     * REPAIR ORDER §5/§15 (DB v16): NULL = workspace-scoped session,
+     * non-null = project-private session (sibling isolation enforced by
+     * scoped DAO queries).
+     */
+    val projectId: Long? = null
 )
 
 @Entity(

@@ -35,6 +35,12 @@ class InMemoryHumanApprovalStore : HumanApprovalStorePort {
             it.executionId == executionId && it.toolName == toolName && it.resolution == ApprovalResolution.PENDING
         }
 
+    override suspend fun findPending(limit: Int): List<HumanApprovalRequest> =
+        requests.values
+            .filter { it.resolution == ApprovalResolution.PENDING }
+            .sortedByDescending { it.requestedAtEpochMs }
+            .take(limit)
+
     override suspend fun resolve(
         approvalId: String,
         resolution: ApprovalResolution,

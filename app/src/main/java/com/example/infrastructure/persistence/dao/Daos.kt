@@ -59,6 +59,74 @@ interface ProjectDao {
 
     @Query("UPDATE projects SET isArchived = 1 WHERE id = :id")
     suspend fun archiveProject(id: Long)
+
+    // ------------------------------------------------------------------
+    // REPAIR ORDER §5/§27 (DB v16): lifecycle-aware project management.
+    // ACTIVE = selectable; ARCHIVED/TRASHED/DELETED = excluded from the
+    // selectable list. The active-project reconciliation uses
+    // [resolvableProjectForWorkspace] — the only sanctioned resolver.
+    // ------------------------------------------------------------------
+
+    /** Projects in a given lifecycle state, owned by [workspaceId]. */
+    @Query(
+        "SELECT * FROM projects WHERE workspaceId = :workspaceId AND lifecycleState = :state " +
+                "ORDER BY updatedAtEpochMs DESC"
+    )
+    suspend fun forWorkspaceInState(workspaceId: String, state: String): List<ProjectEntity>
+
+    /** Selectable (ACTIVE) projects for the workspace — the ONLY list a project picker shows. */
+    @Query(
+        "SELECT * FROM projects WHERE workspaceId = :workspaceId AND lifecycleState = 'ACTIVE' " +
+                "ORDER BY updatedAtEpochMs DESC"
+    )
+    suspend fun activeProjectsForWorkspaceList(workspaceId: String): List<ProjectEntity>
+
+    /** Most recently updated ACTIVE project owned by the workspace (deterministic reconciliation). */
+    @Query(
+        "SELECT * FROM projects WHERE workspaceId = :workspaceId AND lifecycleState = 'ACTIVE' " +
+                "ORDER BY updatedAtEpochMs DESC LIMIT 1"
+    )
+    suspend fun mostRecentActiveProjectForWorkspace(workspaceId: String): ProjectEntity?
+
+    /**
+     * The sanctioned ACTIVE-project resolver: [id] must exist, be ACTIVE,
+     * and be OWNED by [workspaceId]. Anything else = NOT FOUND (stale
+     * reference — never an arbitrary fallback).
+     */
+    @Query(
+        "SELECT * FROM projects WHERE id = :id AND workspaceId = :workspaceId " +
+                "AND lifecycleState = 'ACTIVE' LIMIT 1"
+    )
+    suspend fun resolvableProjectForWorkspace(id: Long, workspaceId: String): ProjectEntity?
+
+    /** Lifecycle transition (single UPDATE — used inside transactions). */
+    @Query(
+        "UPDATE projects SET lifecycleState = :state, updatedAtEpochMs = :now, " +
+                "isArchived = :archived, archivedAtEpochMs = :archivedAt, trashedAtEpochMs = :trashedAt " +
+                "WHERE id = :id AND workspaceId = :workspaceId"
+    )
+    suspend fun setLifecycleState(
+        id: Long,
+        workspaceId: String,
+        state: String,
+        now: Long,
+        archived: Boolean,
+        archivedAt: Long?,
+        trashedAt: Long?
+    )
+
+    @Query("UPDATE projects SET name = :name, description = :description, updatedAtEpochMs = :now WHERE id = :id AND workspaceId = :workspaceId")
+    suspend fun renameProjectForWorkspace(id: Long, workspaceId: String, name: String, description: String?, now: Long)
+
+    /** Ownership change (project MOVE between workspaces, inside transaction). */
+    @Query("UPDATE projects SET workspaceId = :targetWorkspaceId, updatedAtEpochMs = :now WHERE id = :id AND workspaceId = :sourceWorkspaceId")
+    suspend fun moveProjectToWorkspace(id: Long, sourceWorkspaceId: String, targetWorkspaceId: String, now: Long): Int
+
+    @Query("SELECT COUNT(*) FROM projects WHERE workspaceId = :workspaceId AND name = :name COLLATE NOCASE AND lifecycleState != 'PURGED'")
+    suspend fun countByNameForWorkspace(workspaceId: String, name: String): Int
+
+    @Query("DELETE FROM projects WHERE id = :id")
+    suspend fun deleteProjectRow(id: Long)
 }
 
 @Dao
@@ -169,6 +237,18 @@ interface TaskDao {
 
     @Query("SELECT * FROM tasks WHERE workspaceId = :workspaceId ORDER BY createdAtEpochMs DESC")
     suspend fun getTasksForWorkspace(workspaceId: String): List<TaskEntity>
+
+    /** REPAIR ORDER §5 (DB v16): project-scoped task list (sibling-invisible). */
+    @Query("SELECT * FROM tasks WHERE workspaceId = :workspaceId AND projectId = :projectId ORDER BY createdAtEpochMs DESC")
+    suspend fun getTasksForWorkspaceAndProject(workspaceId: String, projectId: Long?): List<TaskEntity>
+
+    /** REPAIR ORDER §11: rebind task ownership (clone/move/import, in transactions). */
+    @Query("UPDATE tasks SET projectId = :projectId WHERE id IN (:ids)")
+    suspend fun reassignProject(ids: List<String>, projectId: Long?)
+
+    /** REPAIR ORDER §11: project cascade list. */
+    @Query("SELECT * FROM tasks WHERE projectId = :projectId")
+    suspend fun getTasksForProject(projectId: Long): List<TaskEntity>
 
     @Query("SELECT * FROM tasks WHERE id = :id LIMIT 1")
     suspend fun getTaskById(id: String): TaskEntity?

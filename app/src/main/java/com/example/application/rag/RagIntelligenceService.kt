@@ -186,26 +186,37 @@ class RagIntelligenceService(
         val queryTerms = query.lowercase().split("\\s+".toRegex()).filter { it.length > 2 }.toSet()
         if (queryTerms.isEmpty()) return emptyList()
 
-        // Document frequency per term.
+        // ------------------------------------------------------------------
+        // REPAIR ORDER §15 — O(N²) FIX: tokenization now happens ONCE per
+        // chunk. Previously `avgDl = chunks.sumOf { tokenize(it.text).size }`
+        // sat INSIDE the per-chunk map lambda, so the whole corpus was
+        // re-tokenized FOR EVERY CHUNK (N² tokenizations per query). We now
+        // tokenize each chunk once, reuse the token lists for df + tf + dl,
+        // and compute avgDl from the cached lengths (single pass, O(N)).
+        // ------------------------------------------------------------------
+        val chunkTokens: List<List<String>> = chunks.map { tokenize(it.text) }
+        val chunkLengths = chunkTokens.map { it.size }
+        val n = chunks.size
+        val avgDl = chunkLengths.sum().toDouble() / n.coerceAtLeast(1)
+
+        // Document frequency per term (single pass over cached token lists).
         val df = mutableMapOf<String, Int>()
-        for (chunk in chunks) {
-            val tokens = tokenize(chunk.text)
+        for (tokens in chunkTokens) {
+            val tokenSet = tokens.toHashSet()
             for (term in queryTerms) {
-                if (term in tokens) df[term] = (df[term] ?: 0) + 1
+                if (term in tokenSet) df[term] = (df[term] ?: 0) + 1
             }
         }
 
-        val n = chunks.size
-        return chunks.map { chunk ->
-            val tokens = tokenize(chunk.text)
+        return chunks.mapIndexed { idx, chunk ->
+            val tokens = chunkTokens[idx]
             val tf = mutableMapOf<String, Int>()
             for (t in tokens) {
                 if (t in queryTerms) tf[t] = (tf[t] ?: 0) + 1
             }
             // BM25 score with k1=1.2, b=0.75.
             val k1 = 1.2; val b = 0.75
-            val avgDl = chunks.sumOf { tokenize(it.text).size }.toDouble() / n.coerceAtLeast(1)
-            val dl = tokens.size.toDouble()
+            val dl = chunkLengths[idx].toDouble()
             var score = 0.0
             for (term in queryTerms) {
                 val termDf = df[term] ?: 0
@@ -222,7 +233,7 @@ class RagIntelligenceService(
             .filter { it.score > 0f }
             .sortedByDescending { it.score }
             .take(topK)
-            .mapIndexed { idx, c -> c.copy(rank = idx + 1) }
+            .mapIndexed { idx2, c -> c.copy(rank = idx2 + 1) }
     }
 
     private fun tokenize(text: String): List<String> =

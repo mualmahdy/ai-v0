@@ -60,7 +60,13 @@ data class KnowledgeDocumentEntity(
     val totalTokensEstimated: Int,
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long,
-    val isArchived: Boolean = false
+    val isArchived: Boolean = false,
+    /**
+     * REPAIR ORDER §15 (DB v16): NULL = workspace-shared knowledge,
+     * non-null = project-private knowledge. Unlike the pre-v12 dead column,
+     * this one is WRITTEN and READ by the scoped retrieval path.
+     */
+    val projectId: Long? = null
 )
 
 /**

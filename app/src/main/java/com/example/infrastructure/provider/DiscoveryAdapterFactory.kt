@@ -10,6 +10,7 @@ import com.example.domain.core.provider.ServiceType
 import com.example.domain.core.provider.offering.OfferingType
 import com.example.domain.core.provider.offering.ServiceOffering
 import com.example.domain.ports.llm.LlmProviderPort
+import com.example.infrastructure.network.EgressControl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -55,6 +56,19 @@ object DiscoveryAdapterFactory {
         .build()
 
     /**
+     * REPAIR ORDER §17 — centralized egress authority for EVERY discovery
+     * dial. Previously this (PRODUCTION) discovery path built a PRIVATE
+     * client with NO egress interceptor, so /models requests to arbitrary
+     * endpoints escaped workspace network policy entirely (an OFFLINE
+     * workspace could still emit network traffic). The shared [EgressControl]
+     * instance is injected by the caller (ProviderControlPlaneService wires
+     * the AppContainer's single instance); when present, every request is
+     * checked BEFORE dialing — fail-closed on policy violation.
+     */
+    @Volatile
+    var egressControl: EgressControl? = null
+
+    /**
      * Discover offerings for the given (service, config). Returns a list of
      * `ServiceOffering`s (NOT ResourceRecords). The caller must materialize
      * each offering separately.
@@ -73,6 +87,20 @@ object DiscoveryAdapterFactory {
             ServiceType.IMAGE_GENERATION, ServiceType.SPEECH, ServiceType.VECTOR_STORE ->
                 Outcome.Success(emptyList())
         }
+    }
+
+    /**
+     * REPAIR ORDER §17 — egress-gated request execution for discovery.
+     * Fail-CLOSED: egress must be WIRED for any outbound dial; a policy
+     * DENY aborts before any byte leaves the device.
+     */
+    private fun executeEgressChecked(request: Request): okhttp3.Response {
+        val egress = egressControl
+            ?: throw java.io.IOException(
+                "EGRESS_CONTROL_UNWIRED: مسار الاكتشاف غير مرتبط بسياسة الخروج المركزية — رفض الاتصال بدل تجاوزها (${request.url})"
+            )
+        egress.assertEgressAllowed(request)
+        return httpClient.newCall(request).execute()
     }
 
     /**
@@ -110,7 +138,7 @@ object DiscoveryAdapterFactory {
                     if (!apiKey.isNullOrBlank()) {
                         builder.addHeader("Authorization", "Bearer $apiKey")
                     }
-                    val response = httpClient.newCall(builder.build()).execute()
+                    val response = executeEgressChecked(builder.build())
                     if (!response.isSuccessful) {
                         return Outcome.Error(
                             "HTTP_${response.code}",
@@ -133,8 +161,16 @@ object DiscoveryAdapterFactory {
                             offeringType = OfferingType.MODEL,
                             name = id,
                             description = item.optString("description", "Discovered model"),
+                            // ------------------------------------------------------------
+                            // REPAIR ORDER §16 — HONEST capabilities: an arbitrary
+                            // OpenAI-compatible /models response contains ONLY ids.
+                            // STREAMING/REASONING were previously FABRICATED for
+                            // every discovered model. Only the capability implied
+                            // by the service type is claimed; everything else
+                            // remains UNKNOWN until verified (unclaimed = unknown).
+                            // ------------------------------------------------------------
                             supportedCapabilities = if (service.serviceType == ServiceType.LLM)
-                                setOf(CapabilityType.LLM_GENERATION, CapabilityType.REASONING, CapabilityType.STREAMING)
+                                setOf(CapabilityType.LLM_GENERATION)
                             else setOf(CapabilityType.EMBEDDING, CapabilityType.MEMORY_RETRIEVAL),
                             isLocal = service.serviceType == ServiceType.LLM && config.protocolId == ServiceProtocolId.OLLAMA_NATIVE,
                             isAvailable = true,
@@ -157,9 +193,9 @@ object DiscoveryAdapterFactory {
                     // x-goog-api-key HEADER instead of a ?key= URL query param
                     // (previously the key leaked into URLs/proxy logs).
                     val url = "https://generativelanguage.googleapis.com/v1beta/models"
-                    val response = httpClient.newCall(
+                    val response = executeEgressChecked(
                         Request.Builder().url(url).header("x-goog-api-key", apiKey).build()
-                    ).execute()
+                    )
                     if (!response.isSuccessful) {
                         return Outcome.Error(
                             "HTTP_${response.code}",
@@ -184,12 +220,11 @@ object DiscoveryAdapterFactory {
                             offeringType = OfferingType.MODEL,
                             name = name,
                             description = item.optString("description", "Discovered Gemini model"),
-                            supportedCapabilities = setOf(
-                                CapabilityType.LLM_GENERATION,
-                                CapabilityType.REASONING,
-                                CapabilityType.STREAMING,
-                                CapabilityType.VISION
-                            ),
+                            // REPAIR ORDER §16 — only capabilities VERIFIED by the
+                            // discovery response: generateContent support (checked
+                            // above) implies LLM_GENERATION. VISION/STREAMING/
+                            // REASONING were previously fabricated for ALL models.
+                            supportedCapabilities = setOf(CapabilityType.LLM_GENERATION),
                             isLocal = false,
                             isAvailable = true,
                             contextWindowTokens = item.optInt("inputTokenLimit").takeIf { it > 0 },

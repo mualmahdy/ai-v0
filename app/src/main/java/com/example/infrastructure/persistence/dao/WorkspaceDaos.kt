@@ -50,6 +50,20 @@ interface WorkspaceDao {
     @Query("UPDATE workspaces SET lastActiveProjectId = :projectId, lastAccessedEpochMs = :now WHERE id = :workspaceId")
     suspend fun setActiveProject(workspaceId: String, projectId: Long?, now: Long)
 
+    /**
+     * REPAIR ORDER §20 (DB v16): the workspace's AUTHORITATIVE autonomy
+     * policy becomes mutable through ONE sanctioned path — the same DAO
+     * that owns every other policy column. Previously the column was set
+     * once at creation and NO update path existed, so the UI toggle was
+     * decorative and every workspace was frozen at SUPERVISED.
+     */
+    @Query("UPDATE workspaces SET autonomyPolicy = :policy, lastAccessedEpochMs = :now WHERE id = :workspaceId")
+    suspend fun updateAutonomyPolicy(workspaceId: String, policy: String, now: Long)
+
+    /** REPAIR ORDER §20: direct policy lookup for the PINNED workspace (never a Flow read). */
+    @Query("SELECT autonomyPolicy FROM workspaces WHERE id = :workspaceId LIMIT 1")
+    suspend fun autonomyPolicyFor(workspaceId: String): String?
+
     @Query("DELETE FROM workspaces WHERE id = :id")
     suspend fun deleteById(id: String)
 }
@@ -65,8 +79,27 @@ interface KnowledgeDocumentDao {
     @Query("SELECT * FROM knowledge_documents WHERE workspaceId = :workspaceId AND isArchived = 0 ORDER BY createdAtEpochMs DESC")
     suspend fun getDocumentsForWorkspace(workspaceId: String): List<KnowledgeDocumentEntity>
 
+    /** REPAIR ORDER §15: workspace-shared knowledge (projectId IS NULL). */
+    @Query("SELECT * FROM knowledge_documents WHERE workspaceId = :workspaceId AND isArchived = 0 AND projectId IS NULL ORDER BY createdAtEpochMs DESC")
+    suspend fun getWorkspaceSharedDocuments(workspaceId: String): List<KnowledgeDocumentEntity>
+
+    /** REPAIR ORDER §15: project-private knowledge (projectId = :projectId) — sibling-invisible. */
+    @Query("SELECT * FROM knowledge_documents WHERE projectId = :projectId AND isArchived = 0 ORDER BY createdAtEpochMs DESC")
+    suspend fun getProjectPrivateDocuments(projectId: Long): List<KnowledgeDocumentEntity>
+
+    /** Retrieval scope mode filter: project-private + workspace-shared in one query. */
+    @Query(
+        "SELECT * FROM knowledge_documents WHERE workspaceId = :workspaceId AND isArchived = 0 " +
+                "AND (projectId IS NULL OR projectId = :projectId) ORDER BY createdAtEpochMs DESC"
+    )
+    suspend fun getDocumentsForRetrieval(workspaceId: String, projectId: Long?): List<KnowledgeDocumentEntity>
+
     @Query("SELECT * FROM knowledge_documents WHERE id = :id LIMIT 1")
     suspend fun getDocumentById(id: String): KnowledgeDocumentEntity?
+
+    /** WORKSPACE-AUTHORIZED load — another workspace's document is NOT FOUND. */
+    @Query("SELECT * FROM knowledge_documents WHERE id = :id AND workspaceId = :workspaceId LIMIT 1")
+    suspend fun getDocumentByIdForWorkspace(id: String, workspaceId: String): KnowledgeDocumentEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdate(document: KnowledgeDocumentEntity)
@@ -80,8 +113,20 @@ interface KnowledgeDocumentDao {
     @Query("DELETE FROM knowledge_documents WHERE id = :id")
     suspend fun deleteById(id: String)
 
+    /** WORKSPACE-AUTHORIZED delete. */
+    @Query("DELETE FROM knowledge_documents WHERE id = :id AND workspaceId = :workspaceId")
+    suspend fun deleteByIdForWorkspace(id: String, workspaceId: String)
+
     @Query("DELETE FROM knowledge_documents WHERE workspaceId = :workspaceId")
     suspend fun deleteAllForWorkspace(workspaceId: String)
+
+    /** REPAIR ORDER §11: project-scoped cascade for clone/move/import. */
+    @Query("DELETE FROM knowledge_documents WHERE projectId = :projectId")
+    suspend fun deleteAllForProject(projectId: Long)
+
+    /** Rebind ownership (import/clone/move, inside transactions). */
+    @Query("UPDATE knowledge_documents SET projectId = :projectId WHERE id IN (:ids)")
+    suspend fun reassignProject(ids: List<String>, projectId: Long?)
 
     @Query("SELECT COUNT(*) FROM knowledge_documents WHERE workspaceId = :workspaceId AND isArchived = 0")
     suspend fun countForWorkspace(workspaceId: String): Int

@@ -21,6 +21,26 @@ interface ConversationSessionDao {
     @Query("SELECT * FROM chat_sessions WHERE workspaceId = :workspaceId ORDER BY lastActiveAtEpochMs DESC")
     fun forWorkspace(workspaceId: String): Flow<List<ConversationSessionEntity>>
 
+    /**
+     * REPAIR ORDER §5/§15 (DB v16): project-filtered session list.
+     * projectId = null → workspace-scoped sessions only;
+     * projectId non-null → that project's private sessions only.
+     * A sibling project's sessions are NEVER returned (SQL predicate).
+     */
+    @Query(
+        "SELECT * FROM chat_sessions WHERE workspaceId = :workspaceId " +
+                "AND ((:projectId IS NULL AND projectId IS NULL) OR projectId = :projectId) " +
+                "ORDER BY lastActiveAtEpochMs DESC"
+    )
+    fun forWorkspaceAndProject(workspaceId: String, projectId: Long?): Flow<List<ConversationSessionEntity>>
+
+    @Query(
+        "SELECT * FROM chat_sessions WHERE workspaceId = :workspaceId " +
+                "AND ((:projectId IS NULL AND projectId IS NULL) OR projectId = :projectId) " +
+                "ORDER BY lastActiveAtEpochMs DESC"
+    )
+    suspend fun forWorkspaceAndProjectOnce(workspaceId: String, projectId: Long?): List<ConversationSessionEntity>
+
     @Query("SELECT * FROM chat_sessions WHERE sessionId = :id LIMIT 1")
     suspend fun byId(id: String): ConversationSessionEntity?
 
@@ -29,8 +49,22 @@ interface ConversationSessionDao {
     @Query("SELECT * FROM chat_sessions WHERE sessionId = :id AND workspaceId = :workspaceId LIMIT 1")
     suspend fun byIdAndWorkspace(id: String, workspaceId: String): ConversationSessionEntity?
 
+    /** REPAIR ORDER §11: rebind sessions to a project (clone/move/import, inside transactions). */
+    @Query("UPDATE chat_sessions SET projectId = :projectId WHERE sessionId IN (:ids)")
+    suspend fun reassignProject(ids: List<String>, projectId: Long?)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(session: ConversationSessionEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(sessions: List<ConversationSessionEntity>)
+
+    /** REPAIR ORDER §11: project-scoped cascade for clone/move/delete. */
+    @Query("SELECT * FROM chat_sessions WHERE projectId = :projectId ORDER BY lastActiveAtEpochMs DESC")
+    suspend fun forProject(projectId: Long): List<ConversationSessionEntity>
+
+    @Query("DELETE FROM chat_sessions WHERE projectId = :projectId")
+    suspend fun deleteForProject(projectId: Long)
 
     @Query("UPDATE chat_sessions SET modelResourceId = :modelId, modelDisplayName = :modelDisplayName, lastActiveAtEpochMs = :now WHERE sessionId = :id")
     suspend fun updateModel(id: String, modelId: String?, modelDisplayName: String?, now: Long)

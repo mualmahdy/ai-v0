@@ -46,6 +46,9 @@ class RoomHumanApprovalStore(
     override suspend fun findPendingFor(executionId: String, toolName: String): HumanApprovalRequest? =
         withContext(Dispatchers.IO) { dao.findPendingFor(executionId, toolName)?.toDomain() }
 
+    override suspend fun findPending(limit: Int): List<HumanApprovalRequest> =
+        withContext(Dispatchers.IO) { dao.findPending(limit).map { it.toDomain() } }
+
     override suspend fun resolve(
         approvalId: String,
         resolution: ApprovalResolution,

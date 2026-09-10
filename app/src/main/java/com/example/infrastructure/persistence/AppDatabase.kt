@@ -182,9 +182,15 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.WorkflowDefinitionEntity::class,
         // v15 — DURABLE human approval requests (audit 2026 §17) + explicit
         // workspace identity on tasks / execution logs / trace nodes (P1-7/P1-10)
-        com.example.infrastructure.persistence.entities.HumanApprovalRequestEntity::class
+        com.example.infrastructure.persistence.entities.HumanApprovalRequestEntity::class,
+        // v16 — REPAIR ORDER: unified artifact library (§7), project
+        // dependency graph (§24), snapshots (§26), audit trail (§30)
+        com.example.infrastructure.persistence.entities.ArtifactEntity::class,
+        com.example.infrastructure.persistence.entities.ProjectDependencyEntity::class,
+        com.example.infrastructure.persistence.entities.ProjectSnapshotEntity::class,
+        com.example.infrastructure.persistence.entities.AuditEventEntity::class
     ],
-    version = 15,
+    version = 16,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -267,6 +273,13 @@ abstract class AppDatabase : RoomDatabase() {
 
     // v15 — DURABLE human approval requests (audit 2026 §17)
     abstract fun humanApprovalRequestDao(): com.example.infrastructure.persistence.dao.HumanApprovalRequestDao
+
+    // v16 — REPAIR ORDER: unified artifact library, dependency graph,
+    // snapshots, audit trail
+    abstract fun artifactDao(): com.example.infrastructure.persistence.dao.ArtifactDao
+    abstract fun projectDependencyDao(): com.example.infrastructure.persistence.dao.ProjectDependencyDao
+    abstract fun projectSnapshotDao(): com.example.infrastructure.persistence.dao.ProjectSnapshotDao
+    abstract fun auditEventDao(): com.example.infrastructure.persistence.dao.AuditEventDao
 
     companion object {
         @Volatile
@@ -1562,6 +1575,182 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+
+        /**
+         * REPAIR ORDER §5/§7/§15/§24/§26/§27/§30 — DB v15 → v16:
+         *
+         *  1. PROJECT LIFECYCLE (§27): projects += lifecycleState/
+         *     archivedAtEpochMs/trashedAtEpochMs (+lifecycleState index);
+         *     legacy isArchived=1 backfills to 'ARCHIVED'.
+         *  2. PROJECT OWNERSHIP COLUMNS (§5/§15): knowledge_documents,
+         *     chat_sessions and tasks gain a queryable nullable projectId;
+         *     tasks.projectId is backfilled by decoding executionContextJson
+         *     (regex on the pinned context — deterministic, no JSON lib in
+         *     raw SQL); knowledge/session rows backfill to NULL (honest
+         *     workspace-shared scope).
+         *  3. UNIFIED ARTIFACT LIBRARY (§7): new `artifacts` table.
+         *  4. PROJECT DEPENDENCY GRAPH (§24): new `project_dependencies`.
+         *  5. SNAPSHOTS (§26): new `project_snapshots`.
+         *  6. UNIFIED AUDIT TRAIL (§30): new `audit_events`.
+         *
+         * Purely additive columns/tables — all new columns nullable or
+         * defaulted; existing data survives untouched.
+         */
+        private val MIGRATION_15_TO_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // --- 1. Project lifecycle state machine (§27) ---
+                db.execSQL("ALTER TABLE projects ADD COLUMN lifecycleState TEXT NOT NULL DEFAULT 'ACTIVE'")
+                db.execSQL("ALTER TABLE projects ADD COLUMN archivedAtEpochMs INTEGER")
+                db.execSQL("ALTER TABLE projects ADD COLUMN trashedAtEpochMs INTEGER")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_projects_lifecycleState ON projects(lifecycleState)")
+                db.execSQL("UPDATE projects SET lifecycleState = 'ARCHIVED', archivedAtEpochMs = updatedAtEpochMs WHERE isArchived = 1")
+
+                // --- 2. Project ownership columns (§5/§15) ---
+                db.execSQL("ALTER TABLE knowledge_documents ADD COLUMN projectId INTEGER")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_documents_projectId ON knowledge_documents(projectId)")
+                db.execSQL("ALTER TABLE chat_sessions ADD COLUMN projectId INTEGER")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_sessions_projectId ON chat_sessions(projectId)")
+                db.execSQL("ALTER TABLE tasks ADD COLUMN projectId INTEGER")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_tasks_projectId ON tasks(projectId)")
+                // Deterministic backfill of tasks.projectId from the pinned
+                // canonical execution context JSON. SQLite instr/substr keep
+                // this migration dependency-free. Handles BOTH terminators
+                // (',' when projectId is mid-JSON, '}' when it is last).
+                db.execSQL(
+                    """
+                    UPDATE tasks SET projectId = CAST(
+                        replace(
+                            trim(
+                                substr(
+                                    substr(executionContextJson, instr(executionContextJson, '"projectId":') + 12),
+                                    1,
+                                    CASE
+                                        WHEN instr(substr(executionContextJson, instr(executionContextJson, '"projectId":') + 12), ',') > 0
+                                        THEN instr(substr(executionContextJson, instr(executionContextJson, '"projectId":') + 12), ',') - 1
+                                        WHEN instr(substr(executionContextJson, instr(executionContextJson, '"projectId":') + 12), '}') > 0
+                                        THEN instr(substr(executionContextJson, instr(executionContextJson, '"projectId":') + 12), '}') - 1
+                                        ELSE 0
+                                    END
+                                )
+                            ),
+                            ' ', ''
+                        ) AS INTEGER
+                    )
+                    WHERE executionContextJson IS NOT NULL
+                      AND executionContextJson LIKE '%"projectId":%'
+                      AND projectId IS NULL
+                    """.trimIndent()
+                )
+                // --- 2b. REPAIR ORDER §19: action-space version binding for
+                //     learned Q-values (legacy rows stay NULL = pre-versioning
+                //     and are invalidated honestly at engine load).
+                db.execSQL("ALTER TABLE mdp_q_values ADD COLUMN actionSpaceVersion TEXT")
+
+                // --- 3. Unified artifact library (§7) ---
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS artifacts (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        workspaceId TEXT,
+                        projectId INTEGER,
+                        sessionId TEXT,
+                        taskId TEXT,
+                        executionId TEXT,
+                        workflowId TEXT,
+                        type TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        mimeType TEXT NOT NULL DEFAULT 'application/octet-stream',
+                        sizeBytes INTEGER NOT NULL DEFAULT 0,
+                        contentHash TEXT,
+                        storageUri TEXT NOT NULL,
+                        source TEXT NOT NULL DEFAULT 'USER',
+                        securityClassification TEXT NOT NULL DEFAULT 'UNCLASSIFIED',
+                        indexingState TEXT NOT NULL DEFAULT 'NOT_INDEXED',
+                        ownerId TEXT,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL,
+                        metadataJson TEXT NOT NULL DEFAULT '{}'
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_artifacts_workspaceId ON artifacts(workspaceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_artifacts_projectId ON artifacts(projectId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_artifacts_type ON artifacts(type)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_artifacts_createdAtEpochMs ON artifacts(createdAtEpochMs)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_artifacts_workspaceId_projectId ON artifacts(workspaceId, projectId)")
+
+                // --- 4. Project dependency graph (§24) ---
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS project_dependencies (
+                        projectId INTEGER NOT NULL,
+                        type TEXT NOT NULL,
+                        `key` TEXT NOT NULL,
+                        requirement TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        detail TEXT,
+                        metadataJson TEXT NOT NULL DEFAULT '{}',
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL,
+                        PRIMARY KEY(projectId, type, `key`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_project_dependencies_projectId ON project_dependencies(projectId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_project_dependencies_type ON project_dependencies(type)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_project_dependencies_key ON project_dependencies(`key`)")
+
+                // --- 5. Snapshots (§26) ---
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS project_snapshots (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        projectId INTEGER NOT NULL,
+                        workspaceId TEXT NOT NULL,
+                        label TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        manifestJson TEXT NOT NULL,
+                        contentHash TEXT NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_project_snapshots_projectId ON project_snapshots(projectId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_project_snapshots_workspaceId ON project_snapshots(workspaceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_project_snapshots_createdAtEpochMs ON project_snapshots(createdAtEpochMs)")
+
+                // --- 6. Unified audit trail (§30) ---
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS audit_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        actorType TEXT NOT NULL,
+                        actorId TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        resourceType TEXT NOT NULL,
+                        resourceId TEXT,
+                        sourceScopeType TEXT NOT NULL,
+                        sourceScopeId TEXT NOT NULL,
+                        targetScopeType TEXT,
+                        targetScopeId TEXT,
+                        policy TEXT,
+                        result TEXT NOT NULL,
+                        reason TEXT,
+                        workspaceId TEXT,
+                        projectId INTEGER,
+                        occurredAtEpochMs INTEGER NOT NULL,
+                        metadataJson TEXT NOT NULL DEFAULT '{}'
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_audit_events_occurredAtEpochMs ON audit_events(occurredAtEpochMs)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_audit_events_action ON audit_events(action)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_audit_events_workspaceId ON audit_events(workspaceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_audit_events_projectId ON audit_events(projectId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_audit_events_resourceType ON audit_events(resourceType)")
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1579,6 +1768,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_12_TO_13,
             MIGRATION_13_TO_14,
             MIGRATION_14_TO_15,
+            MIGRATION_15_TO_16,
         )
 
         fun getInstance(context: Context): AppDatabase {

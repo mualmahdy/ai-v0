@@ -99,6 +99,11 @@ class OrchestratorKernelTest {
         override suspend fun getTasksForWorkspace(workspaceId: String): List<TaskEntity> =
             stored.values.filter { it.workspaceId == workspaceId }
         override suspend fun getTaskById(id: String): TaskEntity? = stored[id]
+        override suspend fun getTasksForWorkspaceAndProject(workspaceId: String, projectId: Long?): List<TaskEntity> =
+            stored.values.filter { it.workspaceId == workspaceId && it.projectId == projectId }
+        override suspend fun reassignProject(ids: List<String>, projectId: Long?) {}
+        override suspend fun getTasksForProject(projectId: Long): List<TaskEntity> =
+            stored.values.filter { it.projectId == projectId }
         override suspend fun insertOrUpdateTask(task: TaskEntity) { stored[task.id] = task }
         override suspend fun updateTaskStatus(
             id: String, state: String, summary: String?, tokens: Int, duration: Long,

@@ -6,10 +6,11 @@ import com.example.domain.core.capability.CapabilityResourceGraph
 import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
-import com.example.domain.core.decision.DecisionResult
 import com.example.domain.core.decision.DecisionState
 import com.example.domain.core.decision.EnvironmentObservation
+import com.example.domain.core.decision.DecisionResult
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.task.TaskContract
 import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.workspace.ResourceGraph
 import com.example.domain.core.workspace.Workspace
@@ -45,7 +46,26 @@ data class DecisionContext(
     val lastAction: DecisionAction? = null,
     val lastObservation: EnvironmentObservation? = null,
     val decisionHistory: List<DecisionResult> = emptyList(),
-    val metadata: Map<String, String> = emptyMap()
+    val metadata: Map<String, String> = emptyMap(),
+    /**
+     * REPAIR ORDER §3B — the TASK CONTRACT: intent → admissible action set.
+     * The decision engine receives an action space ALREADY constrained by
+     * task semantics; prohibited actions are never generated, never ranked,
+     * and never reach governance as surprises. Null = legacy callers
+     * (contract still enforced through the agent-capability filter).
+     */
+    val taskContract: TaskContract? = null,
+    /**
+     * REPAIR ORDER §3B — capability binding of the ASSIGNED agent: an agent
+     * that does not declare TOOL_EXECUTION never sees tool-family actions
+     * (Quick Chat structurally cannot nominate sensitive tools).
+     */
+    val agentAllowedCapabilities: Set<CapabilityType>? = null,
+    /**
+     * REPAIR ORDER §3B/§20 — effective autonomy policy snapshot PINNED at
+     * launch (workspace hierarchy resolved once, never re-read mid-run).
+     */
+    val effectiveAutonomyPolicy: com.example.domain.core.task.AutonomyPolicy? = null
 ) {
     val hasSearchEvidence: Boolean
         get() = accumulatedEvidence.containsKey("searchResults") || (lastAction?.type == DecisionActionType.SEARCH && lastObservation?.isSuccess == true)

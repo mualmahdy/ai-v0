@@ -40,5 +40,14 @@ class ExecutionScope(
     val sessionId: String? = null
 ) : AbstractCoroutineContextElement(Key) {
 
-    companion object Key : CoroutineContext.Key<ExecutionScope>
+    companion object Key : CoroutineContext.Key<ExecutionScope> {
+        /**
+         * REPAIR ORDER §4/§20 — pinned-scope helper: the workspace id of the
+         * CURRENT coroutine's ExecutionScope (null outside an execution).
+         * Governance/authorization layers resolve the pinned scope FIRST so
+         * a live execution's authority never follows the active workspace.
+         */
+        suspend fun currentWorkspaceIdOrNull(): String? =
+            kotlin.coroutines.coroutineContext[Key]?.workspaceId
+    }
 }

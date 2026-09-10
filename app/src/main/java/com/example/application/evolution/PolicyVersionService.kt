@@ -70,35 +70,24 @@ class PolicyVersionService(
 
     suspend fun promote(versionId: String, actor: String, decision: PromotionDecision): Boolean = withContext(Dispatchers.IO) {
         if (!decision.isApproved) return@withContext false
-        // Demote any currently-promoted version of the same kind.
-        val entity = policyVersionDao.historyFor(PolicyKind.CBR_MDP_Q_TABLE.code) // placeholder; actual kind pulled below
-        // Look up the entity to find its kind.
-        val allFlow = policyVersionDao.allFlow()
-        // We need a direct lookup; use the history flow first emit (single-shot).
-        // For simplicity, we demote ALL kinds — promotion is exclusive per kind.
-        // In practice the caller should pass the kind explicitly; we infer it.
-        val toPromote = kotlinx.coroutines.runBlocking {
-            // Use a small workaround: read via the dao directly.
-            // Since we don't have a direct byId query, we iterate allFlow first emission.
-            val list = mutableListOf<PolicyVersionEntity>()
-            allFlow.collect { list.clear(); list.addAll(it); return@collect }
-            list.firstOrNull { it.versionId == versionId }
-        }
-        if (toPromote == null) return@withContext false
+        // ------------------------------------------------------------
+        // REPAIR ORDER §18 — DIRECT one-shot DAO lookups. The previous
+        // implementation used `runBlocking { allFlow.collect { …; return@collect } }`:
+        // `return@collect` is a LOCAL return from the lambda, so collection
+        // of the INFINITE Room Flow never completed — `runBlocking` blocked
+        // the calling thread FOREVER (hang). Promote/rollback are now
+        // bounded, deterministic, single-record suspend operations.
+        // ------------------------------------------------------------
+        val toPromote = policyVersionDao.byId(versionId) ?: return@withContext false
         policyVersionDao.demoteAll(toPromote.policyKind)
         policyVersionDao.promote(versionId, actor, System.currentTimeMillis())
         true
     }
 
     suspend fun rollback(fromVersionId: String, actor: String): RollbackResult = withContext(Dispatchers.IO) {
-        val allFlow = policyVersionDao.allFlow()
-        val all = kotlinx.coroutines.runBlocking {
-            val list = mutableListOf<PolicyVersionEntity>()
-            allFlow.collect { list.clear(); list.addAll(it); return@collect }
-            list
-        }
-        val current = all.firstOrNull { it.versionId == fromVersionId } ?: return@withContext RollbackResult(fromVersionId, "", false, "النسخة الحالية غير موجودة")
-        val parent = current.parentVersionId?.let { pid -> all.firstOrNull { it.versionId == pid } }
+        val current = policyVersionDao.byId(fromVersionId)
+            ?: return@withContext RollbackResult(fromVersionId, "", false, "النسخة الحالية غير موجودة")
+        val parent = current.parentVersionId?.let { pid -> policyVersionDao.byId(pid) }
         if (parent == null) return@withContext RollbackResult(fromVersionId, "", false, "لا توجد نسخة سابقة للرجوع إليها")
         policyVersionDao.demoteAll(current.policyKind)
         policyVersionDao.promote(parent.versionId, actor, System.currentTimeMillis())

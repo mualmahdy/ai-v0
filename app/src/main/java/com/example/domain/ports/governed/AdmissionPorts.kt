@@ -67,6 +67,8 @@ interface HumanApprovalStorePort {
     suspend fun create(request: HumanApprovalRequest): HumanApprovalRequest
     suspend fun find(approvalId: String): HumanApprovalRequest?
     suspend fun findPendingFor(executionId: String, toolName: String): HumanApprovalRequest?
+    /** REPAIR ORDER §3B/§2.2 — the approval SURFACE query: all pending requests. */
+    suspend fun findPending(limit: Int = 50): List<HumanApprovalRequest>
     suspend fun resolve(approvalId: String, resolution: ApprovalResolution, resolvedBy: String): HumanApprovalRequest?
     suspend fun expireStale(nowEpochMs: Long): Int
     suspend fun markTokenConsumed(approvalId: String): Boolean

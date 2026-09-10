@@ -21,6 +21,10 @@ interface HumanApprovalRequestDao {
     )
     suspend fun findPendingFor(executionId: String, toolName: String): HumanApprovalRequestEntity?
 
+    /** REPAIR ORDER §3B/§2.2 — the approval SURFACE query: all pending requests. */
+    @Query("SELECT * FROM human_approval_requests WHERE resolution = 'PENDING' ORDER BY requestedAtEpochMs DESC LIMIT :limit")
+    suspend fun findPending(limit: Int = 50): List<HumanApprovalRequestEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: HumanApprovalRequestEntity)
 

@@ -109,6 +109,15 @@ class ProviderControlPlaneService(
      */
     var pricingPublisher: ((com.example.domain.core.budget.PricingEntry) -> Unit)? = null
 
+    init {
+        // REPAIR ORDER §17 — the discovery factory shares THE centralized
+        // egress authority owned by this control plane (single instance from
+        // the composition root). Previously discovery dialed arbitrary
+        // endpoints through a PRIVATE client with NO egress interceptor —
+        // an OFFLINE workspace still emitted network traffic.
+        com.example.infrastructure.provider.DiscoveryAdapterFactory.egressControl = egressControl
+    }
+
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 

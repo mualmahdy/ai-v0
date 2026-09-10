@@ -153,7 +153,108 @@ class AppContainer(context: Context) {
             projectDao = database.projectDao(),
             projectRootPathResolver = { projectId ->
                 java.io.File(appContext.filesDir, "workspaces/proj_$projectId").absolutePath
+            },
+            // REPAIR ORDER §3A — the bootstrap STATE MACHINE owns startup:
+            // transactional workspace+project creation, deterministic
+            // restoration, stale-reference reconciliation, observable phases.
+            bootstrapOrchestrator = workspaceBootstrapOrchestrator,
+            // REPAIR ORDER §5 — project lifecycle operations delegate to the
+            // dedicated runtime (this service stays a workspace-scope runtime).
+            projectRuntime = projectRuntimeService
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // REPAIR ORDER §3A/§5/§7/§9-§14/§24-§30 — NEW PORTABILITY SUBSYSTEM
+    // ------------------------------------------------------------------
+
+    /** §30 — unified audit trail (typed writer, secret-redacting). */
+    val auditTrailService: com.example.application.audit.AuditTrailService by lazy {
+        com.example.application.audit.AuditTrailService(database = database)
+    }
+
+    /** Shared sandbox file engine (containment-checked §7/§9/§11). */
+    private val sandboxProjectsDir: java.io.File by lazy {
+        java.io.File(appContext.filesDir, "workspaces").apply { mkdirs() }
+    }
+    val sandboxFileStore: com.example.infrastructure.storage.SandboxProjectFileStore by lazy {
+        com.example.infrastructure.storage.SandboxProjectFileStore(baseProjectsDir = sandboxProjectsDir)
+    }
+
+    /** §3A — bootstrap state machine (BOOTSTRAPPING → … → READY). */
+    val workspaceBootstrapOrchestrator: com.example.application.bootstrap.WorkspaceBootstrapOrchestrator by lazy {
+        com.example.application.bootstrap.WorkspaceBootstrapOrchestrator(
+            database = database,
+            projectRootResolver = { projectId ->
+                java.io.File(sandboxProjectsDir, "proj_$projectId")
             }
+        )
+    }
+
+    /** §5/§27 — project lifecycle runtime (multi-project management). */
+    val projectRuntimeService: com.example.application.project.ProjectRuntimeService by lazy {
+        com.example.application.project.ProjectRuntimeService(
+            database = database,
+            projectRootResolver = { projectId ->
+                java.io.File(sandboxProjectsDir, "proj_$projectId")
+            },
+            auditTrail = auditTrailService
+        )
+    }
+
+    /** §24/§25 — project readiness + dependency resolution. */
+    val projectReadinessService: com.example.application.project.ProjectReadinessService by lazy {
+        com.example.application.project.ProjectReadinessService(
+            database = database,
+            fileStore = sandboxFileStore
+        )
+    }
+
+    /** §7/§8/§29 — unified artifact / resource library. */
+    val artifactService: com.example.application.artifacts.ArtifactService by lazy {
+        com.example.application.artifacts.ArtifactService(
+            database = database,
+            fileStore = sandboxFileStore,
+            auditTrail = auditTrailService
+        )
+    }
+
+    /** §9 — file/folder import/export (SAF streams, safety, staging+atomic). */
+    val fileTransferService: com.example.application.transfer.FileTransferService by lazy {
+        com.example.application.transfer.FileTransferService(
+            fileStore = sandboxFileStore,
+            auditTrail = auditTrailService
+        )
+    }
+
+    /** §10-§12 — versioned portable project packages + clone/move. */
+    val projectPackageService: com.example.application.transfer.ProjectPackageService by lazy {
+        com.example.application.transfer.ProjectPackageService(
+            database = database,
+            fileStore = sandboxFileStore,
+            auditTrail = auditTrailService
+        )
+    }
+
+    /** §14 — session transcript export (canonical → TXT/MD/JSON). */
+    val sessionExportService: com.example.application.transfer.SessionExportService by lazy {
+        com.example.application.transfer.SessionExportService(database = database)
+    }
+
+    /** §28 — repair / reconciliation center (DETECT → EXPLAIN → REPAIR → VERIFY). */
+    val repairCenterService: com.example.application.repair.RepairCenterService by lazy {
+        com.example.application.repair.RepairCenterService(
+            database = database,
+            fileStore = sandboxFileStore,
+            auditTrail = auditTrailService
+        )
+    }
+
+    /** §4/§6/§8 — centralized scope resolution + access enforcement. */
+    val contextResolverService: com.example.application.context.ContextResolverService by lazy {
+        com.example.application.context.ContextResolverService(
+            database = database,
+            activeWorkspaceIdProvider = { workspaceRuntimeService.activeWorkspaceIdOrNull() }
         )
     }
 
@@ -877,6 +978,29 @@ class AppContainer(context: Context) {
             // file operations (FileSystemTool / skills / MCP local bridge all
             // resolve the pinned scope first). No implicit 1L ever.
             orchestrator.projectIdProvider = { workspaceRuntimeService.activeProjectIdOrNull() }
+            // REPAIR ORDER §20 — the PINNED workspace's authoritative policy,
+            // read from persistence BY ID once at launch (never the
+            // currently-active StateFlow: a mid-run workspace switch must not
+            // change a live execution's governance).
+            orchestrator.pinnedWorkspacePolicyProvider = { workspaceId ->
+                workspaceRuntimeService.autonomyPolicyForWorkspace(workspaceId)?.name
+            }
+            // REPAIR ORDER §3B — DURABLE consent requests: when a genuinely
+            // sensitive action is blocked and no admissible alternative
+            // remains, a human-approval request is RECORDED so the user can
+            // actually see and resolve it (the previously unreachable
+            // approval surface).
+            orchestrator.approvalRequester = { executionId, toolName, prompt, justification ->
+                runCatching {
+                    humanApprovalGate.requestApproval(
+                        executionId = executionId,
+                        toolName = toolName,
+                        riskLevel = "HIGH",
+                        prompt = prompt,
+                        justification = justification
+                    )
+                }.getOrNull()
+            }
             // Delegation executor: child tasks run through the same closed
             // loop (DECIDE → EXECUTE → OBSERVE), so children persist their
             // own task rows, emit their own traces, and honour the same
@@ -917,24 +1041,25 @@ class AppContainer(context: Context) {
             // (authoritative) and the task's persisted policy — instead of
             // raw caller-supplied authority. An explicit EXECUTE grant counts
             // as recorded consent.
+            //
+            // REPAIR ORDER §20: the orchestrator now resolves the effective
+            // policy ONCE at launch (pinned workspace policy from persistence
+            // BY ID ⊔ task constraints) and passes it in — the governor no
+            // longer re-reads the CURRENTLY-ACTIVE workspace mid-execution
+            // (scope mismatch: a live execution's governance must never
+            // change because the user switched workspaces).
             orchestrator.autonomyGovernor = { agent, action, isSensitive, taskPolicy ->
-                val workspacePolicy = runCatching {
-                    workspaceRuntimeService.activeWorkspace.value
-                        ?.settings?.get("autonomyPolicy")
-                }.getOrNull()?.let {
-                    runCatching {
-                        com.example.domain.core.task.AutonomyPolicy.valueOf(it)
-                    }.getOrNull()
-                }
-                val effective = moreRestrictiveAutonomy(workspacePolicy, taskPolicy)
+                val effective = taskPolicy
                 val evaluation = agentLifecycleService.evaluateAutonomy(
                     agent.identity.id, effective, action.type.name, isSensitive
                 )
                 if (evaluation.isAllowed) {
                     evaluation
                 } else if (evaluation.requireHumanConsent && !action.targetId.isNullOrBlank()) {
-                    // An explicit EXECUTE grant IS recorded consent.
-                    val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
+                    // An explicit EXECUTE grant IS recorded consent (resolved
+                    // against the PINNED execution workspace, not the active one).
+                    val workspaceId = com.example.domain.core.execution.ExecutionScope
+                        .currentWorkspaceIdOrNull() ?: workspaceRuntimeService.activeWorkspaceIdOrNull()
                     val granted = runCatching {
                         permissionGrantService.check(
                             principalType = com.example.domain.core.security.governance.PrincipalType.AGENT,
@@ -1590,7 +1715,18 @@ class MainViewModelFactory(
                 // (report gap-closure).
                 conversationSessionService = appContainer.conversationSessionService,
                 workflowLibraryService = appContainer.workflowLibraryService,
-                workflowPersistenceService = appContainer.workflowPersistenceService
+                workflowPersistenceService = appContainer.workflowPersistenceService,
+                // REPAIR ORDER §3A/§5/§9-§14/§24-§28 — portability subsystem:
+                // bootstrap state machine, project runtime, transfers,
+                // readiness, repair center, and the approval surface.
+                projectRuntimeService = appContainer.projectRuntimeService,
+                bootstrapStateProvider = appContainer.workspaceRuntimeService.bootstrapState,
+                fileTransferService = appContainer.fileTransferService,
+                projectPackageService = appContainer.projectPackageService,
+                sessionExportService = appContainer.sessionExportService,
+                projectReadinessService = appContainer.projectReadinessService,
+                repairCenterService = appContainer.repairCenterService,
+                humanApprovalGate = appContainer.humanApprovalGate
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

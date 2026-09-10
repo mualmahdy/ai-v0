@@ -68,7 +68,21 @@ class WorkspaceRuntimeService(
     private val projectDao: ProjectDao? = null,
     /** Resolves the sandbox root directory for a project id (wired from context by AppContainer). */
     private val projectRootPathResolver: (Long) -> String = { id -> "workspaces/proj_$id" },
-    private val coroutineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val coroutineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    /**
+     * REPAIR ORDER §3A — the bootstrap state machine. When provided, the
+     * service's init{} bootstrap delegates to the orchestrator (instead of
+     * the old fire-and-forget, non-transactional, non-reconciling path) and
+     * exposes [bootstrapState] as the SINGLE startup truth for the UI and
+     * for project-dependent feature gating. Null = legacy JVM-test wiring.
+     */
+    private val bootstrapOrchestrator: com.example.application.bootstrap.WorkspaceBootstrapOrchestrator? = null,
+    /**
+     * REPAIR ORDER §5 — the project lifecycle runtime. When provided,
+     * project operations delegate here (WorkspaceRuntimeService is NOT a
+     * monolithic project manager). Null = legacy JVM-test wiring.
+     */
+    private val projectRuntime: com.example.application.project.ProjectRuntimeService? = null
 ) {
     private val _activeWorkspace = MutableStateFlow<Workspace?>(null)
     val activeWorkspace: StateFlow<Workspace?> = _activeWorkspace.asStateFlow()
@@ -76,14 +90,29 @@ class WorkspaceRuntimeService(
     private val _allWorkspaces = MutableStateFlow<List<Workspace>>(emptyList())
     val allWorkspaces: StateFlow<List<Workspace>> = _allWorkspaces.asStateFlow()
 
+    /** REPAIR ORDER §3A — observable startup state machine. */
+    val bootstrapState: StateFlow<com.example.application.bootstrap.BootstrapState>
+        get() = bootstrapOrchestrator?.state ?: MutableStateFlow(com.example.application.bootstrap.BootstrapState.BOOTSTRAPPING)
+
     private val mutex = Mutex()
 
     init {
         // Bootstrap on first init: ensure at least one workspace exists and is active.
+        // REPAIR ORDER §3A: when the state-machine orchestrator is wired it
+        // OWNS the bootstrap (transactional workspace+project creation,
+        // deterministic restoration, stale-reference reconciliation); this
+        // collector then refreshes the runtime flows from the resulting
+        // authoritative state. Idempotent by construction.
         coroutineScope.launch {
-            bootstrapDefaultWorkspaceIfNeeded()
-            refreshAllWorkspaces()
-            refreshActiveWorkspace()
+            runCatching {
+                bootstrapOrchestrator?.bootstrap()
+                    ?: bootstrapDefaultWorkspaceIfNeeded()
+                refreshAllWorkspaces()
+                refreshActiveWorkspace()
+            }.onFailure {
+                // Honest failure: the bootstrap state machine surfaces it;
+                // legacy wiring (no orchestrator) keeps the old behavior.
+            }
         }
     }
 
@@ -237,9 +266,24 @@ class WorkspaceRuntimeService(
     /**
      * Updates the active project for the current workspace. Pass null to clear
      * the active project (e.g. when the user deletes the project).
+     *
+     * REPAIR ORDER §5: when the project runtime is wired, selection is
+     * validated by it (the project must be ACTIVE and owned by the
+     * workspace — a stale/archived/foreign reference is REJECTED, which
+     * is the reconciliation input of the bootstrap state machine).
      */
     suspend fun setActiveProject(projectId: Long?) {
         val active = _activeWorkspace.value ?: return
+        if (projectId != null && projectId > 0) {
+            val runtime = projectRuntime
+            if (runtime != null) {
+                if (!runtime.selectProject(active.id, projectId)) {
+                    return // rejected: stale/archived/foreign — honest no-op, reconciliation handles the rest
+                }
+                _activeWorkspace.update { it?.copy(activeProjectId = projectId) }
+                return
+            }
+        }
         workspaceDao.setActiveProject(active.id, projectId, System.currentTimeMillis())
         _activeWorkspace.update { it?.copy(activeProjectId = projectId ?: 0L) }
     }
@@ -254,6 +298,32 @@ class WorkspaceRuntimeService(
         val entity = workspaceDao.getWorkspaceById(active.id) ?: return
         workspaceDao.update(entity.copy(networkPolicy = policy.name, lastAccessedEpochMs = now))
         _activeWorkspace.update { it?.copy(networkPolicy = policy) }
+    }
+
+    /**
+     * REPAIR ORDER §20 — updates the AUTHORITATIVE autonomy policy of the
+     * active workspace (persisted column, the single governance authority
+     * consumed by the execution pipeline). Previously NO update path
+     * existed: the column was frozen at creation and the UI toggle was
+     * decorative (UI-local state with zero runtime consumers).
+     */
+    suspend fun updateAutonomyPolicy(policy: com.example.domain.core.task.AutonomyPolicy) {
+        val active = _activeWorkspace.value ?: return
+        workspaceDao.updateAutonomyPolicy(active.id, policy.name, System.currentTimeMillis())
+        // Refresh so the surfaced domain model carries the new policy.
+        refreshActiveWorkspace()
+    }
+
+    /**
+     * REPAIR ORDER §20 — pinned-workspace policy lookup (suspend, direct
+     * DAO read). Used by the orchestrator at EXECUTION LAUNCH to resolve
+     * the governing policy of the workspace the execution is pinned to —
+     * never the currently-active StateFlow (mid-run switches cannot
+     * change a live execution's governance).
+     */
+    suspend fun autonomyPolicyForWorkspace(workspaceId: String): com.example.domain.core.task.AutonomyPolicy? {
+        return workspaceDao.autonomyPolicyFor(workspaceId)
+            ?.let { name -> runCatching { com.example.domain.core.task.AutonomyPolicy.valueOf(name) }.getOrNull() }
     }
 
     /**

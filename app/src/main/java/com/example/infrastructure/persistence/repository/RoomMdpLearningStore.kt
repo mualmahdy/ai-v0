@@ -33,7 +33,9 @@ class RoomMdpLearningStore(
                     qValue = entity.qValue,
                     visitCount = entity.visitCount,
                     successCount = entity.successCount,
-                    lastUpdatedEpochMs = entity.lastUpdatedEpochMs
+                    lastUpdatedEpochMs = entity.lastUpdatedEpochMs,
+                    // REPAIR ORDER §19 — round-trips the action-space version.
+                    actionSpaceVersion = entity.actionSpaceVersion
                 )
             }
         }
@@ -49,7 +51,12 @@ class RoomMdpLearningStore(
                     qValue = entry.qValue,
                     visitCount = entry.visitCount,
                     successCount = entry.successCount,
-                    lastUpdatedEpochMs = entry.lastUpdatedEpochMs
+                    lastUpdatedEpochMs = entry.lastUpdatedEpochMs,
+                    // REPAIR ORDER §19 — persist rows stamped with the CURRENT
+                    // action-space version so future semantic changes can
+                    // invalidate them deterministically.
+                    actionSpaceVersion = entry.actionSpaceVersion
+                        ?: com.example.domain.core.decision.CbrMdpEngine.ACTION_SPACE_VERSION
                 )
             }
         )

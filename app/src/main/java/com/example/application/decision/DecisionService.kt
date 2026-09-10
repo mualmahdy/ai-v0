@@ -128,6 +128,11 @@ class DecisionService(
     /**
      * Builds the complete multi-dimensional DecisionContext by aggregating Workspace,
      * Resource Graph, Tool/Capability states, Memory, and Environment telemetry.
+     *
+     * REPAIR ORDER §3B: the caller (orchestrator) supplies the TASK CONTRACT
+     * (intent → admissible action set), the assigned agent's capability
+     * binding, and the EFFECTIVE autonomy policy pinned at launch. These
+     * constrain the action space BEFORE ranking.
      */
     fun buildDecisionContext(
         task: TaskDefinition,
@@ -143,7 +148,10 @@ class DecisionService(
         accumulatedEvidence: Map<String, Any?> = emptyMap(),
         lastAction: DecisionAction? = null,
         lastObservation: EnvironmentObservation? = null,
-        decisionHistory: List<DecisionResult> = emptyList()
+        decisionHistory: List<DecisionResult> = emptyList(),
+        taskContract: com.example.domain.core.task.TaskContract? = null,
+        agentAllowedCapabilities: Set<CapabilityType>? = null,
+        effectiveAutonomyPolicy: com.example.domain.core.task.AutonomyPolicy? = null
     ): DecisionContext {
         val effectiveRequirements = resolveTaskRequirements(task)
         val taskWithRequirements = if (task.requirements == effectiveRequirements) task else task.copy(requirements = effectiveRequirements)
@@ -228,7 +236,11 @@ class DecisionService(
             accumulatedEvidence = accumulatedEvidence,
             lastAction = lastAction,
             lastObservation = lastObservation,
-            decisionHistory = decisionHistory
+            decisionHistory = decisionHistory,
+            // REPAIR ORDER §3B — intent-constrained action space inputs.
+            taskContract = taskContract,
+            agentAllowedCapabilities = agentAllowedCapabilities,
+            effectiveAutonomyPolicy = effectiveAutonomyPolicy
         )
     }
 
@@ -621,7 +633,95 @@ class DecisionService(
             )
         }
 
-        return candidates
+        // ------------------------------------------------------------
+        // REPAIR ORDER §3B — ADMISSIBLE ACTION SET FILTER.
+        //
+        // The decision engine now receives an action space ALREADY
+        // constrained by (a) TASK SEMANTICS (the Task Contract resolved
+        // from intent: Quick Chat = generation-only, chat = no sensitive
+        // tools, …) and (b) the ASSIGNED AGENT'S capability binding (an
+        // agent without TOOL_EXECUTION never sees tool-family actions).
+        //
+        // This is the structural fix for the universal
+        // AUTONOMY_POLICY_BLOCKED failure: previously EVERY task (including
+        // ordinary chat) generated EXECUTE_TOOL candidates, the decision
+        // engine ranked them, and ONLY THEN did governance block them and
+        // kill the whole task. Prohibited actions are now never generated.
+        // Governance remains the FINAL enforcement boundary (defense in
+        // depth) — it just no longer meets surprises.
+        //
+        // Under ASSISTED policy the whole sensitive-action family is
+        // excluded from the action space (consent-first: such tasks surface
+        // ASK_USER instead of a mid-loop block).
+        // ------------------------------------------------------------
+        return applyAdmissibleActionSet(candidates, context)
+    }
+
+    /** Contract + capability + policy filter — see §3B comment above. */
+    private fun applyAdmissibleActionSet(
+        candidates: List<DecisionAction>,
+        context: DecisionContext
+    ): List<DecisionAction> {
+        val contract = context.taskContract
+        val agentCaps = context.agentAllowedCapabilities
+        val effectivePolicy = context.effectiveAutonomyPolicy
+
+        val sensitiveFamilyExcluded = effectivePolicy == com.example.domain.core.task.AutonomyPolicy.ASSISTED
+        val agentLacksToolExecution = agentCaps != null &&
+                com.example.domain.core.capability.CapabilityType.TOOL_EXECUTION !in agentCaps
+
+        var filtered = candidates.filter { action ->
+            // 1. Task-contract admissibility (semantics).
+            (contract == null || contract.isAdmissible(action.type)) &&
+                    // 2. Agent capability binding.
+                    !(agentLacksToolExecution && action.type in TOOL_FAMILY_ACTIONS) &&
+                    // 3. Policy pre-constraint: ASSISTED tasks never see
+                    //    sensitive actions in their action space.
+                    !(sensitiveFamilyExcluded && action.type in SENSITIVE_ACTION_FAMILY)
+        }
+
+        // Fallback safety: control actions (COMPLETE/ASK_USER/RETRY/REPLAN)
+        // are ALWAYS admissible — a task can never end up with an EMPTY
+        // action space (that would loop forever).
+        if (filtered.none { it.type in ALWAYS_ADMISSIBLE_CONTROL_ACTIONS }) {
+            filtered = filtered + listOfNotNull(
+                candidates.firstOrNull { it.type == DecisionActionType.ASK_USER }
+            ).ifEmpty {
+                listOf(
+                    DecisionAction(
+                        type = DecisionActionType.ASK_USER,
+                        targetId = "empty_admissible_action_set",
+                        payload = mapOf(
+                            "reason" to "لا توجد أفعال مسموحة لهذه المهمة وفق عقد المهمة والسياسة — " +
+                                    "مطلوب إرشاد المستخدم."
+                        )
+                    )
+                )
+            }
+        }
+        return filtered
+    }
+
+    companion object {
+        /** Maximum planning-hint boost for a user-preferred resource. */
+        const val PREFERENCE_BOOST = 0.05f
+
+        /** REPAIR ORDER §3B — sensitive action family mirrored from the governance boundary (§3B/§20). */
+        val SENSITIVE_ACTION_FAMILY: Set<DecisionActionType> = setOf(
+            DecisionActionType.EXECUTE_TOOL,
+            DecisionActionType.EXECUTE_MCP,
+            DecisionActionType.EXECUTE_SKILL,
+            DecisionActionType.USE_INTEGRATION
+        )
+
+        /** REPAIR ORDER §3B — control actions that are always admissible (never an empty space). */
+        val ALWAYS_ADMISSIBLE_CONTROL_ACTIONS: Set<DecisionActionType> = setOf(
+            DecisionActionType.COMPLETE,
+            DecisionActionType.STOP,
+            DecisionActionType.ASK_USER,
+            DecisionActionType.RETRY,
+            DecisionActionType.REPLAN
+        )
     }
 
     /**
@@ -658,11 +758,6 @@ class DecisionService(
         } catch (e: Exception) {
             null
         }
-    }
-
-    companion object {
-        /** Maximum planning-hint boost for a user-preferred resource. */
-        const val PREFERENCE_BOOST = 0.05f
     }
 
     /**

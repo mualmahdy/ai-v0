@@ -99,5 +99,8 @@ class PolicyVersionServiceTest {
         override suspend fun upsert(entity: com.example.infrastructure.persistence.entities.PolicyVersionEntity) {}
         override suspend fun demoteAll(kind: String) {}
         override suspend fun promote(id: String, actor: String, now: Long) {}
+        // REPAIR ORDER §18 — direct one-shot lookups (v16 DAO surface).
+        override suspend fun byId(id: String): com.example.infrastructure.persistence.entities.PolicyVersionEntity? = null
+        override suspend fun countById(id: String): Int = 0
     }
 }

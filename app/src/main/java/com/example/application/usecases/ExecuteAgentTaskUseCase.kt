@@ -5,6 +5,7 @@ import com.example.domain.core.agent.AgentDefinition
 import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.llm.LlmMessage
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.task.TaskConstraints
 import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.task.TaskId
 import com.example.domain.core.task.TaskInput
@@ -18,6 +19,11 @@ import java.util.UUID
  * specific model — the decision layer targets exactly that resource and the
  * binding survives the whole execution (reproducibility) instead of degrading
  * into "whatever model is currently preferred".
+ *
+ * REPAIR ORDER §3B/§20: [chatMode] drives the TASK CONTRACT (intent →
+ * admissible action set — Quick Chat is a legitimate generation-only mode),
+ * and [constraints] may now be supplied from an AUTHORITATIVE source
+ * (workspace policy); the default remains honest SUPERVISED.
  */
 class ExecuteAgentTaskUseCase(
     private val orchestrator: AgentOrchestrator
@@ -32,7 +38,11 @@ class ExecuteAgentTaskUseCase(
         assignedModelId: String? = null,
         networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
         isNetworkAvailable: Boolean = true,
-        includeWebSearch: Boolean = false
+        includeWebSearch: Boolean = false,
+        /** ChatMode.name — QUICK_CHAT binds the generation-only contract. */
+        chatMode: String? = null,
+        /** Task constraints sourced from the authoritative workspace policy. */
+        constraints: TaskConstraints? = null
     ): Flow<ExecutionEvent> {
         // REPAIR (defect family 3 — canonical identity & reproducibility):
         // `assignedModelId` previously fell back to `preferredProviderId`,
@@ -45,11 +55,16 @@ class ExecuteAgentTaskUseCase(
         // A pin that is not a model-resource id matches no candidate and
         // surfaces as an explicit PINNED_MODEL_UNAVAILABLE decision — no
         // silent degradation.
+        val parameters = buildMap {
+            put("delegationDepth", 0)
+            if (chatMode != null) put("chatMode", chatMode)
+        }
         val task = TaskDefinition(
             id = TaskId(taskId),
             assignedAgentId = agent.identity.id,
-            input = TaskInput(rawPrompt = prompt),
-            assignedModelId = assignedModelId
+            input = TaskInput(rawPrompt = prompt, parameters = parameters),
+            assignedModelId = assignedModelId,
+            constraints = constraints ?: TaskConstraints()
         )
 
         return orchestrator.executeTaskStream(

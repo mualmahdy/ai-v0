@@ -123,7 +123,12 @@ class ProtocolAdapterFactory(
             ServiceProtocolId.OLLAMA_NATIVE -> OpenAiCompatibleEmbeddingAdapter(
                 baseUrl = config.endpointUrl.ifBlank { "http://127.0.0.1:11434" },
                 apiKeyProvider = { null },
-                model = offeringModelId ?: config.defaultOfferingId.ifBlank { "nomic-embed-text" }
+                model = offeringModelId ?: config.defaultOfferingId.ifBlank { "nomic-embed-text" },
+                // REPAIR ORDER §17: the Ollama embedding adapter previously
+                // fell back to EgressControl.default (UN-PINNED → every
+                // request failed closed with EGRESS_NO_PINNED_POLICY). It now
+                // shares the SAME egress authority as every other adapter.
+                egressControl = egressControl
             )
             else -> null
         }

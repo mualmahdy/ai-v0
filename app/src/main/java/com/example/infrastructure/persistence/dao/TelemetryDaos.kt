@@ -249,6 +249,18 @@ interface PolicyVersionDao {
     @Query("SELECT * FROM policy_versions ORDER BY createdAtEpochMs DESC")
     fun allFlow(): Flow<List<PolicyVersionEntity>>
 
+    /**
+     * REPAIR ORDER §18 (DB v16): DIRECT one-shot lookup — replaces the
+     * hang-prone "runBlocking + collect infinite Flow" pattern in
+     * PolicyVersionService.promote/rollback. Never collect an infinite
+     * Flow to obtain one record.
+     */
+    @Query("SELECT * FROM policy_versions WHERE versionId = :id LIMIT 1")
+    suspend fun byId(id: String): PolicyVersionEntity?
+
+    @Query("SELECT COUNT(*) FROM policy_versions WHERE versionId = :id")
+    suspend fun countById(id: String): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: PolicyVersionEntity)
 

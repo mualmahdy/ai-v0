@@ -10,6 +10,7 @@ import com.example.domain.core.provider.HealthStatus
 import com.example.domain.core.rag.AssembledRagContext
 import com.example.domain.core.rag.DocumentChunk
 import com.example.domain.core.rag.KnowledgeDocument
+import com.example.domain.core.rag.RetrievalScopeMode
 import com.example.domain.core.rag.KnowledgePersistenceState
 import com.example.domain.core.rag.RetrievedContextChunk
 import com.example.domain.core.resource.ResourceId
@@ -142,8 +143,10 @@ class RagPipelineService(
         }
         if (evictedDocs > 0) {
             recordEviction(
-                "CORPUS_BOUND: evicted $evictedDocs document(s) / $evictedChunks chunk(s) " +
-                    "(limits: docs=$maxDocumentsPerWorkspace, chunks=$maxChunksPerWorkspace)"
+                "CORPUS_BOUND(RAM): evicted $evictedDocs document(s) / $evictedChunks chunk(s) " +
+                    "from the IN-MEMORY working set (limits: docs=$maxDocumentsPerWorkspace, " +
+                    "chunks=$maxChunksPerWorkspace). Persistent knowledge is RETAINED — " +
+                    "this is a memory-pressure eviction, NOT a deletion."
             )
         }
     }
@@ -156,6 +159,8 @@ class RagPipelineService(
         // COW-safe atomic removal.
         chunks.removeIf { it.documentId == documentId }
         indexedChunks.removeIf { it.chunk.documentId == documentId }
+        // REPAIR ORDER §15 — keep the scope index consistent with the working set.
+        docProjectIndex = docProjectIndex - documentId
     }
 
     private fun indexChunk(chunk: DocumentChunk): IndexedChunk {
@@ -200,6 +205,42 @@ class RagPipelineService(
     /** Audit 2026: collision-free document id generator (see ingestDocument). */
     private val docIdCounter = AtomicLong(0)
 
+    /**
+     * REPAIR ORDER §15 — the workspace whose knowledge is CURRENTLY in the
+     * RAM working set. Retrieval checks this and RELOADS when the pinned
+     * scope's workspace differs (previously retrieval scanned whatever was
+     * last loaded — a mid-execution workspace switch silently returned the
+     * OTHER workspace's knowledge).
+     */
+    @Volatile
+    private var loadedWorkspaceId: String? = null
+
+    /** REPAIR ORDER §15 — documentId → projectId (for scope-mode filtering). */
+    @Volatile
+    private var docProjectIndex: Map<String, Long?> = emptyMap()
+
+    private fun rebuildDocProjectIndex() {
+        docProjectIndex = _documents.value.associate { it.id to it.projectId }
+    }
+
+    /**
+     * REPAIR ORDER §15 — resolves the retrieval scope: the pinned
+     * ExecutionScope (agent executions) else the active workspace, and
+     * RELOADS the working set when it does not match. Returns null when no
+     * scope can be resolved (honest empty retrieval — fail-closed).
+     */
+    private suspend fun ensureWorkingSetForPinnedScope(): Pair<String, Long?>? {
+        val pinnedScope = currentCoroutineContext()[ExecutionScope.Key]
+        val workspaceId = pinnedScope?.workspaceId ?: runCatching { workspaceIdProvider() }.getOrNull()
+            ?: return null
+        if (loadedWorkspaceId != workspaceId && persistenceService != null) {
+            // Stale working set (workspace switch mid-execution): reload for
+            // the PINNED workspace — the scope the caller actually runs in.
+            loadFromPersistence()
+        }
+        return workspaceId to pinnedScope?.projectId?.takeIf { it > 0 }
+    }
+
     init {
         bootstrapDefaultKnowledge()
     }
@@ -213,12 +254,20 @@ class RagPipelineService(
      * (another workspace switch) started while this one was reading, this
      * result is discarded instead of clobbering the newer workspace's
      * working set (the A-load / B-load / A-finishes-last race).
+     *
+     * REPAIR ORDER §15 — (a) the loaded scope is TRACKED ([loadedWorkspaceId])
+     * so retrieval can detect and repair a stale working set instead of
+     * returning ANOTHER workspace's knowledge; (b) corpus bounds are
+     * enforced AFTER load (previously an over-bound corpus was fully
+     * resurrected on every restart and then re-evicted piecemeal on the
+     * next ingest — a thrash loop); (c) [projectId] scopes the load to a
+     * project view (project-private + workspace-shared).
      */
-    suspend fun loadFromPersistence() {
+    suspend fun loadFromPersistence(projectId: Long? = null) {
         val persistence = persistenceService ?: return
         val generation = loadGeneration.incrementAndGet()
         val workspaceId = workspaceIdProvider()
-        val (docs, loadedChunks) = persistence.loadWorkspaceKnowledge(workspaceId)
+        val (docs, loadedChunks) = persistence.loadWorkspaceKnowledge(workspaceId, projectId)
         // Stale-result guard: only the LATEST load may mutate the index.
         if (loadGeneration.get() != generation) return
         chunksMutex.withLock {
@@ -227,6 +276,11 @@ class RagPipelineService(
             reindexAll()
         }
         _documents.update { docs }
+        rebuildDocProjectIndex()
+        loadedWorkspaceId = workspaceId
+        // REPAIR ORDER §15 — enforce the SAME bounds after load (eviction is
+        // RAM-only and honestly labeled: persistent knowledge is RETAINED).
+        enforceCorpusBounds()
     }
 
     /**
@@ -334,14 +388,24 @@ class RagPipelineService(
      * Per Section 8: each chunk records which embedding ResourceId generated
      * its vector. This preserves vector-compatibility boundaries across
      * different embedding resources.
+     *
+     * REPAIR ORDER §15: [projectId] scopes the ingested knowledge — null
+     * (default) = WORKSPACE-SHARED, non-null = PROJECT-PRIVATE.
      */
-    suspend fun ingestDocument(title: String, content: String, sourceUri: String, tags: List<String> = emptyList()): KnowledgeDocument = withContext(Dispatchers.Default) {
+    suspend fun ingestDocument(
+        title: String,
+        content: String,
+        sourceUri: String,
+        tags: List<String> = emptyList(),
+        projectId: Long? = null
+    ): KnowledgeDocument = withContext(Dispatchers.Default) {
         // Audit 2026: collision-free document id. A timestamp-only id made
         // two documents ingested within the same millisecond THE SAME
         // document (eviction/deletion then wiped them all at once).
         val docId = "doc_${System.currentTimeMillis()}_${docIdCounter.incrementAndGet()}"
         val doc = KnowledgeDocument(
-            id = docId, title = title, sourceUri = sourceUri, content = content, tags = tags
+            id = docId, title = title, sourceUri = sourceUri, content = content, tags = tags,
+            projectId = projectId
         )
         val splitChunks = splitIntoChunks(doc)
 
@@ -384,6 +448,7 @@ class RagPipelineService(
         chunks.addAll(embeddedChunks)
         // P1-5: keep the retrieval index in sync with ingested chunks.
         embeddedChunks.forEach { indexedChunks.add(indexChunk(it)) }
+        rebuildDocProjectIndex()
         // Audit 2026 (§29): bounded corpus — evict oldest when over the limits.
         enforceCorpusBounds()
 
@@ -529,13 +594,55 @@ class RagPipelineService(
         replaceWith = ReplaceWith("retrieveRelevantContext(query, topK)")
     )
     suspend fun retrieveRelevantContext(query: String, topK: Int = 4, maxTokenBudget: Int = 2000): AssembledRagContext =
-        retrieveRelevantContextInternal(query, topK)
+        retrieveRelevantContextInternal(query, topK, RetrievalScopeMode.PROJECT_AND_WORKSPACE)
 
     suspend fun retrieveRelevantContext(query: String, topK: Int = 4): AssembledRagContext =
-        retrieveRelevantContextInternal(query, topK)
+        retrieveRelevantContextInternal(query, topK, RetrievalScopeMode.PROJECT_AND_WORKSPACE)
 
-    private suspend fun retrieveRelevantContextInternal(query: String, topK: Int): AssembledRagContext = withContext(Dispatchers.Default) {
+    /**
+     * REPAIR ORDER §15 — EXPLICIT retrieval scope mode. The default remains
+     * PROJECT_AND_WORKSPACE (backward compatible); callers may tighten to
+     * PROJECT_ONLY / WORKSPACE_ONLY / APPLICATION. Cross-project private
+     * knowledge is NEVER retrievable regardless of mode (sibling isolation).
+     */
+    suspend fun retrieveRelevantContext(
+        query: String,
+        topK: Int = 4,
+        scopeMode: RetrievalScopeMode
+    ): AssembledRagContext =
+        retrieveRelevantContextInternal(query, topK, scopeMode)
+
+    private suspend fun retrieveRelevantContextInternal(
+        query: String,
+        topK: Int,
+        scopeMode: RetrievalScopeMode = RetrievalScopeMode.PROJECT_AND_WORKSPACE
+    ): AssembledRagContext = withContext(Dispatchers.Default) {
         val (embeddingProvider, usedResourceId) = resolveEmbeddingProvider()
+
+        // --------------------------------------------------------------
+        // REPAIR ORDER §15 — SCOPED RETRIEVAL: resolve the caller's pinned
+        // (or active) workspace/project, repair a stale working set, and
+        // filter the candidate chunks by the requested SCOPE MODE. This is
+        // the structural fix for "retrieval was a GLOBAL working-set scan":
+        // another workspace's — or a sibling project's private — knowledge
+        // can no longer be silently retrieved.
+        // --------------------------------------------------------------
+        val retrievalScope = ensureWorkingSetForPinnedScope()
+        val pinnedProjectId = retrievalScope?.second
+        val scopeFilter: (String) -> Boolean = { documentId ->
+            val docProject = docProjectIndex[documentId]
+            when (scopeMode) {
+                RetrievalScopeMode.PROJECT_ONLY ->
+                    pinnedProjectId != null && docProject == pinnedProjectId
+                // No pinned project = the caller runs at WORKSPACE scope:
+                // the whole (workspace-bounded) working set is visible.
+                // With a pinned project: own private + workspace-shared.
+                RetrievalScopeMode.PROJECT_AND_WORKSPACE ->
+                    pinnedProjectId == null || docProject == null || docProject == pinnedProjectId
+                RetrievalScopeMode.WORKSPACE_ONLY -> docProject == null
+                RetrievalScopeMode.APPLICATION -> false // no app-shared knowledge persisted yet — honest empty
+            }
+        }
 
         val providerIsSemantic = isProviderSemantic(embeddingProvider)
 
@@ -580,6 +687,10 @@ class RagPipelineService(
         for (i in 0 until scanBound) {
             val indexed = candidates[i]
             val chunk = indexed.chunk
+            // REPAIR ORDER §15 — scope-mode membership check BEFORE any
+            // scoring work: out-of-scope chunks (sibling project private,
+            // other-workspace) are skipped entirely.
+            if (!scopeFilter(chunk.documentId)) continue
             val chunkEmbeddingId = chunk.metadata["embeddingResourceId"]
             // Compatibility boundary: chunks embedded by a DIFFERENT embedding
             // resource than the active one cannot be compared semantically.
