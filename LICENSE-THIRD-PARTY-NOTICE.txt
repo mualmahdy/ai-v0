@@ -1,0 +1,28 @@
+AI-V0 Ultimate — Third-Party License Notice
+
+AI-V0 Ultimate is licensed under the Apache License, Version 2.0.
+
+This distribution may contain or depend upon third-party software.
+Third-party software remains subject to its respective license terms.
+
+In particular, the Android core-library desugaring component:
+
+    com.android.tools:desugar_jdk_libs
+
+is distributed under GPLv2 with the Classpath Exception by its upstream
+project. Its applicable license terms remain in force.
+
+Other third-party components may be distributed under Apache-2.0, MIT,
+or other permissive licenses.
+
+For the complete project-level third-party inventory, see:
+
+    THIRD-PARTY-LICENSES.md
+
+For the project license, see:
+
+    LICENSE
+
+AI-V0 Ultimate does not grant rights to third-party AI models, APIs,
+datasets, trademarks, fonts, images, or other external resources.
+Those resources are governed by their respective terms.
