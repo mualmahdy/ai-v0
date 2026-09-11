@@ -1,5 +1,6 @@
 package com.example.infrastructure.persistence.entities
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -30,7 +31,11 @@ data class ProjectEntity(
     val isArchived: Boolean = false,
     /** Owning workspace id — set at creation, never implicit. */
     val workspaceId: String? = null,
-    /** REPAIR ORDER §27: authoritative lifecycle state (DB v16). */
+    /** REPAIR ORDER §27: authoritative lifecycle state (DB v16).
+     * GAP-01 (Design Closure 2026): defaultValue mirrors the column's
+     * `ALTER TABLE ... DEFAULT 'ACTIVE'` in MIGRATION_15_TO_16 so the
+     * migrated schema and the entity schema validate identically. */
+    @ColumnInfo(defaultValue = "'ACTIVE'")
     val lifecycleState: String = "ACTIVE",
     val archivedAtEpochMs: Long? = null,
     val trashedAtEpochMs: Long? = null
@@ -62,7 +67,17 @@ data class ProjectEntity(
  * workspace-owned, not resurrected from this remnant.
  */
 
-@Entity(tableName = "memory_records")
+@Entity(
+    tableName = "memory_records",
+    indices = [
+        // GAP-01 (Design Closure 2026): MIGRATION_7_TO_8 creates these three
+        // indices; declaring them here makes the fresh-install schema, the
+        // migrated schema and the expected (validation) schema identical.
+        Index("workspaceId"),
+        Index("agentId"),
+        Index("memoryType")
+    ]
+)
 data class MemoryEntity(
     @PrimaryKey
     val id: String,
@@ -77,12 +92,19 @@ data class MemoryEntity(
     val isArchived: Boolean = false,
     // ---- Phase 5 (Memory Intelligence): full taxonomy + workspace/agent scoping ----
     // See MIGRATION_7_TO_8 — all new columns have defaults so existing rows migrate cleanly.
+    // GAP-01 (Design Closure 2026): the @ColumnInfo defaultValue annotations mirror
+    // the migration's SQL DEFAULTs exactly (schema identity for validation + export).
+    @ColumnInfo(defaultValue = "'FACTUAL_INSIGHT'")
     val memoryType: String = "FACTUAL_INSIGHT", // WORKING, EPISODIC, SEMANTIC, PROCEDURAL, PREFERENCE, FACTUAL_INSIGHT, CASE_EXAMPLE, CONVERSATION_SUMMARY, WORKSPACE, AGENT
+    @ColumnInfo(defaultValue = "1.0")
     val importance: Float = 1.0f,
+    @ColumnInfo(defaultValue = "1.0")
     val decayScore: Float = 1.0f, // starts at 1.0 (full strength), decays over time
     val workspaceId: String? = null,
     val agentId: String? = null,
+    @ColumnInfo(defaultValue = "'[]'")
     val tagsJson: String = "[]",
+    @ColumnInfo(defaultValue = "0")
     val lastDecayEvaluatedAtEpochMs: Long = System.currentTimeMillis()
 )
 
@@ -104,7 +126,10 @@ data class ExecutionLogEntity(
     val workspaceId: String? = null
 )
 
-@Entity(tableName = "tasks", indices = [Index("workspaceId"), Index("parentTaskId")])
+@Entity(
+    tableName = "tasks",
+    indices = [Index("workspaceId"), Index("parentTaskId"), Index("projectId")]
+)
 data class TaskEntity(
     @PrimaryKey
     val id: String,
@@ -122,14 +147,25 @@ data class TaskEntity(
     val updatedAtEpochMs: Long,
     // FIX APP-P0-07 (DOM-P0-02): Added fields to support full TaskDefinition round-trip
     // so that resumeTask can reconstruct the original task instead of dropping most fields.
+    // GAP-01 (Design Closure 2026): the @ColumnInfo defaultValue annotations mirror the
+    // SQL DEFAULTs of MIGRATION_3_TO_4 / MIGRATION_8_TO_9 exactly (schema identity).
+    @ColumnInfo(defaultValue = "''")
     val goal: String = rawPrompt,
+    @ColumnInfo(defaultValue = "0")
     val currentStepIndex: Int = 0,
+    @ColumnInfo(defaultValue = "30000")
     val tokenLimit: Int = 30000,
+    @ColumnInfo(defaultValue = "3")
     val maxRetries: Int = 3,
+    @ColumnInfo(defaultValue = "1")
     val allowDegradedExecution: Boolean = true,
+    @ColumnInfo(defaultValue = "1")
     val requireHumanConsentForSensitiveTools: Boolean = true,
+    @ColumnInfo(defaultValue = "60000")
     val timeoutMs: Long = 60000L,
+    @ColumnInfo(defaultValue = "1")
     val minOutputLengthChars: Int = 1,
+    @ColumnInfo(defaultValue = "'STRICT'")
     val verificationStrategy: String = "STRICT",
     val assignedModelId: String? = null,
     val activeToolsJson: String? = null,         // JSON array of tool IDs
@@ -141,6 +177,7 @@ data class TaskEntity(
     // Parent task for delegated child tasks (NULL for top-level tasks).
     val parentTaskId: String? = null,
     // Delegation nesting depth (0 = top-level). Guards against runaway recursion.
+    @ColumnInfo(defaultValue = "0")
     val delegationDepth: Int = 0,
     // JSON checkpoint of the closed-loop state (step index, accumulated
     // evidence, accumulated output, consumed tokens) — the resume payload.
@@ -270,6 +307,9 @@ data class ProviderConfigEntity(
 )
 data class MdpQValueEntity(
     val regionKey: String,
+    // GAP-01 (Design Closure 2026): mirrors the v12 recreation DDL
+    // (MIGRATION_11_TO_12: resourceKey TEXT NOT NULL DEFAULT 'R:none').
+    @ColumnInfo(defaultValue = "'R:none'")
     val resourceKey: String,
     val actionType: String,
     val qValue: Float,

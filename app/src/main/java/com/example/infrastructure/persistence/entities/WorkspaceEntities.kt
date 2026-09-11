@@ -1,5 +1,6 @@
 package com.example.infrastructure.persistence.entities
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -45,7 +46,14 @@ data class WorkspaceEntity(
  */
 @Entity(
     tableName = "knowledge_documents",
-    indices = [Index("workspaceId"), Index("createdAtEpochMs")]
+    indices = [
+        Index("workspaceId"),
+        Index("createdAtEpochMs"),
+        // GAP-01 (Design Closure 2026): MIGRATION_15_TO_16 creates this index
+        // (index_knowledge_documents_projectId); declaring it keeps the fresh,
+        // migrated and expected schemas identical.
+        Index("projectId")
+    ]
 )
 data class KnowledgeDocumentEntity(
     @PrimaryKey
@@ -54,12 +62,18 @@ data class KnowledgeDocumentEntity(
     val title: String,
     val sourceUri: String,
     val content: String,              // full document text (so re-chunking is possible)
+    // GAP-01 (Design Closure 2026): defaultValue mirrors the v12 recreation DDL
+    // (MIGRATION_11_TO_12: mimeType TEXT NOT NULL DEFAULT 'text/markdown').
+    @ColumnInfo(defaultValue = "'text/markdown'")
     val mimeType: String = "text/markdown",
     val tagsJson: String,             // JSON array of tags
     val totalChunks: Int,
     val totalTokensEstimated: Int,
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long,
+    // GAP-01 (Design Closure 2026): mirrors `isArchived INTEGER NOT NULL DEFAULT 0`
+    // in MIGRATION_11_TO_12's knowledge_documents_v12 recreation.
+    @ColumnInfo(defaultValue = "0")
     val isArchived: Boolean = false,
     /**
      * REPAIR ORDER §15 (DB v16): NULL = workspace-shared knowledge,
@@ -99,6 +113,9 @@ data class DocumentChunkEntity(
     val vectorDimension: Int,
     val vectorJson: String,           // Float array as JSON
     val retrievalSource: String,      // SEMANTIC | LEXICAL_FALLBACK
+    // GAP-01 (Design Closure 2026): mirrors MIGRATION_11_TO_12's
+    // `ALTER TABLE document_chunks ADD COLUMN metadataJson TEXT NOT NULL DEFAULT '{}'`.
+    @ColumnInfo(defaultValue = "'{}'")
     val metadataJson: String = "{}",  // JSON map of chunk metadata
     val createdAtEpochMs: Long
 )
@@ -135,7 +152,13 @@ data class ResourceEdgeEntity(
     val targetId: String,
     val targetType: String,
     val edgeType: String,             // ResourceEdgeType.name (CONTAINS, DEPENDS_ON, USES_TOOL, etc.)
+    // GAP-01 (Design Closure 2026): mirror the table's v5 creation DDL
+    // (MIGRATION_4_TO_5: weight REAL NOT NULL DEFAULT 1.0 / metadataJson
+    // TEXT NOT NULL DEFAULT '{}') — the table was never recreated, so the
+    // DEFAULTs persist into every upgraded database.
+    @ColumnInfo(defaultValue = "1.0")
     val weight: Float = 1.0f,
+    @ColumnInfo(defaultValue = "'{}'")
     val metadataJson: String = "{}",  // JSON map
     val createdAtEpochMs: Long
 )

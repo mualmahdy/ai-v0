@@ -11,13 +11,13 @@ import com.example.domain.core.provider.offering.OfferingType
 import com.example.domain.core.provider.offering.ServiceOffering
 import com.example.domain.ports.llm.LlmProviderPort
 import com.example.infrastructure.network.EgressControl
+import com.example.infrastructure.network.GovernedHttpClientFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 /**
  * ============================================================================
@@ -48,25 +48,28 @@ import java.util.concurrent.TimeUnit
  *
  * Discovery result: `ServiceOffering` — NOT `ResourceRecord`.
  */
-object DiscoveryAdapterFactory {
-
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .build()
+class DiscoveryAdapterFactory(
+    /**
+     * REPAIR ORDER §17 + GAP-03 (Design Closure 2026, ADR-3): centralized
+     * egress authority for EVERY discovery dial, CONSTRUCTOR-INJECTED by the
+     * caller (ProviderControlPlaneService wires the composition root's
+     * single instance). Previously this factory exposed a globally mutable
+     * `object` + public static `egressControl` var — assignable by any code,
+     * contradicting the instance-injection design of EgressControl. Every
+     * request is checked BEFORE dialing — fail-closed on policy violation
+     * (an OFFLINE workspace can no longer emit discovery traffic).
+     */
+    private val egressControl: EgressControl
+) {
 
     /**
-     * REPAIR ORDER §17 — centralized egress authority for EVERY discovery
-     * dial. Previously this (PRODUCTION) discovery path built a PRIVATE
-     * client with NO egress interceptor, so /models requests to arbitrary
-     * endpoints escaped workspace network policy entirely (an OFFLINE
-     * workspace could still emit network traffic). The shared [EgressControl]
-     * instance is injected by the caller (ProviderControlPlaneService wires
-     * the AppContainer's single instance); when present, every request is
-     * checked BEFORE dialing — fail-closed on policy violation.
+     * GAP-03: the discovery client is built by the governed factory — the
+     * EgressControl interceptor is ALWAYS installed (belt), and
+     * [executeEgressChecked] additionally asserts the policy explicitly
+     * (suspenders, kept from REPAIR ORDER §17 for fail-closed clarity).
      */
-    @Volatile
-    var egressControl: EgressControl? = null
+    private val httpClient: OkHttpClient = GovernedHttpClientFactory(egressControl)
+        .create(connectTimeoutSeconds = 8, readTimeoutSeconds = 10)
 
     /**
      * Discover offerings for the given (service, config). Returns a list of
@@ -91,15 +94,12 @@ object DiscoveryAdapterFactory {
 
     /**
      * REPAIR ORDER §17 — egress-gated request execution for discovery.
-     * Fail-CLOSED: egress must be WIRED for any outbound dial; a policy
-     * DENY aborts before any byte leaves the device.
+     * Fail-CLOSED: a policy DENY aborts before any byte leaves the device.
+     * (The former EGRESS_CONTROL_UNWIRED guard is unnecessary now — the
+     * egress authority is a required constructor parameter, not a static.)
      */
     private fun executeEgressChecked(request: Request): okhttp3.Response {
-        val egress = egressControl
-            ?: throw java.io.IOException(
-                "EGRESS_CONTROL_UNWIRED: مسار الاكتشاف غير مرتبط بسياسة الخروج المركزية — رفض الاتصال بدل تجاوزها (${request.url})"
-            )
-        egress.assertEgressAllowed(request)
+        egressControl.assertEgressAllowed(request)
         return httpClient.newCall(request).execute()
     }
 

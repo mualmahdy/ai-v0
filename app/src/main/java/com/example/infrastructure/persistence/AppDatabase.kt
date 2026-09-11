@@ -91,7 +91,10 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
  * Migration policy going forward:
  *   1. Bump `version` below when adding columns/tables.
  *   2. Add a new `MIGRATION_N_TO_N1` Migration object to `ALL_MIGRATIONS`.
- *   3. Set `exportSchema = true` once the schemas/ directory is wired in build.gradle.
+ *   3. exportSchema is enabled (GAP-01, Design Closure 2026) with
+ *      `room.schemaLocation` wired in build.gradle — commit the exported
+ *      JSON on every version bump so CI can catch schema drift and
+ *      MigrationTestHelper can validate future steps.
  *
  * FIX R-3 (audit c03919d): the migration chain now starts at v1 (1→2→3→4→5→6→7)
  * so ANY historically shipped database upgrades cleanly.
@@ -191,7 +194,14 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.AuditEventEntity::class
     ],
     version = 16,
-    exportSchema = false
+    // GAP-01 (Design Closure 2026, ADR-1): schema export is now enabled and
+    // committed under app/schemas/ — every future schema change gets a
+    // committed baseline JSON, enabling MigrationTestHelper tests and CI
+    // schema-drift detection from v16 onward. (Historical v1–v15 JSONs
+    // cannot be regenerated honestly: exportSchema was false from the start.
+    // The full-chain identity validation for those paths lives in
+    // MigrationChainValidationTest.)
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
 
@@ -1598,6 +1608,18 @@ abstract class AppDatabase : RoomDatabase() {
          */
         private val MIGRATION_15_TO_16 = object : Migration(15, 16) {
             override fun migrate(db: SupportSQLiteDatabase) {
+                // --- 0. GAP-01 schema reconciliation (Design Closure 2026) ---
+                // MIGRATION_7_TO_8 created only 4 of the 5 indices declared by
+                // ToolAuditEntity (index_tool_audit_log_callerAgentId was never
+                // created), so every upgraded database fails Room's
+                // validateMigration index check. Creating it HERE (in the last
+                // migration, idempotently) converges every upgrade path ≤15
+                // and fresh installs onto the entity-declared schema. Additive
+                // and safe: an extra index never changes query semantics.
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_tool_audit_log_callerAgentId ON tool_audit_log(callerAgentId)"
+                )
+
                 // --- 1. Project lifecycle state machine (§27) ---
                 db.execSQL("ALTER TABLE projects ADD COLUMN lifecycleState TEXT NOT NULL DEFAULT 'ACTIVE'")
                 db.execSQL("ALTER TABLE projects ADD COLUMN archivedAtEpochMs INTEGER")

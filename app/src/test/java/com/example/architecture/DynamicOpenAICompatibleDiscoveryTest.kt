@@ -1,6 +1,8 @@
 package com.example.architecture
 
 import com.example.infrastructure.provider.DiscoveryAdapterFactory
+import com.example.infrastructure.network.EgressControl
+import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.Outcome
 import com.example.domain.core.provider.ProviderService
 import com.example.domain.core.provider.ServiceConfiguration
@@ -26,6 +28,20 @@ import org.junit.Test
  * rather than a hard-coded provider.
  */
 class DynamicOpenAICompatibleDiscoveryTest {
+
+    /**
+     * GAP-03 (Design Closure 2026): DiscoveryAdapterFactory is now a
+     * constructor-injected CLASS (the mutable static egress var is gone).
+     * The test pins a permissive HYBRID policy so the fake-endpoint calls
+     * reach the transport layer (as before) — the egress deny path is
+     * covered by GovernedEgressPerimeterTest.
+     */
+    private val factory = DiscoveryAdapterFactory(
+        egressControl = EgressControl().apply {
+            pinWorkspacePolicy("ws-test", NetworkPolicy.HYBRID)
+            setActiveWorkspace("ws-test")
+        }
+    )
 
     @Test
     fun `discovery uses the configured endpoint dynamically`() = runBlocking {
@@ -58,8 +74,8 @@ class DynamicOpenAICompatibleDiscoveryTest {
         // Both calls go through the same factory; only the configuration differs.
         // We don't make real network calls (these URLs are fake), but we verify
         // that the factory accepts any endpoint and attempts discovery.
-        val outcome1 = DiscoveryAdapterFactory.discover(service, cfg1) { null }
-        val outcome2 = DiscoveryAdapterFactory.discover(service, cfg2) { null }
+        val outcome1 = factory.discover(service, cfg1) { null }
+        val outcome2 = factory.discover(service, cfg2) { null }
 
         // Both should return some Outcome (Error or Success) — not a hard-coded
         // single-endpoint behavior. They MUST NOT both succeed with the same
@@ -84,7 +100,7 @@ class DynamicOpenAICompatibleDiscoveryTest {
             endpointUrl = "https://invalid.example.test/v1",
             isEnabled = true
         )
-        val outcome = DiscoveryAdapterFactory.discover(service, cfg) { null }
+        val outcome = factory.discover(service, cfg) { null }
         // Even if discovery fails, the result type is List<ServiceOffering>, not
         // List<ResourceRecord>. This is the architectural invariant.
         when (outcome) {

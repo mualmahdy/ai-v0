@@ -10,6 +10,8 @@ import com.example.domain.core.resource.ResourceValidator
 import com.example.domain.core.resource.ResourceValidatorRegistry
 import com.example.infrastructure.llm.gemini.GeminiBootstrap
 import com.example.infrastructure.llm.openai.OpenAiCompatibleLlmAdapter
+import com.example.infrastructure.network.EgressControl
+import com.example.infrastructure.network.GovernedHttpClientFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -32,13 +34,24 @@ import java.util.concurrent.TimeUnit
  * All network work runs on Dispatchers.IO.
  */
 
-private val validatorClient: OkHttpClient = OkHttpClient.Builder()
-    .connectTimeout(8, TimeUnit.SECONDS)
-    .readTimeout(15, TimeUnit.SECONDS)
-    .build()
+/**
+ * GAP-03 (Design Closure 2026, ADR-3): the validation client is now built
+ * by [GovernedHttpClientFactory] — the EgressControl interceptor is ALWAYS
+ * installed, so an OFFLINE workspace policy denies "Test Connection" /
+ * "Validate" pings BEFORE any socket is opened. Previously this private
+ * client bypassed egress governance entirely.
+ *
+ * Defaults follow the repo convention: an UN-pinned EgressControl fails
+ * CLOSED; production (AppContainer) injects the composition-root factory.
+ */
+private fun governedValidatorClient(
+    egressControl: EgressControl
+): OkHttpClient = GovernedHttpClientFactory(egressControl)
+    .create(connectTimeoutSeconds = 8, readTimeoutSeconds = 15)
 
 /** Shared HTTP ping + classification used by LLM & remote embedding validators. */
 private suspend fun httpPing(
+    client: OkHttpClient,
     url: String,
     apiKeyProvider: suspend () -> String?
 ): ServiceValidationResult = withContext(Dispatchers.IO) {
@@ -48,7 +61,7 @@ private suspend fun httpPing(
         apiKeyProvider()?.takeIf { it.isNotBlank() }?.let { key ->
             builder.addHeader("Authorization", "Bearer $key")
         }
-        validatorClient.newCall(builder.build()).execute().use { response ->
+        client.newCall(builder.build()).execute().use { response ->
             val latency = System.currentTimeMillis() - start
             when {
                 response.isSuccessful -> ServiceValidationResult.success(
@@ -91,6 +104,7 @@ private suspend fun httpPing(
 
 /** Gemini pings the models endpoint with the key in the x-goog-api-key header (no URL leakage). */
 private suspend fun geminiPing(
+    client: OkHttpClient,
     apiKey: String
 ): ServiceValidationResult = withContext(Dispatchers.IO) {
     val start = System.currentTimeMillis()
@@ -98,7 +112,7 @@ private suspend fun geminiPing(
         // FIX P0-8 (audit c03919d): API key moved from ?key= URL param to the
         // x-goog-api-key request header.
         val url = "https://generativelanguage.googleapis.com/v1beta/models"
-        val response = validatorClient.newCall(
+        val response = client.newCall(
             Request.Builder().url(url).header("x-goog-api-key", apiKey).get().build()
         ).execute()
         response.use { resp ->
@@ -137,7 +151,9 @@ private suspend fun geminiPing(
 /* ------------------------------ LLM ---------------------------------------- */
 
 class LlmResourceValidator(
-    private val geminiBootstrap: GeminiBootstrap? = null
+    private val geminiBootstrap: GeminiBootstrap? = null,
+    /** GAP-03: governed client — egress policy applies to validation pings. */
+    private val httpClient: OkHttpClient = governedValidatorClient(EgressControl.default)
 ) : ResourceValidator {
 
     override suspend fun validate(
@@ -157,7 +173,7 @@ class LlmResourceValidator(
                     val bootstrap = geminiBootstrap
                     val firebaseKey = bootstrap?.apiKeyFromOptions()
                     if (bootstrap != null && firebaseKey != null) {
-                        geminiPing(firebaseKey)
+                        geminiPing(httpClient, firebaseKey)
                     } else {
                         ServiceValidationResult.failure(
                             ServiceHealthClassification.AUTHENTICATION_FAILURE,
@@ -166,15 +182,17 @@ class LlmResourceValidator(
                         )
                     }
                 } else {
-                    geminiPing(key)
+                    geminiPing(httpClient, key)
                 }
             }
             ServiceProtocolId.OPENAI_COMPATIBLE,
             ServiceProtocolId.OPENAI_NATIVE -> httpPing(
+                httpClient,
                 OpenAiCompatibleLlmAdapter.normalizeBaseUrl(config.endpointUrl) + "/models",
                 apiKeyProvider
             )
             ServiceProtocolId.OLLAMA_NATIVE -> httpPing(
+                httpClient,
                 OpenAiCompatibleLlmAdapter.normalizeBaseUrl(
                     config.endpointUrl.ifBlank { "http://127.0.0.1:11434" }
                 ) + "/models",
@@ -200,7 +218,10 @@ class LlmResourceValidator(
 
 /* ------------------------------ Embedding ---------------------------------- */
 
-class EmbeddingResourceValidator : ResourceValidator {
+class EmbeddingResourceValidator(
+    /** GAP-03: governed client — egress policy applies to validation pings. */
+    private val httpClient: OkHttpClient = governedValidatorClient(EgressControl.default)
+) : ResourceValidator {
 
     override suspend fun validate(
         service: ProviderService,
@@ -243,7 +264,7 @@ class EmbeddingResourceValidator : ResourceValidator {
                 } else {
                     config.endpointUrl
                 }
-                httpPing(OpenAiCompatibleLlmAdapter.normalizeBaseUrl(base) + "/models", apiKeyProvider)
+                httpPing(httpClient, OpenAiCompatibleLlmAdapter.normalizeBaseUrl(base) + "/models", apiKeyProvider)
             }
             else -> ServiceValidationResult.failure(
                 ServiceHealthClassification.UNKNOWN, 0L,
@@ -255,7 +276,10 @@ class EmbeddingResourceValidator : ResourceValidator {
 
 /* ------------------------------ SEARCH ------------------------------------- */
 
-class SearchResourceValidator : ResourceValidator {
+class SearchResourceValidator(
+    /** GAP-03: governed client — egress policy applies to validation pings. */
+    private val httpClient: OkHttpClient = governedValidatorClient(EgressControl.default)
+) : ResourceValidator {
 
     override suspend fun validate(
         service: ProviderService,
@@ -288,7 +312,7 @@ class SearchResourceValidator : ResourceValidator {
                         "مفتاح Tavily غير مخزّن"
                     )
                 } else {
-                    httpPing("https://api.tavily.com/search", apiKeyProvider)
+                    httpPing(httpClient, "https://api.tavily.com/search", apiKeyProvider)
                 }
             }
             else -> ServiceValidationResult.failure(
@@ -303,13 +327,20 @@ class SearchResourceValidator : ResourceValidator {
 
 /**
  * Default registry wiring REAL validators for LLM / EMBEDDING / SEARCH.
+ *
+ * GAP-03 (Design Closure 2026): pass the composition-root [egressControl] so
+ * every validation ping runs under workspace egress policy (an OFFLINE
+ * workspace denies pings before any socket). The default is the repo's
+ * UN-pinned fail-closed instance — production must inject the real one.
  */
 fun defaultResourceValidatorRegistry(
-    geminiBootstrap: GeminiBootstrap? = null
+    geminiBootstrap: GeminiBootstrap? = null,
+    egressControl: EgressControl = EgressControl.default
 ): ResourceValidatorRegistry {
+    val client = governedValidatorClient(egressControl)
     val registry = ResourceValidatorRegistry()
-    registry.register(ResourceType.LLM, LlmResourceValidator(geminiBootstrap))
-    registry.register(ResourceType.EMBEDDING, EmbeddingResourceValidator())
-    registry.register(ResourceType.SEARCH, SearchResourceValidator())
+    registry.register(ResourceType.LLM, LlmResourceValidator(geminiBootstrap, client))
+    registry.register(ResourceType.EMBEDDING, EmbeddingResourceValidator(client))
+    registry.register(ResourceType.SEARCH, SearchResourceValidator(client))
     return registry
 }

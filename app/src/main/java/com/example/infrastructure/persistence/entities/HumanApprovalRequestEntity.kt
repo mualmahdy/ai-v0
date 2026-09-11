@@ -1,5 +1,6 @@
 package com.example.infrastructure.persistence.entities
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -44,6 +45,9 @@ data class HumanApprovalRequestEntity(
     val resolution: String,
     val resolvedBy: String?,
     val resolvedAtEpochMs: Long?,
-    /** One-shot token semantics: TRUE once the approval authorized one admission. */
+    /** One-shot token semantics: TRUE once the approval authorized one admission.
+     * GAP-01 (Design Closure 2026): mirrors the table's v15 creation DDL
+     * (MIGRATION_14_TO_15: isTokenConsumed INTEGER NOT NULL DEFAULT 0). */
+    @ColumnInfo(defaultValue = "0")
     val isTokenConsumed: Boolean = false
 )

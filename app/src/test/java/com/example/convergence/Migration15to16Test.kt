@@ -159,6 +159,45 @@ class Migration15to16Test {
             )
             """.trimIndent()
         )
+        // GAP-01 (Design Closure 2026): MIGRATION_15_TO_16 now also reconciles
+        // the missing index_tool_audit_log_callerAgentId, so the seeded v15
+        // schema must include tool_audit_log (real v15 devices have it —
+        // created by MIGRATION_7_TO_8; this test's premise is "every table
+        // the migration touches").
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS tool_audit_log (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                toolName TEXT NOT NULL,
+                toolVersion TEXT NOT NULL,
+                executionId TEXT NOT NULL,
+                callerAgentId TEXT,
+                workspaceId TEXT,
+                argumentsHash TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                failureCode TEXT,
+                durationMs INTEGER NOT NULL,
+                tokenCostEstimate INTEGER NOT NULL,
+                occurredAtEpochMs INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_tool_audit_log_toolName ON tool_audit_log(toolName)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_tool_audit_log_executionId ON tool_audit_log(executionId)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_tool_audit_log_outcome ON tool_audit_log(outcome)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_tool_audit_log_occurredAtEpochMs ON tool_audit_log(occurredAtEpochMs)"
+        )
+        db.execSQL(
+            "INSERT INTO tool_audit_log (toolName, toolVersion, executionId, callerAgentId, workspaceId, argumentsHash, outcome, durationMs, tokenCostEstimate, occurredAtEpochMs) " +
+                "VALUES ('web_search', '1', 'exec_1', 'agent_1', 'ws1', 'hash1', 'SUCCESS', 10, 5, 1)"
+        )
 
         // Seed data that must SURVIVE the migration.
         db.execSQL(
@@ -310,6 +349,12 @@ class Migration15to16Test {
             db.query("SELECT COUNT(*) FROM chat_sessions").use { c -> assertTrue(c.moveToFirst()); assertEquals(1, c.getInt(0)) }
             db.query("SELECT COUNT(*) FROM tasks").use { c -> assertTrue(c.moveToFirst()); assertEquals(1, c.getInt(0)) }
             db.query("SELECT COUNT(*) FROM mdp_q_values").use { c -> assertTrue(c.moveToFirst()); assertEquals(1, c.getInt(0)) }
+            // GAP-01: the reconciled callerAgentId index exists and the seeded
+            // tool-audit row survives.
+            db.query("SELECT COUNT(*) FROM tool_audit_log").use { c -> assertTrue(c.moveToFirst()); assertEquals(1, c.getInt(0)) }
+            db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='index_tool_audit_log_callerAgentId'").use { c ->
+                assertTrue("GAP-01: callerAgentId index must be reconciled by 15→16", c.moveToFirst())
+            }
         }
     }
 }

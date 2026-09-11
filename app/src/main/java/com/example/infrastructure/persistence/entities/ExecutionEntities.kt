@@ -1,6 +1,8 @@
 package com.example.infrastructure.persistence.entities
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
+import androidx.room.Index
 import com.example.domain.core.execution.ActionIntent
 import com.example.domain.core.execution.ActionIntentState
 
@@ -25,7 +27,11 @@ import com.example.domain.core.execution.ActionIntentState
  */
 @Entity(
     tableName = "action_intents",
-    primaryKeys = ["executionId", "actionKey"]
+    primaryKeys = ["executionId", "actionKey"],
+    // GAP-01 (Design Closure 2026): MIGRATION_10_TO_11 creates these two
+    // indices; declaring them keeps the fresh, migrated and expected
+    // (validation) schemas identical (caught by MigrationChainValidationTest).
+    indices = [Index("executionId"), Index("state")]
 )
 data class ActionIntentEntity(
     val executionId: String,
@@ -92,12 +98,18 @@ data class AgentDefinitionEntity(
     // durable agent previously LOST goals, networkRequirement, locality and
     // authorityLevel on every save).
     /** JSON array of {"description": ..., "priority": n} goal objects. */
+    // GAP-01 (Design Closure 2026): the @ColumnInfo defaultValue annotations
+    // mirror MIGRATION_12_TO_13's ALTER TABLE ... NOT NULL DEFAULT clauses.
+    @ColumnInfo(defaultValue = "'[]'")
     val goalsJson: String = "[]",
     /** NetworkRequirement.name. */
+    @ColumnInfo(defaultValue = "'HYBRID'")
     val networkRequirement: String = "HYBRID",
     /** Locality.name. */
+    @ColumnInfo(defaultValue = "'LOCAL_ON_DEVICE'")
     val locality: String = "LOCAL_ON_DEVICE",
     /** Authority level (domain string, default STANDARD). */
+    @ColumnInfo(defaultValue = "'STANDARD'")
     val authorityLevel: String = "STANDARD",
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long
@@ -113,7 +125,10 @@ data class AgentDefinitionEntity(
  */
 @Entity(
     tableName = "agent_revisions",
-    primaryKeys = ["agentId", "revisionId"]
+    primaryKeys = ["agentId", "revisionId"],
+    // GAP-01 (Design Closure 2026): MIGRATION_13_TO_14 creates this index;
+    // declaring it keeps the fresh, migrated and expected schemas identical.
+    indices = [Index("agentId")]
 )
 data class AgentRevisionEntity(
     val agentId: String,

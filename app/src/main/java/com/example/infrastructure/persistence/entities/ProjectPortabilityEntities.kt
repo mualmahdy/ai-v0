@@ -1,5 +1,6 @@
 package com.example.infrastructure.persistence.entities
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -41,19 +42,28 @@ data class ArtifactEntity(
     /** ArtifactType.name */
     val type: String,
     val name: String,
+    // GAP-01 (Design Closure 2026): the @ColumnInfo defaultValue annotations
+    // mirror the v16 creation DDL (MIGRATION_15_TO_16) exactly so the migrated
+    // and fresh-install schemas validate identically.
+    @ColumnInfo(defaultValue = "'application/octet-stream'")
     val mimeType: String = "application/octet-stream",
+    @ColumnInfo(defaultValue = "0")
     val sizeBytes: Long = 0L,
     val contentHash: String? = null,
     /** Sandbox-relative URI — never an arbitrary absolute path. */
     val storageUri: String,
+    @ColumnInfo(defaultValue = "'USER'")
     val source: String = "USER",
     /** SecurityClassification.name */
+    @ColumnInfo(defaultValue = "'UNCLASSIFIED'")
     val securityClassification: String = "UNCLASSIFIED",
     /** ArtifactIndexingState.name */
+    @ColumnInfo(defaultValue = "'NOT_INDEXED'")
     val indexingState: String = "NOT_INDEXED",
     val ownerId: String? = null,
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long,
+    @ColumnInfo(defaultValue = "'{}'")
     val metadataJson: String = "{}"
 )
 
@@ -81,6 +91,9 @@ data class ProjectDependencyEntity(
     /** DependencyStatus.name — RESOLVED / MISSING / INCOMPATIBLE */
     val status: String,
     val detail: String? = null,
+    // GAP-01 (Design Closure 2026): mirrors MIGRATION_15_TO_16's
+    // project_dependencies DDL (metadataJson TEXT NOT NULL DEFAULT '{}').
+    @ColumnInfo(defaultValue = "'{}'")
     val metadataJson: String = "{}",
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long
@@ -154,5 +167,8 @@ data class AuditEventEntity(
     val workspaceId: String? = null,
     val projectId: Long? = null,
     val occurredAtEpochMs: Long,
+    // GAP-01 (Design Closure 2026): mirrors MIGRATION_15_TO_16's
+    // audit_events DDL (metadataJson TEXT NOT NULL DEFAULT '{}').
+    @ColumnInfo(defaultValue = "'{}'")
     val metadataJson: String = "{}"
 )

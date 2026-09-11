@@ -4,6 +4,7 @@ import com.example.domain.core.Outcome
 import com.example.domain.core.extension.McpDiscoveredTool
 import com.example.domain.core.extension.McpTransportType
 import com.example.domain.core.provider.ServiceConfiguration
+import com.example.infrastructure.network.EgressControl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -12,7 +13,6 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -34,15 +34,50 @@ interface McpAdapterPort {
     suspend fun close()
 }
 
+/**
+ * EGRESS SCOPE (MCP egress-scope closure): EVERY outbound MCP request this
+ * adapter issues — initialize, notifications/initialized, tools/list,
+ * tools/call — is stamped with the governing [EgressControl.EgressScopeTag]
+ * via [EgressControl.applyEgressScope] (the same legal mechanism every other
+ * governed adapter uses). The tag is derived from the coroutine's pinned
+ * [com.example.domain.core.execution.ExecutionScope], so an execution's MCP
+ * traffic stays governed by the workspace BOUND TO THAT EXECUTION even when
+ * the ACTIVE workspace changes mid-execution. Requests issued outside an
+ * execution (user-driven control-plane paths) carry no tag and resolve
+ * against the active workspace — the documented EgressControl fallback for
+ * unscoped requests.
+ *
+ * EGRESS_BLOCKED is never swallowed or reclassified: a policy denial
+ * (EgressBlockedException) surfaces as Outcome.Error("EGRESS_BLOCKED", …)
+ * carrying the machine-readable reason — never as a misleading MCP_TRANSPORT
+ * transport failure, and never silently discarded on the fire-and-forget
+ * notifications/initialized path.
+ */
 class McpAdapter(
     private val serviceId: String,
     private val config: ServiceConfiguration,
     private val transportType: McpTransportType = McpTransportType.SSE,
-    private val mcpClient: McpClient = McpClient(),
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
+    /**
+     * The composition-root-owned egress authority that stamps the execution
+     * scope onto every outbound MCP request (applyEgressScope). It must be
+     * the SAME instance whose interceptor governs [client] — the composition
+     * root wires them as a pair (see
+     * ProviderControlPlaneService.getOrCreateMcpSession).
+     */
+    private val egressControl: EgressControl = EgressControl.default,
+    /**
+     * GAP-03 (Design Closure 2026, ADR-3): the client is now built by
+     * [com.example.infrastructure.network.GovernedHttpClientFactory], so the
+     * EgressControl interceptor is ALWAYS installed — an OFFLINE workspace
+     * denies MCP JSON-RPC calls BEFORE any socket is opened. Previously this
+     * constructor accepted an injected-but-NEVER-used `McpClient` (dead
+     * parameter — all traffic flowed through this PRIVATE ungoverned client);
+     * the dead parameter is removed and the real client is governed.
+     */
+    private val client: OkHttpClient = com.example.infrastructure.network.GovernedHttpClientFactory(
+        egressControl
+    )
+        .create(connectTimeoutSeconds = 10, readTimeoutSeconds = 30)
 ) : McpAdapterPort {
 
     private val nextRequestId = AtomicLong(1)
@@ -57,11 +92,16 @@ class McpAdapter(
                     .put("method", method)
                     .put("params", params)
 
-                val request = Request.Builder()
-                    .url(config.endpointUrl)
-                    .post(envelope.toString().toRequestBody("application/json".toMediaType()))
-                    .addHeader("Accept", "application/json, text/event-stream")
-                    .build()
+                // EGRESS SCOPE: stamp the pinned ExecutionScope's workspace
+                // (and sandbox session) onto THIS request — the egress
+                // decision then follows the execution-bound workspace, not
+                // the active workspace at request time.
+                val request = egressControl.applyEgressScope(
+                    Request.Builder()
+                        .url(config.endpointUrl)
+                        .post(envelope.toString().toRequestBody("application/json".toMediaType()))
+                        .addHeader("Accept", "application/json, text/event-stream")
+                ).build()
 
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
@@ -97,6 +137,15 @@ class McpAdapter(
                     }
                     Outcome.Success(json)
                 }
+            } catch (e: EgressControl.EgressBlockedException) {
+                // EGRESS_BLOCKED is a POLICY denial, not a transport failure:
+                // surface it explicitly with its machine-readable reason —
+                // never let it fall into the IOException catch below and be
+                // reclassified as a misleading MCP_TRANSPORT diagnostic.
+                Outcome.Error(
+                    "EGRESS_BLOCKED",
+                    "MCP $method denied by egress policy: reason=${e.reasonCode}; ${e.message}"
+                )
             } catch (e: java.net.SocketTimeoutException) {
                 Outcome.Error("MCP_TIMEOUT", "MCP $method timed out: ${e.message}")
             } catch (e: java.io.IOException) {
@@ -118,22 +167,44 @@ class McpAdapter(
         return when (result) {
             is Outcome.Success -> {
                 // Send the initialized notification (fire-and-forget, no id).
-                withContext(Dispatchers.IO) {
-                    runCatching {
-                        client.newCall(
-                            Request.Builder()
-                                .url(config.endpointUrl)
-                                .post(
-                                    JSONObject()
-                                        .put("jsonrpc", "2.0")
-                                        .put("method", "notifications/initialized")
-                                        .toString()
-                                        .toRequestBody("application/json".toMediaType())
-                                )
-                                .build()
-                        ).execute().close()
+                // EGRESS SCOPE: stamped with the execution's pinned scope like
+                // every other MCP request — initialize, notifications/
+                // initialized, tools/list and tools/call are ALL governed by
+                // the execution-bound workspace.
+                val notificationRequest = egressControl.applyEgressScope(
+                    Request.Builder()
+                        .url(config.endpointUrl)
+                        .post(
+                            JSONObject()
+                                .put("jsonrpc", "2.0")
+                                .put("method", "notifications/initialized")
+                                .toString()
+                                .toRequestBody("application/json".toMediaType())
+                        )
+                        .addHeader("Accept", "application/json, text/event-stream")
+                ).build()
+                val notificationOutcome = withContext(Dispatchers.IO) {
+                    try {
+                        client.newCall(notificationRequest).execute().close()
+                        Outcome.Success(Unit)
+                    } catch (e: EgressControl.EgressBlockedException) {
+                        // A POLICY denial on the notification is NOT swallowed:
+                        // fire-and-forget applies to transport noise only. The
+                        // session must not be marked initialized while its
+                        // governing scope is denied egress.
+                        Outcome.Error(
+                            "EGRESS_BLOCKED",
+                            "MCP notifications/initialized denied by egress policy: " +
+                                "reason=${e.reasonCode}; ${e.message}"
+                        )
+                    } catch (e: Exception) {
+                        // Transport-level failure on a NOTIFICATION is
+                        // non-fatal per MCP semantics (no response is
+                        // expected) — fire-and-forget for noise ONLY.
+                        Outcome.Success(Unit)
                     }
                 }
+                if (notificationOutcome is Outcome.Error) return notificationOutcome
                 initialized = true
                 Outcome.Success(Unit)
             }

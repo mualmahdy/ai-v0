@@ -109,14 +109,24 @@ class ProviderControlPlaneService(
      */
     var pricingPublisher: ((com.example.domain.core.budget.PricingEntry) -> Unit)? = null
 
-    init {
-        // REPAIR ORDER §17 — the discovery factory shares THE centralized
-        // egress authority owned by this control plane (single instance from
-        // the composition root). Previously discovery dialed arbitrary
-        // endpoints through a PRIVATE client with NO egress interceptor —
-        // an OFFLINE workspace still emitted network traffic.
-        com.example.infrastructure.provider.DiscoveryAdapterFactory.egressControl = egressControl
-    }
+    /**
+     * GAP-03 (Design Closure 2026, ADR-3): the discovery factory is now
+     * CONSTRUCTOR-INJECTED with this control plane's egress authority —
+     * the globally mutable static `DiscoveryAdapterFactory.egressControl`
+     * (assignable by ANY code, contradicting the instance-injection design)
+     * is removed. Discovery dialing remains fail-closed: every request is
+     * checked against workspace egress policy BEFORE any byte leaves the
+     * device.
+     */
+    private val discoveryAdapterFactory =
+        com.example.infrastructure.provider.DiscoveryAdapterFactory(egressControl = egressControl)
+
+    /**
+     * GAP-03 (Design Closure 2026, ADR-3): governed HTTP client factory for
+     * MCP adapter sessions (EgressControl interceptor always installed).
+     */
+    private val governedHttpClientFactory =
+        com.example.infrastructure.network.GovernedHttpClientFactory(egressControl = egressControl)
 
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
@@ -336,7 +346,7 @@ class ProviderControlPlaneService(
         // Per Correction #9 / Phase 4: produces ServiceOfferings but NOT ResourceRecords.
         return try {
             val discovery = withContext(Dispatchers.IO) {
-                com.example.infrastructure.provider.DiscoveryAdapterFactory
+                discoveryAdapterFactory
                     .discover(service, config, apiKeyProvider)
             }
             when (discovery) {
@@ -1046,11 +1056,26 @@ class ProviderControlPlaneService(
         config: ServiceConfiguration
     ): McpAdapterPort {
         return mcpSessions.getOrPut(service.id) {
+            // GAP-03 (Design Closure 2026, ADR-3): the session's HTTP client is
+            // built by the governed factory (EgressControl interceptor always
+            // installed — an OFFLINE workspace denies MCP calls before any
+            // socket). The previously injected-but-never-used McpClient dead
+            // parameter is gone (see McpAdapter).
+            //
+            // MCP EGRESS SCOPE: the adapter ALSO receives the control plane's
+            // egress authority so it stamps the pinned ExecutionScope onto
+            // every outbound MCP request (initialize, notifications/
+            // initialized, tools/list, tools/call) — execution-bound
+            // governance, identical instance to the one governing the client.
             McpAdapter(
                 serviceId = service.id,
                 config = config,
                 transportType = com.example.domain.core.extension.McpTransportType.SSE,
-                mcpClient = com.example.infrastructure.mcp.McpClient(egressControl = egressControl)
+                egressControl = egressControl,
+                client = governedHttpClientFactory.create(
+                    connectTimeoutSeconds = 10,
+                    readTimeoutSeconds = 30
+                )
             )
         }
     }

@@ -279,7 +279,16 @@ class AppContainer(context: Context) {
      * router falls back to the lexical adapter (honestly labeled).
      */
     val onnxSemanticEmbeddingAdapter: com.example.infrastructure.memory.semantic.OnnxSemanticEmbeddingAdapter by lazy {
-        com.example.infrastructure.memory.semantic.OnnxSemanticEmbeddingAdapter(appContext)
+        // GAP-03: the ~23MB model download is governed by workspace egress
+        // policy (OFFLINE workspace → honest deny before any socket).
+        com.example.infrastructure.memory.semantic.OnnxSemanticEmbeddingAdapter(
+            appContext = appContext,
+            client = governedHttpClientFactory.create(
+                connectTimeoutSeconds = 20,
+                readTimeoutSeconds = 120,
+                writeTimeoutSeconds = 120
+            )
+        )
     }
 
     /**
@@ -353,6 +362,19 @@ class AppContainer(context: Context) {
         com.example.infrastructure.network.EgressControl()
     }
 
+    /**
+     * GAP-03 (Design Closure 2026, ADR-3): THE single authority for outbound
+     * HTTP clients. Every client produced here installs the EgressControl
+     * interceptor first — a policy deny (e.g. an OFFLINE workspace) aborts
+     * before any socket is opened. The four formerly-bypassing paths (resource
+     * validation pings, MCP adapter sessions, Radar GitHub/RSS discovery, the
+     * ONNX semantic-model download) obtain their clients from this factory,
+     * closing the audit's P0 egress bypasses.
+     */
+    val governedHttpClientFactory: com.example.infrastructure.network.GovernedHttpClientFactory by lazy {
+        com.example.infrastructure.network.GovernedHttpClientFactory(egressControl = egressControl)
+    }
+
     val protocolAdapterFactory: ProtocolAdapterFactory by lazy {
         ProtocolAdapterFactory(
             geminiBootstrap = geminiBootstrap,
@@ -361,7 +383,11 @@ class AppContainer(context: Context) {
     }
 
     val resourceValidatorRegistry by lazy {
-        defaultResourceValidatorRegistry(geminiBootstrap = geminiBootstrap)
+        // GAP-03: validation pings run under workspace egress policy.
+        defaultResourceValidatorRegistry(
+            geminiBootstrap = geminiBootstrap,
+            egressControl = egressControl
+        )
     }
 
     val generalizedProviderRepository: ProviderRepository by lazy {
@@ -604,7 +630,22 @@ class AppContainer(context: Context) {
     // --- Intelligence Radar ---
     val intelligenceRadarPipeline: IntelligenceRadarPipeline by lazy {
         IntelligenceRadarPipeline(
-            radarSources = listOf(GitHubReleasesRadarSource(), RssFeedRadarSource()),
+            radarSources = listOf(
+                // GAP-03: radar discovery clients are governed (OFFLINE
+                // workspace → deny before any socket).
+                GitHubReleasesRadarSource(
+                    client = governedHttpClientFactory.create(
+                        connectTimeoutSeconds = 6,
+                        readTimeoutSeconds = 8
+                    )
+                ),
+                RssFeedRadarSource(
+                    client = governedHttpClientFactory.create(
+                        connectTimeoutSeconds = 6,
+                        readTimeoutSeconds = 8
+                    )
+                )
+            ),
             radarItemDao = database.radarItemDao(),
             evolutionCandidateDao = database.evolutionCandidateDao(),
             // GAP-CLOSURE P1-17 (MEASURE): a REGISTERED capability's

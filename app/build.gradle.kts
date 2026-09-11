@@ -91,6 +91,14 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
+// GAP-01 (Design Closure 2026, ADR-1): Room schema export location. Every
+// schema change now lands as a committed JSON baseline under app/schemas/,
+// enabling MigrationTestHelper validation and CI schema-drift detection
+// from v16 onward. Keep the exported JSONs under version control.
+ksp {
+  arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {

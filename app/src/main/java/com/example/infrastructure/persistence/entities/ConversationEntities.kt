@@ -1,5 +1,6 @@
 package com.example.infrastructure.persistence.entities
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -34,7 +35,11 @@ data class ConversationSessionEntity(
     val agentName: String? = null,
     val modelResourceId: String? = null,
     val modelDisplayName: String? = null,
+    // GAP-01 (Design Closure 2026): mirror MIGRATION_12_TO_13's
+    // `turnCount INTEGER NOT NULL DEFAULT 0` / `totalTokensConsumed ... DEFAULT 0`.
+    @ColumnInfo(defaultValue = "0")
     val turnCount: Int = 0,
+    @ColumnInfo(defaultValue = "0")
     val totalTokensConsumed: Int = 0,
     val createdAtEpochMs: Long,
     val lastActiveAtEpochMs: Long,
@@ -58,9 +63,15 @@ data class ConversationTurnEntity(
     val agentName: String? = null,
     val agentRole: String? = null,
     val modelResourceId: String? = null,
+    // GAP-01 (Design Closure 2026): mirror MIGRATION_12_TO_13's chat_turns DDL
+    // (tokensConsumed/durationMs/eventCount DEFAULT 0, isSuccessful DEFAULT 1).
+    @ColumnInfo(defaultValue = "0")
     val tokensConsumed: Int = 0,
+    @ColumnInfo(defaultValue = "0")
     val durationMs: Long = 0,
+    @ColumnInfo(defaultValue = "1")
     val isSuccessful: Boolean = true,
+    @ColumnInfo(defaultValue = "0")
     val eventCount: Int = 0,
     val createdAtEpochMs: Long
 )
@@ -90,8 +101,11 @@ data class WorkflowDefinitionEntity(
     val executionMode: String,
     /** Lossless StepNode serialization (same format as workflow_executions.planJson). */
     val stepsJson: String,
-    /** Monotonic edit revision (bumped on every save). */
+    // GAP-01 (Design Closure 2026): mirror MIGRATION_12_TO_13's
+    // `version INTEGER NOT NULL DEFAULT 1` / `runCount INTEGER NOT NULL DEFAULT 0`.
+    @ColumnInfo(defaultValue = "1")
     val version: Int = 1,
+    @ColumnInfo(defaultValue = "0")
     val runCount: Int = 0,
     val lastRunAtEpochMs: Long? = null,
     val createdAtEpochMs: Long,

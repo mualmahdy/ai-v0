@@ -11,10 +11,10 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.example.infrastructure.network.GovernedHttpClientFactory
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 /**
  * ============================================================================
@@ -48,10 +48,16 @@ class OnnxSemanticEmbeddingAdapter(
     private val vocabSourceUrl: String =
         "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/vocab.txt",
     override val dimension: Int = 384,
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .build()
+    /**
+     * GAP-03 (Design Closure 2026, ADR-3): governed client — EgressControl
+     * interceptor always installed, so provisioning the ~23MB ONNX model is
+     * subject to workspace egress policy (an OFFLINE workspace denies the
+     * download BEFORE any socket is opened — previously this private client
+     * bypassed egress governance entirely, which the audit called out as a
+     * live egress bypass activatable from the Knowledge screen).
+     */
+    private val client: OkHttpClient = GovernedHttpClientFactory()
+        .create(connectTimeoutSeconds = 20, readTimeoutSeconds = 120, writeTimeoutSeconds = 120)
 ) : EmbeddingProviderPort {
 
     override val metadata: SafeEmbeddingProviderMetadata

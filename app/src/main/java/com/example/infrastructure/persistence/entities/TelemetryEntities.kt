@@ -1,5 +1,6 @@
 package com.example.infrastructure.persistence.entities
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -194,6 +195,9 @@ data class WorkflowStepStateEntity(
     val durationMs: Long?,
     val startedAtEpochMs: Long?,
     val completedAtEpochMs: Long?,
+    // GAP-01 (Design Closure 2026): mirrors MIGRATION_7_TO_8's
+    // workflow_step_states DDL (attemptCount INTEGER NOT NULL DEFAULT 0).
+    @ColumnInfo(defaultValue = "0")
     val attemptCount: Int = 0,
     val lastErrorMessage: String?,
     /**

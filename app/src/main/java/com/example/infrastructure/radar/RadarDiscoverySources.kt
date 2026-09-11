@@ -4,6 +4,7 @@ import com.example.domain.core.Outcome
 import com.example.domain.core.radar.ExtractedCapabilityProfile
 import com.example.domain.core.radar.RadarCategory
 import com.example.domain.core.radar.RadarItem
+import com.example.infrastructure.network.GovernedHttpClientFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -12,7 +13,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.StringReader
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 
@@ -33,10 +33,14 @@ class GitHubReleasesRadarSource(
         "ollama/ollama",
         "firebase/firebase-android-sdk"
     ),
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .build()
+    /**
+     * GAP-03 (Design Closure 2026, ADR-3): governed client — EgressControl
+     * interceptor always installed, so an OFFLINE workspace denies radar
+     * GitHub discovery BEFORE any socket is opened (previously this private
+     * client bypassed egress governance entirely).
+     */
+    private val client: OkHttpClient = GovernedHttpClientFactory()
+        .create(connectTimeoutSeconds = 6, readTimeoutSeconds = 8)
 ) : RadarSourcePort {
 
     override val sourceName: String = "GitHub Open Source Releases"
@@ -104,10 +108,12 @@ class RssFeedRadarSource(
         "Google AI Blog" to "https://blog.google/technology/ai/rss/",
         "ArXiv CS.AI" to "https://rss.arxiv.org/rss/cs.AI"
     ),
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .build()
+    /**
+     * GAP-03 (Design Closure 2026, ADR-3): governed client — EgressControl
+     * interceptor always installed (see GitHubReleasesRadarSource).
+     */
+    private val client: OkHttpClient = GovernedHttpClientFactory()
+        .create(connectTimeoutSeconds = 6, readTimeoutSeconds = 8)
 ) : RadarSourcePort {
 
     override val sourceName: String = "AI Research & Industry RSS"
