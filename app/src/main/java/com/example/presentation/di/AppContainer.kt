@@ -3,6 +3,7 @@ package com.example.presentation.di
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.room.withTransaction
 import com.example.application.decision.DecisionService
 import com.example.application.decision.DecisionIntelligenceService
 import com.example.application.execution.ExecutionService
@@ -175,7 +176,10 @@ class AppContainer(context: Context) {
             bootstrapOrchestrator = workspaceBootstrapOrchestrator,
             // REPAIR ORDER §5 — project lifecycle operations delegate to the
             // dedicated runtime (this service stays a workspace-scope runtime).
-            projectRuntime = projectRuntimeService
+            projectRuntime = projectRuntimeService,
+            // GAP-16 (Design Closure 2026): every multi-write workspace
+            // mutation (create/switch/delete) runs in ONE Room transaction.
+            transactionRunner = { block -> database.withTransaction { block() } }
         )
     }
 
@@ -1212,6 +1216,15 @@ class AppContainer(context: Context) {
         }
     }
 
+    /**
+     * GAP-11 (Design Closure 2026) — workspace-scoped task board read
+     * authority for the tasks surface (TaskDao.getAllTasksFlow /
+     * getTasksForWorkspaceFlow previously had zero production callers).
+     */
+    val taskBoardService: com.example.application.orchestration.TaskBoardService by lazy {
+        com.example.application.orchestration.TaskBoardService(database.taskDao())
+    }
+
     // Workflow Engine — now durably persisted (audit 2026 fix).
     val workflowEngine: WorkflowEngine by lazy {
         WorkflowEngine(
@@ -1671,16 +1684,34 @@ class AppContainer(context: Context) {
             // GAP-CLOSURE P1-08: seed/sync the canonical durable agent catalog
             // into the runtime registry BEFORE any execution can start.
             runCatching { syncCanonicalAgents() }
+                .onFailure { recordBootstrapDegradation("CANONICAL_AGENT_SYNC_FAILED", it) }
             providerControlPlaneService.ensureBootstrapDefaults()
             providerControlPlaneService.restoreAdaptersForPersistedResources()
             // Phase 5 — memory decay + workflow/task resume on startup.
+            // GAP-13 (Design Closure 2026): bootstrap-step failures are AUDITED
+            // (WARN) instead of silently swallowed — the runCatching keeps
+            // startup resilient, but every degradation is now visible.
             runCatching { memoryLifecycleService.applyDecay() }
-            runCatching { memoryLifecycleService.consolidate() }
+                .onFailure { recordBootstrapDegradation("MEMORY_DECAY_FAILED", it) }
+            // GAP-12 (Design Closure 2026): consolidation NEVER crosses
+            // workspace boundaries — the global default previously merged
+            // near-duplicate memories from DIFFERENT workspaces (the survivor
+            // took the first row's workspaceId). Each workspace consolidates
+            // within its own scope; global (workspaceId IS NULL) memories
+            // consolidate among themselves only.
+            runCatching {
+                database.workspaceDao().getAllWorkspaces().forEach { ws ->
+                    memoryLifecycleService.consolidate(workspaceId = ws.id)
+                }
+                memoryLifecycleService.consolidate(workspaceId = null)
+            }.onFailure { recordBootstrapDegradation("MEMORY_CONSOLIDATION_FAILED", it) }
             // Process-death recovery (audit 2026 fix): actually RESUME tasks
             // left RUNNING by a crashed/killed process — previously the
             // resumable list was computed and then discarded.
             runCatching { agentOrchestrator.resumeInterruptedTasks() }
+                .onFailure { recordBootstrapDegradation("TASK_RESUME_SWEEP_FAILED", it) }
             runCatching { workflowPersistenceService.resumable() } // surfaces resumable workflows for the UI/log
+                .onFailure { recordBootstrapDegradation("WORKFLOW_RESUMABLE_SCAN_FAILED", it) }
             // GOVERNANCE PHASE: derive the initial radar snapshot AFTER the
             // registry is eager-loaded (persisted capability states survive
             // restarts; this refreshes them against live resource facts).
@@ -1694,7 +1725,7 @@ class AppContainer(context: Context) {
                         networkPolicy = com.example.domain.core.network.NetworkPolicy.HYBRID,
                         isNetworkAvailable = networkMonitor.isNetworkAvailable.value
                     )
-                }
+                }.onFailure { recordBootstrapDegradation("RADAR_SNAPSHOT_FAILED", it) }
             }
             // GOVERNANCE PHASE: ensure a SYSTEM-scope budget policy exists so
             // budget governance has defined (non-fabricated) semantics. NO
@@ -1765,6 +1796,32 @@ class AppContainer(context: Context) {
             }
         }
     }
+
+    /**
+     * GAP-13 (Design Closure 2026) — the single honest-degradation policy for
+     * bootstrap steps: a step that fails inside its resilience runCatching is
+     * AUDITED as a WARN event (actor=bootstrap) instead of being silently
+     * swallowed. The event lands in the audit trail the activity feed reads,
+     * so a degraded startup is VISIBLE, never invisible. Fire-and-forget:
+     * an audit-write failure must never break the bootstrap path.
+     */
+    private fun recordBootstrapDegradation(action: String, cause: Throwable) {
+        runCatching {
+            applicationScope.launch {
+                runCatching {
+                    telemetryService.recordAudit(
+                        AuditSeverity.WARN,
+                        actor = "bootstrap",
+                        action = action,
+                        resourceType = "runtime",
+                        resourceId = "bootstrap",
+                        decision = "WARN",
+                        reason = "${cause::class.simpleName}: ${cause.message?.take(200)}"
+                    )
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -1832,6 +1889,27 @@ class MainViewModelFactory(
                 humanApprovalGate = appContainer.humanApprovalGate,
                 localPrincipalId = appContainer.localPrincipalId,
                 permissionGrantService = appContainer.permissionGrantService
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * GAP-11 (Design Closure 2026) — factory for the TASKS feature ViewModel.
+ * ADR-6 freeze compliance: new feature surfaces get NEW ViewModels; the
+ * MainViewModel is not expanded.
+ */
+class TasksViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.TasksViewModel::class.java)) {
+            return com.example.presentation.viewmodel.TasksViewModel(
+                taskBoardService = appContainer.taskBoardService,
+                agentOrchestrator = appContainer.agentOrchestrator,
+                workspaceRuntimeService = appContainer.workspaceRuntimeService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

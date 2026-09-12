@@ -224,10 +224,14 @@ class OrchestratorKernelTest {
         // the original agent being removed before a resume).
         orchestrator.executeTaskStream(agent = testAgent, task = task("t_agent_gone")).toList()
         registry.registerAgent(testAgent) // ensure present during the run
-        // Remove by overwriting the registry's entry with a DIFFERENT agent id:
+        // Remove by overwriting the registry's entry with a DIFFERENT agent id.
+        // GAP-11 note: the row is set to RUNNING (process-death), matching
+        // this test's documented scenario — a RESUME target. A COMPLETED row
+        // is rejected by the resume-state guard (TASK_NOT_RESUMABLE) before
+        // the agent check, which is the more honest error for that state.
         val ghostDao = FakeTaskDao().also { dao ->
             dao.stored["t_agent_gone"] = taskDao.stored["t_agent_gone"]!!
-                .copy(assignedAgentId = "ghost_agent")
+                .copy(assignedAgentId = "ghost_agent", lifecycleState = "RUNNING")
         }
         val ghostOrchestrator = AgentOrchestrator(
             registry = registry,

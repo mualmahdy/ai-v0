@@ -33,6 +33,20 @@ open class KnowledgePersistenceService(
 ) {
 
     /**
+     * GAP-13 (Design Closure 2026): honest vector-decode observability.
+     * The old comment claimed "log and return null" — there was NO log.
+     * A dimension-mismatch/undecodable vector now records a REASON here
+     * (readable by diagnostics/tests); the null return stays (the caller
+     * falls back to lexical honestly), but the fallback is attributable.
+     */
+    val vectorDecodeFailures = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Last vector-decode failure description (null = none). */
+    @Volatile
+    var lastVectorDecodeFailure: String? = null
+        private set
+
+    /**
      * Loads all non-archived documents and their chunks for a workspace.
      * Returns a Pair of (documents, chunks) ready to be loaded into the
      * RagPipelineService in-memory index.
@@ -247,11 +261,21 @@ open class KnowledgePersistenceService(
                 floats[i] = arr.getDouble(i).toFloat()
             }
             if (expectedDim > 0 && floats.size != expectedDim) {
-                // Dimension mismatch — log and return null so caller falls back
+                // GAP-13: dimension mismatch — the fallback is RECORDED, not
+                // silent (the comment previously claimed a log that never
+                // existed). The caller falls back to lexical honestly.
+                vectorDecodeFailures.incrementAndGet()
+                lastVectorDecodeFailure =
+                    "VECTOR_DIMENSION_MISMATCH: expected=$expectedDim actual=${floats.size}"
+                System.err.println("KNOWLEDGE $lastVectorDecodeFailure")
                 return null
             }
             EmbeddingVector(floats)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            vectorDecodeFailures.incrementAndGet()
+            lastVectorDecodeFailure =
+                "VECTOR_DECODE_FAILED: ${e::class.simpleName}: ${e.message?.take(120)}"
+            System.err.println("KNOWLEDGE $lastVectorDecodeFailure")
             null
         }
     }

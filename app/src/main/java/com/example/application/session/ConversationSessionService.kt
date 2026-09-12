@@ -42,6 +42,18 @@ class ConversationSessionService(
     fun observeSessions(workspaceId: String): Flow<List<ConversationSession>> =
         repository.observeSessions(workspaceId)
 
+    /**
+     * GAP-14 (Design Closure 2026): live session list scoped to a project —
+     * the project's private sessions PLUS nothing else (sibling projects'
+     * sessions are invisible; `projectId = null` lists only the
+     * workspace-scoped shared sessions).
+     */
+    fun observeSessionsForProject(
+        workspaceId: String,
+        projectId: Long?
+    ): Flow<List<ConversationSession>> =
+        repository.observeSessionsForProject(workspaceId, projectId)
+
     /** Live turn stream of one session. */
     fun observeTurns(sessionId: ConversationSessionId): Flow<List<ConversationTurn>> =
         repository.observeTurns(sessionId)
@@ -71,6 +83,12 @@ suspend fun getSession(
      * Creates a new durable session bound to the ACTIVE workspace.
      * QUICK_CHAT sessions are agent-independent; AGENT sessions record the
      * canonical agent they are bound to.
+     *
+     * GAP-14 (Design Closure 2026): `projectId` scopes the session to a
+     * project from creation (NULL = workspace-scoped shared session).
+     * Previously the id was structurally dropped by the mapper, so
+     * project-private sessions could never exist and the purge cascade was
+     * a latent no-op.
      */
     suspend fun createSession(
         mode: ChatMode,
@@ -78,7 +96,8 @@ suspend fun getSession(
         agentName: String? = null,
         modelResourceId: String? = null,
         modelDisplayName: String? = null,
-        title: String = defaultTitle()
+        title: String = defaultTitle(),
+        projectId: Long? = null
     ): ConversationSession {
         val now = System.currentTimeMillis()
         val session = ConversationSession(
@@ -90,6 +109,7 @@ suspend fun getSession(
             agentName = agentName,
             modelResourceId = modelResourceId,
             modelDisplayName = modelDisplayName,
+            projectId = projectId,
             createdAtEpochMs = now,
             lastActiveAtEpochMs = now
         )

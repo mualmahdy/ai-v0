@@ -825,10 +825,27 @@ class ExecutionService(
         val breakerResourceId = decisionRecord!!.selectedResourceId
         val breaker = circuitBreakerGate
         if (breaker != null) {
+            // GAP-17 (Design Closure 2026): enforcement failure is no longer
+            // SILENTLY swallowed. Declared policy — documented fail-open: the
+            // breaker is a RESILIENCE OPTIMIZATION (fail-fast for failing
+            // providers), not a governance authority like the budget/egress
+            // gates (which fail CLOSED); a broken breaker must not brick
+            // every LLM call. The degradation is EMITTED as an event so the
+            // feed/telemetry see it. State durability is in-memory only (see
+            // CircuitBreakerService KDoc).
             val allowed = try {
                 breaker.allowCall(breakerResourceId.value)
-            } catch (_: Exception) {
-                true // enforcement failure must not add a new failure mode
+            } catch (enforcement: Exception) {
+                onEvent(
+                    ExecutionEvent.Degraded(
+                        executionId = executionId,
+                        reason = com.example.domain.core.DegradedReason.UNKNOWN_DEGRADATION,
+                        message = "CIRCUIT_BREAKER_ENFORCEMENT_FAILED: فشل تقييم قاطع الدائرة لمورد " +
+                                "'${breakerResourceId.value}' — استمرار التنفيذ (سياسة مقاومة معلنة، ليست سلطة حوكمة): " +
+                                "${enforcement::class.simpleName}: ${enforcement.message?.take(120)}"
+                    )
+                )
+                true // documented fail-open — see comment above
             }
             if (!allowed) {
                 return ExecutionResult(
@@ -1244,6 +1261,15 @@ class ExecutionService(
                 // Tool results have been consumed by the synthesis round.
                 toolResultMessages.clear()
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // GAP-10 (Design Closure 2026): cancellation is CONTROL FLOW, not
+            // a step failure. Swallowing it here (the previous bare
+            // `catch (e: Exception)`) reclassified the user's/system's cancel
+            // as an ordinary provider error, so the orchestrator's CANCELLED
+            // persistence never ran and the task row died as FAILED with
+            // fabricated error text. Rethrow so the cancellation reaches the
+            // durable-cancellation handler in AgentOrchestrator.
+            throw e
         } catch (e: Exception) {
             isSuccess = false
             errorMessage = e.localizedMessage ?: "حدث استثناء غير متوقع أثناء استدعاء المزود."
@@ -1336,10 +1362,23 @@ class ExecutionService(
         val breakerResourceId = decisionRecord!!.selectedResourceId
         val breaker = circuitBreakerGate
         if (breaker != null) {
+            // GAP-17 (Design Closure 2026): same declared policy as the LLM
+            // gate — enforcement failure is EMITTED (never silent) and the
+            // call proceeds (documented fail-open; the breaker optimizes
+            // resilience, it does not govern).
             val allowed = try {
                 breaker.allowCall(breakerResourceId.value)
-            } catch (_: Exception) {
-                true // enforcement failure must not block; the resolver validated health
+            } catch (enforcement: Exception) {
+                onEvent(
+                    ExecutionEvent.Degraded(
+                        executionId = executionId,
+                        reason = com.example.domain.core.DegradedReason.UNKNOWN_DEGRADATION,
+                        message = "CIRCUIT_BREAKER_ENFORCEMENT_FAILED: فشل تقييم قاطع الدائرة لمورد البحث " +
+                                "'${breakerResourceId.value}' — استمرار بمسار البحث المباشر (سياسة معلنة): " +
+                                "${enforcement::class.simpleName}: ${enforcement.message?.take(120)}"
+                    )
+                )
+                true
             }
             if (!allowed) {
                 return ExecutionResult(
@@ -1357,10 +1396,22 @@ class ExecutionService(
         // no provider substitution happens inside the intelligence layer).
         val intelligenceHook = searchIntelligence
         if (intelligenceHook != null) {
+            // GAP-13 (Design Closure 2026): the intelligent-search fallback is
+            // EMITTED, never silent — the plain path runs, and the feed sees
+            // exactly what was degraded and why.
             val intelligentResult = try {
                 intelligenceHook(query, searchProvider)
-            } catch (_: Exception) {
-                null // honest degradation to the plain path — never a crash
+            } catch (intelligence: Exception) {
+                onEvent(
+                    ExecutionEvent.Degraded(
+                        executionId = executionId,
+                        reason = com.example.domain.core.DegradedReason.SEARCH_PROVIDER_PARTIAL,
+                        message = "SEARCH_INTELLIGENCE_UNAVAILABLE: مسار البحث الذكي فشل — " +
+                                "تم التراجع إلى البحث المباشر (degradation مُعلن): " +
+                                "${intelligence::class.simpleName}: ${intelligence.message?.take(120)}"
+                    )
+                )
+                null
             }
             if (intelligentResult != null && intelligentResult.rankedItems.isNotEmpty()) {
                 if (breaker != null) {
@@ -1460,10 +1511,31 @@ class ExecutionService(
     ): ExecutionResult {
         val query = action.payload["query"] ?: context.task.input.rawPrompt
 
+        // GAP-13 (Design Closure 2026): a RAG pipeline failure or empty
+        // retrieval is EMITTED before falling back to the memory path —
+        // previously the fallback was invisible.
         val ragContext = try {
             ragRetrievalProvider?.invoke(query, 4)
-        } catch (_: Exception) {
+        } catch (rag: Exception) {
+            onEvent(
+                ExecutionEvent.Degraded(
+                    executionId = executionId,
+                    reason = com.example.domain.core.DegradedReason.LEXICAL_FALLBACK,
+                    message = "RAG_RETRIEVAL_FAILED: فشل استرجاع قاعدة المعرفة — " +
+                            "التراجع إلى مسار الذاكرة المُنطَق (degradation مُعلن): " +
+                            "${rag::class.simpleName}: ${rag.message?.take(120)}"
+                )
+            )
             null // retrieval failure must not crash the loop — fall through honestly
+        }
+        if (ragContext != null && ragContext.retrievedChunks.isEmpty()) {
+            onEvent(
+                ExecutionEvent.Degraded(
+                    executionId = executionId,
+                    reason = com.example.domain.core.DegradedReason.LEXICAL_FALLBACK,
+                    message = "RAG_RETRIEVAL_EMPTY: قاعدة المعرفة لم تُعد نتائج — التراجع إلى مسار الذاكرة (degradation مُعلن)."
+                )
+            )
         }
 
         if (ragContext != null && ragContext.retrievedChunks.isNotEmpty()) {
@@ -2133,9 +2205,15 @@ class ExecutionService(
         }
 
         // Budget: carve the child's budget out of the parent's remaining budget.
+        // GAP-09 (Design Closure 2026): the previous "safety floors"
+        // (limit/4, 1000) could grant a child MORE than the parent actually
+        // had left — a parent holding 200 remaining tokens could grant 500.
+        // The contract is now hard: the child's token limit can NEVER exceed
+        // the parent's unspent remaining budget. A fully-exhausted parent
+        // delegates with a zero budget (the child's own budget gate refuses
+        // honestly — fail-closed instead of fabricating spend authority).
         val parentRemaining = (context.task.budget.tokenLimit - context.task.budget.consumedTokens)
-            .coerceAtLeast(context.task.budget.tokenLimit / 4)
-            .coerceAtLeast(1000)
+            .coerceAtLeast(0)
         val childBudget = com.example.domain.core.task.TaskBudget(
             tokenLimit = minOf(parentRemaining / 2, 15000)
         )

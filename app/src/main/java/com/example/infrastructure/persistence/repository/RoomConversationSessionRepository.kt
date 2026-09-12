@@ -33,6 +33,21 @@ class RoomConversationSessionRepository(
         }
     }
 
+    /**
+     * GAP-14 (Design Closure 2026): project-scoped session list. NULL
+     * [projectId] = workspace-scoped (shared) sessions only; non-null = that
+     * project's private sessions only. A sibling project's sessions are
+     * NEVER returned (SQL predicate in [ConversationSessionDao.forWorkspaceAndProject]).
+     */
+    override fun observeSessionsForProject(
+        workspaceId: String,
+        projectId: Long?
+    ): Flow<List<ConversationSession>> {
+        return sessionDao.forWorkspaceAndProject(workspaceId, projectId).map { rows ->
+            rows.map { it.toDomain() }
+        }
+    }
+
     override fun observeTurns(sessionId: ConversationSessionId): Flow<List<ConversationTurn>> {
         return turnDao.forSession(sessionId.value).map { rows ->
             rows.map { it.toDomain() }
@@ -73,7 +88,11 @@ class RoomConversationSessionRepository(
                 turnCount = session.turnCount,
                 totalTokensConsumed = session.totalTokensConsumed,
                 createdAtEpochMs = session.createdAtEpochMs,
-                lastActiveAtEpochMs = session.lastActiveAtEpochMs
+                lastActiveAtEpochMs = session.lastActiveAtEpochMs,
+                // GAP-14: projectId round-trips — the mapper previously DROPPED
+                // it both ways, so project-scoped sessions could never exist and
+                // the purge cascade was a latent no-op.
+                projectId = session.projectId
             )
         )
     }
@@ -123,8 +142,13 @@ class RoomConversationSessionRepository(
         // ONLY for the owning workspace — a cross-workspace delete is a
         // no-op that deletes nothing.
         val existing = sessionDao.byIdAndWorkspace(id.value, workspaceId) ?: return false
-        turnDao.deleteForSession(existing.sessionId)
-        sessionDao.deleteForWorkspace(existing.sessionId, workspaceId)
+        // GAP-16 (Design Closure 2026): turns + session row are removed in ONE
+        // Room transaction — a crash between the two writes previously left
+        // orphaned turn rows above a deleted session forever.
+        database.withTransaction {
+            turnDao.deleteForSession(existing.sessionId)
+            sessionDao.deleteForWorkspace(existing.sessionId, workspaceId)
+        }
         return true
     }
 
@@ -178,7 +202,9 @@ class RoomConversationSessionRepository(
             turnCount = turnCount,
             totalTokensConsumed = totalTokensConsumed,
             createdAtEpochMs = createdAtEpochMs,
-            lastActiveAtEpochMs = lastActiveAtEpochMs
+            lastActiveAtEpochMs = lastActiveAtEpochMs,
+            // GAP-14: projectId round-trips (was silently dropped).
+            projectId = projectId
         )
     }
 

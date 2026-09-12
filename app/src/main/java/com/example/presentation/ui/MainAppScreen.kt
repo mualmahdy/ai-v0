@@ -104,6 +104,7 @@ import com.example.presentation.viewmodel.MainViewModel
 @Composable
 fun MainAppScreen(
     viewModel: MainViewModel,
+    tasksViewModel: com.example.presentation.viewmodel.TasksViewModel? = null,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -211,6 +212,7 @@ fun MainAppScreen(
                 WorkspaceNavHost(
                     navController = navController,
                     viewModel = viewModel,
+                    tasksViewModel = tasksViewModel,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -241,6 +243,7 @@ private fun NavHostController.navigateToTopLevel(route: String) {
 private fun WorkspaceNavHost(
     navController: NavHostController,
     viewModel: MainViewModel,
+    tasksViewModel: com.example.presentation.viewmodel.TasksViewModel? = null,
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
@@ -293,6 +296,7 @@ private fun WorkspaceNavHost(
         composable(WorkspaceRoutes.TASKS) {
             TasksScreen(
                 viewModel = viewModel,
+                tasksViewModel = tasksViewModel,
                 modifier = Modifier.fillMaxSize()
             )
         }

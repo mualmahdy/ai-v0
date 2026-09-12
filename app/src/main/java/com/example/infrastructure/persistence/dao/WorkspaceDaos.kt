@@ -29,10 +29,10 @@ interface WorkspaceDao {
     @Query("SELECT * FROM workspaces WHERE id = :id LIMIT 1")
     suspend fun getWorkspaceById(id: String): WorkspaceEntity?
 
-    @Query("SELECT * FROM workspaces WHERE isActive = 1 LIMIT 1")
+    @Query("SELECT * FROM workspaces WHERE isActive = 1 ORDER BY lastAccessedEpochMs DESC LIMIT 1")
     suspend fun getActiveWorkspace(): WorkspaceEntity?
 
-    @Query("SELECT * FROM workspaces WHERE isActive = 1 LIMIT 1")
+    @Query("SELECT * FROM workspaces WHERE isActive = 1 ORDER BY lastAccessedEpochMs DESC LIMIT 1")
     fun observeActiveWorkspace(): Flow<WorkspaceEntity?>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

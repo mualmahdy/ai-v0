@@ -316,6 +316,11 @@ class MainViewModel(
                         )
                     }
                 }
+            }.onFailure { failure ->
+                // GAP-13: the refresh degradations are surfaced, not swallowed.
+                _uiState.update {
+                    it.copy(diagnosticBanner = "تعذر تحديث لقطة قدرات الحوكمة: ${failure.localizedMessage}")
+                }
             }
             runCatching {
                 val economics = economicGovernanceService ?: return@launch
@@ -328,6 +333,11 @@ class MainViewModel(
                         costLedgerRecent = recent,
                         workspaceTokensConsumed = tokens
                     )
+                }
+            }.onFailure { failure ->
+                // GAP-13: economic-summary degradation is surfaced.
+                _uiState.update {
+                    it.copy(diagnosticBanner = "تعذر تحديث ملخص الميزانية: ${failure.localizedMessage}")
                 }
             }
         }
@@ -776,7 +786,11 @@ class MainViewModel(
                     agentId = current.activeAgent?.identity?.id?.value,
                     agentName = current.activeAgent?.identity?.name,
                     modelResourceId = current.selectedModelResourceId,
-                    modelDisplayName = current.selectedModelDisplayName
+                    modelDisplayName = current.selectedModelDisplayName,
+                    // GAP-14: new sessions are project-scoped from creation —
+                    // bound to the ACTIVE workspace's active project (null =
+                    // shared workspace session when no project is bound).
+                    projectId = workspaceRuntimeService.activeProjectIdOrNull()
                 )
                 _uiState.update {
                     it.copy(
@@ -902,7 +916,9 @@ class MainViewModel(
                 agentId = if (mode == com.example.domain.core.session.ChatMode.AGENT) agent.identity.id.value else null,
                 agentName = if (mode == com.example.domain.core.session.ChatMode.AGENT) agent.identity.name else null,
                 modelResourceId = modelResourceId,
-                modelDisplayName = modelDisplayName
+                modelDisplayName = modelDisplayName,
+                // GAP-14: bind to the active project (null = shared session).
+                projectId = workspaceRuntimeService.activeProjectIdOrNull()
             )
             _uiState.update { it.copy(activeSessionId = session.id.value) }
             session.id
@@ -967,10 +983,20 @@ class MainViewModel(
                     val wsId = workspace?.id ?: return@collect
 
                     // Durable session browser (most recent first).
+                    // GAP-14 (Design Closure 2026): the browser is PROJECT-
+                    // scoped — the active project's PRIVATE sessions (a
+                    // project-bound workspace shows its project's sessions;
+                    // a project-less workspace shows the workspace's shared
+                    // sessions). Sibling projects' sessions are invisible
+                    // (isolation from the service layer, REPAIR ORDER §5/§15
+                    // scoping semantics).
                     conversationSessionService?.let { service ->
                         launch {
                             runCatching {
-                                service.observeSessions(wsId).collect { sessions ->
+                                service.observeSessionsForProject(
+                                    wsId,
+                                    workspace.activeProjectId.takeIf { it > 0L }
+                                ).collect { sessions ->
                                     _uiState.update { it.copy(sessions = sessions) }
                                 }
                             }
@@ -2188,7 +2214,11 @@ class MainViewModel(
     fun cloneWorkflowDefinition(definitionId: String) {
         val library = workflowLibraryService ?: return
         viewModelScope.launch {
+            // GAP-13: degradation surfaced (was a bare runCatching).
             runCatching { library.cloneDefinition(com.example.domain.core.workflow.WorkflowId(definitionId)) }
+                .onFailure { failure ->
+                    _uiState.update { it.copy(diagnosticBanner = "تعذر استنساخ خطة العمل: ${failure.localizedMessage}") }
+                }
         }
     }
 
@@ -2196,7 +2226,11 @@ class MainViewModel(
     fun deleteWorkflowDefinition(definitionId: String) {
         val library = workflowLibraryService ?: return
         viewModelScope.launch {
+            // GAP-13: degradation surfaced (was a bare runCatching).
             runCatching { library.deleteDefinition(com.example.domain.core.workflow.WorkflowId(definitionId)) }
+                .onFailure { failure ->
+                    _uiState.update { it.copy(diagnosticBanner = "تعذر حذف خطة العمل: ${failure.localizedMessage}") }
+                }
         }
     }
 
@@ -2209,6 +2243,7 @@ class MainViewModel(
     fun resumeWorkflow(workflowId: String) {
         val persistence = workflowPersistenceService ?: return
         viewModelScope.launch {
+            // GAP-13: degradation surfaced (was a bare runCatching).
             runCatching {
                 // WORKSPACE-SCOPED resume (defect family 1): a workflow of
                 // ANOTHER workspace cannot be resumed from this surface.
@@ -2216,6 +2251,8 @@ class MainViewModel(
                 val resumable = persistence.resumable(workspaceId).firstOrNull { it.workflowId.value == workflowId }
                     ?: return@launch
                 executeWorkflow(resumable.plan, resumable.completedStepIds)
+            }.onFailure { failure ->
+                _uiState.update { it.copy(diagnosticBanner = "تعذر استئناف التنفيذ: ${failure.localizedMessage}") }
             }
         }
     }

@@ -37,6 +37,21 @@ class AuditTrailService(
     var redactor: (String) -> String = ::defaultRedact
 
     /**
+     * GAP-13 (Design Closure 2026): honest audit-write observability. The
+     * `runCatching` on the insert stays (an audit failure must never break
+     * the audited business path), but the failure is now COUNTED and
+     * LOGGED — the KDoc always claimed "logged"; previously it was not.
+     * A silently failing audit writer is exactly the invisible-degradation
+     * class the gap register calls out (recordAudit → swallowed -1).
+     */
+    val consecutiveWriteFailures = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Last write failure description (null = none / last write succeeded). */
+    @Volatile
+    var lastWriteFailure: String? = null
+        private set
+
+    /**
      * Records an audit event (suspend — deterministic persistence for
      * critical paths). Scope ids are derived from the ResourceScope.
      */
@@ -72,6 +87,15 @@ class AuditTrailService(
             metadataJson = redactor(metadataJson)
         )
         runCatching { dao.insert(entity) }
+            .onFailure { failure ->
+                consecutiveWriteFailures.incrementAndGet()
+                lastWriteFailure = "${failure::class.simpleName}: ${failure.message?.take(160)}"
+                // Honest log (goes to logcat on Android, stderr on the JVM):
+                // the audit trail is the LAST line of accountability — its
+                // own failures must be visible somewhere, not nowhere.
+                System.err.println("AUDIT_WRITE_FAILED action=$action resource=$resourceType/$resourceId: $lastWriteFailure")
+            }
+            .onSuccess { consecutiveWriteFailures.set(0); lastWriteFailure = null }
     }
 
     /** Non-blocking variant for hot paths. */

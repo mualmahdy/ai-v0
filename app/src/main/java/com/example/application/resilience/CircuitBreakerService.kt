@@ -28,8 +28,25 @@ import java.util.concurrent.ConcurrentHashMap
  *               breaker closes, otherwise it re-opens.
  *
  * Each resource has its own breaker keyed by `resourceId`.
+ *
+ * ----------------------------------------------------------------------------
+ * GAP-17 (Design Closure 2026) — honest scope declaration:
+ *  - DURABILITY: breaker state lives in a ConcurrentHashMap ONLY. It is
+ *    LOST on process death — after a restart every breaker resets to
+ *    CLOSED and the failure threshold re-accumulates from zero. This is
+ *    a declared trade-off, not an accident (persistence would belong with
+ *    the tool_health_snapshots.circuitState column — deferred to the
+ *    ADR-8 audit-unification track, which owns that table's readers).
+ *  - COVERAGE: the gate is consulted on the LLM and SEARCH execution
+ *    paths only (see ExecutionService wiring). Tools, MCP and embeddings
+ *    are NOT gated — adding them is a deliberate follow-up decision, not
+ *    a silent gap.
+ *  - ENFORCEMENT FAILURES: callers apply the documented fail-open policy
+ *    (resilience optimization, not a governance authority) and EMIT a
+ *    degradation event — see ExecutionService (GAP-17/GAP-13).
+ * ----------------------------------------------------------------------------
  */
-class CircuitBreakerService(
+open class CircuitBreakerService(
     private val defaultConfig: CircuitBreakerConfig = CircuitBreakerConfig()
 ) {
 
@@ -56,8 +73,12 @@ class CircuitBreakerService(
      * Check whether a call should be allowed against the given resource.
      * Returns true if the breaker is CLOSED, or HALF_OPEN and THIS caller
      * won the exclusive probe.
+     *
+     * GAP-17: `open` is a declared TEST SEAM (the enforcement-failure policy
+     * in ExecutionService is tested by injecting a throwing override) — not
+     * an extension point for production specializations.
      */
-    suspend fun allowCall(resourceId: String): Boolean {
+    open suspend fun allowCall(resourceId: String): Boolean {
         val lock = locks.computeIfAbsent(resourceId) { Mutex() }
         return lock.withLock {
             val snapshot = current(resourceId)

@@ -15,8 +15,10 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.unit.LayoutDirection
 import com.example.presentation.di.AppContainer
 import com.example.presentation.di.MainViewModelFactory
+import com.example.presentation.di.TasksViewModelFactory
 import com.example.presentation.ui.MainAppScreen
 import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.TasksViewModel
 import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
@@ -27,6 +29,13 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels {
         MainViewModelFactory(appContainer)
+    }
+
+    // GAP-11 (Design Closure 2026): the tasks feature ViewModel — the
+    // resumable-task board lives in its OWN feature VM (ADR-6 freeze on
+    // growing MainViewModel).
+    private val tasksViewModel: TasksViewModel by viewModels {
+        TasksViewModelFactory(appContainer)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,7 +62,7 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxSize(),
                         color = MaterialTheme.colorScheme.background
                     ) {
-                        MainAppScreen(viewModel = viewModel)
+                        MainAppScreen(viewModel = viewModel, tasksViewModel = tasksViewModel)
                     }
                 }
             }

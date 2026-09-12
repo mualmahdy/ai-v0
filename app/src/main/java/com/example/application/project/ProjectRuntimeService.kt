@@ -185,10 +185,24 @@ class ProjectRuntimeService(
     /**
      * DELETED: DB row removed; sandbox directory retained until PURGED.
      * Second destructive step after TRASH — never the first action.
+     *
+     * GAP-15 (Design Closure 2026): the §27 transition table is now ENFORCED
+     * — TRASHED → DELETED is the only path in. Deleting an ACTIVE/ARCHIVED
+     * project is REJECTED ("destruction is never the first action"); the
+     * rejection is audited as a FAILURE, never silent.
      */
     suspend fun deleteProject(workspaceId: String, projectId: Long): Boolean = mutex.withLock {
         val entity = projectDao.getProjectByIdForWorkspace(projectId, workspaceId) ?: run {
             _lastError.value = "المشروع غير موجود في هذه المساحة."
+            return false
+        }
+        val current = parseLifecycle(entity)
+        if (current != ProjectLifecycleState.TRASHED) {
+            _lastError.value = "حذف المشروع يتطلب نقله إلى المهملات أولاً (الحالة الحالية $current) — الإتلاف ليس أول إجراء."
+            audit(
+                AuditActions.PROJECT_DELETED, workspaceId, projectId, AuditResult.FAILURE,
+                reason = "rejected: invalid lifecycle transition $current → DELETED (§27)"
+            )
             return false
         }
         val ws = workspaceDao.getWorkspaceById(workspaceId)
@@ -206,8 +220,26 @@ class ProjectRuntimeService(
     /**
      * PURGED: irreversible — DB rows already deleted; destroys the sandbox
      * directory and any dangling scoped rows. Explicit second call.
+     *
+     * GAP-15 (Design Closure 2026): the §27 transition table is now ENFORCED
+     * — PURGED is reachable only from TRASHED (row still present) or from
+     * DELETED (row already removed by [deleteProject]). A row that is still
+     * ACTIVE/ARCHIVED is REJECTED with an audited FAILURE — direct
+     * destruction of a live project is never allowed.
      */
     suspend fun purgeProject(workspaceId: String, projectId: Long): Boolean = mutex.withLock {
+        val row = projectDao.getProjectByIdForWorkspace(projectId, workspaceId)
+        if (row != null) {
+            val current = parseLifecycle(row)
+            if (current != ProjectLifecycleState.TRASHED && current != ProjectLifecycleState.DELETED) {
+                _lastError.value = "التنظيف النهائي يتطلب مهملات أو حذفاً مسبقاً (الحالة الحالية $current) — الإتلاف ليس أول إجراء."
+                audit(
+                    AuditActions.PROJECT_PURGED, workspaceId, projectId, AuditResult.FAILURE,
+                    reason = "rejected: invalid lifecycle transition $current → PURGED (§27)"
+                )
+                return false
+            }
+        } // row == null → already DELETED via deleteProject — purge proceeds.
         val root = projectRootResolver(projectId)
         val deletedFiles = root.exists() && root.deleteRecursively()
         // Cascade dangling scoped rows (defensive — deleteProject removes the row).

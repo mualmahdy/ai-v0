@@ -50,6 +50,7 @@ import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -222,6 +223,14 @@ class AgentOrchestrator(
 
     /** Guards concurrent auto-resume sweeps on startup. */
     private val resumeSweepRunning = AtomicBoolean(false)
+
+    /**
+     * GAP-11 (Design Closure 2026): wall-clock source for the step-boundary
+     * timeout check. Production = real time; tests inject a jumped clock to
+     * reach the TIMED_OUT branch deterministically (the 60s floor makes
+     * wall-clock waiting impractical).
+     */
+    internal var nowProvider: () -> Long = { System.currentTimeMillis() }
 
     /** Detailed execution outcome for workflow/DAG accounting (P1-07). */
     data class TaskExecutionSummary(
@@ -502,20 +511,37 @@ class AgentOrchestrator(
             // Truthful cancellation (audit 2026 fix): persist CANCELLED so the
             // task does not linger as a zombie RUNNING row that auto-resume
             // would re-launch on the next startup.
+            // GAP-10 (Design Closure 2026): the token accounting is preserved
+            // — the old code wrote `restoredCheckpoint?.tokensConsumed ?: 0`,
+            // which RESET the row's total to the start-of-run value (or zero)
+            // and erased every token the cancelled run had actually consumed
+            // (per-step persistence had already written the honest value).
+            // The row's CURRENT total is authoritative; the checkpoint is
+            // only the fallback when the row cannot be read.
             val dao = taskDao
             if (dao != null) {
+                // GAP-10: the durable CANCELLED write must LAND even though
+                // this coroutine is cancelling — suspend DAO calls abort at
+                // their suspension point in a cancelled coroutine (the
+                // in-memory-fake test path cannot expose this; real Room
+                // can), so the write runs under NonCancellable.
                 runCatching {
-                    dao.updateTaskStatus(
-                        id = task.id.value,
-                        state = "CANCELLED",
-                        summary = "تم إلغاء المهمة بواسطة المستخدم أو النظام.",
-                        tokens = restoredCheckpoint?.tokensConsumed ?: 0,
-                        duration = 0L,
-                        isDegraded = false,
-                        degradedReason = null,
-                        errorMsg = "CANCELLED",
-                        now = System.currentTimeMillis()
-                    )
+                    withContext(NonCancellable) {
+                        val consumedAtCancellation = runCatching {
+                            dao.getTaskById(task.id.value)?.totalTokensConsumed
+                        }.getOrNull() ?: restoredCheckpoint?.tokensConsumed ?: 0
+                        dao.updateTaskStatus(
+                            id = task.id.value,
+                            state = "CANCELLED",
+                            summary = "تم إلغاء المهمة بواسطة المستخدم أو النظام.",
+                            tokens = consumedAtCancellation,
+                            duration = 0L,
+                            isDegraded = false,
+                            degradedReason = null,
+                            errorMsg = "CANCELLED",
+                            now = System.currentTimeMillis()
+                        )
+                    }
                 }
             }
             runCatching {
@@ -672,7 +698,22 @@ class AgentOrchestrator(
         } else {
             task.copy(state = TaskLifecycleState.RUNNING)
         }
-        persistTaskInitial(currentTask, agent, context)
+        // GAP-13 (Design Closure 2026): an initial-persist failure is EMITTED
+        // (previously swallowed inside persistTaskInitial) — the execution
+        // continues in-memory, but the task row's existence (and therefore
+        // resume after process death) is degraded, and the feed sees it.
+        if (!persistTaskInitial(currentTask, agent, context)) {
+            runCatching {
+                collector.emit(
+                    ExecutionEvent.Degraded(
+                        executionId = executionId,
+                        reason = DegradedReason.UNKNOWN_DEGRADATION,
+                        message = "TASK_INITIAL_PERSIST_FAILED: فشل حفظ الصف الأولي للمهمة '${task.id.value}' — " +
+                                "التنفيذ مستمر في الذاكرة لكن الاستئناف بعد إعادة التشغيل غير مضمون."
+                    )
+                )
+            }
+        }
 
         // ------------------------------------------------------------
         // PINNED WORKSPACE SCOPE (P0-02): every suspending call below this
@@ -798,16 +839,27 @@ class AgentOrchestrator(
             // the loop checks elapsed time at each step boundary (never
             // mid-IO) and terminates in an explicit TIMEOUT degraded
             // state instead of running unbounded.
+            //
+            // GAP-11 (Design Closure 2026): (a) the timeout budget is the
+            // task's OWN constraint — the previous `* attempt` multiplied
+            // the cap on every resume, so a repeatedly-resumed task could
+            // run effectively unbounded; a resume now gets the SAME cap
+            // (the checkpoint already skips completed work, so the next
+            // attempt needs no more time, only the remaining steps').
+            // (b) the persisted state is the DISTINCT resumable TIMED_OUT
+            // (previously the same "WAITING" as ASK_USER/consent —
+            // indistinguishable in the tasks surface and never swept).
             // ----------------------------------------------------------
-            val elapsedMs = System.currentTimeMillis() - startTime
-            val timeoutBudgetMs = (currentTask.constraints.timeoutMs.coerceAtLeast(60_000L)) *
-                    (context.attempt.coerceAtLeast(1))
+            // GAP-11: overridable clock for the wall-clock timeout boundary
+            // check (tests inject a jumped clock; production = real time).
+            val elapsedMs = nowProvider() - startTime
+            val timeoutBudgetMs = currentTask.constraints.timeoutMs.coerceAtLeast(60_000L)
             if (elapsedMs > timeoutBudgetMs) {
                 val timeoutMsg = "TASK_TIMEOUT: تجاوز التنفيذ الحد الزمني (${timeoutBudgetMs / 1000}s). " +
                         "الحالة محفوظة والتنفيذ قابل للاستئناف."
                 accumulatedOutputText.append("\n[مهلة]: $timeoutMsg")
                 persistTaskFinal(
-                    currentTask.id.value, "WAITING", timeoutMsg,
+                    currentTask.id.value, "TIMED_OUT", timeoutMsg,
                     accumulatedTokens, elapsedMs, true, DegradedReason.UNKNOWN_DEGRADATION.name, null
                 )
                 collector.emit(ExecutionEvent.Degraded(executionId, DegradedReason.UNKNOWN_DEGRADATION, timeoutMsg))
@@ -1224,13 +1276,30 @@ class AgentOrchestrator(
                         onEvent = { event -> collector.emit(event) }
                     )
                     if (isGatedAction) {
-                        if (execResult.isSuccess) {
+                        // GAP-13 (Design Closure 2026): an outcome-write
+                        // failure WEAKENS exactly-once (the intent row stays
+                        // INTENDED → ambiguous on resume) — emitted, never
+                        // silently swallowed.
+                        val outcomeWritten = if (execResult.isSuccess) {
                             idempotency.complete(executionId, stepIndex, chosenAction, execResult.outputText)
                         } else {
                             idempotency.fail(
                                 executionId, stepIndex, chosenAction,
                                 execResult.errorDescription ?: "فشل غير محدد"
                             )
+                        }
+                        if (!outcomeWritten) {
+                            runCatching {
+                                collector.emit(
+                                    ExecutionEvent.Degraded(
+                                        executionId = executionId,
+                                        reason = DegradedReason.UNKNOWN_DEGRADATION,
+                                        message = "INTENT_OUTCOME_WRITE_FAILED: فشل تسجيل نتيجة الخطوة $stepIndex " +
+                                                "في دفتر الموثوقية — ضمان exactly-once مُضعَف (النية تبقى غامضة عند الاستئناف): " +
+                                                (idempotency.lastOutcomeWriteFailure ?: "سبب غير معروف")
+                                    )
+                                )
+                            }
                         }
                     }
                 }
@@ -1586,6 +1655,27 @@ class AgentOrchestrator(
             TaskLifecycleState.CREATED
         }
 
+        // ------------------------------------------------------------
+        // GAP-11 (Design Closure 2026): manual resume is only legal for
+        // RESUMABLE states — COMPLETED (nothing to resume) and CANCELLED
+        // (deliberately stopped by user/system) are rejected honestly.
+        // RUNNING stays resumable: that is the process-death recovery
+        // semantic (the startup sweep and OrchestratorKernelTest resume
+        // rows left RUNNING by a killed process; the durable checkpoint
+        // makes the resume CONTINUE from the last step, never restart).
+        // ------------------------------------------------------------
+        if (restoredState !in TaskLifecycleState.RESUMABLE) {
+            emit(
+                ExecutionEvent.Error(
+                    "resume_err",
+                    "TASK_NOT_RESUMABLE",
+                    "المهمة في حالة ${restoredState.name} غير القابلة للاستئناف — الاستئناف متاح لحالات: " +
+                            TaskLifecycleState.RESUMABLE.joinToString { it.name }
+                )
+            )
+            return@flow
+        }
+
         // Reconstruct full TaskDefinition from the extended TaskEntity.
         val taskDef = TaskDefinition(
             id = TaskId(taskEntity.id),
@@ -1795,13 +1885,18 @@ class AgentOrchestrator(
         return arr.toString()
     }
 
+    /**
+     * @return true when the row was written; false = honest failure
+     * (GAP-13 — the caller emits a degradation event instead of the old
+     * silent catch).
+     */
     private suspend fun persistTaskInitial(
         task: TaskDefinition,
         agent: AgentDefinition,
         context: CanonicalExecutionContext
-    ) {
-        val dao = taskDao ?: return
-        try {
+    ): Boolean {
+        val dao = taskDao ?: return true // no persistence wired — nothing to guarantee
+        return try {
             dao.insertOrUpdateTask(
                 TaskEntity(
                     id = task.id.value,
@@ -1845,8 +1940,10 @@ class AgentOrchestrator(
                     workspaceId = context.workspaceId
                 )
             )
+            true
         } catch (_: Exception) {
-            // Safe fallback
+            // GAP-13: honest failure — the caller EMITS the degradation.
+            false
         }
     }
 

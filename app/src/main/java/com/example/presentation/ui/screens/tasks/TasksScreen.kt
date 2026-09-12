@@ -91,6 +91,7 @@ private data class BuilderStep(
 @Composable
 fun TasksScreen(
     viewModel: MainViewModel,
+    tasksViewModel: com.example.presentation.viewmodel.TasksViewModel? = null,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -118,6 +119,23 @@ fun TasksScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(vertical = 6.dp)
         ) {
+            // ---- GAP-11 (Design Closure 2026): the task board ----
+            // A live, workspace-scoped list of task rows. Timed-out tasks
+            // show as degraded + RESUMABLE (TIMED_OUT state, distinct from
+            // user-input WAITING); resuming replays the idempotency ledger
+            // instead of re-executing completed steps.
+            if (tasksViewModel != null) {
+                val board by tasksViewModel.board.collectAsState()
+                val resumingTaskId by tasksViewModel.resumingTaskId.collectAsState()
+                if (board.isNotEmpty()) {
+                    TaskBoardCard(
+                        board = board,
+                        resumingTaskId = resumingTaskId,
+                        onResume = tasksViewModel::resume
+                    )
+                }
+            }
+
             SectionHeader(
                 icon = Icons.Default.AccountTree,
                 title = "منشئ خطط العمل",
@@ -914,4 +932,107 @@ private fun ResumableWorkflowsCard(
             }
         }
     }
+}
+
+/**
+ * GAP-11 (Design Closure 2026) — the live task board card: workspace-scoped
+ * task rows with state, degradation, token accounting, and a Resume action
+ * for resumable states (TIMED_OUT / WAITING / FAILED / BLOCKED / DEGRADED).
+ * A timed-out task shows as "منتهية المهلة" — DISTINCT from a task waiting
+ * for user input (previously both were the invisible "WAITING").
+ */
+@Composable
+private fun TaskBoardCard(
+    board: List<com.example.presentation.viewmodel.TasksViewModel.TaskRow>,
+    resumingTaskId: String?,
+    onResume: (String) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .testTag("task_board_card"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Timeline,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "لوحة المهام",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            board.forEach { row ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 3.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = row.title.ifBlank { row.id },
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = taskRowSubline(row),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (row.isResumable) {
+                        Button(
+                            onClick = { onResume(row.id) },
+                            enabled = resumingTaskId == null,
+                            modifier = Modifier.testTag("btn_resume_task")
+                        ) {
+                            Icon(
+                                if (resumingTaskId == row.id) Icons.Default.Schedule else Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                if (resumingTaskId == row.id) "جارٍ…" else "استئناف",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Honest one-line status: state label + degradation + tokens. */
+private fun taskRowSubline(
+    row: com.example.presentation.viewmodel.TasksViewModel.TaskRow
+): String {
+    val stateLabel = when (row.state) {
+        "TIMED_OUT" -> "منتهية المهلة — قابلة للاستئناف من آخر خطوة محفوظة"
+        "WAITING" -> "بانتظار مدخل — قابلة للاستئناف"
+        "RUNNING" -> "قيد التنفيذ"
+        "COMPLETED" -> "مكتملة"
+        "FAILED" -> "فاشلة — قابلة لإعادة المحاولة"
+        "CANCELLED" -> "ملغاة"
+        "BLOCKED" -> "محجوبة — قابلة للاستئناف"
+        "DEGRADED" -> "متدهورة — قابلة للاستئناف"
+        else -> row.state
+    }
+    val tokens = if (row.totalTokensConsumed > 0) " · ${row.totalTokensConsumed} توكن" else ""
+    val degraded = if (row.isDegraded && row.state != "TIMED_OUT") " · متدهورة" else ""
+    return stateLabel + tokens + degraded
 }

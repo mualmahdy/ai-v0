@@ -86,15 +86,23 @@ class ActionIdempotencyService(private val dao: ActionIntentDao?) {
         }
     }
 
-    /** Records a completed side effect with a deterministic output fingerprint. */
+    /**
+     * Records a completed side effect with a deterministic output fingerprint.
+     *
+     * GAP-13 (Design Closure 2026): returns whether the outcome row was
+     * actually written. The caller EMITS a degradation event on `false` —
+     * an outcome-recording failure is never silently swallowed (the
+     * begin() row stays INTENDED and the resume path treats it as
+     * ambiguous — exactly-once is weakened, which the user must see).
+     */
     suspend fun complete(
         executionId: String,
         stepIndex: Int,
         action: DecisionAction,
         outputText: String
-    ) {
-        val ledger = dao ?: return
-        try {
+    ): Boolean {
+        val ledger = dao ?: return true // no ledger wired — nothing to guarantee
+        return try {
             ledger.updateIntentOutcome(
                 executionId = executionId,
                 actionKey = actionKey(executionId, stepIndex, action),
@@ -103,16 +111,22 @@ class ActionIdempotencyService(private val dao: ActionIntentDao?) {
                 summary = outputText.take(200),
                 now = System.currentTimeMillis()
             )
-        } catch (_: Exception) {
+            true
+        } catch (e: Exception) {
             // Outcome recording is best-effort; the begin() row (INTENDED)
             // stays authoritative and the resume path treats it as ambiguous.
+            lastOutcomeWriteFailure = "INTENT_OUTCOME_WRITE_FAILED: ${e::class.simpleName}: ${e.message?.take(120)}"
+            false
         }
     }
 
-    /** Records a definitively failed action (safe to retry through the loop). */
-    suspend fun fail(executionId: String, stepIndex: Int, action: DecisionAction, error: String) {
-        val ledger = dao ?: return
-        try {
+    /**
+     * Records a definitively failed action (safe to retry through the loop).
+     * GAP-13: same honest-return policy as [complete].
+     */
+    suspend fun fail(executionId: String, stepIndex: Int, action: DecisionAction, error: String): Boolean {
+        val ledger = dao ?: return true
+        return try {
             ledger.updateIntentOutcome(
                 executionId = executionId,
                 actionKey = actionKey(executionId, stepIndex, action),
@@ -121,9 +135,20 @@ class ActionIdempotencyService(private val dao: ActionIntentDao?) {
                 summary = error.take(200),
                 now = System.currentTimeMillis()
             )
-        } catch (_: Exception) {
+            true
+        } catch (e: Exception) {
+            lastOutcomeWriteFailure = "INTENT_OUTCOME_WRITE_FAILED: ${e::class.simpleName}: ${e.message?.take(120)}"
+            false
         }
     }
+
+    /**
+     * GAP-13: the most recent outcome-write failure (null = none) — exposed
+     * for callers/diagnostics so a weakened exactly-once guarantee is
+     * observable instead of invisible.
+     */
+    var lastOutcomeWriteFailure: String? = null
+        private set
 
     /** Number of completed intents for an execution (replay statistics). */
     suspend fun completedCount(executionId: String): Int =

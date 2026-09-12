@@ -37,6 +37,32 @@ interface ConversationSessionRepositoryPort {
     /** Live, most-recent-first session list for a workspace. */
     fun observeSessions(workspaceId: String): Flow<List<ConversationSession>>
 
+    /**
+     * GAP-14 (Design Closure 2026): live, most-recent-first session list
+     * scoped to a project within a workspace. `projectId = null` returns the
+     * workspace-scoped (shared) sessions only; a non-null id returns that
+     * project's private sessions only. A sibling project's sessions are
+     * NEVER returned — project isolation from the service, not raw SQL.
+     *
+     * Default implementation filters [observeSessions] so in-memory test
+     * fakes keep working; the Room implementation delegates to a
+     * SQL-predicate DAO query.
+     */
+    fun observeSessionsForProject(
+        workspaceId: String,
+        projectId: Long?
+    ): Flow<List<ConversationSession>> =
+        kotlinx.coroutines.flow.flow {
+            observeSessions(workspaceId).collect { sessions ->
+                emit(
+                    sessions.filter { session ->
+                        if (projectId == null) session.projectId == null
+                        else session.projectId == projectId
+                    }
+                )
+            }
+        }
+
     /** Live, oldest-first turn list of one session. */
     fun observeTurns(sessionId: ConversationSessionId): Flow<List<com.example.domain.core.session.ConversationTurn>>
 

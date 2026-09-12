@@ -82,7 +82,16 @@ class WorkspaceRuntimeService(
      * project operations delegate here (WorkspaceRuntimeService is NOT a
      * monolithic project manager). Null = legacy JVM-test wiring.
      */
-    private val projectRuntime: com.example.application.project.ProjectRuntimeService? = null
+    private val projectRuntime: com.example.application.project.ProjectRuntimeService? = null,
+    /**
+     * GAP-16 (Design Closure 2026): transaction runner for every multi-write
+     * workspace mutation (create/switch/delete). Default = identity (honest
+     * for pure-JVM tests with fake DAOs); production wires Room's
+     * `database::withTransaction` so a mid-sequence crash leaves NO partial
+     * state (previously createWorkspace could persist a deactivated world
+     * with no new row, or a row with no project).
+     */
+    private val transactionRunner: suspend (suspend () -> Unit) -> Unit = { it() }
 ) {
     private val _activeWorkspace = MutableStateFlow<Workspace?>(null)
     val activeWorkspace: StateFlow<Workspace?> = _activeWorkspace.asStateFlow()
@@ -191,6 +200,11 @@ class WorkspaceRuntimeService(
      * GAP-CLOSURE P0-04: the workspace gets its OWN dedicated sandbox project
      * (never the legacy shared projectId=1L). Every workspace — default or
      * not — owns its project; the "default" id has no special entitlement.
+     *
+     * GAP-16 (Design Closure 2026): project insert + deactivateAll + the
+     * workspace row insert run in ONE transaction ([transactionRunner]) —
+     * an injected mid-sequence failure leaves NO orphan (no deactivated
+     * world, no half-created workspace).
      */
     suspend fun createWorkspace(
         name: String,
@@ -203,8 +217,14 @@ class WorkspaceRuntimeService(
         val id = "ws_" + UUID.randomUUID().toString().take(12)
 
         // P0-04: per-workspace sandbox project — real isolation, explicitly owned.
-        val ownProjectId: Long? = projectDao?.let { dao ->
-            runCatching {
+        // GAP-16: project row + deactivation + the workspace row are ONE
+        // transaction — a mid-sequence failure leaves NO partial state (no
+        // orphan project, no deactivated world without a new row, no
+        // workspace without its required project). A project-insert failure
+        // now FAILS the whole creation (fail-closed) instead of silently
+        // creating a project-less workspace.
+        transactionRunner {
+            val ownProjectId: Long? = projectDao?.let { dao ->
                 val provisional = ProjectEntity(
                     name = "مشروع $name",
                     description = description,
@@ -221,23 +241,25 @@ class WorkspaceRuntimeService(
                     )
                 )
                 generatedId
-            }.getOrNull()
-        }
+            }
 
-        val entity = WorkspaceEntity(
-            id = id,
-            name = name,
-            description = description,
-            networkPolicy = networkPolicy.name,
-            autonomyPolicy = autonomyPolicy,
-            settingsJson = encodeSettings(settings),
-            isActive = true,
-            lastActiveProjectId = ownProjectId,
-            createdAtEpochMs = now,
-            lastAccessedEpochMs = now
-        )
-        workspaceDao.deactivateAll()
-        workspaceDao.insertOrUpdate(entity)
+            workspaceDao.insertOrUpdate(
+                WorkspaceEntity(
+                    id = id,
+                    name = name,
+                    description = description,
+                    networkPolicy = networkPolicy.name,
+                    autonomyPolicy = autonomyPolicy,
+                    settingsJson = encodeSettings(settings),
+                    isActive = true,
+                    lastActiveProjectId = ownProjectId,
+                    createdAtEpochMs = now,
+                    lastAccessedEpochMs = now
+                )
+            )
+            workspaceDao.deactivateAll()
+            workspaceDao.setActive(id, now)
+        }
         refreshAllWorkspaces()
         refreshActiveWorkspace()
         // FIX R-2 (audit c03919d): previously `_activeWorkspace.value!!` — a
@@ -256,8 +278,27 @@ class WorkspaceRuntimeService(
      */
     suspend fun switchWorkspace(workspaceId: String): Boolean = mutex.withLock {
         val target = workspaceDao.getWorkspaceById(workspaceId) ?: return@withLock false
-        workspaceDao.deactivateAll()
-        workspaceDao.setActive(workspaceId, System.currentTimeMillis())
+        // GAP-16 (Design Closure 2026): the switch is ONE transaction and the
+        // target's project pin is RECONCILED IMMEDIATELY (previously the stale
+        // lastActiveProjectId survived until the next process bootstrap):
+        //   - pin resolves (exists + ACTIVE + owned by the target) → kept;
+        //   - pin stale (deleted/archived/trashed/foreign) → repaired to the
+        //     most recently updated ACTIVE OWNED project, else cleared.
+        // Same reconciliation semantics as the bootstrap state machine
+        // (REPAIR ORDER §3A root cause 3), applied at switch time.
+        transactionRunner {
+            workspaceDao.deactivateAll()
+            workspaceDao.setActive(workspaceId, System.currentTimeMillis())
+        }
+        val dao = projectDao
+        if (dao != null) {
+            val pinned = target.lastActiveProjectId
+            val resolvable = pinned?.let { dao.resolvableProjectForWorkspace(it, workspaceId) }
+            if (resolvable == null) {
+                val replacement = dao.mostRecentActiveProjectForWorkspace(workspaceId)
+                workspaceDao.setActiveProject(workspaceId, replacement?.id, System.currentTimeMillis())
+            }
+        }
         refreshAllWorkspaces()
         refreshActiveWorkspace()
         true
@@ -382,12 +423,17 @@ class WorkspaceRuntimeService(
             // deletion is REFUSED — a live execution must never be orphaned
             // above a deleted workspace root.
             if (ExecutionHost.executionsFor(workspaceId).isNotEmpty()) return@withLock false
-            workspaceDao.deleteById(workspaceId)
-            if (target.isActive) {
-                val nextActive = all.filter { it.id != workspaceId }.maxByOrNull { it.lastAccessedEpochMs }
-                if (nextActive != null) {
-                    workspaceDao.deactivateAll()
-                    workspaceDao.setActive(nextActive.id, System.currentTimeMillis())
+            // GAP-16: row delete + successor activation are ONE transaction —
+            // a crash between them previously left ZERO active workspaces
+            // (the "no project associated" startup failure).
+            transactionRunner {
+                workspaceDao.deleteById(workspaceId)
+                if (target.isActive) {
+                    val nextActive = all.filter { it.id != workspaceId }.maxByOrNull { it.lastAccessedEpochMs }
+                    if (nextActive != null) {
+                        workspaceDao.deactivateAll()
+                        workspaceDao.setActive(nextActive.id, System.currentTimeMillis())
+                    }
                 }
             }
             refreshAllWorkspaces()

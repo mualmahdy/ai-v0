@@ -46,7 +46,35 @@ enum class TaskLifecycleState {
     COMPLETED,
     DEGRADED,
     FAILED,
-    CANCELLED
+    CANCELLED,
+    /**
+     * GAP-11 (Design Closure 2026): a DISTINCT state for wall-clock timeout
+     * — previously timeout persisted the same "WAITING" value as
+     * ASK_USER/consent pauses, so a timed-out task was indistinguishable
+     * from a task waiting for the user. TIMED_OUT is resumable: the durable
+     * checkpoint (steps, evidence, tokens) survives and the resume path
+     * replays completed intents instead of re-executing them.
+     */
+    TIMED_OUT;
+
+    companion object {
+        /**
+         * GAP-11 (Design Closure 2026): the states [AgentOrchestrator.resumeTask]
+         * accepts. The guard exists to keep the two TERMINAL-for-user-intent
+         * states honest: COMPLETED (nothing to resume) and CANCELLED (the
+         * user/system deliberately stopped it — a resume would contradict the
+         * cancellation). Every other state is resumable:
+         *  - RUNNING: process-death recovery — the startup sweep
+         *    (resumeInterruptedTasks) and OrchestratorKernelTest both resume
+         *    rows left RUNNING by a killed process (the durable checkpoint +
+         *    idempotency ledger make the resume CONTINUE, not restart);
+         *  - TIMED_OUT: the new distinct timeout state (checkpoint survives);
+         *  - WAITING/BLOCKED/DEGRADED/FAILED/CREATED/READY/PLANNING/REPLANNING:
+         *    paused, degraded, failed or not-yet-started work.
+         */
+        val RESUMABLE: Set<TaskLifecycleState> =
+            entries.filter { it != COMPLETED && it != CANCELLED }.toSet()
+    }
 }
 
 /**

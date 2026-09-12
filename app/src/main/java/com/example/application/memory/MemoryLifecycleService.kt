@@ -122,8 +122,19 @@ class MemoryLifecycleService(
             memoryDao.getActiveForWorkspaceAndAgent(workspaceId, agentId)
         } else if (workspaceId != null) {
             memoryDao.getActiveForWorkspace(workspaceId)
+        } else if (agentId != null) {
+            // Global scope narrowed by agent — every row here has
+            // workspaceId IS NULL, so no workspace boundary is crossed.
+            memoryDao.getActiveForWorkspaceAndAgent(null, agentId)
         } else {
-            memoryDao.getAllActiveMemories()
+            // GAP-12 (Design Closure 2026): workspaceId == null means the
+            // GLOBAL scope (workspaceId IS NULL) — NOT "all memories". The
+            // previous getAllActiveMemories() loaded every workspace's rows,
+            // letting a global consolidation absorb workspace-scoped
+            // memories (the survivor took the first row's workspaceId —
+            // cross-workscope corruption). Consolidation NEVER crosses a
+            // workspace boundary, in any direction.
+            memoryDao.getActiveForWorkspace(null)
         }
 
         // Only consolidate SEMANTIC / FACTUAL_INSIGHT / WORKSPACE types —
