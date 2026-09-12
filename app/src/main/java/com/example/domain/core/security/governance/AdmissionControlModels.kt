@@ -84,6 +84,12 @@ data class ToolAdmissionRequest(
     val estimatedTokens: Int? = null,
     val budgetScopeKey: String? = null,
     val approvalTokenId: String? = null,
+    /**
+     * GAP-05 (Design Closure 2026, ADR-5): resource identity for REMOTE
+     * (paid) tools — e.g. the materialized MCP tool's ResourceId. Null for
+     * local tools, which honestly carry no cash cost.
+     */
+    val remoteResourceId: String? = null,
     val requestedAtEpochMs: Long = System.currentTimeMillis()
 )
 

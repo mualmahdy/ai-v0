@@ -83,29 +83,6 @@ data class AuditTrailEntity(
 )
 
 /**
- * Periodic health probe samples (one row per probe). Allows the dashboard
- * to render a timeline instead of just the latest snapshot.
- */
-@Entity(
-    tableName = "health_probes",
-    indices = [
-        Index("resourceId"),
-        Index("resourceType"),
-        Index("probedAtEpochMs")
-    ]
-)
-data class HealthProbeEntity(
-    @PrimaryKey(autoGenerate = true)
-    val id: Long = 0L,
-    val resourceId: String,
-    val resourceType: String,
-    val isHealthy: Boolean,
-    val latencyMs: Long,
-    val errorMessage: String?,
-    val probedAtEpochMs: Long
-)
-
-/**
  * Execution trace node — one row per (executionId, stepIndex, action).
  * Powers the Unified Activity Feed screen so the user can see the full
  * decision→action→observation chain at a glance.
@@ -272,36 +249,6 @@ data class PermissionGrantEntity(
     val expiresAtEpochMs: Long?,
     /** Workspace scope (null = explicitly GLOBAL). */
     val workspaceId: String? = null
-)
-
-/**
- * Persistent policy version for the CBR-MDP / decision engine. Closes the
- * Evolution/Self-Improvement gap "no PolicyVersion entity, no history of
- * agent/decision policy changes".
- *
- * Each promotion creates a new row; the active policy is the latest
- * `isPromoted = true` row. Rollback = mark newer rows `isPromoted = false`.
- */
-@Entity(
-    tableName = "policy_versions",
-    indices = [
-        Index("policyKind"),
-        Index("isPromoted"),
-        Index("createdAtEpochMs")
-    ]
-)
-data class PolicyVersionEntity(
-    @PrimaryKey
-    val versionId: String,
-    val policyKind: String, // CBR_MDP_Q_TABLE, ROUTING, AGENT_SELECTION, TOOL_SELECTION
-    val versionLabel: String,
-    val snapshotJson: String,
-    val evaluationReportJson: String?,
-    val isPromoted: Boolean,
-    val promotedBy: String,
-    val promotedAtEpochMs: Long?,
-    val createdAtEpochMs: Long,
-    val parentVersionId: String?
 )
 
 /**

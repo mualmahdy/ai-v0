@@ -610,7 +610,6 @@ class GoldenPathTest {
             auditEvents.add(event)
             return auditEvents.size.toLong()
         }
-        override suspend fun recordHealthProbe(probe: com.example.domain.core.observability.HealthProbe) {}
         override suspend fun recordTraceNode(node: com.example.domain.core.observability.ExecutionTraceNode) {}
         override fun snapshots(): Flow<List<com.example.domain.core.observability.MetricSnapshot>> =
             flowOf(emptyList())

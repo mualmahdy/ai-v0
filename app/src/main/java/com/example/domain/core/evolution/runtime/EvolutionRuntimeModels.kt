@@ -5,12 +5,12 @@ package com.example.domain.core.evolution.runtime
  * Evolution / Self-Improvement Domain Models — Phase 5 (P1)
  * ============================================================================
  *
- * Closes the Evolution/Self-Improvement gap (audit: 25–35% → ~45%) by
- * adding policy versioning, offline replay, regression detection, and
- * safe promotion — none of which existed before (the audit found no
- * `PolicyVersion` entity, no replay tool, no comparison between current
- * and previous policy performance, no staging/canary mechanism, no
- * rollback).
+ * GAP-08 (Design Closure 2026, ADR-7): the dead policy-versioning tail
+ * (PolicyVersion / PromotionDecision / RollbackResult + the
+ * policy_versions table + PolicyVersionService) was DELETED — it was
+ * built, wired and never consumed. PolicyKind and
+ * PolicyEvaluationReport survive: DecisionIntelligenceService uses them
+ * as its live evaluation-contract types.
  */
 
 enum class PolicyKind(val code: String) {
@@ -19,19 +19,6 @@ enum class PolicyKind(val code: String) {
     AGENT_SELECTION("AGENT_SELECTION"),
     TOOL_SELECTION("TOOL_SELECTION")
 }
-
-data class PolicyVersion(
-    val versionId: String,
-    val kind: PolicyKind,
-    val versionLabel: String,
-    val snapshotJson: String,
-    val evaluationReportJson: String? = null,
-    val isPromoted: Boolean = false,
-    val promotedBy: String = "",
-    val promotedAtEpochMs: Long? = null,
-    val createdAtEpochMs: Long = System.currentTimeMillis(),
-    val parentVersionId: String? = null
-)
 
 data class PolicyEvaluationReport(
     val versionId: String,
@@ -47,16 +34,3 @@ data class PolicyEvaluationReport(
     val notes: String
 )
 
-data class PromotionDecision(
-    val versionId: String,
-    val isApproved: Boolean,
-    val reason: String,
-    val conditions: List<String>
-)
-
-data class RollbackResult(
-    val fromVersionId: String,
-    val toVersionId: String,
-    val isSuccessful: Boolean,
-    val reason: String
-)

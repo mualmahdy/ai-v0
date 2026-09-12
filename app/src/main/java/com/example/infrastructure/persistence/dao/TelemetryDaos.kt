@@ -6,10 +6,8 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.example.infrastructure.persistence.entities.AuditTrailEntity
 import com.example.infrastructure.persistence.entities.ExecutionTraceNodeEntity
-import com.example.infrastructure.persistence.entities.HealthProbeEntity
 import com.example.infrastructure.persistence.entities.MetricEventEntity
 import com.example.infrastructure.persistence.entities.PermissionGrantEntity
-import com.example.infrastructure.persistence.entities.PolicyVersionEntity
 import com.example.infrastructure.persistence.entities.ToolAuditEntity
 import com.example.infrastructure.persistence.entities.ToolHealthSnapshotEntity
 import com.example.infrastructure.persistence.entities.ToolLifecycleStateEntity
@@ -64,32 +62,11 @@ interface AuditTrailDao {
     @Query("SELECT * FROM audit_trail ORDER BY occurredAtEpochMs DESC LIMIT :limit")
     fun recent(limit: Int = 100): Flow<List<AuditTrailEntity>>
 
-    @Query("SELECT * FROM audit_trail WHERE resourceType = :type AND resourceId = :id ORDER BY occurredAtEpochMs DESC")
-    suspend fun forResource(type: String, id: String): List<AuditTrailEntity>
-
     @Query("SELECT * FROM audit_trail WHERE workspaceId = :workspaceId ORDER BY occurredAtEpochMs DESC LIMIT :limit")
-    suspend fun forWorkspace(workspaceId: String, limit: Int = 100): List<AuditTrailEntity>
-
-    @Query("SELECT * FROM audit_trail WHERE severity = :severity ORDER BY occurredAtEpochMs DESC LIMIT :limit")
-    suspend fun forSeverity(severity: String, limit: Int = 100): List<AuditTrailEntity>
+    fun forWorkspace(workspaceId: String, limit: Int = 100): Flow<List<AuditTrailEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(event: AuditTrailEntity): Long
-
-    @Query("DELETE FROM audit_trail WHERE occurredAtEpochMs < :cutoff")
-    suspend fun pruneOlderThan(cutoff: Long): Int
-}
-
-@Dao
-interface HealthProbeDao {
-    @Query("SELECT * FROM health_probes WHERE resourceId = :resourceId ORDER BY probedAtEpochMs DESC LIMIT :limit")
-    suspend fun forResource(resourceId: String, limit: Int = 50): List<HealthProbeEntity>
-
-    @Query("SELECT * FROM health_probes ORDER BY probedAtEpochMs DESC LIMIT :limit")
-    fun recent(limit: Int = 100): Flow<List<HealthProbeEntity>>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(probe: HealthProbeEntity): Long
 }
 
 @Dao
@@ -236,39 +213,6 @@ interface AgentRevisionDao {
 
     @Query("DELETE FROM agent_revisions WHERE agentId = :agentId")
     suspend fun deleteForAgent(agentId: String)
-}
-
-@Dao
-interface PolicyVersionDao {
-    @Query("SELECT * FROM policy_versions WHERE policyKind = :kind AND isPromoted = 1 ORDER BY promotedAtEpochMs DESC LIMIT 1")
-    suspend fun activeFor(kind: String): PolicyVersionEntity?
-
-    @Query("SELECT * FROM policy_versions WHERE policyKind = :kind ORDER BY createdAtEpochMs DESC")
-    fun historyFor(kind: String): Flow<List<PolicyVersionEntity>>
-
-    @Query("SELECT * FROM policy_versions ORDER BY createdAtEpochMs DESC")
-    fun allFlow(): Flow<List<PolicyVersionEntity>>
-
-    /**
-     * REPAIR ORDER §18 (DB v16): DIRECT one-shot lookup — replaces the
-     * hang-prone "runBlocking + collect infinite Flow" pattern in
-     * PolicyVersionService.promote/rollback. Never collect an infinite
-     * Flow to obtain one record.
-     */
-    @Query("SELECT * FROM policy_versions WHERE versionId = :id LIMIT 1")
-    suspend fun byId(id: String): PolicyVersionEntity?
-
-    @Query("SELECT COUNT(*) FROM policy_versions WHERE versionId = :id")
-    suspend fun countById(id: String): Int
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(entity: PolicyVersionEntity)
-
-    @Query("UPDATE policy_versions SET isPromoted = 0 WHERE policyKind = :kind")
-    suspend fun demoteAll(kind: String)
-
-    @Query("UPDATE policy_versions SET isPromoted = 1, promotedAtEpochMs = :now, promotedBy = :actor WHERE versionId = :id")
-    suspend fun promote(id: String, actor: String, now: Long)
 }
 
 @Dao

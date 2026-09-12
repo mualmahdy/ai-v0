@@ -2,7 +2,6 @@ package com.example.application.observability
 
 import com.example.domain.core.observability.AuditEvent
 import com.example.domain.core.observability.AuditSeverity
-import com.example.domain.core.observability.HealthProbe
 import com.example.domain.core.observability.MetricDimensions
 import com.example.domain.core.observability.MetricSample
 import com.example.domain.core.observability.MetricType
@@ -80,20 +79,6 @@ class TelemetryServiceTest {
     }
 
     @Test
-    fun `recordHealthProbe delegates to port`() = kotlinx.coroutines.runBlocking {
-        service.recordHealthProbe(
-            HealthProbe(
-                resourceId = "res_gemini",
-                resourceType = "LLM",
-                isHealthy = true,
-                latencyMs = 120L
-            )
-        )
-        assertEquals(1, fakePort.healthProbes.size)
-        assertTrue(fakePort.healthProbes.first().isHealthy)
-    }
-
-    @Test
     fun `recordTraceNode stores node with computed durationMs`() = kotlinx.coroutines.runBlocking {
         service.recordTraceNode(
             executionId = "exec_1",
@@ -122,7 +107,6 @@ class TelemetryServiceTest {
         val latencySamples = mutableListOf<MetricSample>()
         val tokenSamples = mutableListOf<MetricSample>()
         val auditEvents = mutableListOf<AuditEvent>()
-        val healthProbes = mutableListOf<HealthProbe>()
         val traceNodes = mutableListOf<com.example.domain.core.observability.ExecutionTraceNode>()
         private var rowIdCounter = 1L
 
@@ -142,10 +126,6 @@ class TelemetryServiceTest {
         override suspend fun recordAudit(event: AuditEvent): Long {
             auditEvents.add(event)
             return rowIdCounter++
-        }
-
-        override suspend fun recordHealthProbe(probe: HealthProbe) {
-            healthProbes.add(probe)
         }
 
         override suspend fun recordTraceNode(node: com.example.domain.core.observability.ExecutionTraceNode) {

@@ -3,7 +3,6 @@ package com.example.domain.ports.observability
 import com.example.domain.core.observability.AuditEvent
 import com.example.domain.core.observability.DimensionSummary
 import com.example.domain.core.observability.ExecutionTraceNode
-import com.example.domain.core.observability.HealthProbe
 import com.example.domain.core.observability.MetricSample
 import com.example.domain.core.observability.MetricSnapshot
 import com.example.domain.core.observability.MetricType
@@ -28,9 +27,6 @@ interface TelemetryPort {
     /** Persist a security audit event. Returns the assigned row id. */
     suspend fun recordAudit(event: AuditEvent): Long
 
-    /** Persist a health probe sample. */
-    suspend fun recordHealthProbe(probe: HealthProbe)
-
     /** Persist a single execution trace node (one per action). */
     suspend fun recordTraceNode(node: ExecutionTraceNode)
 
@@ -43,6 +39,21 @@ interface TelemetryPort {
     /** Live stream of audit events for the activity feed. */
     fun auditEvents(limit: Int = 100): Flow<List<AuditEvent>>
 
+    /**
+     * GAP-04 (Design Closure 2026): workspace-scoped live audit stream.
+     * The Unified Activity Feed must reflect ONLY the active workspace —
+     * the previous global read leaked other workspaces' audit rows.
+     *
+     * Default implementation falls back to the unscoped stream so that
+     * test fakes keep their behavior; the production repository overrides
+     * this with a SQL-level `WHERE workspaceId = :id` filter.
+     *
+     * `workspaceId == null` means "no active workspace" — the honest feed
+     * is EMPTY (nothing is attributable), never a cross-workspace leak.
+     */
+    fun auditEvents(workspaceId: String?, limit: Int = 100): Flow<List<AuditEvent>> =
+        auditEvents(limit)
+
     /** Live stream of execution-trace nodes for an execution. */
     fun traceForExecution(executionId: String): Flow<List<ExecutionTraceNode>>
 
@@ -54,6 +65,15 @@ interface TelemetryPort {
      * is active the feed now falls back to the recent-trace window.
      */
     fun recentTraceNodes(limit: Int = 50): Flow<List<ExecutionTraceNode>>
+
+    /**
+     * GAP-04 (Design Closure 2026): workspace-scoped recent-trace window.
+     * Same policy as [auditEvents] above: default = unscoped fallback for
+     * test fakes; production overrides with a SQL `WHERE workspaceId = :id`
+     * filter; `workspaceId == null` = honest empty (no active workspace).
+     */
+    fun recentTraceNodes(workspaceId: String?, limit: Int = 50): Flow<List<ExecutionTraceNode>> =
+        recentTraceNodes(limit)
 
     /** Aggregate snapshot filtered by type. */
     suspend fun snapshotByType(type: MetricType): List<MetricSnapshot>

@@ -119,20 +119,6 @@ data class DimensionSummary(
 )
 
 /**
- * Health probe result emitted periodically by background monitoring
- * (e.g. `ProviderHealthMonitor`). Persisted so the dashboard can show
- * a timeline, not just the latest snapshot.
- */
-data class HealthProbe(
-    val resourceId: String,
-    val resourceType: String,
-    val isHealthy: Boolean,
-    val latencyMs: Long,
-    val errorMessage: String? = null,
-    val probedAtEpochMs: Long = System.currentTimeMillis()
-)
-
-/**
  * Severity for an audit-log entry.
  */
 enum class AuditSeverity { INFO, WARN, ERROR, CRITICAL }

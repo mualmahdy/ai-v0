@@ -72,24 +72,29 @@ class LegacyIsolationTest {
         )
     }
 
-    @Test
-    fun `P2-02 legacy provider DB API is frozen to its declaration sites`() {
+@Test
+    fun `P2-02 legacy provider DB island is fully deleted`() {
+        // GAP-08 (Design Closure 2026, ADR-7 "delete" branch): the frozen
+        // legacy island - provider_configs table + ProviderConfigDao +
+        // ProviderConfigEntity + RoomProviderRepositoryAdapter +
+        // ProviderRepositoryPort - was DELETED (v17 drops the table). This
+        // test now pins the ABSENCE of the island: any resurrection must
+        // come with a new ADR.
         val violations = forbiddenReferences(
             patterns = listOf(
                 Regex("providerConfigDao\\(\\)"),
-                Regex("ProviderConfigEntity\\(")
+                Regex("ProviderConfigEntity\\("),
+                Regex("RoomProviderRepositoryAdapter"),
+                Regex("ProviderRepositoryPort")
             ),
             allowlist = setOf(
-                "com/example/infrastructure/persistence/AppDatabase.kt",
-                "com/example/infrastructure/persistence/entities/Entities.kt",
-                "com/example/infrastructure/persistence/dao/Daos.kt",
-                "com/example/infrastructure/persistence/dao/ProviderDao.kt",
-                // P2-02: the frozen legacy adapter island (bridge-only file).
-                "com/example/infrastructure/provider/RoomProviderRepositoryAdapter.kt"
+                // Historical migration SQL keeps creating the table for
+                // v1->v2 upgrade paths (the v17 DROP converges all paths).
+                "com/example/infrastructure/persistence/AppDatabase.kt"
             )
         )
         assertEquals(
-            "Legacy ProviderConfig DB usage must not grow beyond the declaration sites: $violations",
+            "Legacy provider_configs island must stay deleted (ADR-7): $violations",
             0,
             violations.size
         )

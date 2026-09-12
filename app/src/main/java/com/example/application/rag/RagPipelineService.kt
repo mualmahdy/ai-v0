@@ -694,10 +694,19 @@ class RagPipelineService(
             val chunkEmbeddingId = chunk.metadata["embeddingResourceId"]
             // Compatibility boundary: chunks embedded by a DIFFERENT embedding
             // resource than the active one cannot be compared semantically.
-            val vectorCompatible = chunkEmbeddingId == null ||
+            // GAP-07 (Design Closure 2026, ADR-4): the boundary is ALSO
+            // dimension-space honest — the local-128 resource can UPGRADE
+            // from lexical to ONNX semantic vectors under the SAME resource
+            // id (the router seam). A lexical-embedded chunk (metadata
+            // embeddingSemantic=false) must never be semantically scored
+            // against a semantic query vector (different vector spaces), and
+            // vice versa — such chunks stay lexical-scored only, honestly.
+            val chunkWasSemantic = chunk.metadata["embeddingSemantic"]?.toBoolean() ?: false
+            val vectorCompatible = (chunkEmbeddingId == null ||
                 usedResourceId == null ||
                 chunkEmbeddingId == usedResourceId.value ||
-                chunkEmbeddingId == "local_lexical"
+                chunkEmbeddingId == "local_lexical") &&
+                chunkWasSemantic == providerIsSemantic
 
             val sim = if (vectorCompatible) {
                 val chunkVector = chunk.vector ?: generateLexicalVector(chunk.text)

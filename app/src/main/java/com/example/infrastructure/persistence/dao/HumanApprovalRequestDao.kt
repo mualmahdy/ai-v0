@@ -25,6 +25,17 @@ interface HumanApprovalRequestDao {
     @Query("SELECT * FROM human_approval_requests WHERE resolution = 'PENDING' ORDER BY requestedAtEpochMs DESC LIMIT :limit")
     suspend fun findPending(limit: Int = 50): List<HumanApprovalRequestEntity>
 
+    /**
+     * GAP-02 (Design Closure 2026, ADR-2c): the token TRANSPORT query —
+     * APPROVED, unconsumed, unexpired request for (executionId, toolName).
+     */
+    @Query(
+        "SELECT * FROM human_approval_requests WHERE executionId = :executionId " +
+            "AND toolName = :toolName AND resolution = 'APPROVED' AND isTokenConsumed = 0 " +
+            "AND expiresAtEpochMs > :nowEpochMs ORDER BY resolvedAtEpochMs DESC LIMIT 1"
+    )
+    suspend fun findApprovedFor(executionId: String, toolName: String, nowEpochMs: Long): HumanApprovalRequestEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: HumanApprovalRequestEntity)
 

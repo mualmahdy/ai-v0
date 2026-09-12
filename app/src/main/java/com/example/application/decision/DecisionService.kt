@@ -151,7 +151,8 @@ class DecisionService(
         decisionHistory: List<DecisionResult> = emptyList(),
         taskContract: com.example.domain.core.task.TaskContract? = null,
         agentAllowedCapabilities: Set<CapabilityType>? = null,
-        effectiveAutonomyPolicy: com.example.domain.core.task.AutonomyPolicy? = null
+        effectiveAutonomyPolicy: com.example.domain.core.task.AutonomyPolicy? = null,
+        hasKnowledgeCorpus: Boolean = false
     ): DecisionContext {
         val effectiveRequirements = resolveTaskRequirements(task)
         val taskWithRequirements = if (task.requirements == effectiveRequirements) task else task.copy(requirements = effectiveRequirements)
@@ -240,7 +241,9 @@ class DecisionService(
             // REPAIR ORDER §3B — intent-constrained action space inputs.
             taskContract = taskContract,
             agentAllowedCapabilities = agentAllowedCapabilities,
-            effectiveAutonomyPolicy = effectiveAutonomyPolicy
+            effectiveAutonomyPolicy = effectiveAutonomyPolicy,
+            // GAP-07 — corpus flag for CHAT grounding candidacy.
+            hasKnowledgeCorpus = hasKnowledgeCorpus
         )
     }
 
@@ -398,10 +401,22 @@ class DecisionService(
         // resource pipeline. The DecisionService does NOT generate a RETRIVE_MEMORY
         // candidate with a fabricated embedding resource. If the planner needs RAG,
         // it emits a RETRIVE_KNOWLEDGE action with the configured embedding resource.
+        //
+        // GAP-07 (Design Closure 2026, ADR-4) — CHAT GROUNDING POLICY: when the
+        // task contract is CHAT and the pinned workspace has a NON-EMPTY
+        // knowledge corpus, a RETRIEVE_KNOWLEDGE candidate is ALWAYS nominated
+        // (keyword-free prompts included — the pre-GAP-07 behavior was: chat
+        // never retrieved unless the prompt happened to contain memory/rag
+        // keywords, so answers were ungrounded in the common case).
+        // QUICK_CHAT stays structurally retrieval-free (contract semantics),
+        // and the candidate still respects scope isolation at execution.
+        val chatGroundingCandidate =
+            context.taskContract?.category == com.example.domain.core.task.TaskIntentCategory.CHAT &&
+                context.hasKnowledgeCorpus
         val needsMemory = requiredCaps.contains(CapabilityType.MEMORY_RETRIEVAL) ||
             requiredCaps.contains(CapabilityType.EMBEDDING) ||
             optionalCaps.contains(CapabilityType.MEMORY_RETRIEVAL)
-        if (needsMemory || (!context.hasMemoryEvidence && currentStep == 0 && requiredCaps.isEmpty())) {
+        if (needsMemory || chatGroundingCandidate || (!context.hasMemoryEvidence && currentStep == 0 && requiredCaps.isEmpty())) {
             val embeddingCandidates = resourceCapabilityGraph.findCandidatesByType(
                 ResourceType.EMBEDDING,
                 context.networkPolicy,

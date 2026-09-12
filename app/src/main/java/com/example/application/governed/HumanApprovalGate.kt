@@ -85,6 +85,21 @@ class HumanApprovalGate(
     suspend fun expireStale(): Int = store.expireStale(clock())
 
     /**
+     * GAP-02 (Design Closure 2026, ADR-2c): the token TRANSPORT — the id of
+     * an APPROVED, unconsumed, unexpired request for (executionId, toolName),
+     * or null. Does NOT consume: the one-shot consumption stays inside
+     * AdmissionControlService.tryConsumeToken, exactly once, atomically.
+     *
+     * This is what makes the consent loop CLOSEABLE: after the user approves
+     * (UI surface), the execution layer's next admission for the same
+     * (executionId, toolName) can look the token up and pass it through —
+     * previously an approved request satisfied nothing (requestApproval only
+     * re-uses PENDING rows, so a retry minted a fresh request forever).
+     */
+    suspend fun findApprovedToken(executionId: String, toolName: String): String? =
+        store.findApprovedFor(executionId, toolName, clock())?.approvalId
+
+    /**
      * REPAIR ORDER §3B/§2.2 — the approval SURFACE: all pending requests
      * (the user can finally SEE and RESOLVE consent requests; previously
      * approve/reject had ZERO production callers — governance was enforced

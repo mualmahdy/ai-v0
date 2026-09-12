@@ -14,14 +14,11 @@ import com.example.infrastructure.persistence.dao.EvolutionCandidateDao
 import com.example.infrastructure.persistence.dao.ExecutionLogDao
 import com.example.infrastructure.persistence.dao.ExecutionTraceDao
 import com.example.infrastructure.persistence.dao.ExtensionConfigDao
-import com.example.infrastructure.persistence.dao.HealthProbeDao
 import com.example.infrastructure.persistence.dao.KnowledgeDocumentDao
 import com.example.infrastructure.persistence.dao.MemoryDao
 import com.example.infrastructure.persistence.dao.MetricEventDao
 import com.example.infrastructure.persistence.dao.PermissionGrantDao
-import com.example.infrastructure.persistence.dao.PolicyVersionDao
 import com.example.infrastructure.persistence.dao.ProjectDao
-import com.example.infrastructure.persistence.dao.ProviderConfigDao
 import com.example.infrastructure.persistence.dao.ProviderDao
 import com.example.infrastructure.persistence.dao.ProviderServiceDao
 import com.example.infrastructure.persistence.dao.RadarItemDao
@@ -47,14 +44,11 @@ import com.example.infrastructure.persistence.entities.EvolutionCandidateEntity
 import com.example.infrastructure.persistence.entities.ExecutionLogEntity
 import com.example.infrastructure.persistence.entities.ExecutionTraceNodeEntity
 import com.example.infrastructure.persistence.entities.ExtensionConfigEntity
-import com.example.infrastructure.persistence.entities.HealthProbeEntity
 import com.example.infrastructure.persistence.entities.KnowledgeDocumentEntity
 import com.example.infrastructure.persistence.entities.MemoryEntity
 import com.example.infrastructure.persistence.entities.MetricEventEntity
 import com.example.infrastructure.persistence.entities.PermissionGrantEntity
-import com.example.infrastructure.persistence.entities.PolicyVersionEntity
 import com.example.infrastructure.persistence.entities.ProjectEntity
-import com.example.infrastructure.persistence.entities.ProviderConfigEntity
 import com.example.infrastructure.persistence.entities.ProviderEntity
 import com.example.infrastructure.persistence.entities.ProviderServiceEntity
 import com.example.infrastructure.persistence.entities.RadarItemEntity
@@ -135,7 +129,6 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         RadarItemEntity::class,
         EvolutionCandidateEntity::class,
         ExtensionConfigEntity::class,
-        ProviderConfigEntity::class,
         // Phase 2 — new entities for true multi-workspace runtime + RAG persistence
         WorkspaceEntity::class,
         KnowledgeDocumentEntity::class,
@@ -154,13 +147,11 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         // Phase 5 — Observability / Memory / Tool / Workflow / Security / Evolution
         MetricEventEntity::class,
         AuditTrailEntity::class,
-        HealthProbeEntity::class,
         ExecutionTraceNodeEntity::class,
         WorkflowExecutionEntity::class,
         WorkflowStepStateEntity::class,
         ToolAuditEntity::class,
         PermissionGrantEntity::class,
-        PolicyVersionEntity::class,
         AgentMemoryNamespaceEntity::class,
         ToolLifecycleStateEntity::class,
         ToolHealthSnapshotEntity::class,
@@ -193,7 +184,7 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.ProjectSnapshotEntity::class,
         com.example.infrastructure.persistence.entities.AuditEventEntity::class
     ],
-    version = 16,
+    version = 17,
     // GAP-01 (Design Closure 2026, ADR-1): schema export is now enabled and
     // committed under app/schemas/ — every future schema change gets a
     // committed baseline JSON, enabling MigrationTestHelper tests and CI
@@ -213,7 +204,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun radarItemDao(): RadarItemDao
     abstract fun evolutionCandidateDao(): EvolutionCandidateDao
     abstract fun extensionConfigDao(): ExtensionConfigDao
-    abstract fun providerConfigDao(): ProviderConfigDao
     // Phase 2 — new DAOs
     abstract fun workspaceDao(): WorkspaceDao
     abstract fun knowledgeDocumentDao(): KnowledgeDocumentDao
@@ -235,7 +225,6 @@ abstract class AppDatabase : RoomDatabase() {
     // Phase 5 — Observability / Telemetry / Audit / Trace
     abstract fun metricEventDao(): MetricEventDao
     abstract fun auditTrailDao(): AuditTrailDao
-    abstract fun healthProbeDao(): HealthProbeDao
     abstract fun executionTraceDao(): ExecutionTraceDao
 
     // Phase 5 — Tool lifecycle / health / audit
@@ -243,9 +232,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun toolLifecycleDao(): ToolLifecycleDao
     abstract fun toolHealthDao(): ToolHealthDao
 
-    // Phase 5 — Security / Permissions / Policy versions
+    // Phase 5 — Security / Permissions
     abstract fun permissionGrantDao(): PermissionGrantDao
-    abstract fun policyVersionDao(): PolicyVersionDao
 
     // Phase 5 — Workflow persistence (resume after process death)
     abstract fun workflowExecutionDao(): WorkflowExecutionDao
@@ -1773,6 +1761,29 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * GAP-08 (Design Closure 2026, ADR-7 "delete" branch): v17 drops the
+         * three dead tables — `provider_configs` (legacy provider island;
+         * its entity graph was removed from the codebase long ago, only the
+         * migration-chain remnant remained), `policy_versions` (evolution
+         * tail: PolicyVersionService had zero production consumers) and
+         * `health_probes` (write-only table — recordHealthProbe was never
+         * called in production). All three are DROP-only: no surviving
+         * reader loses data, and every historical upgrade path (v1..v16)
+         * converges on the same end state.
+         *
+         * Destructive-by-design and ADR-sanctioned; the v16→v17 identity is
+         * validated by MigrationChainValidationTest (v1→17 and v15→17) plus
+         * Migration16to17Test (data survival of the surviving tables).
+         */
+        private val MIGRATION_16_TO_17: Migration = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS provider_configs")
+                db.execSQL("DROP TABLE IF EXISTS policy_versions")
+                db.execSQL("DROP TABLE IF EXISTS health_probes")
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1791,6 +1802,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_13_TO_14,
             MIGRATION_14_TO_15,
             MIGRATION_15_TO_16,
+            MIGRATION_16_TO_17,
         )
 
         fun getInstance(context: Context): AppDatabase {

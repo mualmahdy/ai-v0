@@ -252,7 +252,7 @@ class GovernancePersistenceTest {
     }
 
     @Test
-    fun `db version is 16 with all governance + execution-kernel + convergence + portability tables`() {
+    fun `db version is 17 with all governance + execution-kernel + convergence + portability tables`() {
         // Gap-closure: v11 added action_intents + agent_definitions + the
         // tasks.executionContextJson column (canonical execution kernel).
         // P0 convergence (v12): workspace-owned projects, RAG metadata
@@ -271,8 +271,10 @@ class GovernancePersistenceTest {
         // knowledge_documents/chat_sessions/tasks, action-space version on
         // mdp_q_values, artifacts, project_dependencies, project_snapshots,
         // audit_events.
+        // GAP-08 (Design Closure 2026, ADR-7) v17: the three dead tables
+        // (provider_configs, policy_versions, health_probes) are DROPPED.
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(16, dbVersion)
+        assertEquals(17, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))

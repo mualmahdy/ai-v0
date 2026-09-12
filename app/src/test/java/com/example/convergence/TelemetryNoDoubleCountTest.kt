@@ -53,7 +53,6 @@ class TelemetryNoDoubleCountTest {
         repository = RoomTelemetryRepository(
             metricEventDao = db.metricEventDao(),
             auditTrailDao = db.auditTrailDao(),
-            healthProbeDao = db.healthProbeDao(),
             executionTraceDao = db.executionTraceDao(),
             executionLogDao = db.executionLogDao(),
             writeScope = writeScope

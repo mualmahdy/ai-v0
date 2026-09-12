@@ -8,7 +8,6 @@ import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.execution.ExecutionScope
 import com.example.domain.core.observability.AuditEvent
-import com.example.domain.core.observability.HealthProbe
 import com.example.domain.core.observability.MetricSample
 import com.example.domain.core.observability.MetricType
 import com.example.domain.ports.observability.TelemetryPort
@@ -62,7 +61,6 @@ class WorkspaceSwitchDuringExecutionTest {
         override suspend fun record(sample: MetricSample) { samples.add(sample) }
         override suspend fun recordBatch(list: List<MetricSample>) { samples.addAll(list) }
         override suspend fun recordAudit(event: AuditEvent): Long = 1L
-        override suspend fun recordHealthProbe(probe: HealthProbe) {}
         override suspend fun recordTraceNode(
             node: com.example.domain.core.observability.ExecutionTraceNode
         ) {}

@@ -3,7 +3,6 @@ package com.example.application.observability
 import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.observability.AuditEvent
 import com.example.domain.core.observability.AuditSeverity
-import com.example.domain.core.observability.HealthProbe
 import com.example.domain.core.observability.MetricDimensions
 import com.example.domain.core.observability.MetricSample
 import com.example.domain.core.observability.MetricType
@@ -157,9 +156,6 @@ class TelemetryService(
             workspaceId = workspaceId
         )
     )
-
-    /** Record a periodic health probe. */
-    suspend fun recordHealthProbe(probe: HealthProbe) = telemetryPort.recordHealthProbe(probe)
 
     /** Record a single execution trace node. */
     suspend fun recordTraceNode(

@@ -14,7 +14,6 @@ import com.example.application.orchestration.WorkflowEngine
 import com.example.application.observation.ObservationService
 import com.example.application.outcome.OutcomeService
 import com.example.application.provider.ProviderControlPlaneService
-import com.example.application.provider.ProviderRoutingService
 import com.example.application.radar.IntelligenceRadarPipeline
 import com.example.application.rag.KnowledgePersistenceService
 import com.example.application.rag.RagPipelineService
@@ -48,7 +47,6 @@ import com.example.application.workspace.WorkspaceContextEngine
 import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.application.workflow.WorkflowPersistenceService
 import com.example.application.task.TaskDecompositionService
-import com.example.application.evolution.PolicyVersionService
 import com.example.application.resilience.CircuitBreakerService
 import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
@@ -96,6 +94,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import java.io.File
 
 /**
@@ -121,6 +120,22 @@ class AppContainer(context: Context) {
      * eager load, MDP Q-table load, adapter restore) — never the main thread.
      */
     val applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * GAP-02 (Design Closure 2026, ADR-2): the EXPLICIT local principal
+     * identity that resolves approvals / grants. A stable, persisted
+     * device-local user id (random UUID, stored in SharedPreferences) —
+     * previously resolvedBy was the anonymous constant "user", which the
+     * audit flagged as an unknown actor. Single-user on-device product:
+     * one durable local identity is the honest semantics.
+     */
+    val localPrincipalId: String by lazy {
+        val prefs = appContext.getSharedPreferences("ai_v0_principal", Context.MODE_PRIVATE)
+        prefs.getString("local_principal_id", null)
+            ?: "user_" + java.util.UUID.randomUUID().toString().also {
+                prefs.edit().putString("local_principal_id", it).apply()
+            }
+    }
 
     /**
      * Real connectivity monitor (audit 2026 fix) — single source of truth for
@@ -378,7 +393,14 @@ class AppContainer(context: Context) {
     val protocolAdapterFactory: ProtocolAdapterFactory by lazy {
         ProtocolAdapterFactory(
             geminiBootstrap = geminiBootstrap,
-            egressControl = egressControl
+            egressControl = egressControl,
+            // GAP-07 (Design Closure 2026, ADR-4): IN_PROCESS embedding
+            // resources (the bootstrapped "local-128") bind to the LOCAL
+            // ROUTER — ONNX semantic vectors once provisioned, the same
+            // 128d deterministic lexical space before. Provisioning the
+            // semantic model now upgrades the ACTUAL document/memory
+            // embedding path, not just the memory fallback.
+            inProcessEmbeddingRouter = localEmbeddingRouter
         )
     }
 
@@ -836,6 +858,15 @@ class AppContainer(context: Context) {
     /** Budget gate adapter over EconomicGovernanceService.authorize(). */
     val budgetAuthorizationPort: BudgetAuthorizationPort by lazy {
         BudgetAuthorizationPort { request: ToolAdmissionRequest ->
+            // GAP-05 (Design Closure 2026, ADR-5): the admission budget check
+            // now carries the HONEST resource identity. LOCAL tools (file /
+            // diagnostics) are declared isLocalResource=true — they consume
+            // no cash budget, so a HARD_LIMIT allocation cannot deny them
+            // (this is the ADR-5(b) documented policy, mirrored in the
+            // GovernanceScreen text). REMOTE tools (MCP servers reached via
+            // a materialized resource — request.remoteResourceId) carry
+            // their real resourceId so the governor's rate scope and any
+            // pricing entries apply BEFORE the call.
             val result = economicGovernanceService.authorize(
                 com.example.domain.core.budget.EconomicAuthorizationRequest(
                     executionId = request.executionId,
@@ -845,8 +876,8 @@ class AppContainer(context: Context) {
                     providerId = null,
                     serviceId = null,
                     modelId = null,
-                    resourceId = null,
-                    isLocalResource = true,
+                    resourceId = request.remoteResourceId,
+                    isLocalResource = request.remoteResourceId == null,
                     expectedTotalTokens = request.estimatedTokens,
                     actionTypeCode = "TOOL:${request.toolName}"
                 )
@@ -1019,6 +1050,13 @@ class AppContainer(context: Context) {
             // file operations (FileSystemTool / skills / MCP local bridge all
             // resolve the pinned scope first). No implicit 1L ever.
             orchestrator.projectIdProvider = { workspaceRuntimeService.activeProjectIdOrNull() }
+            // GAP-07 (Design Closure 2026, ADR-4): knowledge-corpus probe —
+            // CHAT-contract executions with a non-empty corpus (pinned
+            // workspace) nominate a RETRIEVE_KNOWLEDGE candidate, so chat
+            // answers are grounded when knowledge exists.
+            orchestrator.knowledgeCorpusProbe = { workspaceId ->
+                database.documentChunkDao().countForWorkspace(workspaceId) > 0
+            }
             // REPAIR ORDER §20 — the PINNED workspace's authoritative policy,
             // read from persistence BY ID once at launch (never the
             // currently-active StateFlow: a mid-run workspace switch must not
@@ -1071,6 +1109,17 @@ class AppContainer(context: Context) {
             // layer close the RPM/TPM windows in the governor.
             executionService.rateLimitRecorder = { providerId, modelId, resourceId, _, retryAfterMs ->
                 economicGovernanceService.recordRateLimitEncounter(providerId, modelId, resourceId, retryAfterMs)
+            }
+            // GAP-05 (Design Closure 2026, ADR-5): the pre-execution economic
+            // gate on every LLM step — HARD_LIMIT + rate windows now deny
+            // BEFORE the provider call, not only at decide-time.
+            executionService.economicGovernance = economicGovernanceService
+            // GAP-02 (Design Closure 2026, ADR-2c): APPROVAL TOKEN TRANSPORT —
+            // when the user has approved the consent request for this
+            // (executionId, toolName), the token rides the admission request
+            // and stage 9 consumes it exactly once. Closes the consent loop.
+            executionService.approvalTokenProvider = { executionId, toolName ->
+                humanApprovalGate.findApprovedToken(executionId, toolName)
             }
             // Security governance wiring (audit 2026 fix): tool/MCP/delegation
             // permission checks are enforced through the permission service.
@@ -1316,8 +1365,6 @@ class AppContainer(context: Context) {
     //   - TaskDecompositionService     → Task Intelligence (40-45% → 55%)
     //   - CircuitBreakerService        → Production Resilience (35-45% → 55%)
     //   - PermissionGrantService       → Security Governance (40-45% → 55%)
-    //   - PolicyVersionService         → Evolution/Self-Improvement (25-35% → 45%)
-    //   - ProviderRoutingService       → Provider Ecosystem (~45% → 55%)
     //   - DecisionIntelligenceService  → Decision Intelligence (~45% → 55%)
     //   - ExtensionLifecycleService    → MCP/Extensions (40-45% → 55%)
 
@@ -1325,7 +1372,6 @@ class AppContainer(context: Context) {
         RoomTelemetryRepository(
             metricEventDao = database.metricEventDao(),
             auditTrailDao = database.auditTrailDao(),
-            healthProbeDao = database.healthProbeDao(),
             executionTraceDao = database.executionTraceDao(),
             executionLogDao = database.executionLogDao()
         )
@@ -1478,12 +1524,6 @@ class AppContainer(context: Context) {
             telemetryPort = telemetryPort
         )
     }
-
-    val policyVersionService: PolicyVersionService by lazy {
-        PolicyVersionService(policyVersionDao = database.policyVersionDao())
-    }
-
-    val providerRoutingService: ProviderRoutingService by lazy { ProviderRoutingService() }
 
     val decisionIntelligenceService: DecisionIntelligenceService by lazy {
         DecisionIntelligenceService(
@@ -1675,6 +1715,31 @@ class AppContainer(context: Context) {
                     )
                 }
             }
+            // GAP-02 (Design Closure 2026, ADR-2): periodic housekeeping —
+            // expire stale PENDING approval requests (previously
+            // expireStale had ZERO production callers, so PENDING rows
+            // accumulated forever). A 60s sweep is cheap (one indexed SQL
+            // UPDATE) and bounded; failures are recorded to the audit trail
+            // instead of being silently swallowed.
+            launch {
+                while (isActive) {
+                    kotlinx.coroutines.delay(60_000L)
+                    runCatching { humanApprovalGate.expireStale() }
+                        .onFailure { t ->
+                            runCatching {
+                                telemetryService.recordAudit(
+                                    AuditSeverity.WARN,
+                                    actor = "bootstrap",
+                                    action = "approval_expiry_sweep_failed",
+                                    resourceType = "runtime",
+                                    resourceId = "human_approval_gate",
+                                    decision = "WARN",
+                                    reason = "فشل تنظيف الموافقات المنتهية: ${t::class.simpleName}: ${t.message?.take(200)}"
+                                )
+                            }
+                        }
+                }
+            }
             } catch (t: Throwable) {
                 // P1-8: a bootstrap step threw. The readiness gate is STILL
                 // released below — the failure is attributed honestly so the
@@ -1757,17 +1822,16 @@ class MainViewModelFactory(
                 conversationSessionService = appContainer.conversationSessionService,
                 workflowLibraryService = appContainer.workflowLibraryService,
                 workflowPersistenceService = appContainer.workflowPersistenceService,
-                // REPAIR ORDER §3A/§5/§9-§14/§24-§28 — portability subsystem:
-                // bootstrap state machine, project runtime, transfers,
-                // readiness, repair center, and the approval surface.
-                projectRuntimeService = appContainer.projectRuntimeService,
+                // REPAIR ORDER §3A — observable bootstrap state machine, and
+                // §3B/§2.2 — the approval surface (consent loop).
+                // GAP-08 (Design Closure 2026, ADR-7): the dead project /
+                // transfer / readiness / repair VM surface was deleted — the
+                // MainViewModel no longer receives those services (the
+                // services themselves remain alive for bootstrap & tests).
                 bootstrapStateProvider = appContainer.workspaceRuntimeService.bootstrapState,
-                fileTransferService = appContainer.fileTransferService,
-                projectPackageService = appContainer.projectPackageService,
-                sessionExportService = appContainer.sessionExportService,
-                projectReadinessService = appContainer.projectReadinessService,
-                repairCenterService = appContainer.repairCenterService,
-                humanApprovalGate = appContainer.humanApprovalGate
+                humanApprovalGate = appContainer.humanApprovalGate,
+                localPrincipalId = appContainer.localPrincipalId,
+                permissionGrantService = appContainer.permissionGrantService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

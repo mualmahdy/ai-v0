@@ -41,7 +41,18 @@ class ProtocolAdapterFactory(
     private val geminiBootstrap: GeminiBootstrap? = null,
     /** EGRESS ENFORCEMENT: the shared, composition-root-owned guard. */
     private val egressControl: com.example.infrastructure.network.EgressControl =
-        com.example.infrastructure.network.EgressControl.default
+        com.example.infrastructure.network.EgressControl.default,
+    /**
+     * GAP-07 (Design Closure 2026, ADR-4) — IN-PROCESS EMBEDDING SEAM:
+     * when the composition root supplies a LOCAL embedding ROUTER
+     * (ONNX-when-provisioned with an honest lexical fallback), every
+     * IN_PROCESS embedding resource (e.g. the bootstrapped "local-128")
+     * binds to that router instead of a bare lexical adapter — so
+     * provisioning the local semantic model TRANSPARENTLY upgrades the
+     * resource's embedding to REAL semantic vectors. Null (tests) = the
+     * previous behavior (fresh LocalDeterministicEmbeddingAdapter).
+     */
+    private val inProcessEmbeddingRouter: com.example.domain.ports.memory.EmbeddingProviderPort? = null
 ) {
 
     fun createLlmAdapter(
@@ -110,9 +121,14 @@ class ProtocolAdapterFactory(
     ): EmbeddingProviderPort? {
         return when (protocolId) {
             ServiceProtocolId.IN_PROCESS,
-            ServiceProtocolId.NATIVE_SDK -> LocalDeterministicEmbeddingAdapter(
-                providerId = "${service.providerId}_${service.id}".lowercase()
-            )
+            ServiceProtocolId.NATIVE_SDK ->
+                // GAP-07 (ADR-4): the composition-root router wins when
+                // present — ONNX semantic vectors once provisioned, the
+                // SAME deterministic 128d lexical space before that (the
+                // router's fallback IS a LocalDeterministicEmbeddingAdapter).
+                inProcessEmbeddingRouter ?: LocalDeterministicEmbeddingAdapter(
+                    providerId = "${service.providerId}_${service.id}".lowercase()
+                )
             ServiceProtocolId.OPENAI_COMPATIBLE,
             ServiceProtocolId.OPENAI_NATIVE -> OpenAiCompatibleEmbeddingAdapter(
                 baseUrl = config.endpointUrl,

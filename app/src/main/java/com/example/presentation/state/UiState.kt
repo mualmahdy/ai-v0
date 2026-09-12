@@ -40,25 +40,6 @@ import com.example.domain.core.workflow.ExecutionMode
 import com.example.domain.core.workflow.WorkflowExecutionReport
 import com.example.domain.core.workspace.ResourceGraph
 
-enum class ActiveNavigationTab(val displayName: String, val iconName: String) {
-    STUDIO("الاستوديو", "ic_studio"),
-    /**
-     * GAP-CLOSURE P1-18/P1-19: the Unified Activity Feed (execution trace,
-     * proactive suggestions, audit events) is a FIRST-CLASS destination —
-     * backend capability made user-visible (previously the screen existed
-     * but was unreachable from the navigation).
-     */
-    UNIFIED_ACTIVITY("النشاط الموحد", "ic_activity"),
-    TASKS_WORKFLOWS("المهام وخطط العمل", "ic_workflow"),
-    DECISION_INTELLIGENCE("ذكاء القرار (CBR-MDP)", "ic_decision"),
-    RADAR_EVOLUTION("رادار التطور", "ic_radar"),
-    GOVERNANCE("مرصد الحوكمة والاستدامة", "ic_governance"),
-    EXTENSIONS("الملحقات والمهارات", "ic_extensions"),
-    MODELS_CAPABILITIES("المزودون والنماذج", "ic_models"),
-    KNOWLEDGE_RAG("المعرفة (RAG)", "ic_knowledge"),
-    FILES("ملفات مساحة العمل", "ic_files")
-}
-
 /**
  * One conversational turn in the Studio session transcript: the user prompt,
  * the agent that ran it, the final streamed answer, the event count and the
@@ -116,7 +97,6 @@ data class ExecutionStepItem(
     val id: String,
     val title: String,
     val detail: String,
-    val isRunning: Boolean = false,
     val isSuccess: Boolean = false,
     val isError: Boolean = false,
     val isDegraded: Boolean = false
@@ -139,7 +119,6 @@ data class ExecutionStepItem(
  * (Phase 4 follow-up commit will add the screen).
  */
 data class UiState(
-    val activeTab: ActiveNavigationTab = ActiveNavigationTab.STUDIO,
     val activeProject: ProjectMetadata? = null,
     val activeAgent: AgentDefinition? = null,
     val availableAgents: List<AgentDefinition> = emptyList(),
@@ -182,7 +161,6 @@ data class UiState(
      * REPAIR ORDER §5 — projects of the active workspace (authoritative
      * list from ProjectRuntimeService; UI project pickers render THIS).
      */
-    val availableProjects: List<com.example.domain.core.project.Project> = emptyList(),
     val resourceGraph: ResourceGraph = ResourceGraph(),
 
     // Tasks & Workflows
@@ -234,7 +212,11 @@ data class UiState(
     val isDiscoveringModels: Boolean = false,
     val isTestingProvider: Boolean = false,
     val testingProviderId: String? = null,
-    val isAddProviderDialogOpen: Boolean = false,
+
+    // GAP-02 (Design Closure 2026, ADR-2): the HUMAN APPROVAL SURFACE —
+    // pending consent requests rendered by the governance observatory
+    // (previously the consent loop was a dead end with no reachable UI).
+    val pendingApprovals: List<com.example.domain.ports.governed.HumanApprovalRequest> = emptyList(),
 
     // "Connect Provider" wizard — the guided full-chain path that ends with a
     // usable ENABLED resource (fix: user could add a provider but never use it).

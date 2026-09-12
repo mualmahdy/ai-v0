@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit
  *
  * The remaining legacy adapters that build their own builder INLINE
  * (Gemini, OpenAI-compatible x2, MultiSourceSearch, IntegrationGateway,
- * McpClient, Tavily) already install `egressControl.interceptor()`
+ * McpClient) already install `egressControl.interceptor()`
  * themselves — they are frozen as-is (documented allowlist) and
  * `GovernedEgressPerimeterTest` fails if any NEW direct
  * `OkHttpClient.Builder()` appears outside the factory/allowlist.

@@ -55,7 +55,6 @@ import com.example.domain.core.workspace.ResourceEdgeType
 import com.example.domain.core.workspace.ResourceGraph
 import com.example.domain.core.workspace.ResourceNode
 import com.example.domain.core.workspace.ResourceType
-import com.example.presentation.state.ActiveNavigationTab
 import com.example.presentation.state.StudioTurn
 import com.example.presentation.state.UiState
 import com.example.presentation.ui.screens.ProviderPreset
@@ -130,23 +129,18 @@ class MainViewModel(
      * WORKFLOW EXECUTION PERSISTENCE — resumable workflows surface.
      */
     private val workflowPersistenceService: com.example.application.workflow.WorkflowPersistenceService? = null,
-    /**
-     * REPAIR ORDER §5/§27 — multi-project management runtime. Nullable keeps
-     * existing constructor call sites compatible.
-     */
-    private val projectRuntimeService: com.example.application.project.ProjectRuntimeService? = null,
     /** REPAIR ORDER §3A — observable bootstrap state machine. */
     private val bootstrapStateProvider: kotlinx.coroutines.flow.StateFlow<com.example.application.bootstrap.BootstrapState>? = null,
-    /** REPAIR ORDER §9-§14 — unified transfer subsystem. */
-    private val fileTransferService: com.example.application.transfer.FileTransferService? = null,
-    private val projectPackageService: com.example.application.transfer.ProjectPackageService? = null,
-    private val sessionExportService: com.example.application.transfer.SessionExportService? = null,
-    /** REPAIR ORDER §24/§25 — readiness + dependencies. */
-    private val projectReadinessService: com.example.application.project.ProjectReadinessService? = null,
-    /** REPAIR ORDER §28 — repair / reconciliation center. */
-    private val repairCenterService: com.example.application.repair.RepairCenterService? = null,
     /** REPAIR ORDER §3B/§2.2 — human approval surface (consent loop). */
-    private val humanApprovalGate: com.example.application.governed.HumanApprovalGate? = null
+    private val humanApprovalGate: com.example.application.governed.HumanApprovalGate? = null,
+    /**
+     * GAP-02 (Design Closure 2026, ADR-2): the EXPLICIT local principal
+     * identity — resolves approvals/grants with a durable device-local user
+     * id instead of the anonymous "user" constant.
+     */
+    private val localPrincipalId: String = "local-device-user",
+    /** GAP-02 (ADR-2c): "allow always" grants for sensitive tools. */
+    private val permissionGrantService: com.example.application.security.PermissionGrantService? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UiState())
@@ -180,8 +174,6 @@ class MainViewModel(
         }
     }
 
-    private var currentExecutionJob: Job? = null
-
     /** Gap-closure P0-01: the ExecutionHost key of the task launched by the Studio screen. */
     private var currentExecutionTaskId: String? = null
 
@@ -208,14 +200,19 @@ class MainViewModel(
 
     val activeExecutionTrace: StateFlow<List<com.example.domain.core.observability.ExecutionTraceNode>> =
         telemetryPort?.let { port ->
-            combine(flowOf(port), activeExecutionId) { p, id -> p to id }
-                .flatMapLatest { (p, id) ->
-                    if (id.isNullOrBlank()) {
-                        // No live execution → the recent-trace window (real,
-                        // persisted traces across executions).
-                        p.recentTraceNodes(50)
-                    } else {
+            // GAP-04 (Design Closure 2026): the feed reflects ONLY the active
+            // (or executing) workspace. Mid-execution the trace stays bound
+            // to the live execution; otherwise it follows the ACTIVE
+            // workspace — traces from other workspaces are invisible.
+            combine(flowOf(port), activeExecutionId, workspaceRuntimeService.activeWorkspace) { p, id, ws -> Triple(p, id, ws?.id) }
+                .flatMapLatest { (p, id, wsId) ->
+                    if (!id.isNullOrBlank()) {
+                        // A live execution → that execution's trace (the
+                        // execution pins its own workspace at launch).
                         p.traceForExecution(id)
+                    } else {
+                        // No live execution → the workspace-scoped recent window.
+                        p.recentTraceNodes(wsId, 50)
                     }
                 }
                 .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
@@ -223,7 +220,11 @@ class MainViewModel(
 
     val recentAuditEvents: StateFlow<List<com.example.domain.core.observability.AuditEvent>> =
         telemetryPort?.let { port ->
-            port.auditEvents(100)
+            // GAP-04: audit events are workspace-scoped too — the global
+            // read previously leaked other workspaces' audit rows into the
+            // Unified Activity Feed.
+            workspaceRuntimeService.activeWorkspace
+                .flatMapLatest { ws -> port.auditEvents(ws?.id, 100) }
                 .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
         } ?: MutableStateFlow(emptyList<com.example.domain.core.observability.AuditEvent>()).asStateFlow()
 
@@ -290,6 +291,8 @@ class MainViewModel(
      * for the active workspace.
      */
     fun refreshGovernance() {
+        // GAP-02: the approval surface refreshes with the observatory.
+        refreshPendingApprovals()
         viewModelScope.launch {
             // P0-03: bootstrap-aware — skip honestly when no workspace yet.
             val wsId = workspaceRuntimeService.awaitActiveWorkspaceId() ?: run {
@@ -332,7 +335,10 @@ class MainViewModel(
 
     /**
      * GOVERNANCE PHASE — set the workspace monetary budget allocation (USD).
-     * Policy: HARD_LIMIT + warn at 80% (enforced by the decision gate).
+     * Policy: HARD_LIMIT + warn at 80% (enforced at BOTH the decide-time
+     * gate in DecisionService and the pre-execution gate in
+     * ExecutionService.executeLlmStep — GAP-05/ADR-5). Local tools carry no
+     * cash cost and are honestly not cash-denied.
      */
     fun setWorkspaceBudgetAllocationUsd(amountUsd: Double) {
         val economics = economicGovernanceService ?: return
@@ -455,7 +461,9 @@ class MainViewModel(
                         it.copy(
                             semanticModelReady = true,
                             isProvisioningSemanticModel = false,
-                            diagnosticBanner = "النموذج الدلالي المحلي جاهز — استرجاع دلالي حقيقي على الجهاز."
+                            // GAP-07: honest — new ingest + queries are semantic;
+                            // pre-provisioning chunks stay lexical (boundary).
+                            diagnosticBanner = "النموذج الدلالي المحلي جاهز — الاسترجاع والدمج الجديد دلالي على الجهاز؛ المتجهات القديمة تبقى معجمية (حد التوافق)."
                         )
                     }
                     is Outcome.Error -> _uiState.update {
@@ -664,14 +672,6 @@ class MainViewModel(
     }
 
     // --- Navigation ---
-    fun selectNavigationTab(tab: ActiveNavigationTab) {
-        _uiState.update { it.copy(activeTab = tab) }
-    }
-
-    fun selectTab(tab: ActiveNavigationTab) {
-        selectNavigationTab(tab)
-    }
-
     // --- Agent Selection ---
     fun selectAgent(agent: AgentDefinition) {
         _uiState.update { it.copy(activeAgent = agent) }
@@ -712,10 +712,6 @@ class MainViewModel(
     // --- Prompt & Task Execution ---
     fun updatePromptInput(input: String) {
         _uiState.update { it.copy(promptInput = input) }
-    }
-
-    fun clearPromptInput() {
-        _uiState.update { it.copy(promptInput = "") }
     }
 
     /** Clears the in-memory Studio conversation transcript (session only). */
@@ -853,14 +849,6 @@ class MainViewModel(
                     _uiState.update { it.copy(activeSessionId = null, studioSession = emptyList()) }
                 }
             }
-        }
-    }
-
-    /** Renames a durable session. */
-    fun renameSession(sessionId: String, title: String) {
-        val service = conversationSessionService ?: return
-        viewModelScope.launch {
-            runCatching { service.renameSession(com.example.domain.core.session.ConversationSessionId(sessionId), title) }
         }
     }
 
@@ -1050,8 +1038,6 @@ class MainViewModel(
 
     fun cancelExecution() {
         currentExecutionTaskId?.let { com.example.application.execution.ExecutionHost.cancel(it) }
-        currentExecutionJob?.cancel()
-        currentExecutionJob = null
         currentExecutionTaskId = null
         appContext?.let {
             com.example.application.execution.AgentExecutionForegroundService.stop(it)
@@ -1181,7 +1167,6 @@ class MainViewModel(
                     assignedModelId = selectedModelId,
                     networkPolicy = current.networkPolicy,
                     isNetworkAvailable = netAvailable,
-                    includeWebSearch = false,
                     // REPAIR ORDER §3B — the execution mode drives the TASK
                     // CONTRACT (Quick Chat = legitimate generation-only mode).
                     chatMode = current.chatMode.name,
@@ -1375,87 +1360,6 @@ class MainViewModel(
     // --- Provider & Resource Control Plane (Phase 4 — generalized API) ---
 
     /**
-     * Create a new Provider. Pure persistence — no network calls.
-     */
-    fun createProvider(name: String, description: String, websiteUrl: String?, isLocal: Boolean) {
-        viewModelScope.launch {
-            val provider = com.example.domain.core.provider.Provider(
-                id = "prov_${System.currentTimeMillis()}",
-                name = name,
-                description = description,
-                websiteUrl = websiteUrl,
-                isLocal = isLocal,
-                isEnabled = true
-            )
-            when (val outcome = providerControlPlaneService.createProvider(provider)) {
-                is Outcome.Success -> {
-                    _uiState.update { it.copy(isAddProviderDialogOpen = false) }
-                    refreshCapabilities()
-                }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> Unit
-            }
-        }
-    }
-
-    /**
-     * Add a service to an existing provider. ServiceType↔Protocol compatibility
-     * is verified by the control plane. Pure persistence — no network calls.
-     */
-    fun addService(providerId: String, name: String, serviceType: ServiceType, supportedProtocols: List<String>) {
-        viewModelScope.launch {
-            val service = ProviderService(
-                id = "${providerId}_${serviceType.code}_${System.currentTimeMillis()}",
-                providerId = providerId,
-                name = name,
-                serviceType = serviceType,
-                supportedProtocolIds = supportedProtocols,
-                isEnabled = true
-            )
-            when (val outcome = providerControlPlaneService.addService(service)) {
-                is Outcome.Success -> refreshCapabilities()
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> Unit
-            }
-        }
-    }
-
-    /**
-     * Save a ServiceConfiguration. Pure persistence — no network calls.
-     */
-    fun saveServiceConfiguration(
-        serviceId: String,
-        protocolId: com.example.domain.core.provider.ServiceProtocolId,
-        endpointUrl: String,
-        authAlias: String?,
-        secretApiKey: String?,
-        timeoutSeconds: Int = 30
-    ) {
-        viewModelScope.launch {
-            val config = ServiceConfiguration(
-                id = "cfg_${serviceId}_${System.currentTimeMillis()}",
-                serviceId = serviceId,
-                protocolId = protocolId,
-                endpointUrl = endpointUrl,
-                authAlias = authAlias,
-                timeoutSeconds = timeoutSeconds,
-                isEnabled = true
-            )
-            when (val outcome = providerControlPlaneService.saveConfiguration(config)) {
-                is Outcome.Success -> {
-                    // Also store the secret if provided
-                    if (!authAlias.isNullOrBlank() && !secretApiKey.isNullOrBlank()) {
-                        providerControlPlaneService.storeSecret(authAlias, secretApiKey)
-                    }
-                    refreshCapabilities()
-                }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> Unit
-            }
-        }
-    }
-
-    /**
      * Test the connection for a ServiceConfiguration. Explicit network call
      * (POST /chat/completions for LLM, real protocol operation for others).
      */
@@ -1589,14 +1493,6 @@ class MainViewModel(
                 else -> refreshCapabilities()
             }
         }
-    }
-
-    fun openAddProviderDialog() {
-        _uiState.update { it.copy(isAddProviderDialogOpen = true) }
-    }
-
-    fun closeAddProviderDialog() {
-        _uiState.update { it.copy(isAddProviderDialogOpen = false) }
     }
 
     // ------------------------------------------------------------------
@@ -1911,10 +1807,6 @@ class MainViewModel(
                 else -> _uiState.update { it.copy(isSavingCredential = false) }
             }
         }
-    }
-
-    fun clearProviderTestResult() {
-        _uiState.update { it.copy(testingProviderId = null) }
     }
 
     // --- Extensibility Management ---
@@ -2504,129 +2396,23 @@ class MainViewModel(
     }
 
     // ====================================================================
-    // REPAIR ORDER §5/§27 — MULTI-PROJECT MANAGEMENT SURFACE
-    // (UI consumes the authoritative ProjectRuntimeService; the ViewModel
-    //  holds NO project lifecycle authority of its own.)
-    // ====================================================================
-
-    fun refreshProjects() {
-        val runtime = projectRuntimeService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return@launch
-            runCatching {
-                val projects = runtime.listActiveProjects(workspaceId)
-                _uiState.update { it.copy(availableProjects = projects) }
-            }
-        }
-    }
-
-    fun createProject(name: String, description: String? = null, activate: Boolean = true) {
-        val runtime = projectRuntimeService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return@launch
-            runCatching { runtime.createProject(workspaceId, name, description, activate) }
-                .onSuccess { project ->
-                    if (project != null) {
-                        refreshProjects()
-                        if (activate) observeWorkspaceProjectRefresh()
-                        _uiState.update {
-                            it.copy(diagnosticBanner = "تم إنشاء المشروع '${project.name}'.")
-                        }
-                    } else {
-                        _uiState.update { it.copy(errorMessage = runtime.lastError.value ?: "تعذر إنشاء المشروع.") }
-                    }
-                }
-                .onFailure { e ->
-                    _uiState.update { it.copy(errorMessage = "تعذر إنشاء المشروع: ${e.localizedMessage}") }
-                }
-        }
-    }
-
-    fun selectProject(projectId: Long) {
-        val runtime = projectRuntimeService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return@launch
-            val ok = runCatching { runtime.selectProject(workspaceId, projectId) }.getOrDefault(false)
-            if (ok) observeWorkspaceProjectRefresh() else {
-                _uiState.update { it.copy(errorMessage = runtime.lastError.value ?: "تعذر اختيار المشروع.") }
-            }
-        }
-    }
-
-    fun renameProject(projectId: Long, newName: String) {
-        val runtime = projectRuntimeService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return@launch
-            val ok = runCatching { runtime.renameProject(workspaceId, projectId, newName) }.getOrDefault(false)
-            if (ok) refreshProjects() else {
-                _uiState.update { it.copy(errorMessage = runtime.lastError.value ?: "تعذر إعادة تسمية المشروع.") }
-            }
-        }
-    }
-
-    fun archiveProject(projectId: Long) = lifecycleProject(projectId, "archive")
-    fun restoreProject(projectId: Long) = lifecycleProject(projectId, "restore")
-    fun trashProject(projectId: Long) = lifecycleProject(projectId, "trash")
-
-    private fun lifecycleProject(projectId: Long, op: String) {
-        val runtime = projectRuntimeService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return@launch
-            val ok = runCatching {
-                when (op) {
-                    "archive" -> runtime.archiveProject(workspaceId, projectId)
-                    "restore" -> runtime.restoreProject(workspaceId, projectId)
-                    "trash" -> runtime.trashProject(workspaceId, projectId)
-                    else -> false
-                }
-            }.getOrDefault(false)
-            if (ok) {
-                refreshProjects()
-                observeWorkspaceProjectRefresh()
-            } else {
-                _uiState.update { it.copy(errorMessage = runtime.lastError.value ?: "تعذر تنفيذ العملية.") }
-            }
-        }
-    }
-
-    /** §26 snapshot before destructive operations. */
-    fun snapshotProject(projectId: Long, reason: String) {
-        val packages = projectPackageService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return@launch
-            runCatching { packages.createSnapshot(workspaceId, projectId, "manual", reason) }
-        }
-    }
-
-    /** §11 CLONE (source intact). */
-    fun cloneProject(projectId: Long, cloneName: String? = null) {
-        val packages = projectPackageService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return@launch
-            val result = runCatching { packages.cloneProject(workspaceId, projectId, workspaceId, cloneName) }.getOrNull()
-            if (result != null) {
-                val newId: Long? = result.first
-                val outcome: com.example.application.transfer.TransferOutcome = result.second
-                if (newId != null) {
-                    refreshProjects()
-                    _uiState.update {
-                        it.copy(diagnosticBanner = (outcome as? com.example.application.transfer.TransferOutcome.Success)?.message ?: "تم الاستنساخ.")
-                    }
-                } else {
-                    _uiState.update {
-                        it.copy(errorMessage = (outcome as? com.example.application.transfer.TransferOutcome.Failure)?.message ?: "فشل الاستنساخ.")
-                    }
-                }
-            } else {
-                _uiState.update { it.copy(errorMessage = "فشل الاستنساخ.") }
-            }
-        }
-    }
-
-    // ====================================================================
     // REPAIR ORDER §3B/§2.2 — APPROVAL SURFACE (the previously unreachable
     // human-consent loop: pending approvals are now visible + resolvable).
     // ====================================================================
+
+    /**
+     * GAP-02 (Design Closure 2026, ADR-2): REACTIVE approval surface —
+     * pending requests land in [UiState.pendingApprovals] where the
+     * governance screen renders them. Previously these functions had ZERO
+     * screen callers (the consent loop was a dead end).
+     */
+    fun refreshPendingApprovals() {
+        val gate = humanApprovalGate ?: return
+        viewModelScope.launch {
+            val pending = runCatching { gate.pendingApprovals() }.getOrDefault(emptyList())
+            _uiState.update { it.copy(pendingApprovals = pending) }
+        }
+    }
 
     fun listPendingApprovals(
         onResult: (List<com.example.domain.ports.governed.HumanApprovalRequest>) -> Unit
@@ -2637,13 +2423,14 @@ class MainViewModel(
         }
     }
 
-    fun approveSensitiveAction(approvalId: String, resolvedBy: String = "user") {
+    fun approveSensitiveAction(approvalId: String, resolvedBy: String = localPrincipalId) {
         val gate = humanApprovalGate ?: return
         viewModelScope.launch {
             runCatching { gate.approve(approvalId, resolvedBy) }
                 .onSuccess { resolution ->
                     val banner = if (resolution.name == "APPROVED") "تمت الموافقة على الإجراء الحساس." else resolution.name
                     _uiState.update { it.copy(diagnosticBanner = banner) }
+                    refreshPendingApprovals()
                 }
                 .onFailure { e ->
                     _uiState.update { it.copy(errorMessage = "تعذر تسجيل الموافقة: ${e.localizedMessage}") }
@@ -2651,143 +2438,55 @@ class MainViewModel(
         }
     }
 
-    fun rejectSensitiveAction(approvalId: String, resolvedBy: String = "user") {
+    fun rejectSensitiveAction(approvalId: String, resolvedBy: String = localPrincipalId) {
         val gate = humanApprovalGate ?: return
         viewModelScope.launch {
             runCatching { gate.reject(approvalId, resolvedBy) }
-        }
-    }
-
-    // ====================================================================
-    // REPAIR ORDER §9/§10/§14 — TRANSFER SURFACE (streams; the UI layer
-    // supplies SAF URIs via ContentResolver).
-    // ====================================================================
-
-    fun importFileIntoProject(
-        source: java.io.InputStream,
-        relativePath: String,
-        onResult: (com.example.application.transfer.TransferOutcome) -> Unit
-    ) {
-        val transfer = fileTransferService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.requireActiveWorkspaceId()
-            val projectId = workspaceRuntimeService.activeProjectIdOrNull()
-            if (projectId == null) {
-                onResult(com.example.application.transfer.TransferOutcome.Failure("PROJECT_CONTEXT_REQUIRED", "لا يوجد مشروع نشط للاستيراد."))
-                return@launch
-            }
-            onResult(transfer.importFile(workspaceId, projectId, source, relativePath))
-            refreshFiles()
-        }
-    }
-
-    fun importFolderZipIntoProject(
-        source: java.io.InputStream,
-        targetSubDirectory: String? = null,
-        onResult: (com.example.application.transfer.TransferOutcome) -> Unit
-    ) {
-        val transfer = fileTransferService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.requireActiveWorkspaceId()
-            val projectId = workspaceRuntimeService.activeProjectIdOrNull()
-            if (projectId == null) {
-                onResult(com.example.application.transfer.TransferOutcome.Failure("PROJECT_CONTEXT_REQUIRED", "لا يوجد مشروع نشط للاستيراد."))
-                return@launch
-            }
-            onResult(transfer.importFolderZip(workspaceId, projectId, source, targetSubDirectory))
-            refreshFiles()
-        }
-    }
-
-    fun exportProjectPackage(
-        projectId: Long,
-        destination: java.io.OutputStream,
-        onResult: (com.example.application.transfer.TransferOutcome) -> Unit
-    ) {
-        val packages = projectPackageService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.requireActiveWorkspaceId()
-            onResult(packages.exportProject(workspaceId, projectId, destination))
-        }
-    }
-
-    fun importProjectPackage(
-        source: java.io.InputStream,
-        conflictPolicy: com.example.application.transfer.ImportConflictPolicy = com.example.application.transfer.ImportConflictPolicy.ASK,
-        onResult: (Long?, com.example.application.transfer.ProjectPackageService.ImportReport) -> Unit
-    ) {
-        val packages = projectPackageService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.requireActiveWorkspaceId()
-            val result = runCatching {
-                packages.importProject(workspaceId, source, conflictPolicy)
-            }.getOrElse {
-                null to com.example.application.transfer.ProjectPackageService.ImportReport.error(
-                    "IMPORT_EXCEPTION", it.localizedMessage ?: "فشل الاستيراد."
-                )
-            }
-            onResult(result.first, result.second)
-            refreshProjects()
-        }
-    }
-
-    fun exportSessionTranscript(
-        sessionId: String,
-        format: com.example.application.transfer.SessionExportService.Format =
-            com.example.application.transfer.SessionExportService.Format.TXT,
-        onResult: (String?) -> Unit
-    ) {
-        val exporter = sessionExportService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.requireActiveWorkspaceId()
-            onResult(exporter.exportSession(workspaceId, sessionId, format))
-        }
-    }
-
-    // ====================================================================
-    // REPAIR ORDER §24/§25/§28 — READINESS + REPAIR SURFACES
-    // ====================================================================
-
-    fun assessProjectReadiness(
-        projectId: Long,
-        onResult: (com.example.domain.core.project.ProjectReadinessReport?) -> Unit
-    ) {
-        val readiness = projectReadinessService ?: return
-        viewModelScope.launch {
-            val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return@launch
-            onResult(runCatching { readiness.assess(workspaceId, projectId) }.getOrNull())
-        }
-    }
-
-    fun runRepairs(onResult: (List<com.example.application.repair.RepairCenterService.RepairReport>) -> Unit) {
-        val repair = repairCenterService ?: return
-        viewModelScope.launch {
-            onResult(runCatching { repair.detectAndRepairAll() }.getOrDefault(emptyList()))
-        }
-    }
-
-    /** Refreshes the active-project projection from the authoritative runtime. */
-    private fun observeWorkspaceProjectRefresh() {
-        viewModelScope.launch {
-            // Re-collect the current active workspace value once — the
-            // observeWorkspace collector reacts to StateFlow emissions, but a
-            // same-value emission (id unchanged) does not re-trigger it.
-            workspaceRuntimeService.activeWorkspace.value?.let { ws ->
-                val projectId = ws.activeProjectId.takeIf { it > 0 }
-                if (projectId != null) {
-                    _uiState.update {
-                        it.copy(
-                            activeProject = com.example.domain.core.storage.ProjectMetadata(
-                                id = projectId,
-                                name = ws.name,
-                                description = ws.description,
-                                isDefault = ws.id == "default",
-                                createdAtTimestampMs = ws.createdAtTimestampMs
-                            )
-                        )
-                    }
-                    refreshFiles()
+                .onSuccess {
+                    _uiState.update { it.copy(diagnosticBanner = "تم رفض الإجراء الحساس.") }
+                    refreshPendingApprovals()
                 }
+                .onFailure { e ->
+                    _uiState.update { it.copy(errorMessage = "تعذر تسجيل الرفض: ${e.localizedMessage}") }
+                }
+        }
+    }
+
+    /**
+     * GAP-02 (ADR-2c): "السماح دائماً لهذه الأداة" — an EXECUTE
+     * permission-grant for the tool (recorded consent: future admissions of
+     * this tool pass without a new request), plus resolving the CURRENT
+     * pending request so the in-flight execution can also proceed (its
+     * one-shot token remains consumable).
+     */
+    fun grantAlwaysForApproval(approvalId: String) {
+        val gate = humanApprovalGate ?: return
+        val grants = permissionGrantService
+        viewModelScope.launch {
+            if (grants == null) {
+                _uiState.update { it.copy(errorMessage = "خدمة منح الأذونات غير متاحة.") }
+                return@launch
+            }
+            runCatching {
+                val pending = gate.pendingApprovals().firstOrNull { it.approvalId == approvalId }
+                if (pending != null) {
+                    grants.grant(
+                        principalType = com.example.domain.core.security.governance.PrincipalType.USER,
+                        principalId = localPrincipalId,
+                        // GLOBAL grant (workspaceId = null): standing consent for
+                        // the tool across the single-user device profile.
+                        resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
+                        resourceId = pending.toolName,
+                        permission = com.example.domain.core.security.governance.Permission.EXECUTE,
+                        grantedBy = localPrincipalId
+                    )
+                    gate.approve(approvalId, localPrincipalId)
+                }
+            }.onSuccess {
+                _uiState.update { it.copy(diagnosticBanner = "تم السماح دائماً بهذه الأداة (منح EXECUTE دائم).") }
+                refreshPendingApprovals()
+            }.onFailure { e ->
+                _uiState.update { it.copy(errorMessage = "تعذر تسجيل المنح الدائم: ${e.localizedMessage}") }
             }
         }
     }

@@ -41,6 +41,18 @@ class InMemoryHumanApprovalStore : HumanApprovalStorePort {
             .sortedByDescending { it.requestedAtEpochMs }
             .take(limit)
 
+    /** GAP-02 (ADR-2c): token TRANSPORT query. */
+    override suspend fun findApprovedFor(executionId: String, toolName: String, nowEpochMs: Long): HumanApprovalRequest? =
+        requests.values
+            .filter {
+                it.executionId == executionId &&
+                    it.toolName == toolName &&
+                    it.resolution == ApprovalResolution.APPROVED &&
+                    it.approvalId !in consumedTokens &&
+                    it.expiresAtEpochMs > nowEpochMs
+            }
+            .maxByOrNull { it.resolvedAtEpochMs ?: 0L }
+
     override suspend fun resolve(
         approvalId: String,
         resolution: ApprovalResolution,

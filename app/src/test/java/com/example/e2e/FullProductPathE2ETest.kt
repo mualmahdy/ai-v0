@@ -174,7 +174,6 @@ class FullProductPathE2ETest {
         val telemetryPort = RoomTelemetryRepository(
             metricEventDao = database.metricEventDao(),
             auditTrailDao = database.auditTrailDao(),
-            healthProbeDao = database.healthProbeDao(),
             executionTraceDao = database.executionTraceDao(),
             executionLogDao = database.executionLogDao()
         )

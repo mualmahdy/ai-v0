@@ -56,6 +56,14 @@ data class DecisionContext(
      */
     val taskContract: TaskContract? = null,
     /**
+     * GAP-07 (Design Closure 2026, ADR-4): TRUE when the pinned execution
+     * workspace has a non-empty knowledge corpus (chunks). Combined with a
+     * CHAT task contract, this nominates a RETRIEVE_KNOWLEDGE candidate —
+     * the grounding policy "chat answers are grounded when a corpus exists".
+     * False/unknown = no grounding claim (honest).
+     */
+    val hasKnowledgeCorpus: Boolean = false,
+    /**
      * REPAIR ORDER §3B — capability binding of the ASSIGNED agent: an agent
      * that does not declare TOOL_EXECUTION never sees tool-family actions
      * (Quick Chat structurally cannot nominate sensitive tools).

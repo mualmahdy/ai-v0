@@ -69,6 +69,15 @@ interface HumanApprovalStorePort {
     suspend fun findPendingFor(executionId: String, toolName: String): HumanApprovalRequest?
     /** REPAIR ORDER §3B/§2.2 — the approval SURFACE query: all pending requests. */
     suspend fun findPending(limit: Int = 50): List<HumanApprovalRequest>
+    /**
+     * GAP-02 (Design Closure 2026, ADR-2c): the token TRANSPORT query — an
+     * APPROVED, unconsumed, unexpired request for (executionId, toolName).
+     * The retry path consults this so an approved consent can actually be
+     * consumed one-shot on the model's/tool's next admission (previously an
+     * approved request satisfied NOTHING: requestApproval only re-uses
+     * PENDING rows, so a retry minted a NEW request forever).
+     */
+    suspend fun findApprovedFor(executionId: String, toolName: String, nowEpochMs: Long): HumanApprovalRequest?
     suspend fun resolve(approvalId: String, resolution: ApprovalResolution, resolvedBy: String): HumanApprovalRequest?
     suspend fun expireStale(nowEpochMs: Long): Int
     suspend fun markTokenConsumed(approvalId: String): Boolean

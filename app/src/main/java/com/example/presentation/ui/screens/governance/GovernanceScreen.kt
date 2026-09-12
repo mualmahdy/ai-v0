@@ -14,13 +14,17 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.filled.AccountBalance
+import androidx.compose.material.icons.filled.GppMaybe
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Paid
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.TrendingUp
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -212,6 +216,95 @@ fun GovernanceScreen(
                             )
                         } else {
                             Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+        }
+
+        // ===================== HUMAN APPROVALS (GAP-02) =====================
+        // The consent loop surface: pending requests for sensitive tools,
+        // with one-shot approve / reject AND a durable "allow always" grant
+        // (ADR-2c hybrid: token for the single event, EXECUTE grant as
+        // recorded standing consent). Previously NO reachable UI existed —
+        // sensitive tools were fail-closed with no way for the user to
+        // ever approve anything.
+        if (state.pendingApprovals.isNotEmpty()) {
+            item {
+                SectionHeader(
+                    icon = Icons.Default.VerifiedUser,
+                    title = "طلبات الموافقة (${state.pendingApprovals.size})",
+                    subtitle = "أدوات حساسة بانتظار موافقتك الصريحة — الموافقة تُستهلك مرة واحدة"
+                )
+            }
+            items(state.pendingApprovals, key = { it.approvalId }) { approval ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .testTag("approval_request_card"),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.GppMaybe,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.tertiary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = approval.toolName,
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.testTag("approval_tool_name")
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "خطر: ${approval.riskLevel}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        if (!approval.justification.isNullOrBlank()) {
+                            Text(
+                                text = approval.justification,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 3
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                        Text(
+                            text = "تنتهي: " + java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                                .format(java.util.Date(approval.expiresAtEpochMs)),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row {
+                            Button(
+                                onClick = { viewModel.approveSensitiveAction(approval.approvalId) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("btn_approve_request"),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)
+                            ) { Text("موافقة (مرة واحدة)", style = MaterialTheme.typography.labelMedium) }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            OutlinedButton(
+                                onClick = { viewModel.grantAlwaysForApproval(approval.approvalId) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("btn_grant_always"),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)
+                            ) { Text("السماح دائماً", style = MaterialTheme.typography.labelMedium) }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            TextButton(
+                                onClick = { viewModel.rejectSensitiveAction(approval.approvalId) },
+                                modifier = Modifier.testTag("btn_reject_request"),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)
+                            ) { Text("رفض", style = MaterialTheme.typography.labelMedium) }
                         }
                     }
                 }
@@ -534,7 +627,10 @@ private fun moneyText(amountMicro: Long?, currency: String): String =
     amountMicro?.let { "%.4f %s".format(it / 1_000_000.0, currency) } ?: "غير معروفة ($currency)"
 
 private fun policyText(action: String): String = when (action) {
-    "HARD_LIMIT" -> "حد صارم (رفض عند التجاوز)"
+    // GAP-05 (ADR-5b): honest text — the strict limit denies LLM generation
+    // steps at BOTH the decision gate and the pre-execution gate (executeLlmStep);
+    // LOCAL tools (ملفات/تشخيص) carry no cash cost and are not cash-denied.
+    "HARD_LIMIT" -> "حد صارم — يرفض خطوات النموذج عند التجاوز (بوابتا القرار والتنفيذ)؛ الأدوات المحلية بلا تكلفة نقدية"
     "SOFT_LIMIT" -> "حد مرن (تحذير عند التجاوز)"
     "AUTO_DOWNGRADE" -> "تخفيض تلقائي لنموذج أرخص"
     "AUTO_LOCAL_FALLBACK" -> "تحويل تلقائي لمورد محلي"

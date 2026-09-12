@@ -247,7 +247,6 @@ class GovernedEgressPerimeterTest {
         // install egressControl.interceptor() themselves (verified below).
         "com/example/infrastructure/integration/IntegrationAdapters.kt",
         "com/example/infrastructure/search/MultiSourceSearchAdapter.kt",
-        "com/example/infrastructure/search/TavilySearchAdapter.kt",
         "com/example/infrastructure/llm/gemini/GeminiLlmAdapter.kt",
         "com/example/infrastructure/llm/openai/OpenAiCompatibleEmbeddingAdapter.kt",
         "com/example/infrastructure/llm/openai/OpenAiCompatibleLlmAdapter.kt",

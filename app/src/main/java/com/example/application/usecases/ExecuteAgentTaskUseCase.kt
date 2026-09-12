@@ -38,7 +38,6 @@ class ExecuteAgentTaskUseCase(
         assignedModelId: String? = null,
         networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
         isNetworkAvailable: Boolean = true,
-        includeWebSearch: Boolean = false,
         /** ChatMode.name — QUICK_CHAT binds the generation-only contract. */
         chatMode: String? = null,
         /** Task constraints sourced from the authoritative workspace policy. */
@@ -74,7 +73,6 @@ class ExecuteAgentTaskUseCase(
             preferredProviderId = preferredProviderId,
             networkPolicy = networkPolicy,
             isNetworkAvailable = isNetworkAvailable,
-            includeWebSearch = includeWebSearch
         )
     }
 }

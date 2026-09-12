@@ -118,6 +118,18 @@ class AgentOrchestrator(
      * by the AppContainer (avoids a constructor dependency cycle).
      */
     var workspaceIdProvider: (() -> String?)? = null,
+
+    /**
+     * GAP-07 (Design Closure 2026, ADR-4): knowledge-corpus probe for CHAT
+     * grounding candidacy. Wired by AppContainer to
+     * `DocumentChunkDao.countForWorkspace > 0` for the PINNED execution
+     * workspace. When the contract is CHAT and a non-empty corpus exists,
+     * DecisionService nominates a RETRIEVE_KNOWLEDGE candidate even for
+     * keyword-free prompts (the pre-GAP-07 behavior: chat never retrieved).
+     * Null/failed probe = no grounding candidacy (degraded honestly —
+     * the chat path still works, it just stays ungrounded).
+     */
+    var knowledgeCorpusProbe: (suspend (workspaceId: String) -> Boolean)? = null,
     /**
      * P0 CONVERGENCE (audit step 12 §6): resolves the ACTIVE workspace's OWN
      * sandbox project id ONCE at execution launch and pins it into the
@@ -465,7 +477,6 @@ class AgentOrchestrator(
         preferredProviderId: String? = null,
         networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
         isNetworkAvailable: Boolean = true,
-        includeWebSearch: Boolean = false,
         restoredCheckpoint: TaskCheckpoint? = null,
         restoredContext: CanonicalExecutionContext? = null,
         pinnedWorkspaceId: String? = null
@@ -483,7 +494,6 @@ class AgentOrchestrator(
                 preferredProviderId = preferredProviderId,
                 networkPolicy = networkPolicy,
                 isNetworkAvailable = isNetworkAvailable,
-                includeWebSearch = includeWebSearch,
                 restoredCheckpoint = restoredCheckpoint,
                 restoredContext = restoredContext,
                 pinnedWorkspaceId = pinnedWorkspaceId
@@ -536,7 +546,6 @@ class AgentOrchestrator(
         preferredProviderId: String?,
         networkPolicy: NetworkPolicy,
         isNetworkAvailable: Boolean,
-        includeWebSearch: Boolean,
         restoredCheckpoint: TaskCheckpoint?,
         restoredContext: CanonicalExecutionContext?,
         pinnedWorkspaceId: String?
@@ -633,6 +642,16 @@ class AgentOrchestrator(
             rawPrompt = task.input.rawPrompt,
             isWorkflowStep = task.input.parameters["workflowStepId"] != null
         )
+        // GAP-07 (ADR-4): probe the knowledge corpus ONCE for the PINNED
+        // workspace — CHAT-contract executions with a non-empty corpus gain
+        // a RETRIEVE_KNOWLEDGE candidate (keyword-free prompts included).
+        val hasKnowledgeCorpus = resolvedWorkspaceId
+            ?.let { wsId ->
+                knowledgeCorpusProbe?.let { probe ->
+                    runCatching { probe(wsId) }.getOrDefault(false)
+                }
+            }
+            ?: false
         val workspacePolicy: AutonomyPolicy? = resolvedWorkspaceId
             ?.let { wsId -> pinnedWorkspacePolicyProvider?.invoke(wsId) }
             ?.let { name -> runCatching { AutonomyPolicy.valueOf(name) }.getOrNull() }
@@ -671,7 +690,8 @@ class AgentOrchestrator(
                 isNetworkAvailable = isNetworkAvailable,
                 restoredCheckpoint = restoredCheckpoint,
                 taskContract = taskContract,
-                effectiveAutonomyPolicy = effectiveAutonomyPolicy
+                effectiveAutonomyPolicy = effectiveAutonomyPolicy,
+                hasKnowledgeCorpus = hasKnowledgeCorpus
             )
         }
     }
@@ -704,7 +724,13 @@ class AgentOrchestrator(
         /** REPAIR ORDER §3B — intent-constrained action space (pinned at launch). */
         taskContract: com.example.domain.core.task.TaskContract? = null,
         /** REPAIR ORDER §20 — effective autonomy policy pinned at launch. */
-        effectiveAutonomyPolicy: AutonomyPolicy? = null
+        effectiveAutonomyPolicy: AutonomyPolicy? = null,
+        /**
+         * GAP-07 (ADR-4): corpus probe result, resolved ONCE in the outer
+         * loop for the PINNED workspace and passed down — CHAT contracts
+         * ground on a non-empty corpus.
+         */
+        hasKnowledgeCorpus: Boolean = false
     ) {
         val executionId = context.executionId
         val workspaceId = context.workspaceId.takeIf { it.isNotBlank() && it != UNATTRIBUTED_WORKSPACE }
@@ -815,7 +841,8 @@ class AgentOrchestrator(
                 decisionHistory = decisionHistory,
                 taskContract = taskContract ?: effectiveContract,
                 agentAllowedCapabilities = agent.allowedCapabilities,
-                effectiveAutonomyPolicy = effectiveAutonomyPolicy ?: currentTask.constraints.autonomyPolicy
+                effectiveAutonomyPolicy = effectiveAutonomyPolicy ?: currentTask.constraints.autonomyPolicy,
+                hasKnowledgeCorpus = hasKnowledgeCorpus
             )
 
             // 2. CBR-MDP Evaluation

@@ -211,7 +211,6 @@ class FailClosedSecurityTest {
         override suspend fun record(sample: com.example.domain.core.observability.MetricSample) {}
         override suspend fun recordBatch(samples: List<com.example.domain.core.observability.MetricSample>) {}
         override suspend fun recordAudit(event: com.example.domain.core.observability.AuditEvent): Long = 0L
-        override suspend fun recordHealthProbe(probe: com.example.domain.core.observability.HealthProbe) {}
         override suspend fun recordTraceNode(node: com.example.domain.core.observability.ExecutionTraceNode) {}
         override fun snapshots(): kotlinx.coroutines.flow.Flow<List<com.example.domain.core.observability.MetricSnapshot>> =
             kotlinx.coroutines.flow.flowOf(emptyList())

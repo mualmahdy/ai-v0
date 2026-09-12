@@ -4,7 +4,6 @@ import com.example.domain.core.observability.AuditEvent
 import com.example.domain.core.observability.AuditSeverity
 import com.example.domain.core.observability.DimensionSummary
 import com.example.domain.core.observability.ExecutionTraceNode
-import com.example.domain.core.observability.HealthProbe
 import com.example.domain.core.observability.MetricDimensions
 import com.example.domain.core.observability.MetricSample
 import com.example.domain.core.observability.MetricSnapshot
@@ -13,13 +12,11 @@ import com.example.domain.ports.observability.TelemetryPort
 import com.example.infrastructure.persistence.dao.AuditTrailDao
 import com.example.infrastructure.persistence.dao.ExecutionLogDao
 import com.example.infrastructure.persistence.dao.ExecutionTraceDao
-import com.example.infrastructure.persistence.dao.HealthProbeDao
 import com.example.infrastructure.persistence.dao.MetricEventDao
 import com.example.infrastructure.persistence.dao.MetricBucketRow
 import com.example.infrastructure.persistence.entities.AuditTrailEntity
 import com.example.infrastructure.persistence.entities.ExecutionLogEntity
 import com.example.infrastructure.persistence.entities.ExecutionTraceNodeEntity
-import com.example.infrastructure.persistence.entities.HealthProbeEntity
 import com.example.infrastructure.persistence.entities.MetricEventEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -64,7 +61,6 @@ import java.util.concurrent.ConcurrentHashMap
 class RoomTelemetryRepository(
     private val metricEventDao: MetricEventDao,
     private val auditTrailDao: AuditTrailDao,
-    private val healthProbeDao: HealthProbeDao,
     private val executionTraceDao: ExecutionTraceDao,
     private val executionLogDao: ExecutionLogDao,
     private val writeScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -249,23 +245,6 @@ class RoomTelemetryRepository(
         }
     }
 
-    override suspend fun recordHealthProbe(probe: HealthProbe) = withContext(Dispatchers.IO) {
-        val entity = HealthProbeEntity(
-            id = 0L,
-            resourceId = probe.resourceId,
-            resourceType = probe.resourceType,
-            isHealthy = probe.isHealthy,
-            latencyMs = probe.latencyMs,
-            errorMessage = probe.errorMessage,
-            probedAtEpochMs = probe.probedAtEpochMs
-        )
-        try {
-            healthProbeDao.insert(entity)
-        } catch (_: Throwable) {
-            // best-effort
-        }
-        Unit
-    }
 
     override suspend fun recordTraceNode(node: ExecutionTraceNode) = withContext(Dispatchers.IO) {
         // ALSO write a row into the legacy execution_logs table so existing
@@ -388,6 +367,16 @@ class RoomTelemetryRepository(
             rows.map { it.toDomain() }
         }
 
+    /** GAP-04: SQL-level workspace scoping — no cross-workspace leak. */
+    override fun auditEvents(workspaceId: String?, limit: Int): Flow<List<AuditEvent>> =
+        if (workspaceId == null) {
+            kotlinx.coroutines.flow.flowOf(emptyList())
+        } else {
+            auditTrailDao.forWorkspace(workspaceId, limit).map { rows ->
+                rows.map { it.toDomain() }
+            }
+        }
+
     override fun traceForExecution(executionId: String): Flow<List<ExecutionTraceNode>> =
         executionTraceDao.forExecution(executionId).map { rows ->
             rows.map { it.toDomain() }
@@ -396,6 +385,16 @@ class RoomTelemetryRepository(
     override fun recentTraceNodes(limit: Int): Flow<List<ExecutionTraceNode>> =
         executionTraceDao.recent(limit).map { rows ->
             rows.map { it.toDomain() }
+        }
+
+    /** GAP-04: SQL-level workspace scoping — no cross-workspace leak. */
+    override fun recentTraceNodes(workspaceId: String?, limit: Int): Flow<List<ExecutionTraceNode>> =
+        if (workspaceId == null) {
+            kotlinx.coroutines.flow.flowOf(emptyList())
+        } else {
+            executionTraceDao.forWorkspace(workspaceId, limit).map { rows ->
+                rows.map { it.toDomain() }
+            }
         }
 
     override suspend fun snapshotByType(type: MetricType): List<MetricSnapshot> =
@@ -456,6 +455,9 @@ class RoomTelemetryRepository(
         durationMs = durationMs,
         outcome = outcome,
         summary = summary,
-        observationSummary = observationSummary
+        observationSummary = observationSummary,
+        // GAP-04: workspaceId is carried through (previously dropped here —
+        // the domain field's null default silently swallowed attribution).
+        workspaceId = workspaceId
     )
 }

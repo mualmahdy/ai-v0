@@ -29,7 +29,8 @@ import java.util.concurrent.ConcurrentHashMap
  *    remains only as a deprecated cancel-ALL shim for old call sites.
  *  - [activeExecutions] is the live per-execution registry (StateFlow) the
  *    foreground service and the UI subscribe to.
- *  - `isRunning` is kept as a deprecated derived alias ("is ANY execution
+ *  - (the deprecated `isRunning`/`currentJob`/`publish`/`cancelCurrent`
+ *    shims were deleted by GAP-08 — zero callers existed)
  *    running") so existing collectors keep compiling.
  *
  * State survives configuration changes and navigation; it does NOT survive
@@ -83,18 +84,6 @@ object ExecutionHost {
     /** TRUE while at least one execution is live. */
     val isAnyRunning: StateFlow<Boolean> = _isAnyRunning.asStateFlow()
 
-    @Deprecated(
-        message = "Global single-job semantics removed (P0-01). Use isAnyRunning.",
-        replaceWith = ReplaceWith("isAnyRunning")
-    )
-    val isRunning: StateFlow<Boolean> get() = isAnyRunning
-
-    @Deprecated(
-        message = "Single currentJob removed (P0-01). Use activeExecutions / handleFor(key).",
-        replaceWith = ReplaceWith("handleFor(key)")
-    )
-    val currentJob: Job? get() = null
-
     init {
         // Keep the derived any-running flag in sync with the registry.
         scope.launch {
@@ -102,12 +91,6 @@ object ExecutionHost {
                 _isAnyRunning.value = live.isNotEmpty()
             }
         }
-    }
-
-    fun publish(event: ExecutionEvent) {
-        // Removed with the dead `_events` flow (P1-10): kept as a no-op for
-        // source compatibility — the real event bus is the orchestrator's
-        // backpressured publisher.
     }
 
     /**
@@ -144,18 +127,6 @@ object ExecutionHost {
     fun cancel(key: String) = synchronized(launchMonitor) {
         handles.remove(key)?.job?.cancel()
         publishState()
-    }
-
-    /**
-     * Legacy cancel-ALL (deprecated): the old UI "stop" button had global
-     * semantics. Prefer [cancel] with the specific execution key.
-     */
-    @Deprecated(
-        message = "Cancels ALL executions. Use cancel(key) for one execution (P0-01).",
-        replaceWith = ReplaceWith("cancel(key)")
-    )
-    fun cancelCurrent() {
-        for (k in handles.keys.toList()) cancel(k)
     }
 
     /** TRUE when [key] is currently executing. */

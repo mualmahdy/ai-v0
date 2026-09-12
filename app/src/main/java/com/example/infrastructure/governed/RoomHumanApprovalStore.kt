@@ -49,6 +49,10 @@ class RoomHumanApprovalStore(
     override suspend fun findPending(limit: Int): List<HumanApprovalRequest> =
         withContext(Dispatchers.IO) { dao.findPending(limit).map { it.toDomain() } }
 
+    /** GAP-02 (ADR-2c): token TRANSPORT query. */
+    override suspend fun findApprovedFor(executionId: String, toolName: String, nowEpochMs: Long): HumanApprovalRequest? =
+        withContext(Dispatchers.IO) { dao.findApprovedFor(executionId, toolName, nowEpochMs)?.toDomain() }
+
     override suspend fun resolve(
         approvalId: String,
         resolution: ApprovalResolution,

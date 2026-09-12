@@ -625,9 +625,16 @@ private fun SemanticEngineTab(
                     }
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
+                        // GAP-07 (ADR-4): honest claim — after the router seam,
+                        // provisioning upgrades BOTH the knowledge (document)
+                        // embedding path AND memory retrieval to real semantic
+                        // vectors. Documents ingested BEFORE provisioning keep
+                        // their lexical vectors (compatibility boundary) and
+                        // score lexically; re-ingest to upgrade them.
                         text = "تجهيز النموذج الدلالي المحلي (~23MB لمرة واحدة) يرقّي استرجاع المعرفة " +
-                            "والذاكرة من مطابقة معجمية إلى فهم دلالي حقيقي على الجهاز — دون إرسال " +
-                            "أي بيانات إلى السحابة. التعذّر (بلا اتصال) يُعرض بصدق ولا يُفتَرَض نجاحه.",
+                            "والذاكرة إلى فهم دلالي حقيقي على الجهاز — دون إرسال أي بيانات إلى السحابة. " +
+                            "المستندات المُدمَجة قبل التجهيز تحتفظ بمتجهاتها المعجمية (حد التوافق) وتُرتّب " +
+                            "معجمياً؛ أعد دمجها للترقية. التعذّر (بلا اتصال) يُعرض بصدق ولا يُفتَرَض نجاحه.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

@@ -165,6 +165,35 @@ class ExecutionService(
     var admissionControl: com.example.application.governed.AdmissionControlService? = null,
 
     /**
+     * GAP-05 (Design Closure 2026, ADR-5): pre-execution ECONOMIC gate on
+     * every LLM step. Wired by AppContainer to the real
+     * [com.example.application.budget.EconomicGovernanceService]. The gate
+     * authorizes the step with the REAL resource identity
+     * (provider/service/model/resourceId of the RESOLVED adapter) BEFORE the
+     * provider call, so a HARD_LIMIT allocation can actually DENY and a
+     * rate-limited scope (blocked-until / RPM / TPM) refuses before tokens
+     * are burned — previously the only enforcement was the decide-time
+     * gate in DecisionService, and a rate-limit DENY there was invisible to
+     * the execution layer.
+     *
+     * Enforcement failure (an exception inside authorize) FAILS CLOSED with
+     * an honest error code — the opposite of the circuit breaker's
+     * documented fail-open (GAP-17, out of scope here).
+     */
+    var economicGovernance: com.example.application.budget.EconomicGovernanceService? = null,
+
+    /**
+     * GAP-02 (Design Closure 2026, ADR-2c): APPROVAL TOKEN TRANSPORT. When
+     * an admission needs human consent and the user has ALREADY approved the
+     * request for this (executionId, toolName) via the governance surface,
+     * this provider hands the token id to the admission request — the
+     * pipeline's stage 9 consumes it ONE-SHOT. This is the missing link that
+     * closed the consent loop (previously the approved token was never
+     * consumable from production: nothing ever set approvalTokenId).
+     */
+    var approvalTokenProvider: (suspend (executionId: String, toolName: String) -> String?)? = null,
+
+    /**
      * P1-2 (audit 2026 §10 — tool lifecycle can be bypassed from other
      * execution paths): late-bound lifecycle verdict provider. When present,
      * a tool whose lifecycle rows are REVOKED (or disabled) is REFUSED here
@@ -316,7 +345,13 @@ class ExecutionService(
          * SKILLS keep the grant-gated path (their governance authority is
          * the permission-grant boundary; they are not ToolPort adapters).
          */
-        requireAdmission: Boolean = true
+        requireAdmission: Boolean = true,
+        /**
+         * GAP-05 (ADR-5): the materialized resource id when the tool is
+         * REMOTE (MCP) — carried into the budget authorization so paid
+         * tools get real rate-scope/pricing identity. Null for local tools.
+         */
+        remoteResourceId: String? = null
     ): ToolAuthorization {
         val workspaceId = currentWorkspaceId()
 
@@ -472,7 +507,13 @@ class ExecutionService(
                 projectId = scope?.projectId?.takeIf { it > 0 },
                 pathArguments = extractAdmissionPathArguments(toolName, arguments),
                 estimatedTokens = null, // honest: unknown before execution
-                budgetScopeKey = "admission:tool:$toolName"
+                budgetScopeKey = "admission:tool:$toolName",
+                // GAP-02 (ADR-2c): token TRANSPORT — if the user already
+                // APPROVED the consent request for this (executionId, toolName),
+                // its one-shot token rides the admission request and is
+                // consumed by pipeline stage 9 (exactly once).
+                approvalTokenId = approvalTokenProvider?.invoke(executionId, toolName),
+                remoteResourceId = remoteResourceId
             )
             val admissionResult = try {
                 admission.admit(request)
@@ -793,6 +834,87 @@ class ExecutionService(
                 return ExecutionResult(
                     isSuccess = false,
                     errorDescription = "CIRCUIT_OPEN: قاطع الدائرة مفتوح لمورد النموذج '${breakerResourceId.value}' — رفض سريع (fail-fast) بدلاً من استدعاء فاشل آخر.",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
+        }
+
+        // ============================================================
+        // GAP-05 (Design Closure 2026, ADR-5): PRE-EXECUTION ECONOMIC GATE.
+        // The step is authorized with the REAL resource identity BEFORE the
+        // provider is called. HARD_LIMIT allocations can DENY here; a
+        // rate-limited scope (blocked-until from a real 429, or configured
+        // RPM/TPM) refuses before tokens are burned. Local providers are
+        // still projected against their scope allocations (honest), and
+        // enforcement failure FAILS CLOSED with an explicit code.
+        // ============================================================
+        val gateAttributionProviderId = provider.metadata.id
+        val gateAttributionServiceId = decisionRecord!!.serviceId
+        val gateAttributionModelId = provider.metadata.defaultModel ?: decisionRecord.selectedResourceId.value
+        val gateAttributionResourceId = decisionRecord.selectedResourceId.value
+        val economicGovernance = this.economicGovernance
+        if (economicGovernance != null) {
+            val gateRequest = com.example.domain.core.budget.EconomicAuthorizationRequest(
+                executionId = executionId,
+                workspaceId = currentWorkspaceId(),
+                agentId = agent.identity.id.value,
+                taskId = context.task.id.value,
+                providerId = gateAttributionProviderId,
+                serviceId = gateAttributionServiceId,
+                modelId = gateAttributionModelId,
+                resourceId = gateAttributionResourceId,
+                isLocalResource = provider.metadata.isLocal,
+                // Same magnitude heuristic as the decide-time gate
+                // (DecisionService.applyEconomicGate) — one step is expected
+                // to consume about a quarter of the remaining budget, capped.
+                expectedTotalTokens = (context.remainingTokenBudget / 4).coerceAtMost(4000),
+                actionTypeCode = "LLM_STEP"
+            )
+            val gateVerdict = try {
+                economicGovernance.authorize(gateRequest)
+            } catch (e: Exception) {
+                // FAIL CLOSED (honest surfaces): an enforcement error must
+                // never silently become an ALLOW. The step degrades visibly
+                // and the loop can replan.
+                onEvent(
+                    ExecutionEvent.Error(
+                        executionId = executionId,
+                        failureCode = "ECONOMIC_GATE_UNAVAILABLE",
+                        message = "فشل تقييم بوابة الميزانية قبل استدعاء النموذج (fail-closed): ${e.message}",
+                        isFatal = false
+                    )
+                )
+                return ExecutionResult(
+                    isSuccess = false,
+                    errorDescription = "ECONOMIC_GATE_UNAVAILABLE: فشل تقييم بوابة الميزانية — ${e.message}",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
+            }
+            if (gateVerdict.decision != com.example.domain.core.budget.EconomicGateDecision.ALLOWED &&
+                gateVerdict.decision != com.example.domain.core.budget.EconomicGateDecision.WARNED
+            ) {
+                val failureCode = when (gateVerdict.decision) {
+                    com.example.domain.core.budget.EconomicGateDecision.DENIED ->
+                        if (gateVerdict.reason.startsWith("RATE_LIMITED")) "RATE_LIMITED" else "BUDGET_GATE_DENIED"
+                    else -> "BUDGET_GATE_${gateVerdict.decision.name}"
+                }
+                val preferLocalHint = when (gateVerdict.decision) {
+                    com.example.domain.core.budget.EconomicGateDecision.DOWNGRADE,
+                    com.example.domain.core.budget.EconomicGateDecision.LOCAL_FALLBACK ->
+                        " — أعد التخطيط مفضّلاً مورداً محلياً (preferLocal)."
+                    else -> ""
+                }
+                onEvent(
+                    ExecutionEvent.Error(
+                        executionId = executionId,
+                        failureCode = failureCode,
+                        message = "بوابة الميزانية رفضت خطوة النموذج (${gateVerdict.decision.name}): ${gateVerdict.reason}$preferLocalHint",
+                        isFatal = false // replan, don't abort the task
+                    )
+                )
+                return ExecutionResult(
+                    isSuccess = false,
+                    errorDescription = "$failureCode: ${gateVerdict.reason}$preferLocalHint",
                     latencyMs = System.currentTimeMillis() - startTime
                 )
             }
@@ -1626,7 +1748,10 @@ class ExecutionService(
             arguments = action.payload,
             actionType = "EXECUTE_MCP",
             executionId = executionId,
-            isMcp = true
+            isMcp = true,
+            // GAP-05 (ADR-5): remote (paid) tool — carry the materialized
+            // resource identity into the budget authorization.
+            remoteResourceId = decisionRecord!!.selectedResourceId.value
         )) {
             is ToolAuthorization.Denied -> return ExecutionResult(
                 isSuccess = false,
@@ -1884,15 +2009,15 @@ class ExecutionService(
                 stepIndex = context.task.currentStepIndex
             )
         )
+        // GAP-08 (Design Closure 2026, ADR-7): the decorative output keys
+        // planGoal/planStepsCount/planGeneratedByModel/generatedWorkflowPlan
+        // were removed — they had ZERO consumers (the "executable plan"
+        // output was never read by any surface). The honest outputs are the
+        // plan text above and the Replanned event emitted earlier.
         return ExecutionResult(
             isSuccess = true,
             outputText = planText,
-            outputData = mapOf(
-                "planGoal" to goal,
-                "planStepsCount" to workflowPlan.steps.size,
-                "planGeneratedByModel" to generatedByModel,
-                "generatedWorkflowPlan" to workflowPlan
-            ),
+            outputData = emptyMap(),
             latencyMs = System.currentTimeMillis() - startTime
         )
     }

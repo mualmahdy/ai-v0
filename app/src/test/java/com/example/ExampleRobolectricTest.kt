@@ -28,6 +28,5 @@ class ExampleRobolectricTest {
 
     org.junit.Assert.assertNotNull(viewModel.uiState.value.activeAgent)
     org.junit.Assert.assertTrue(viewModel.uiState.value.availableAgents.isNotEmpty())
-    org.junit.Assert.assertEquals(com.example.presentation.state.ActiveNavigationTab.STUDIO, viewModel.uiState.value.activeTab)
   }
 }
