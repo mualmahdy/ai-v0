@@ -126,6 +126,29 @@ class WorkspaceRuntimeService(
     }
 
     /**
+     * GAP-23 (Design Closure 2026): the EXPLICIT re-bootstrap entry point
+     * for the honest startup-failure gate. The bootstrap state machine is
+     * idempotent (a re-run on an already-good state re-verifies and repairs
+     * drift instead of failing), so retrying after `Failed(...)` is safe.
+     * The resulting [bootstrapState] (READY or a fresh explicit failure) is
+     * surfaced to the UI via the SAME StateFlow the gate collects — a
+     * successful retry dismisses the gate without any UI-side special case.
+     */
+    suspend fun retryBootstrap(): com.example.application.bootstrap.BootstrapState {
+        val result = runCatching {
+            bootstrapOrchestrator?.bootstrap()
+                ?: bootstrapDefaultWorkspaceIfNeeded()
+            refreshAllWorkspaces()
+            refreshActiveWorkspace()
+        }
+        // The orchestrator's catch-all already records BOOTSTRAP_FAILED for
+        // exceptional paths; legacy (no-orchestrator) wiring keeps the old
+        // non-throwing behavior. Re-throw nothing: the STATE is the truth.
+        result.onFailure { /* surfaced via bootstrapState / runtime flows */ }
+        return bootstrapState.value
+    }
+
+    /**
      * Ensures a default workspace exists on first launch. Idempotent — if a
      * workspace is already present and active, this is a no-op.
      *

@@ -16,6 +16,15 @@ import com.example.domain.ports.memory.EmbeddingProviderPort
  * The router exists so the RAG pipeline / memory subsystems always have ONE
  * local embedding resource, while the retrieval mode labeling stays truthful
  * via [isSemantic].
+ *
+ * GAP-25 (Design Closure 2026): the fallback is now HONEST at the source.
+ * Previously, when the provisioned ONNX model FAILED at inference time, the
+ * router silently returned lexical vectors while `isSemantic` stayed TRUE
+ * and metadata kept describing the SEMANTIC adapter — downstream retrieval
+ * labeling (RagPipelineService) then claimed SEMANTIC mode for lexical
+ * vectors. Now a semantic inference failure flips [isSemantic] to false
+ * (lexical) until a semantic call SUCCEEDS again, so the whole outcome
+ * chain (dimension/metadata/retrieval-mode) tells the same truth.
  */
 class LocalSemanticEmbeddingRouter(
     private val semanticAdapter: OnnxSemanticEmbeddingAdapter,
@@ -24,12 +33,21 @@ class LocalSemanticEmbeddingRouter(
 
     override val providerId: String = semanticAdapter.providerId
 
+    /**
+     * GAP-25: TRUE while the last actual generation came from the ONNX
+     * model. Flips to false when a semantic inference fails and the lexical
+     * fallback serves the request; flips back on the next successful
+     * semantic generation.
+     */
+    @Volatile
+    private var degradedToLexical = false
+
     /** Dimension follows the ACTIVE source (both local sources are fixed-dim). */
     override val dimension: Int
-        get() = if (semanticAdapter.isProvisioned) semanticAdapter.dimension else lexicalFallback.dimension
+        get() = if (isSemantic) semanticAdapter.dimension else lexicalFallback.dimension
 
     override val isSemantic: Boolean
-        get() = semanticAdapter.isProvisioned
+        get() = semanticAdapter.isProvisioned && !degradedToLexical
 
     override val metadata: SafeEmbeddingProviderMetadata
         get() = if (isSemantic) semanticAdapter.metadata else lexicalFallback.metadata
@@ -44,10 +62,17 @@ class LocalSemanticEmbeddingRouter(
     override suspend fun generateEmbeddings(texts: List<String>): Outcome<List<EmbeddingVector>, EmbeddingFailure> {
         if (semanticAdapter.isProvisioned) {
             val semanticOutcome = semanticAdapter.generateEmbeddings(texts)
-            if (semanticOutcome !is Outcome.Error) return semanticOutcome
-            // Semantic inference failed → fall back honestly (the failure is
-            // preserved in the outcome chain via the lexical adapter's own
-            // metadata; the caller sees LEXICAL labeling downstream).
+            if (semanticOutcome !is Outcome.Error) {
+                degradedToLexical = false
+                return semanticOutcome
+            }
+            // Semantic inference failed → degrade HONESTLY: the vectors
+            // returned by the lexical fallback below are labeled lexical
+            // (isSemantic = false, lexical metadata/dimension) — the
+            // previous comment claimed the failure was "preserved in the
+            // outcome chain" while every downstream label still read
+            // SEMANTIC.
+            degradedToLexical = true
         }
         return lexicalFallback.generateEmbeddings(texts)
     }

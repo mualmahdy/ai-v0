@@ -19,9 +19,7 @@ import com.example.infrastructure.persistence.entities.DocumentChunkEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
-import kotlin.math.abs
 import kotlin.math.ln
-import kotlin.math.sqrt
 
 /**
  * ============================================================================
@@ -443,21 +441,36 @@ class RagIntelligenceService(
 
     // --- Vector math helpers ---
 
-    private fun cosine(a: FloatArray, b: FloatArray): Float {
-        if (a.size != b.size || a.isEmpty()) return 0f
-        var dot = 0f; var na = 0f; var nb = 0f
-        for (i in a.indices) {
-            dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]
-        }
-        val denom = sqrt(na) * sqrt(nb)
-        return if (denom > 0f) (dot / denom).coerceIn(-1f, 1f) else 0f
-    }
+    /**
+     * GAP-28 (Design Closure 2026): the private cosine was replaced by the
+     * shared kernel ([com.example.domain.core.memory.VectorMath.cosine]) —
+     * this copy was byte-identical to the memory-subsystem ones.
+     */
+    private fun cosine(a: FloatArray, b: FloatArray): Float =
+        com.example.domain.core.memory.VectorMath.cosine(a, b)
+
+    /**
+     * GAP-28/GAP-13 (Design Closure 2026): vector-decode failures here were
+     * the LAST silent swallow (runCatching → null, no log, no counter) —
+     * now counted + logged like KnowledgePersistenceService, so a corrupt
+     * chunk row is visible instead of just "missing".
+     */
+    private val vectorDecodeFailures = java.util.concurrent.atomic.AtomicInteger(0)
+
+    @Volatile
+    var lastVectorDecodeFailure: String? = null
+        private set
 
     private fun DocumentChunkEntity.toDomain(documentTitle: String): DocumentChunk {
         val vec = runCatching {
             val arr = JSONArray(vectorJson)
             val floats = FloatArray(arr.length()) { i -> arr.getDouble(i).toFloat() }
             EmbeddingVector(values = floats, dimension = floats.size)
+        }.onFailure { failure ->
+            vectorDecodeFailures.incrementAndGet()
+            lastVectorDecodeFailure =
+                "VECTOR_DECODE_FAILED: ${failure::class.simpleName}: ${failure.message?.take(120)}"
+            System.err.println("RAG-INTELLIGENCE $lastVectorDecodeFailure chunkId=$id")
         }.getOrNull()
         // P0 CONVERGENCE (audit step 12 §7): the chunk's OWN persisted metadata
         // (embeddingResourceId, embeddingSemantic, tags, ingest-time filter

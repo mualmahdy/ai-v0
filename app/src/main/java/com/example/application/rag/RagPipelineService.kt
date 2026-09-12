@@ -710,7 +710,15 @@ class RagPipelineService(
 
             val sim = if (vectorCompatible) {
                 val chunkVector = chunk.vector ?: generateLexicalVector(chunk.text)
-                computeCosineSimilarity(queryVector.values, chunkVector.values)
+                // GAP-28 (Design Closure 2026): the shared strict kernel —
+                // dimension-mismatched vectors now score 0 instead of the
+                // previous min-length TRUNCATION. Such pairs only reach
+                // here when their score is multiplied by 0.0 anyway
+                // (vectorCompatible gate) or when persisted embedding
+                // metadata is lying — 0 is the honest score in both cases.
+                com.example.domain.core.memory.VectorMath.cosine(
+                    queryVector.values, chunkVector.values
+                )
             } else 0.0f
 
             // P1-5 LEXICAL PRE-FILTER: with precomputed token sets, a chunk
@@ -789,6 +797,15 @@ class RagPipelineService(
         return (provider as? com.example.infrastructure.memory.semantic.EmbeddingQualityMarker)?.isSemantic ?: true
     }
 
+    /**
+     * GAP-28 (Design Closure 2026): the private 32-dim lexical generator is
+     * INTENTIONALLY kept local (not unified into
+     * [com.example.domain.core.memory.VectorMath.lexicalSparseVector]):
+     * persisted document chunks already carry 32-dim vectors from THIS
+     * tokenizer — changing dimension/tokenizer would silently invalidate
+     * every stored corpus row. Unification happens with the BLOB + sqlite-vec
+     * storage migration (deferred — see docs/PRODUCT-DECISIONS.md).
+     */
     private fun generateLexicalVector(text: String): EmbeddingVector {
         val tokens = text.lowercase().split(Regex("[^\\w\\d]+")).filter { it.isNotBlank() }
         val vector = FloatArray(32) { 0.0f }
@@ -801,20 +818,5 @@ class RagPipelineService(
             for (i in vector.indices) vector[i] /= norm
         }
         return EmbeddingVector(vector)
-    }
-
-    private fun computeCosineSimilarity(vecA: FloatArray, vecB: FloatArray): Float {
-        val len = minOf(vecA.size, vecB.size)
-        if (len == 0) return 0.0f
-        var dot = 0.0f
-        var nA = 0.0f
-        var nB = 0.0f
-        for (i in 0 until len) {
-            dot += vecA[i] * vecB[i]
-            nA += vecA[i] * vecA[i]
-            nB += vecB[i] * vecB[i]
-        }
-        val denom = (sqrt(nA.toDouble()) * sqrt(nB.toDouble())).toFloat()
-        return if (denom > 1e-6f) (dot / denom).coerceIn(-1.0f, 1.0f) else 0.0f
     }
 }

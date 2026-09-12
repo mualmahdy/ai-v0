@@ -27,7 +27,6 @@ import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.max
-import kotlin.math.sqrt
 
 /**
  * ============================================================================
@@ -155,14 +154,18 @@ class MemoryLifecycleService(
         for (i in consolidatable.indices) {
             val a = consolidatable[i]
             if (a.id in consumed) continue
-            val vecA = parseVector(a.vectorJson, a.vectorDimension)
+            // GAP-28: honest per-row decode — a corrupt vector row is
+            // SKIPPED (counted), never allowed to abort the whole
+            // consolidation pass (previously parseVector threw and the
+            // bootstrap runCatching swallowed the entire sweep).
+            val vecA = parseVector(a.vectorJson, a.vectorDimension) ?: continue
             val cluster = mutableListOf(a.id)
 
             for (j in (i + 1) until consolidatable.size) {
                 val b = consolidatable[j]
                 if (b.id in consumed) continue
-                val vecB = parseVector(b.vectorJson, b.vectorDimension)
-                val sim = cosine(vecA.values, vecB.values)
+                val vecB = parseVector(b.vectorJson, b.vectorDimension) ?: continue
+                val sim = com.example.domain.core.memory.VectorMath.cosine(vecA.values, vecB.values)
                 if (sim >= similarityThreshold) {
                     cluster.add(b.id)
                     consumed.add(b.id)
@@ -220,7 +223,11 @@ class MemoryLifecycleService(
 
             val similarity = if (queryVec != null && entity != null) {
                 val storedVec = parseVector(entity.vectorJson, entity.vectorDimension)
-                cosine(queryVec.values, storedVec.values)
+                if (storedVec != null) {
+                    com.example.domain.core.memory.VectorMath.cosine(queryVec.values, storedVec.values)
+                } else {
+                    lexicalSimilarity(queryText, entry.content)
+                }
             } else {
                 lexicalSimilarity(queryText, entry.content)
             }
@@ -315,7 +322,7 @@ class MemoryLifecycleService(
                 is com.example.domain.core.Outcome.Success -> r.value.firstOrNull()
                 else -> null
             }
-        } ?: createLexicalSparseVector(content)
+        } ?: com.example.domain.core.memory.VectorMath.lexicalSparseVector(content)
 
         val tagsJson = JSONArray().also { arr -> tags.forEach { arr.put(it) } }.toString()
         val entity = MemoryEntity(
@@ -361,7 +368,7 @@ class MemoryLifecycleService(
                 is com.example.domain.core.Outcome.Success -> r.value.firstOrNull()?.values
                 else -> null
             }
-        } ?: createLexicalSparseVector(query).values
+        } ?: com.example.domain.core.memory.VectorMath.lexicalSparseVector(query).values
 
         val entries = entities.map { e ->
             val cognitive = CognitiveMemoryType.fromStorageCode(e.memoryType)
@@ -388,24 +395,26 @@ class MemoryLifecycleService(
         rank(entries, queryVec, query).take(topK)
     }
 
-    // --- Vector math helpers (duplicated from RoomVectorStoreAdapter to keep this service standalone) ---
+    // --- Vector math helpers (GAP-28: the cosine + lexical builders were
+    // duplicated from RoomVectorStoreAdapter — both now delegate to the ONE
+    // shared kernel, com.example.domain.core.memory.VectorMath) ---
 
-    private fun parseVector(json: String, dimension: Int): EmbeddingVector {
-        val array = JSONArray(json)
-        val floats = FloatArray(array.length()) { i -> array.getDouble(i).toFloat() }
-        return EmbeddingVector(dimension = dimension, values = floats)
-    }
+    /**
+     * GAP-28/GAP-13: honest per-row decode — returns null (counted + logged)
+     * instead of throwing, so one corrupt row skips itself rather than
+     * aborting the caller's whole pass.
+     */
+    private val vectorDecodeFailures = java.util.concurrent.atomic.AtomicInteger(0)
 
-    private fun cosine(a: FloatArray, b: FloatArray): Float {
-        if (a.size != b.size || a.isEmpty()) return 0f
-        var dot = 0f; var na = 0f; var nb = 0f
-        for (i in a.indices) {
-            dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]
-        }
-        val denom = sqrt(na) * sqrt(nb)
-        return if (denom > 0f) (dot / denom).coerceIn(-1f, 1f) else 0f
-    }
+    @Volatile
+    var lastVectorDecodeFailure: String? = null
+        private set
 
+    /**
+     * Jaccard word-set overlap (rank()'s no-vector fallback). Kept local:
+     * a set-based scorer, not a vector kernel — not part of the GAP-28
+     * duplication.
+     */
     private fun lexicalSimilarity(a: String, b: String): Float {
         val aWords = a.lowercase().split("\\s+".toRegex()).filter { it.isNotBlank() }.toSet()
         val bWords = b.lowercase().split("\\s+".toRegex()).filter { it.isNotBlank() }.toSet()
@@ -415,17 +424,23 @@ class MemoryLifecycleService(
         return intersection.toFloat() / union.toFloat()
     }
 
-    private fun createLexicalSparseVector(text: String, dimension: Int = 128): EmbeddingVector {
-        val values = FloatArray(dimension)
-        val words = text.lowercase().split("\\s+".toRegex()).filter { it.isNotBlank() }
-        for (word in words) {
-            val hash = abs(word.hashCode()) % dimension
-            values[hash] += 1.0f
+    private fun parseVector(json: String, dimension: Int): EmbeddingVector? = try {
+        val array = JSONArray(json)
+        val floats = FloatArray(array.length()) { i -> array.getDouble(i).toFloat() }
+        if (floats.size != dimension) {
+            vectorDecodeFailures.incrementAndGet()
+            lastVectorDecodeFailure =
+                "VECTOR_DIMENSION_MISMATCH: expected=$dimension actual=${floats.size}"
+            System.err.println("MEMORY-LIFECYCLE $lastVectorDecodeFailure")
+            null
+        } else {
+            EmbeddingVector(dimension = dimension, values = floats)
         }
-        var sumSquares = 0f
-        for (v in values) sumSquares += v * v
-        val norm = sqrt(sumSquares)
-        if (norm > 0f) for (i in values.indices) values[i] /= norm
-        return EmbeddingVector(dimension = dimension, values = values)
+    } catch (e: Exception) {
+        vectorDecodeFailures.incrementAndGet()
+        lastVectorDecodeFailure =
+            "VECTOR_DECODE_FAILED: ${e::class.simpleName}: ${e.message?.take(120)}"
+        System.err.println("MEMORY-LIFECYCLE $lastVectorDecodeFailure")
+        null
     }
 }

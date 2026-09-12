@@ -2,7 +2,6 @@ package com.example.infrastructure.mcp
 
 import com.example.domain.core.Outcome
 import com.example.domain.core.extension.McpDiscoveredTool
-import com.example.domain.core.extension.McpTransportType
 import com.example.domain.core.provider.ServiceConfiguration
 import com.example.infrastructure.network.EgressControl
 import kotlinx.coroutines.Dispatchers
@@ -56,7 +55,12 @@ interface McpAdapterPort {
 class McpAdapter(
     private val serviceId: String,
     private val config: ServiceConfiguration,
-    private val transportType: McpTransportType = McpTransportType.SSE,
+    /**
+     * GAP-25 (Design Closure 2026): an unused `transportType` constructor
+     * parameter was removed — it was declared (default SSE) but never read
+     * by this class (the SSE endpoint URL in [config] already determines
+     * the transport).
+     */
     /**
      * The composition-root-owned egress authority that stamps the execution
      * scope onto every outbound MCP request (applyEgressScope). It must be

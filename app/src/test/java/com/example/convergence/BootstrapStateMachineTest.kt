@@ -242,3 +242,82 @@ class BootstrapStateMachineTest {
         assertEquals(File(baseDir, "proj_${ready.projectId}").canonicalPath, repaired.rootPath)
     }
 }
+
+// ------------------------------------------------------------------
+// GAP-23 (Design Closure 2026) — the honest startup gate's RETRY entry
+// ------------------------------------------------------------------
+
+/**
+ * The startup gate renders Failed(...) as a full-screen honest surface with
+ * a retry button. Retry must be SAFE (idempotent state machine) and must
+ * RECOVER when the blocking condition is repaired: the gate opens on
+ * Failed and dismisses on Ready through the SAME state flow.
+ */
+@RunWith(RobolectricTestRunner::class)
+class BootstrapRetryTest {
+
+    private lateinit var db: AppDatabase
+    private lateinit var baseDir: File
+    private lateinit var orchestrator: WorkspaceBootstrapOrchestrator
+    private lateinit var runtime: com.example.application.workspace.WorkspaceRuntimeService
+
+    @Before
+    fun setUp() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        baseDir = File(context.filesDir, "test_workspaces_bootstrap_retry").apply { deleteRecursively(); mkdirs() }
+        orchestrator = WorkspaceBootstrapOrchestrator(
+            database = db,
+            projectRootResolver = { id -> File(baseDir, "proj_$id") }
+        )
+        runtime = com.example.application.workspace.WorkspaceRuntimeService(
+            workspaceDao = db.workspaceDao(),
+            projectDao = db.projectDao(),
+            projectRootPathResolver = { id -> File(baseDir, "proj_$id").path },
+            coroutineScope = kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Unconfined
+            ),
+            bootstrapOrchestrator = orchestrator
+        )
+    }
+
+    @After
+    fun tearDown() {
+        db.close()
+        baseDir.deleteRecursively()
+    }
+
+    @Test
+    fun `retryBootstrap reaches READY on a healthy state and is idempotent`() = runBlocking {
+        val first = runtime.retryBootstrap()
+        assertTrue("first retry on a fresh DB must reach READY, was $first", first.isReady)
+
+        val second = runtime.retryBootstrap()
+        assertTrue("re-running on READY re-verifies instead of failing", second.isReady)
+    }
+
+    @Test
+    fun `retryBootstrap surfaces the explicit failure and RECOVERS after repair`() = runBlocking {
+        runtime.retryBootstrap() // READY — creates the default workspace + its project.
+        val ready = orchestrator.state.value.phase as BootstrapPhase.Ready
+
+        // Corrupt the resolvable state: trash the ONLY project (the workspace
+        // still OWNS it — so bootstrap must NOT auto-create a replacement;
+        // it must fail explicitly with PROJECT_NOT_FOUND).
+        val project = db.projectDao().getProjectById(ready.projectId)!!
+        db.projectDao().updateProject(project.copy(lifecycleState = "TRASHED"))
+
+        val failed = runtime.retryBootstrap()
+        assertTrue("expected FAILED, was ${failed.phase}", failed.isFailed)
+        val failure = failed.phase as BootstrapPhase.Failed
+        assertEquals(BootstrapFailure.PROJECT_NOT_FOUND, failure.failure)
+        assertNotNull("the failure message must be present for the gate to render", failure.message)
+
+        // The gate's retry: repair (restore the project) → retry → READY.
+        db.projectDao().updateProject(project.copy(lifecycleState = "ACTIVE"))
+        val recovered = runtime.retryBootstrap()
+        assertTrue("retry after repair must dismiss the gate (READY), was ${recovered.phase}", recovered.isReady)
+    }
+}

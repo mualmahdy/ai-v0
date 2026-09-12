@@ -980,6 +980,14 @@ class ProviderControlPlaneService(
                     name = "Gemini 2.5 Flash",
                     description = "نموذج Gemini السريع متعدد الوسائط",
                     contextWindowTokens = 1_048_576,
+                    // GAP-25 (Design Closure 2026, honest capability
+                    // declarations): REASONING + STREAMING are UNVERIFIED
+                    // bootstrap defaults — no probe has ever demonstrated
+                    // them for this offering; the record stays REGISTERED
+                    // (honest availability) until a real validation runs.
+                    // Kept because decision-engine contracts filter
+                    // offerings by these capabilities; actual VERIFICATION
+                    // is deferred to the ADR-6 redesign track.
                     supportedCapabilities = setOf(
                         CapabilityType.LLM_GENERATION,
                         CapabilityType.REASONING,
@@ -1070,7 +1078,6 @@ class ProviderControlPlaneService(
             McpAdapter(
                 serviceId = service.id,
                 config = config,
-                transportType = com.example.domain.core.extension.McpTransportType.SSE,
                 egressControl = egressControl,
                 client = governedHttpClientFactory.create(
                     connectTimeoutSeconds = 10,

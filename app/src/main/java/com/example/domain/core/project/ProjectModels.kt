@@ -9,10 +9,15 @@ import com.example.domain.core.context.ResourceHealthState
  *
  *   ACTIVE ──archive──▶ ARCHIVED ──restore──▶ ACTIVE
  *      │                    │
- *      └────trash──────────┴───▶ TRASHED ──restore──▶ ACTIVE (pre-trash state)
+ *      └────trash──────────┴───▶ TRASHED ──restore──▶ ACTIVE
  *                                    │
  *                                    ├─delete─▶ DELETED (rows removed, purge scheduled)
  *                                    └─purge──▶ PURGED  (irreversible, data destroyed)
+ *
+ * GAP-25 (Design Closure 2026): restore ALWAYS lands in ACTIVE (the §27
+ * transition table) — the previous diagram claimed a "pre-trash state"
+ * restore, but no pre-trash state is recorded anywhere (an ARCHIVED→TRASHED
+ * project restores to ACTIVE, not ARCHIVED).
  */
 enum class ProjectLifecycleState {
     ACTIVE,

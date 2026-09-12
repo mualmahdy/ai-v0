@@ -84,7 +84,7 @@ class ArtifactService(
             updatedAtEpochMs = now
         )
         artifactDao.upsert(entity)
-        audit(AuditActions.FILE_EXPORTED, "REGISTER", entity.id, workspaceId, projectId, AuditResult.SUCCESS)
+        audit(AuditActions.FILE_REGISTERED, "ARTIFACT", entity.id, workspaceId, projectId, AuditResult.SUCCESS)
         entity.toDescriptor()
     }
 
@@ -153,7 +153,7 @@ class ArtifactService(
         val artifact = artifactDao.byId(artifactId) ?: return@withContext null
         val resourceScope = artifactScope(artifact) ?: return@withContext null
         if (!ScopeRules.canAccess(accessorScope, resourceScope)) {
-            audit(AuditActions.FILE_EXPORTED, "READ", artifactId, artifact.workspaceId, artifact.projectId, AuditResult.DENIED)
+            audit(AuditActions.FILE_READ, "ARTIFACT", artifactId, artifact.workspaceId, artifact.projectId, AuditResult.DENIED)
             return@withContext null
         }
         val projectId = artifact.projectId ?: return@withContext null
@@ -181,7 +181,7 @@ class ArtifactService(
         val artifact = artifactDao.byId(artifactId) ?: return@withContext false
         val resourceScope = artifactScope(artifact) ?: return@withContext false
         if (!ScopeRules.canAccess(accessorScope, resourceScope)) {
-            audit(AuditActions.FILE_EXPORTED, "COPY", artifactId, artifact.workspaceId, artifact.projectId, AuditResult.DENIED)
+            audit(AuditActions.FILE_COPIED, "ARTIFACT", artifactId, artifact.workspaceId, artifact.projectId, AuditResult.DENIED)
             return@withContext false
         }
         val sourceProject = artifact.projectId ?: return@withContext false

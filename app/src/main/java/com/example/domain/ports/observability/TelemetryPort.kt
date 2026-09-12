@@ -3,6 +3,7 @@ package com.example.domain.ports.observability
 import com.example.domain.core.observability.AuditEvent
 import com.example.domain.core.observability.DimensionSummary
 import com.example.domain.core.observability.ExecutionTraceNode
+import com.example.domain.core.observability.MeasurementHealth
 import com.example.domain.core.observability.MetricSample
 import com.example.domain.core.observability.MetricSnapshot
 import com.example.domain.core.observability.MetricType
@@ -77,4 +78,16 @@ interface TelemetryPort {
 
     /** Aggregate snapshot filtered by type. */
     suspend fun snapshotByType(type: MetricType): List<MetricSnapshot>
+
+    /**
+     * GAP-24 (Design Closure 2026, ADR-8): honest measurement-health
+     * snapshot — the failure counters of THIS port's persistence layer
+     * (metric + audit write paths). The governance observatory renders it
+     * as the "صحة القياس" card so a silent persistence outage becomes
+     * visible next to the data it was supposed to record.
+     *
+     * Default = healthy (zero failures) so test fakes keep their behavior;
+     * the production repository overrides this with its REAL counters.
+     */
+    suspend fun measurementHealth(): MeasurementHealth = MeasurementHealth()
 }

@@ -288,7 +288,12 @@ class GovernancePersistenceTest {
             // v14 — correctness & authority repair tables.
             "agent_revisions",
             // v15 — audit 2026 remediation: durable human approvals.
-            "human_approval_requests"
+            "human_approval_requests",
+            // GAP-24 (Design Closure 2026, ADR-8): BOTH audit tables are part
+            // of the governance inventory — the §30 audit_events table was
+            // previously absent here while it (and its unified reader) are
+            // core governance surfaces.
+            "audit_events", "audit_trail"
         ).forEach { tableName ->
             assertTrue("missing table: $tableName", tables.contains(tableName))
         }

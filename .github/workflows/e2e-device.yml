@@ -27,15 +27,8 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Prepare environment files
+      - name: Prepare environment
         run: |
-          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-          elif [ ! -f debug.keystore ]; then
-            keytool -genkeypair -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-              -keystore debug.keystore -storepass android -keypass android \
-              -dname "CN=Android Debug, O=Android, C=US"
-          fi
           # P0-3: the wrapper jar is COMMITTED — never substitute an unpinned download.
           chmod +x ./gradlew || true
           if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
@@ -43,11 +36,21 @@ jobs:
             exit 1
           fi
 
-      # REPORT GAP-CLOSURE ("E2E/device proof NOT SUFFICIENT"): the previous
-      # CI ran compile + unit tests + assembleDebug only. This job runs the
-      # instrumentation suite on a REAL emulator (API 34, x86_64) so the
-      # launch → persistence → kill → reopen → resume path is actually
-      # proven on a device-shaped environment.
+      # GAP-22 (Design Closure 2026 — honest CI claims): this job runs the
+      # INSTRUMENTATION suite (:app:connectedDebugAndroidTest) on a real API-34
+      # x86_64 emulator. What that actually proves today: the DURABLE
+      # substrate on a device-shaped environment — Room DAOs, DB reopen
+      # after close(), workflow/agent row round-trips (DurableWorkspaceE2ETest),
+      # plus the package-name smoke test. It does NOT (yet) prove UI launch,
+      # navigation, workspace creation via UI, model connection, chat, a REAL
+      # process kill (am kill / process death — the suite reopens the DB in
+      # the SAME process), or UI resume. The full launch→navigate→chat→kill→
+      # reopen→resume loop remains open and is tracked by the UI-redesign
+      # track (GAP-21). (The previous comment overstated this as "the launch →
+      # persistence → kill → reopen → resume path is actually proven".)
+      # The vestigial root debug.keystore generation step was also removed —
+      # the debug build type signs with the standard AGP auto-generated
+      # keystore (FIX F-12), so no root keystore file is needed.
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \

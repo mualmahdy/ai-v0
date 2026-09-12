@@ -18,6 +18,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.GppMaybe
+import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Paid
 import androidx.compose.material.icons.filled.Radar
@@ -216,6 +217,62 @@ fun GovernanceScreen(
                             )
                         } else {
                             Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+        }
+
+        // ===================== MEASUREMENT HEALTH (GAP-24 / ADR-8) =====================
+        // "صحة القياس" — the telemetry persistence layer's OWN failure
+        // counters, rendered next to the data it records. A silent audit or
+        // metric write outage is a governance failure and must be visible.
+        val healthSnapshot = state.measurementHealth
+        if (healthSnapshot != null) {
+            item {
+                SectionHeader(
+                    icon = Icons.Default.MonitorHeart,
+                    title = "صحة القياس والتدقيق",
+                    subtitle = "عدادات إخفاقات الكتابة لطبقة القياس نفسها — لا صمت"
+                )
+            }
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (healthSnapshot.isHealthy)
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                        else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        if (healthSnapshot.isHealthy) {
+                            InfoRow(
+                                label = "حالة الكتابة",
+                                value = "سليمة — لا إخفاقات تسجيل قياس أو تدقيق"
+                            )
+                        } else {
+                            if (healthSnapshot.metricPersistenceFailures > 0) {
+                                InfoRow(
+                                    label = "إخفاقات حفظ المقاييس",
+                                    value = "${healthSnapshot.metricPersistenceFailures}"
+                                )
+                                healthSnapshot.lastMetricPersistenceError?.let {
+                                    InfoRow(label = "آخر خطأ مقاييس", value = it)
+                                }
+                            }
+                            if (healthSnapshot.auditPersistenceFailures > 0) {
+                                InfoRow(
+                                    label = "إخفاقات حفظ التدقيق",
+                                    value = "${healthSnapshot.auditPersistenceFailures}"
+                                )
+                                healthSnapshot.lastAuditPersistenceError?.let {
+                                    InfoRow(label = "آخر خطأ تدقيق", value = it)
+                                }
+                            }
                         }
                     }
                 }

@@ -39,8 +39,16 @@ import java.io.File
  *   BOOTSTRAPPING → WORKSPACE_READY → PROJECT_RESOLVED → CONTEXT_READY → READY
  *
  * with EXPLICIT failure states:
- *   NO_WORKSPACE | PROJECT_NOT_FOUND | PROJECT_CORRUPT |
+ *   NO_WORKSPACE | PROJECT_NOT_FOUND |
  *   CONTEXT_REPAIR_REQUIRED | BOOTSTRAP_FAILED
+ *
+ * GAP-25 (Design Closure 2026): the previously-declared PROJECT_CORRUPT
+ * failure state was REMOVED — it was never emitted. A corrupt root path is
+ * (by design, §3A) REPAIRED to the canonical sandbox path and recorded as
+ * a repair note ("repaired_corrupt_root_path") on the Ready/ContextReady
+ * phase — a repairable condition must not fail the whole startup. The
+ * honest audit trail of that repair is the repairNote + bootstrap
+ * degradation events, not a hard failure state.
  *
  * Guarantees:
  *   - workspace + required project creation is ONE Room transaction —
@@ -169,9 +177,12 @@ class WorkspaceBootstrapOrchestrator(
         // ---------------------------------------------------------------
         // Phase 3: PROJECT_RESOLVED → CONTEXT_READY
         // The sandbox root must exist on disk; a missing root is repaired
-        // (materialized). A rootPath pointing OUTSIDE the sanctioned
-        // projects directory is PROJECT_CORRUPT (repaired to the canonical
-        // path — never trusted blindly).
+        // (materialized). GAP-25 (Design Closure 2026): a rootPath pointing
+        // OUTSIDE the sanctioned projects directory is NOT a hard failure —
+        // it is REPAIRED to the canonical path (never trusted blindly),
+        // recorded in the repair note, and surfaced as a bootstrap
+        // degradation. The previously-declared PROJECT_CORRUPT failure
+        // state was never actually emitted (dead constant — removed).
         // ---------------------------------------------------------------
         val canonicalRoot = projectRootResolver(resolvedProject.id)
         val rootPathRecorded = resolvedProject.rootPath
@@ -359,7 +370,15 @@ sealed class BootstrapPhase {
     data class Failed(val failure: BootstrapFailure, val message: String) : BootstrapPhase()
 }
 
-enum class BootstrapFailure { NO_WORKSPACE, PROJECT_NOT_FOUND, PROJECT_CORRUPT, CONTEXT_REPAIR_REQUIRED, BOOTSTRAP_FAILED }
+enum class BootstrapFailure {
+    NO_WORKSPACE,
+    PROJECT_NOT_FOUND,
+    CONTEXT_REPAIR_REQUIRED,
+    BOOTSTRAP_FAILED
+    // GAP-25 (Design Closure 2026): PROJECT_CORRUPT removed — never emitted;
+    // a corrupt root path is repaired (repairNote + degradation event), see
+    // the class KDoc.
+}
 
 /** Observable state value consumed by WorkspaceRuntimeService / UI. */
 data class BootstrapState(

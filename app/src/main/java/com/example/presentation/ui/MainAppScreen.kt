@@ -23,13 +23,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -38,6 +41,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -60,6 +64,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -119,6 +124,25 @@ fun MainAppScreen(
             snackbarHostState.showSnackbar(error)
             viewModel.clearErrorMessage()
         }
+    }
+
+    // ------------------------------------------------------------------
+    // GAP-23 (Design Closure 2026) — the HONEST STARTUP GATE.
+    // bootstrapFailureMessage was previously collected by MainViewModel
+    // but NEVER rendered: a failed bootstrap still showed the fully-
+    // scaffolded app, and every project-dependent action popped an error
+    // snackbar. The app now refuses to pretend it is ready: a FAILED
+    // bootstrap replaces the whole shell with an explicit failure surface
+    // (phase + message + retry). A successful retry dismisses the gate via
+    // the same bootstrapState flow that opened it.
+    // ------------------------------------------------------------------
+    if (state.bootstrapFailureMessage != null) {
+        BootstrapFailureGate(
+            phaseLabel = state.bootstrapPhase,
+            message = state.bootstrapFailureMessage ?: "",
+            onRetry = viewModel::retryBootstrap
+        )
+        return
     }
 
     val activeLlmCount = state.materializedResources.count {
@@ -236,6 +260,70 @@ private fun NavHostController.navigateToTopLevel(route: String) {
         popUpTo(graph.startDestinationId) { saveState = true }
         launchSingleTop = true
         restoreState = true
+    }
+}
+
+/**
+ * GAP-23 (Design Closure 2026) — full-screen honest bootstrap-failure gate.
+ * Rendered INSTEAD of the app shell when the startup state machine ended in
+ * `Failed`: the phase label, the machine-readable failure message (with its
+ * actionable Arabic guidance), and an idempotent retry. No navigation, no
+ * workspace switcher — the app does not offer functionality its substrate
+ * could not guarantee.
+ */
+@Composable
+private fun BootstrapFailureGate(
+    phaseLabel: String,
+    message: String,
+    onRetry: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("bootstrap_failure_gate")
+            .padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            Icons.Default.ErrorOutline,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.error,
+            modifier = Modifier.size(56.dp)
+        )
+        Spacer(modifier = Modifier.height(20.dp))
+        Text(
+            text = "فشل تجهيز التطبيق",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.error
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = "الحالة: $phaseLabel",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(modifier = Modifier.height(28.dp))
+        Button(
+            onClick = onRetry,
+            modifier = Modifier.testTag("btn_retry_bootstrap")
+        ) {
+            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("إعادة محاولة التجهيز")
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        OutlinedButton(onClick = onRetry) {
+            Text("أو أعد تشغيل التطبيق ثم جرّب مجدداً")
+        }
     }
 }
 

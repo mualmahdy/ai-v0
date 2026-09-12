@@ -44,6 +44,20 @@ import java.util.concurrent.ConcurrentHashMap
  * Implements `TelemetryPort` against the Room `metric_events`, `audit_trail`,
  * `health_probes`, and `execution_trace_nodes` tables.
  *
+ * GAP-24 (Design Closure 2026, ADR-8 option ج) — AUDIT-TRUTH ROLES, stated
+ * explicitly (two tables, two documented mandates, ONE unified reader):
+ *   - `audit_trail` (this repository, via TelemetryPort.recordAudit):
+ *     RUNTIME governance/security decisions — admission verdicts, permission
+ *     grants/revokes, budget-gate denials, bootstrap degradation. Feeds the
+ *     live activity feed (severity/decision model).
+ *   - `audit_events` (AuditTrailService, REPAIR ORDER §30): USER/PROJECT
+ *     lifecycle & portability actions with full scope/policy/result
+ *     attribution (who/what/when/source-scope/target-scope/policy/result).
+ *     Previously write-only (zero readers).
+ *   - The `auditEvents(...)` overrides below MERGE both sources (mapped into
+ *     the feed's severity/decision shape, provenance preserved via the
+ *     `source` attribute) — a single audit truth for the observatory.
+ *
  * Also maintains an in-process aggregate cache (`snapshotsFlow`) so that
  * dashboard reads do not require a SQL GROUP BY on every emission — the
  * cache is updated atomically when a sample is recorded.
@@ -63,6 +77,8 @@ class RoomTelemetryRepository(
     private val auditTrailDao: AuditTrailDao,
     private val executionTraceDao: ExecutionTraceDao,
     private val executionLogDao: ExecutionLogDao,
+    /** GAP-24: the §30 audit_events table — merged into the unified reader. */
+    private val auditEventDao: com.example.infrastructure.persistence.dao.AuditEventDao? = null,
     private val writeScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 ) : TelemetryPort {
 
@@ -162,6 +178,18 @@ class RoomTelemetryRepository(
     @Volatile var lastPersistenceError: String? = null
         private set
 
+    /**
+     * GAP-24 (Design Closure 2026, ADR-8): audit_trail write failures were
+     * previously swallowed as a bare `-1L` with NO counter — the exact
+     * "mute counter" pattern the gap register flags. They are now counted
+     * and surfaced through [measurementHealth].
+     */
+    @Volatile var auditPersistenceFailureCount: Int = 0
+        private set
+
+    @Volatile var lastAuditPersistenceError: String? = null
+        private set
+
     private suspend fun persistSamples(samples: List<MetricSample>) {
         if (samples.isEmpty()) return
         val entities = samples.map { it.toEntity() }
@@ -240,7 +268,14 @@ class RoomTelemetryRepository(
         )
         try {
             auditTrailDao.insert(entity)
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            // GAP-24: an audit-write failure must never break the audited
+            // business path — but it is COUNTED and surfaced (the -1L return
+            // already told the caller; the counters tell the observatory).
+            auditPersistenceFailureCount++
+            lastAuditPersistenceError =
+                "AUDIT_PERSIST_FAILED: ${t.message ?: t.javaClass.simpleName}"
+            System.err.println("TELEMETRY $lastAuditPersistenceError action=${event.action}")
             -1L
         }
     }
@@ -362,18 +397,43 @@ class RoomTelemetryRepository(
                 }
         }
 
-    override fun auditEvents(limit: Int): Flow<List<AuditEvent>> =
-        auditTrailDao.recent(limit).map { rows ->
-            rows.map { it.toDomain() }
+    /**
+     * GAP-24 (Design Closure 2026, ADR-8): the UNIFIED audit reader —
+     * `audit_trail` (runtime governance decisions) MERGED with
+     * `audit_events` (§30 lifecycle/portability actions, previously
+     * reader-less). Both flows are Room-invalidation-driven, so the merge
+     * is live for both tables; rows are mapped into the feed's
+     * severity/decision shape and re-sorted by time. When no
+     * `auditEventDao` is wired (test wiring), the reader degrades to the
+     * audit_trail stream alone — never to a fabricated empty feed.
+     */
+    override fun auditEvents(limit: Int): Flow<List<AuditEvent>> {
+        val trailFlow = auditTrailDao.recent(limit).map { rows -> rows.map { it.toDomain() } }
+        val eventsFlow = auditEventDao?.observeRecent(limit)
+            ?.map { rows -> rows.map { it.toObservabilityDomain() } }
+            ?: kotlinx.coroutines.flow.flowOf(emptyList())
+        return combine(trailFlow, eventsFlow) { trail, events ->
+            (trail + events).sortedByDescending { it.occurredAtEpochMs }.take(limit)
         }
+    }
 
-    /** GAP-04: SQL-level workspace scoping — no cross-workspace leak. */
+    /**
+     * GAP-04 + GAP-24: SQL-level workspace scoping on the UNIFIED reader —
+     * no cross-workspace leak, both audit sources scoped identically.
+     * `workspaceId == null` stays the honest EMPTY feed.
+     */
     override fun auditEvents(workspaceId: String?, limit: Int): Flow<List<AuditEvent>> =
         if (workspaceId == null) {
             kotlinx.coroutines.flow.flowOf(emptyList())
         } else {
-            auditTrailDao.forWorkspace(workspaceId, limit).map { rows ->
+            val trailFlow = auditTrailDao.forWorkspace(workspaceId, limit).map { rows ->
                 rows.map { it.toDomain() }
+            }
+            val eventsFlow = auditEventDao?.observeForWorkspace(workspaceId, limit)
+                ?.map { rows -> rows.map { it.toObservabilityDomain() } }
+                ?: kotlinx.coroutines.flow.flowOf(emptyList())
+            combine(trailFlow, eventsFlow) { trail, events ->
+                (trail + events).sortedByDescending { it.occurredAtEpochMs }.take(limit)
             }
         }
 
@@ -399,6 +459,19 @@ class RoomTelemetryRepository(
 
     override suspend fun snapshotByType(type: MetricType): List<MetricSnapshot> =
         snapshotsFlow.value.values.filter { it.type == type }
+
+    /**
+     * GAP-24 (Design Closure 2026, ADR-8): REAL counters — both persistence
+     * write paths (metric_events + audit_trail) report their failures so a
+     * silent telemetry outage is visible in the governance observatory.
+     */
+    override suspend fun measurementHealth(): com.example.domain.core.observability.MeasurementHealth =
+        com.example.domain.core.observability.MeasurementHealth(
+            metricPersistenceFailures = persistenceFailureCount,
+            lastMetricPersistenceError = lastPersistenceError,
+            auditPersistenceFailures = auditPersistenceFailureCount,
+            lastAuditPersistenceError = lastAuditPersistenceError
+        )
 
     // --- Helpers ---
 
@@ -443,6 +516,37 @@ class RoomTelemetryRepository(
         }.getOrDefault(emptyMap()),
         occurredAtEpochMs = occurredAtEpochMs
     )
+
+    /**
+     * GAP-24 (Design Closure 2026, ADR-8): maps a §30 `audit_events` row
+     * (scope/policy/result attribution model) into the feed's
+     * severity/decision shape so the unified reader renders both audit
+     * sources through ONE domain type. Provenance survives in the
+     * `source` attribute; result→severity mapping: SUCCESS→INFO,
+     * DENIED/DEGRADED→WARN, FAILURE→ERROR.
+     */
+    private fun com.example.infrastructure.persistence.entities.AuditEventEntity.toObservabilityDomain(): AuditEvent =
+        AuditEvent(
+            id = "audit_events:$id",
+            severity = when (result) {
+                com.example.domain.core.audit.AuditResult.SUCCESS.name -> AuditSeverity.INFO
+                com.example.domain.core.audit.AuditResult.DENIED.name,
+                com.example.domain.core.audit.AuditResult.DEGRADED.name -> AuditSeverity.WARN
+                else -> AuditSeverity.ERROR
+            },
+            actor = "$actorType:$actorId",
+            action = action,
+            resourceType = resourceType,
+            resourceId = resourceId ?: resourceType,
+            decision = result,
+            reason = reason ?: policy ?: result,
+            workspaceId = workspaceId,
+            attributes = buildMap {
+                put("source", "audit_events")
+                policy?.let { put("policy", it) }
+            },
+            occurredAtEpochMs = occurredAtEpochMs
+        )
 
     private fun ExecutionTraceNodeEntity.toDomain(): ExecutionTraceNode = ExecutionTraceNode(
         executionId = executionId,

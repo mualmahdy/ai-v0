@@ -47,6 +47,12 @@ object AuditActions {
     const val WORKSPACE_POLICY_CHANGED = "WORKSPACE_POLICY_CHANGED"
     const val FILE_IMPORTED = "FILE_IMPORTED"
     const val FILE_EXPORTED = "FILE_EXPORTED"
+    // GAP-24 (Design Closure 2026): honest artifact action labels —
+    // ArtifactService previously labeled REGISTER/READ/COPY events all as
+    // FILE_EXPORTED, destroying the action dimension of the audit truth.
+    const val FILE_REGISTERED = "FILE_REGISTERED"
+    const val FILE_READ = "FILE_READ"
+    const val FILE_COPIED = "FILE_COPIED"
     const val FOLDER_IMPORTED = "FOLDER_IMPORTED"
     const val FOLDER_EXPORTED = "FOLDER_EXPORTED"
     const val SESSION_EXPORTED = "SESSION_EXPORTED"

@@ -30,7 +30,11 @@ android {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
       storeFile = file(keystorePath)
       storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
+      // GAP-22 (Design Closure 2026): the alias now honors the KEY_ALIAS
+      // env var / CI secret — release.yml exports it and RELEASE-SIGNING.md
+      // documents it, but the build previously PINNED "upload" and silently
+      // ignored the secret (a latent signing-identity divergence).
+      keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
       keyPassword = System.getenv("KEY_PASSWORD")
     }
     // FIX F-12 (audit c03919d): the debug build type previously pointed at

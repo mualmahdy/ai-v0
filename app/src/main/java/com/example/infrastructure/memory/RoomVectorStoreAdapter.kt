@@ -18,7 +18,6 @@ import com.example.infrastructure.persistence.entities.MemoryEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
-import kotlin.math.sqrt
 
 /**
  * Clean Infrastructure Adapter for Room-backed Vector Store and Memory Repository.
@@ -95,8 +94,14 @@ class RoomVectorStoreAdapter(
             val scored = mutableListOf<Pair<VectorStoreRecord, Float>>()
 
             for (entity in entities) {
-                val storedVector = parseVectorJson(entity.vectorJson, entity.vectorDimension)
-                val similarity = calculateCosineSimilarity(queryVector.values, storedVector.values)
+                // GAP-28: honest per-row decode — a corrupt row is SKIPPED
+                // (counted + logged). Previously parseVectorJson THREW and
+                // the outer catch turned ONE bad row into a failure of the
+                // WHOLE query (poison-pill retrieval).
+                val storedVector = parseVectorJson(entity.vectorJson, entity.vectorDimension) ?: continue
+                val similarity = com.example.domain.core.memory.VectorMath.cosine(
+                    queryVector.values, storedVector.values
+                )
 
                 if (similarity >= minScoreThreshold) {
                     val record = VectorStoreRecord(
@@ -144,11 +149,11 @@ class RoomVectorStoreAdapter(
     override suspend fun storeMemory(entry: MemoryEntry): Outcome<Unit, VectorStoreFailure> = withContext(Dispatchers.IO) {
         val vector = if (embeddingProvider != null) {
             when (val embedResult = embeddingProvider.generateEmbeddings(listOf(entry.content))) {
-                is Outcome.Success -> embedResult.value.firstOrNull() ?: createLexicalSparseVector(entry.content)
-                else -> createLexicalSparseVector(entry.content)
+                is Outcome.Success -> embedResult.value.firstOrNull() ?: com.example.domain.core.memory.VectorMath.lexicalSparseVector(entry.content)
+                else -> com.example.domain.core.memory.VectorMath.lexicalSparseVector(entry.content)
             }
         } else {
-            createLexicalSparseVector(entry.content)
+            com.example.domain.core.memory.VectorMath.lexicalSparseVector(entry.content)
         }
 
         // Phase 5: storeMemory is now workspace/agent agnostic (legacy global path).
@@ -204,17 +209,20 @@ class RoomVectorStoreAdapter(
 
             val queryVector = if (embeddingProvider != null) {
                 when (val embResult = embeddingProvider.generateEmbeddings(listOf(query))) {
-                    is Outcome.Success -> embResult.value.firstOrNull() ?: createLexicalSparseVector(query)
-                    else -> createLexicalSparseVector(query)
+                    is Outcome.Success -> embResult.value.firstOrNull() ?: com.example.domain.core.memory.VectorMath.lexicalSparseVector(query)
+                    else -> com.example.domain.core.memory.VectorMath.lexicalSparseVector(query)
                 }
             } else {
-                createLexicalSparseVector(query)
+                com.example.domain.core.memory.VectorMath.lexicalSparseVector(query)
             }
 
             val scoredRecords = mutableListOf<ScoredMemoryRecord>()
             for (entity in entities) {
-                val storedVector = parseVectorJson(entity.vectorJson, entity.vectorDimension)
-                val similarity = calculateCosineSimilarity(queryVector.values, storedVector.values)
+                // GAP-28: same honest per-row decode as querySimilar.
+                val storedVector = parseVectorJson(entity.vectorJson, entity.vectorDimension) ?: continue
+                val similarity = com.example.domain.core.memory.VectorMath.cosine(
+                    queryVector.values, storedVector.values
+                )
 
                 if (similarity >= 0.2f && entity.confidence >= minConfidence) {
                     val entry = MemoryEntry(
@@ -285,8 +293,14 @@ class RoomVectorStoreAdapter(
     }
 
     /**
-     * Workspace-scoped active memories: only the resolved workspace's (and
-     * legacy global workspaceId-null) rows are visible.
+     * Workspace-scoped active memories: ONLY the resolved workspace's rows
+     * are visible.
+     *
+     * GAP-25 (Design Closure 2026): the first sentence previously claimed
+     * legacy global (workspaceId-null) rows were also visible — false: the
+     * DAO query `workspaceId IS :id` never matches NULL rows, and the
+     * fail-closed paragraph below already documents that a scope-less
+     * caller sees NOTHING. The doc now matches the code.
      *
      * P1-6 FIX (audit 2026 §9 — fail-open isolation): when NO workspace can
      * be resolved (no pinned ExecutionScope AND no active workspace) this
@@ -302,39 +316,41 @@ class RoomVectorStoreAdapter(
         return memoryDao.getActiveForWorkspace(workspaceId)
     }
 
-    private fun parseVectorJson(json: String, dimension: Int): EmbeddingVector {
-        val array = JSONArray(json)
-        val floats = FloatArray(array.length()) { i -> array.getDouble(i).toFloat() }
-        return EmbeddingVector(dimension = dimension, values = floats)
+    private fun parseVectorJson(json: String, dimension: Int): EmbeddingVector? {
+        // GAP-28 (Design Closure 2026, honest decode): returns null (counted
+        // + logged) on malformed JSON or a dimension/metadata mismatch —
+        // the caller skips that row. Previously this THREW (one corrupt row
+        // failed the entire retrieval) and never validated the stored
+        // dimension at all.
+        return try {
+            val array = JSONArray(json)
+            val floats = FloatArray(array.length()) { i -> array.getDouble(i).toFloat() }
+            if (floats.size != dimension) {
+                vectorDecodeFailures.incrementAndGet()
+                lastVectorDecodeFailure =
+                    "VECTOR_DIMENSION_MISMATCH: expected=$dimension actual=${floats.size}"
+                System.err.println("VECTOR-STORE $lastVectorDecodeFailure")
+                null
+            } else {
+                EmbeddingVector(dimension = dimension, values = floats)
+            }
+        } catch (e: Exception) {
+            vectorDecodeFailures.incrementAndGet()
+            lastVectorDecodeFailure =
+                "VECTOR_DECODE_FAILED: ${e::class.simpleName}: ${e.message?.take(120)}"
+            System.err.println("VECTOR-STORE $lastVectorDecodeFailure")
+            null
+        }
     }
 
-    private fun calculateCosineSimilarity(vecA: FloatArray, vecB: FloatArray): Float {
-        if (vecA.size != vecB.size || vecA.isEmpty()) return 0.0f
-        var dotProduct = 0.0f
-        var normA = 0.0f
-        var normB = 0.0f
-        for (i in vecA.indices) {
-            dotProduct += vecA[i] * vecB[i]
-            normA += vecA[i] * vecA[i]
-            normB += vecB[i] * vecB[i]
-        }
-        val denom = sqrt(normA) * sqrt(normB)
-        return if (denom > 0f) (dotProduct / denom).coerceIn(-1.0f, 1.0f) else 0.0f
-    }
+    /**
+     * GAP-28: decode-failure observability (same pattern as
+     * KnowledgePersistenceService — a silent row loss is a degradation,
+     * not a "not found").
+     */
+    val vectorDecodeFailures = java.util.concurrent.atomic.AtomicInteger(0)
 
-    private fun createLexicalSparseVector(text: String, dimension: Int = 128): EmbeddingVector {
-        val values = FloatArray(dimension)
-        val words = text.lowercase().split("\\s+".toRegex()).filter { it.isNotBlank() }
-        for (word in words) {
-            val hash = kotlin.math.abs(word.hashCode()) % dimension
-            values[hash] += 1.0f
-        }
-        var sumSquares = 0f
-        for (v in values) sumSquares += v * v
-        val norm = sqrt(sumSquares)
-        if (norm > 0f) {
-            for (i in values.indices) values[i] /= norm
-        }
-        return EmbeddingVector(dimension = dimension, values = values)
-    }
+    @Volatile
+    var lastVectorDecodeFailure: String? = null
+        private set
 }

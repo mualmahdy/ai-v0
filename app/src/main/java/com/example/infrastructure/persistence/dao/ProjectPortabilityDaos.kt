@@ -137,6 +137,15 @@ interface AuditEventDao {
     @Query("SELECT * FROM audit_events ORDER BY occurredAtEpochMs DESC LIMIT :limit")
     suspend fun recent(limit: Int = 100): List<AuditEventEntity>
 
+    /**
+     * GAP-24 (Design Closure 2026, ADR-8): live unscoped stream — the
+     * unified audit reader in RoomTelemetryRepository combines this with
+     * `audit_trail` so BOTH audit tables feed the activity feed (previously
+     * this table had zero readers while its richer sibling fed nothing).
+     */
+    @Query("SELECT * FROM audit_events ORDER BY occurredAtEpochMs DESC LIMIT :limit")
+    fun observeRecent(limit: Int = 100): kotlinx.coroutines.flow.Flow<List<AuditEventEntity>>
+
     @Query("SELECT * FROM audit_events WHERE workspaceId = :workspaceId ORDER BY occurredAtEpochMs DESC LIMIT :limit")
     suspend fun forWorkspace(workspaceId: String, limit: Int = 100): List<AuditEventEntity>
 

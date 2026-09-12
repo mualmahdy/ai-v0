@@ -2,7 +2,6 @@ package com.example.presentation.state
 
 import com.example.domain.core.DegradedReason
 import com.example.domain.core.agent.AgentDefinition
-import com.example.domain.core.capability.CapabilityDescriptor
 import com.example.domain.core.decision.DecisionCase
 import com.example.domain.core.decision.DecisionResult
 import com.example.domain.core.decision.DecisionState
@@ -35,10 +34,8 @@ import com.example.domain.core.session.ConversationSession
 import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.storage.WorkspaceFileEntry
 import com.example.domain.core.task.AutonomyPolicy
-import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.workflow.ExecutionMode
 import com.example.domain.core.workflow.WorkflowExecutionReport
-import com.example.domain.core.workspace.ResourceGraph
 
 /**
  * One conversational turn in the Studio session transcript: the user prompt,
@@ -150,21 +147,20 @@ data class UiState(
     val networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
     val autonomyPolicy: AutonomyPolicy = AutonomyPolicy.SUPERVISED,
     /**
-     * REPAIR ORDER §3A — the bootstrap state machine phase label
-     * (BOOTSTRAPPING / WORKSPACE_READY / PROJECT_RESOLVED / CONTEXT_READY /
-     * READY / FAILED) and its explicit failure message, if any. UI gates
-     * project-dependent features on READY and renders honest failure states.
+     * REPAIR ORDER §3A + GAP-23 (Design Closure 2026) — the bootstrap
+     * state machine phase label (BOOTSTRAPPING / WORKSPACE_READY /
+     * PROJECT_RESOLVED / CONTEXT_READY / READY / FAILED) and its explicit
+     * failure message. The MainAppScreen startup gate RENDERS the failure
+     * message as a full-screen honest gate (with retry) — previously the
+     * message was collected here but never displayed, so a failed bootstrap
+     * still showed a fully-rendered app where every project-dependent action
+     * popped an error snackbar.
      */
     val bootstrapPhase: String = "BOOTSTRAPPING",
     val bootstrapFailureMessage: String? = null,
-    /**
-     * REPAIR ORDER §5 — projects of the active workspace (authoritative
-     * list from ProjectRuntimeService; UI project pickers render THIS).
-     */
-    val resourceGraph: ResourceGraph = ResourceGraph(),
-
-    // Tasks & Workflows
-    val activeTasks: List<TaskDefinition> = emptyList(),
+    // Tasks & Workflows (GAP-23: the write-only UiState.activeTasks field was
+    // removed — TasksScreen reads the LIVE board from TasksViewModel →
+    // TaskBoardService → TaskDao, which is the single task-list authority.)
     val workflowReport: WorkflowExecutionReport? = null,
     val isExecutingWorkflow: Boolean = false,
     // WORKFLOW LIBRARY (report gap: durable, re-editable authored assets).
@@ -179,7 +175,9 @@ data class UiState(
     val decisionTaskComplexity: Float = 0.6f,
     val decisionUncertainty: Float = 0.2f,
 
-    // Intelligence Radar & Evolution Pipeline
+    // Intelligence Radar & Evolution Pipeline (GAP-23: isRadarRefreshing was
+    // previously a NO-WRITER field — a spinner that could never appear.
+    // refreshRadar() now sets it honestly around the pipeline call.)
     val radarItems: List<RadarItem> = emptyList(),
     val evolutionCandidates: List<EvolutionCandidate> = emptyList(),
     val isRadarRefreshing: Boolean = false,
@@ -190,7 +188,6 @@ data class UiState(
     val radarCapabilityStatuses: List<RadarCapabilityStatus> = emptyList(),
     val radarRecommendations: List<RadarRecommendation> = emptyList(),
     val radarChanges: List<CapabilityChangeRecord> = emptyList(),
-    val radarSnapshotTakenAtMs: Long? = null,
     val workspaceBudgetStatus: BudgetStatus? = null,
     val costLedgerRecent: List<UsageCostRecord> = emptyList(),
     val workspaceTokensConsumed: Long = 0L,
@@ -256,8 +253,11 @@ data class UiState(
     val selectedFilePath: String? = null,
     val isFileLoading: Boolean = false,
 
-    // Legacy capabilities
-    val capabilities: List<CapabilityDescriptor> = emptyList(),
+    // GAP-24 (Design Closure 2026, ADR-8): measurement-health snapshot for
+    // the governance observatory "صحة القياس" card — honest counters of the
+    // telemetry persistence layer itself (metric + audit write failures).
+    // Null = not yet measured (the fetch runs with refreshGovernance).
+    val measurementHealth: com.example.domain.core.observability.MeasurementHealth? = null,
 
     // Error notification
     val errorMessage: String? = null

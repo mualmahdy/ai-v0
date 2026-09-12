@@ -174,6 +174,19 @@ class MainViewModel(
         }
     }
 
+    /**
+     * GAP-23 (Design Closure 2026): re-run the bootstrap state machine from
+     * the honest startup-failure gate. [WorkspaceRuntimeService.retryBootstrap]
+     * is idempotent; the bootstrapState collector above updates
+     * [UiState.bootstrapFailureMessage] — a successful retry therefore
+     * dismisses the gate through the SAME flow that opened it.
+     */
+    fun retryBootstrap() {
+        viewModelScope.launch {
+            workspaceRuntimeService.retryBootstrap()
+        }
+    }
+
     /** Gap-closure P0-01: the ExecutionHost key of the task launched by the Studio screen. */
     private var currentExecutionTaskId: String? = null
 
@@ -311,8 +324,7 @@ class MainViewModel(
                         it.copy(
                             radarCapabilityStatuses = snapshot.capabilities,
                             radarRecommendations = snapshot.recommendations,
-                            radarChanges = snapshot.changes,
-                            radarSnapshotTakenAtMs = snapshot.takenAtEpochMs
+                            radarChanges = snapshot.changes
                         )
                     }
                 }
@@ -338,6 +350,19 @@ class MainViewModel(
                 // GAP-13: economic-summary degradation is surfaced.
                 _uiState.update {
                     it.copy(diagnosticBanner = "تعذر تحديث ملخص الميزانية: ${failure.localizedMessage}")
+                }
+            }
+            // GAP-24 (Design Closure 2026, ADR-8): honest measurement-health
+            // snapshot — the observatory shows the telemetry persistence
+            // layer's own failure counters, not just the data it persisted.
+            runCatching {
+                val health = telemetryPort?.measurementHealth()
+                if (health != null) {
+                    _uiState.update { it.copy(measurementHealth = health) }
+                }
+            }.onFailure { failure ->
+                _uiState.update {
+                    it.copy(diagnosticBanner = "تعذر قياس صحة طبقة القياس: ${failure.localizedMessage}")
                 }
             }
         }
@@ -499,7 +524,6 @@ class MainViewModel(
         viewModelScope.launch {
             providerControlPlaneService.allProvidersFlow.collect { providers ->
                 _uiState.update { it.copy(generalizedProviders = providers) }
-                refreshCapabilities()
             }
         }
         viewModelScope.launch {
@@ -673,7 +697,6 @@ class MainViewModel(
             runCatching {
                 refreshMemories()
                 refreshFiles()
-                refreshCapabilities()
                 simulateDecision()
             }.onFailure { e ->
                 _uiState.update { it.copy(errorMessage = "تعذر تحميل البيانات الأولية: ${e.localizedMessage}") }
@@ -1346,8 +1369,16 @@ class MainViewModel(
     fun simulateDecision() {
         // Readiness-gated engine evaluation (defect family 5): the decision
         // may suspend on case-base load readiness, so it runs scoped.
+        // GAP-23 (Design Closure 2026): the spinner flag is now WRITTEN
+        // honestly around the engine call — it was previously a no-writer
+        // field, so DecisionScreen's progress indicator could never appear.
         viewModelScope.launch {
-            simulateDecisionInternal()
+            _uiState.update { it.copy(isSimulatingDecision = true) }
+            try {
+                simulateDecisionInternal()
+            } finally {
+                _uiState.update { it.copy(isSimulatingDecision = false) }
+            }
         }
     }
 
@@ -1386,8 +1417,12 @@ class MainViewModel(
     // --- Provider & Resource Control Plane (Phase 4 — generalized API) ---
 
     /**
-     * Test the connection for a ServiceConfiguration. Explicit network call
-     * (POST /chat/completions for LLM, real protocol operation for others).
+     * Test the connection for a ServiceConfiguration. Real protocol probe
+     * via the resource validators — for LLM services this is a lightweight
+     * GET /models reachability + authentication check (NOT a generation
+     * call; POST /chat/completions is never issued by validation).
+     * GAP-25 (Design Closure 2026): the previous KDoc claimed a POST
+     * /chat/completions probe, which never matched the implementation.
      */
     fun testServiceConnection(configId: String) {
         viewModelScope.launch {
@@ -1449,7 +1484,6 @@ class MainViewModel(
     fun materializeResource(providerId: String, serviceId: String, offeringId: String) {
         viewModelScope.launch {
             when (val outcome = providerControlPlaneService.materializeResource(providerId, serviceId, offeringId)) {
-                is Outcome.Success -> refreshCapabilities()
                 is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
                 else -> Unit
             }
@@ -1467,7 +1501,6 @@ class MainViewModel(
                     _uiState.update {
                         it.copy(diagnosticBanner = outcome.value.message)
                     }
-                    refreshCapabilities()
                 }
                 is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
                 else -> Unit
@@ -1481,7 +1514,6 @@ class MainViewModel(
     fun enableResource(resourceId: String) {
         viewModelScope.launch {
             when (val outcome = providerControlPlaneService.enableResource(ResourceId(resourceId))) {
-                is Outcome.Success -> refreshCapabilities()
                 is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
                 else -> Unit
             }
@@ -1494,7 +1526,6 @@ class MainViewModel(
     fun disableResource(resourceId: String) {
         viewModelScope.launch {
             when (val outcome = providerControlPlaneService.disableResource(ResourceId(resourceId))) {
-                is Outcome.Success -> refreshCapabilities()
                 is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
                 else -> Unit
             }
@@ -1504,9 +1535,8 @@ class MainViewModel(
     fun deleteProvider(id: String) {
         viewModelScope.launch {
             when (val outcome = providerControlPlaneService.deleteProvider(id)) {
-                is Outcome.Success -> refreshCapabilities()
                 is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> refreshCapabilities()
+                else -> Unit
             }
         }
     }
@@ -1514,9 +1544,8 @@ class MainViewModel(
     fun toggleProvider(id: String, isEnabled: Boolean) {
         viewModelScope.launch {
             when (val outcome = providerControlPlaneService.toggleProvider(id, isEnabled)) {
-                is Outcome.Success -> refreshCapabilities()
                 is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> refreshCapabilities()
+                else -> Unit
             }
         }
     }
@@ -1660,6 +1689,16 @@ class MainViewModel(
                 name = modelName.ifBlank { preset.displayName },
                 description = preset.description,
                 contextWindowTokens = preset.contextWindowTokens,
+                // GAP-25 (Design Closure 2026, honest capability
+                // declarations): REASONING + STREAMING are UNVERIFIED
+                // defaults for LLM presets — the wizard's validation step
+                // proves endpoint reachability + auth via GET /models ONLY;
+                // it never probes streaming (SSE) or reasoning behavior.
+                // The discovery path (DiscoveryAdapterFactory) already
+                // declares only verified capabilities; these provisional
+                // defaults stay because decision-engine contracts filter
+                // offerings by them — capability VERIFICATION is deferred
+                // to the ADR-6 redesign track, not fabricated here.
                 supportedCapabilities = when (preset.serviceType) {
                     ServiceType.LLM -> setOf(
                         CapabilityType.LLM_GENERATION,
@@ -1717,7 +1756,6 @@ class MainViewModel(
                                 diagnosticBanner = "تم تفعيل ${preset.displayName} بنجاح"
                             )
                         }
-                        refreshCapabilities()
                     } else {
                         _uiState.update {
                             it.copy(
@@ -1729,7 +1767,6 @@ class MainViewModel(
                                 wizardResultIsSuccess = false
                             )
                         }
-                        refreshCapabilities()
                     }
                 }
                 is Outcome.Error -> {
@@ -1879,8 +1916,16 @@ class MainViewModel(
 
     // --- Intelligence Radar & Evolution ---
     fun refreshRadar() {
+        // GAP-23 (Design Closure 2026): the refresh indicator is now WRITTEN
+        // honestly around the pipeline call — previously a no-writer field,
+        // so RadarScreen's spinner could never appear.
         viewModelScope.launch {
-            intelligenceRadarPipeline.refreshRadarFeed()
+            _uiState.update { it.copy(isRadarRefreshing = true) }
+            try {
+                intelligenceRadarPipeline.refreshRadarFeed()
+            } finally {
+                _uiState.update { it.copy(isRadarRefreshing = false) }
+            }
         }
     }
 
@@ -2418,10 +2463,6 @@ class MainViewModel(
         }
     }
 
-    fun refreshCapabilities() {
-        val caps = componentRegistry.getCapabilityDescriptors()
-        _uiState.update { it.copy(capabilities = caps) }
-    }
 
     fun clearErrorMessage() {
         _uiState.update { it.copy(errorMessage = null) }

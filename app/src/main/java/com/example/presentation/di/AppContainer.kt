@@ -257,7 +257,13 @@ class AppContainer(context: Context) {
 
     /** §14 — session transcript export (canonical → TXT/MD/JSON). */
     val sessionExportService: com.example.application.transfer.SessionExportService by lazy {
-        com.example.application.transfer.SessionExportService(database = database)
+        // GAP-24 (Design Closure 2026, ADR-8): the audit trail is now WIRED —
+        // previously this service was constructed without it, so every
+        // SESSION_EXPORTED audit event silently never landed in audit_events.
+        com.example.application.transfer.SessionExportService(
+            database = database,
+            auditTrail = auditTrailService
+        )
     }
 
     /** §28 — repair / reconciliation center (DETECT → EXPLAIN → REPAIR → VERIFY). */
@@ -1386,7 +1392,10 @@ class AppContainer(context: Context) {
             metricEventDao = database.metricEventDao(),
             auditTrailDao = database.auditTrailDao(),
             executionTraceDao = database.executionTraceDao(),
-            executionLogDao = database.executionLogDao()
+            executionLogDao = database.executionLogDao(),
+            // GAP-24 (Design Closure 2026, ADR-8): the unified audit reader
+            // merges the §30 audit_events table into the live activity feed.
+            auditEventDao = database.auditEventDao()
         )
     }
 

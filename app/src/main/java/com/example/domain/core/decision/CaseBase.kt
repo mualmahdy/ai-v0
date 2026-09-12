@@ -209,6 +209,14 @@ class CaseBase(
      * vectors to be the canonical length (15) and zero-pad shorter persisted vectors
      * (so old Room rows from before the fix still load) but reject vectors that are
      * too short to be meaningful (< 11 = pre-evidence-schema).
+     *
+     * GAP-28 (Design Closure 2026) — DELIBERATE EXEMPTION from the shared
+     * kernel ([com.example.domain.core.memory.VectorMath.cosine]): the
+     * zero-padding semantics are a documented, test-pinned domain contract
+     * (Phase1FixVerificationTest asserts legacy length-11 cases still match);
+     * these are DECISION feature vectors, not embedding vectors. Do NOT
+     * "unify" this into the strict kernel — the exemption is recorded in
+     * VectorMath's KDoc as well.
      */
     private fun computeCosineSimilarity(vecA: FloatArray, vecB: FloatArray): Float {
         if (vecA.isEmpty() || vecB.isEmpty()) return 0.0f

@@ -124,6 +124,24 @@ data class DimensionSummary(
 enum class AuditSeverity { INFO, WARN, ERROR, CRITICAL }
 
 /**
+ * GAP-24 (Design Closure 2026, ADR-8 option ج) — measurement-health
+ * snapshot: the observatory's honest view of the telemetry persistence
+ * layer ITSELF. Both audit subsystems write durably; when those writes
+ * fail, the failure must be VISIBLE (a silent audit outage is exactly the
+ * "mute counter" the gap register flags). Nulls = no failure recorded;
+ * [isHealthy] is true only when both write paths are clean.
+ */
+data class MeasurementHealth(
+    val metricPersistenceFailures: Int = 0,
+    val lastMetricPersistenceError: String? = null,
+    val auditPersistenceFailures: Int = 0,
+    val lastAuditPersistenceError: String? = null
+) {
+    val isHealthy: Boolean
+        get() = metricPersistenceFailures == 0 && auditPersistenceFailures == 0
+}
+
+/**
  * Structured audit event persisted to `audit_trail` (new table, see
  * `MIGRATION_7_TO_8`). Closes the Security Governance gap "no AuditLog
  * entity, security decisions are not persisted".
