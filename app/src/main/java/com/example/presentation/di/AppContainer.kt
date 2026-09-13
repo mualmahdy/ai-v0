@@ -1973,7 +1973,13 @@ private fun moreRestrictiveAutonomy(
 }
 
 class MainViewModelFactory(
-    private val appContainer: AppContainer
+    private val appContainer: AppContainer,
+    /**
+     * ADR-6 SLICE 2: the per-Activity studio signal bus — MainViewModel
+     * COLLECTS the studio feature's cross-feature projections. Created in
+     * MainActivity, shared with StudioViewModelFactory.
+     */
+    private val studioSignalBus: com.example.presentation.viewmodel.StudioSignalBus? = null
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1999,14 +2005,10 @@ class MainViewModelFactory(
                 telemetryService = appContainer.telemetryService,
                 telemetryPort = appContainer.telemetryPort,
                 networkMonitorProvider = appContainer.networkMonitor,
-                appContext = appContainer.appContext,
                 // GOVERNANCE PHASE — radar + economic governance surfaces for
                 // the GovernanceObservatoryScreen.
                 capabilityRadarService = appContainer.capabilityRadarService,
                 economicGovernanceService = appContainer.economicGovernanceService,
-                // v13 — DURABLE SESSIONS + QUICK CHAT + WORKFLOW LIBRARY
-                // (report gap-closure).
-                conversationSessionService = appContainer.conversationSessionService,
                 workflowLibraryService = appContainer.workflowLibraryService,
                 workflowPersistenceService = appContainer.workflowPersistenceService,
                 // REPAIR ORDER §3A — observable bootstrap state machine, and
@@ -2018,7 +2020,11 @@ class MainViewModelFactory(
                 bootstrapStateProvider = appContainer.workspaceRuntimeService.bootstrapState,
                 humanApprovalGate = appContainer.humanApprovalGate,
                 localPrincipalId = appContainer.localPrincipalId,
-                permissionGrantService = appContainer.permissionGrantService
+                permissionGrantService = appContainer.permissionGrantService,
+                // ADR-6 slice 2 — the studio feature's outbound signal bus
+                // (conversationSessionService + appContext left this factory
+                // with the StudioViewModel extraction).
+                studioSignals = studioSignalBus
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
@@ -2080,6 +2086,55 @@ class SettingsViewModelFactory(
         if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.SettingsViewModel::class.java)) {
             return com.example.presentation.viewmodel.SettingsViewModel(
                 workspaceRuntimeService = appContainer.workspaceRuntimeService
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 2 (Design Closure 2026 UI-redesign track) — factory for the
+ * STUDIO feature ViewModel: the conversation runtime (execution kernel,
+ * Quick Chat, durable-session binding, transcript) extracted from
+ * MainViewModel. Receives the per-Activity studio signal bus (it EMITS the
+ * cross-feature projections MainViewModel collects).
+ */
+class StudioViewModelFactory(
+    private val appContainer: AppContainer,
+    private val studioSignalBus: com.example.presentation.viewmodel.StudioSignalBus
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.StudioViewModel::class.java)) {
+            return com.example.presentation.viewmodel.StudioViewModel(
+                executeAgentTaskUseCase = appContainer.executeAgentTaskUseCase,
+                componentRegistry = appContainer.componentRegistry,
+                workspaceRuntimeService = appContainer.workspaceRuntimeService,
+                conversationSessionService = appContainer.conversationSessionService,
+                networkMonitorProvider = appContainer.networkMonitor,
+                appContext = appContainer.appContext,
+                signalBus = studioSignalBus
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 2 (Design Closure 2026 UI-redesign track) — factory for the
+ * SESSIONS feature ViewModel: the durable-session registry browser
+ * (project-scoped list + sheet flag + deletion) extracted from
+ * MainViewModel.
+ */
+class SessionsViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.SessionsViewModel::class.java)) {
+            return com.example.presentation.viewmodel.SessionsViewModel(
+                conversationSessionService = appContainer.conversationSessionService,
+                activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

@@ -5,7 +5,6 @@ import com.example.domain.core.agent.AgentDefinition
 import com.example.domain.core.decision.DecisionCase
 import com.example.domain.core.decision.DecisionResult
 import com.example.domain.core.decision.DecisionState
-import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.evolution.EvolutionCandidate
 import com.example.domain.core.evolution.EvolutionStage
 import com.example.domain.core.extension.IntegrationDescriptor
@@ -29,8 +28,6 @@ import com.example.domain.core.radar.RadarSnapshot
 import com.example.domain.core.rag.AssembledRagContext
 import com.example.domain.core.rag.KnowledgeDocument
 import com.example.domain.core.resource.ResourceRecord
-import com.example.domain.core.session.ChatMode
-import com.example.domain.core.session.ConversationSession
 import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.workflow.ExecutionMode
@@ -118,31 +115,30 @@ data class UiState(
     val activeProject: ProjectMetadata? = null,
     val activeAgent: AgentDefinition? = null,
     val availableAgents: List<AgentDefinition> = emptyList(),
-    val promptInput: String = "",
-    val isExecuting: Boolean = false,
-    val executionLog: List<ExecutionEvent> = emptyList(),
-    val streamText: String = "",
-    // Session transcript (Studio as a real conversation console).
-    val studioSession: List<StudioTurn> = emptyList(),
-    val sessionTurnStartMs: Long = 0L,
     // ------------------------------------------------------------------
-    // DURABLE SESSIONS + QUICK CHAT + MODEL PICKER (report gap-closure):
-    // the conversation mode (agent-independent Quick Chat vs canonical
-    // agent), the active durable session id, the live session browser list,
-    // and the user-facing exact model selection.
+    // ADR-6 SLICE 2 (Design Closure 2026 UI-redesign track): the ENTIRE
+    // conversation-runtime block (promptInput, isExecuting, executionLog,
+    // streamText, studioSession, sessionTurnStartMs, chatMode,
+    // activeSessionId, sessions, isSessionBrowserOpen,
+    // selectedModelResourceId, selectedModelDisplayName, isDegraded,
+    // degradedReason, currentTokensConsumed, sessionTotalTokens,
+    // remainingBudget) moved to StudioViewModel's own StudioUiState. The
+    // execution-event decision projections (latestDecision,
+    // decisionUncertainty, caseBaseList) stay here as DISPLAY mirrors fed
+    // by the studio signal bus (see MainViewModel.observeStudioSignals).
     // ------------------------------------------------------------------
-    val chatMode: ChatMode = ChatMode.QUICK_CHAT,
-    val activeSessionId: String? = null,
-    val sessions: List<ConversationSession> = emptyList(),
-    val isSessionBrowserOpen: Boolean = false,
-    val selectedModelResourceId: String? = null,
-    val selectedModelDisplayName: String? = null,
     val isDegraded: Boolean = false,
     val degradedReason: DegradedReason? = null,
     val diagnosticBanner: String? = null,
-    val currentTokensConsumed: Int = 0,
-    val sessionTotalTokens: Int = 0,
-    val remainingBudget: Int = 30000,
+    /**
+     * ADR-6 slice 2 — DISPLAY MIRROR ONLY: the SESSION network policy is
+     * owned by StudioViewModel (an execution-time input of the
+     * conversation); this mirror is synced from the studio signal bus so
+     * the decision preview (simulateDecision) and the governance radar
+     * snapshot keep reading ONE shared value. The persisted WORKSPACE
+     * policy (egress authority) lives on the workspace row — a different,
+     * unrelated field.
+     */
     val networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
     val autonomyPolicy: AutonomyPolicy = AutonomyPolicy.SUPERVISED,
     /**

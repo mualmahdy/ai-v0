@@ -68,11 +68,15 @@ import com.example.presentation.viewmodel.MainViewModel
 fun WorkspaceExplorerScreen(
     viewModel: MainViewModel,
     filesViewModel: FilesViewModel,
+    // ADR-6 slice 2: the durable-session registry list (the sessions row
+    // count/subtitle) — read from the sessions feature VM, its owner.
+    sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
     onNavigate: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
     val filesState by filesViewModel.state.collectAsState()
+    val sessionsState by sessionsViewModel.state.collectAsState()
 
     Column(
         modifier = modifier
@@ -186,13 +190,13 @@ fun WorkspaceExplorerScreen(
         ExplorerRow(
             icon = Icons.Default.Schedule,
             title = "الجلسات (محادثات دائمة)",
-            count = state.sessions.size,
+            count = sessionsState.sessions.size,
             countLabel = "جلسة",
             subtitle = when {
-                state.sessions.isEmpty() -> "لا جلسات بعد"
+                sessionsState.sessions.isEmpty() -> "لا جلسات بعد"
                 else -> {
-                    val quick = state.sessions.count { it.mode == ChatMode.QUICK_CHAT }
-                    "$quick محادثة سريعة • ${state.sessions.sumOf { it.turnCount }} دورة"
+                    val quick = sessionsState.sessions.count { it.mode == ChatMode.QUICK_CHAT }
+                    "${quick} محادثة سريعة • ${sessionsState.sessions.sumOf { it.turnCount }} دورة"
                 }
             },
             route = WorkspaceRoutes.STUDIO,

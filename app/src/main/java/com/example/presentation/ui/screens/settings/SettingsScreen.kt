@@ -68,8 +68,12 @@ import com.example.presentation.viewmodel.SettingsViewModel
  *  - the WORKSPACE MANAGER (list / switch / create / per-workspace network
  *    policy / authoritative autonomy policy) now lives in the extracted
  *    SettingsViewModel (mutations route to WorkspaceRuntimeService);
- *  - the SESSION execution policies and the semantic-model provisioning stay
- *    on the shared MainViewModel state (documented next-slice deferral);
+ *  - ADR-6 SLICE 2: the SESSION execution-policy mutation
+ *    (setNetworkPolicy) moved to StudioViewModel — this screen DISPLAYS it
+ *    and delegates the mutation via the [onSessionNetworkPolicy] lambda
+ *    (the same feature-delegation pattern as slice 1's autonomy policy,
+ *    direction reversed); the semantic-model provisioning stays on the
+ *    shared MainViewModel state (documented next-slice deferral);
  *  - HONESTY FIX: the About card previously hardcoded "Room v12" while the
  *    database was already at v17 — it now reads AppDatabase.SCHEMA_VERSION,
  *    the single source of truth;
@@ -81,6 +85,10 @@ fun SettingsScreen(
     viewModel: MainViewModel,
     settingsViewModel: SettingsViewModel,
     onNavigate: (String) -> Unit,
+    /** ADR-6 slice 2: the SESSION policy value (owned by StudioViewModel). */
+    sessionNetworkPolicy: com.example.domain.core.network.NetworkPolicy,
+    /** ADR-6 slice 2: delegates the mutation to the studio feature VM. */
+    onSessionNetworkPolicy: (com.example.domain.core.network.NetworkPolicy) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -130,8 +138,8 @@ fun SettingsScreen(
                                 policy == NetworkPolicy.CLOUD_FIRST -> "يُفضَّل السحابي عند توفره"
                                 else -> "محلي أولاً ثم السحابي عند الحاجة"
                             },
-                            selected = state.networkPolicy == policy,
-                            onClick = { viewModel.setNetworkPolicy(policy) }
+                            selected = sessionNetworkPolicy == policy,
+                            onClick = { onSessionNetworkPolicy(policy) }
                         )
                     }
                     Spacer(modifier = Modifier.height(10.dp))

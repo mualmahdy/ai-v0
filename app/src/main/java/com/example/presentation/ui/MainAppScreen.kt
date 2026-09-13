@@ -112,11 +112,17 @@ fun MainAppScreen(
     tasksViewModel: com.example.presentation.viewmodel.TasksViewModel? = null,
     filesViewModel: com.example.presentation.viewmodel.FilesViewModel,
     settingsViewModel: com.example.presentation.viewmodel.SettingsViewModel,
+    studioViewModel: com.example.presentation.viewmodel.StudioViewModel,
+    sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
     val allWorkspaces by viewModel.allWorkspaces.collectAsState()
     val activeWorkspace by viewModel.activeWorkspace.collectAsState()
+    // ADR-6 SLICE 2: the studio feature's own surfaces (transcript errors,
+    // degradation banners) render in the SAME global honest surfaces as
+    // the shared ones — each from its OWN source of truth.
+    val studioState by studioViewModel.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val navController = rememberNavController()
     var createWorkspaceOpen by rememberSaveable { mutableStateOf(false) }
@@ -125,6 +131,16 @@ fun MainAppScreen(
         state.errorMessage?.let { error ->
             snackbarHostState.showSnackbar(error)
             viewModel.clearErrorMessage()
+        }
+    }
+
+    // ADR-6 SLICE 2: the studio feature's honest error channel (agent-mode
+    // gating, session create/open failures, execution errors) — surfaced
+    // with the same global snackbar, dismissed from its own state.
+    LaunchedEffect(studioState.errorMessage) {
+        studioState.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            studioViewModel.dismissError()
         }
     }
 
@@ -235,12 +251,26 @@ fun MainAppScreen(
                     )
                 }
 
+                // ADR-6 SLICE 2: the STUDIO feature's own diagnostic banner
+                // (execution degradation, durable-turn persistence failures,
+                // cancel notices) — same global surface, own state + own
+                // dismiss (no shared mutable UiState between the VMs).
+                studioState.diagnosticBanner?.let { banner ->
+                    DismissibleInfoBanner(
+                        message = banner,
+                        isDegraded = studioState.isDegraded,
+                        onDismiss = { studioViewModel.dismissBanner() }
+                    )
+                }
+
                 WorkspaceNavHost(
                     navController = navController,
                     viewModel = viewModel,
                     tasksViewModel = tasksViewModel,
                     filesViewModel = filesViewModel,
                     settingsViewModel = settingsViewModel,
+                    studioViewModel = studioViewModel,
+                    sessionsViewModel = sessionsViewModel,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -338,6 +368,8 @@ private fun WorkspaceNavHost(
     tasksViewModel: com.example.presentation.viewmodel.TasksViewModel? = null,
     filesViewModel: com.example.presentation.viewmodel.FilesViewModel,
     settingsViewModel: com.example.presentation.viewmodel.SettingsViewModel,
+    studioViewModel: com.example.presentation.viewmodel.StudioViewModel,
+    sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
@@ -351,6 +383,8 @@ private fun WorkspaceNavHost(
         composable(WorkspaceRoutes.STUDIO) {
             StudioScreen(
                 viewModel = viewModel,
+                studioViewModel = studioViewModel,
+                sessionsViewModel = sessionsViewModel,
                 onNavigate = navigate,
                 // ADR-6 slice 1: the autonomy mutation routes to the SETTINGS
                 // feature ViewModel (authoritative service routing).
@@ -426,6 +460,12 @@ private fun WorkspaceNavHost(
                 viewModel = viewModel,
                 settingsViewModel = settingsViewModel,
                 onNavigate = navigate,
+                // ADR-6 slice 2: the SESSION policy (studio-owned) is passed
+                // as value + mutation — the settings surface displays and
+                // changes it without owning it (same pattern as the slice-1
+                // autonomy delegation, direction reversed).
+                sessionNetworkPolicy = studioViewModel.state.collectAsState().value.networkPolicy,
+                onSessionNetworkPolicy = studioViewModel::setNetworkPolicy,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -433,6 +473,7 @@ private fun WorkspaceNavHost(
             com.example.presentation.ui.screens.explorer.WorkspaceExplorerScreen(
                 viewModel = viewModel,
                 filesViewModel = filesViewModel,
+                sessionsViewModel = sessionsViewModel,
                 onNavigate = navigate,
                 modifier = Modifier.fillMaxSize()
             )

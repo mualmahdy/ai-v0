@@ -107,6 +107,10 @@ import com.example.presentation.viewmodel.MainViewModel
 @Composable
 fun StudioScreen(
     viewModel: MainViewModel,
+    /** ADR-6 slice 2: the conversation runtime (transcript, execution, sessions binding). */
+    studioViewModel: com.example.presentation.viewmodel.StudioViewModel,
+    /** ADR-6 slice 2: the durable-session registry (browser list, sheet flag). */
+    sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
     onNavigate: (String) -> Unit,
     /**
      * ADR-6 slice 1: the autonomy-policy mutation moved to the SETTINGS
@@ -116,7 +120,11 @@ fun StudioScreen(
     onAutonomyPolicy: (AutonomyPolicy) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // SHARED state (catalog, agents, resources, autonomy display) stays on
+    // the MainViewModel; the CONVERSATION state is the studio feature's own.
     val state by viewModel.uiState.collectAsState()
+    val studioState by studioViewModel.state.collectAsState()
+    val sessionsState by sessionsViewModel.state.collectAsState()
     val clipboard = LocalClipboardManager.current
     val listState = rememberLazyListState()
 
@@ -124,9 +132,9 @@ fun StudioScreen(
     var deleteAgentTarget by rememberSaveable { mutableStateOf<String?>(null) }
 
     // Auto-scroll the transcript as turns and stream chunks arrive.
-    val lastTurnCount = state.studioSession.size
-    val streamLength = state.streamText.length
-    LaunchedEffect(lastTurnCount, streamLength, state.isExecuting) {
+    val lastTurnCount = studioState.studioSession.size
+    val streamLength = studioState.streamText.length
+    LaunchedEffect(lastTurnCount, streamLength, studioState.isExecuting) {
         if (lastTurnCount > 0 || streamLength > 0) {
             runCatching { listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1) }
         }
@@ -155,29 +163,36 @@ fun StudioScreen(
             // ---- Conversation mode + durable session browser ----
             // (report gap-closure: Quick Chat is a REAL agent-independent
             // mode; sessions are durable, browsable and resumable)
+            // ADR-6 slice 2: the mode/transcript live on StudioViewModel,
+            // the browser list on SessionsViewModel — the SCREEN composes
+            // the two features (active-session title = registry row found by
+            // the conversation's binding id).
             item {
                 ChatModeAndSessionsBar(
-                    mode = state.chatMode,
-                    onModeChange = viewModel::setChatMode,
-                    onOpenSessions = { viewModel.setSessionBrowserOpen(true) },
-                    onNewSession = viewModel::startNewSession,
-                    activeSessionTitle = state.sessions
-                        .firstOrNull { it.id.value == state.activeSessionId }?.title
+                    mode = studioState.chatMode,
+                    onModeChange = studioViewModel::setChatMode,
+                    onOpenSessions = { sessionsViewModel.setSessionBrowserOpen(true) },
+                    onNewSession = {
+                        studioViewModel.startNewSession(agent = state.activeAgent)
+                        sessionsViewModel.setSessionBrowserOpen(false)
+                    },
+                    activeSessionTitle = sessionsState.sessions
+                        .firstOrNull { it.id.value == studioState.activeSessionId }?.title
                 )
             }
 
             // ---- Runtime policy controls (decision-engine inputs) ----
             item {
                 PolicyControlBar(
-                    networkPolicy = state.networkPolicy,
+                    networkPolicy = studioState.networkPolicy,
                     autonomyPolicy = state.autonomyPolicy,
-                    onNetworkPolicy = viewModel::setNetworkPolicy,
+                    onNetworkPolicy = studioViewModel::setNetworkPolicy,
                     onAutonomyPolicy = onAutonomyPolicy
                 )
             }
 
             // ---- Model picker (QUICK_CHAT) / Agent catalog (AGENT) ----
-            when (state.chatMode) {
+            when (studioState.chatMode) {
                 ChatMode.QUICK_CHAT -> item {
                     ModelPickerRow(
                         resources = state.materializedResources.filter {
@@ -185,8 +200,8 @@ fun StudioScreen(
                                 (it.lifecycleState == ResourceLifecycleState.ENABLED ||
                                     it.lifecycleState == ResourceLifecycleState.ACTIVE)
                         },
-                        selectedResourceId = state.selectedModelResourceId,
-                        onSelect = viewModel::selectModel
+                        selectedResourceId = studioState.selectedModelResourceId,
+                        onSelect = studioViewModel::selectModel
                     )
                 }
 
@@ -211,19 +226,19 @@ fun StudioScreen(
             // ---- Token budget (live, honest) ----
             item {
                 TokenBudgetGauge(
-                    consumedTokens = state.currentTokensConsumed,
-                    remainingBudget = state.remainingBudget,
-                    totalSession = state.sessionTotalTokens
+                    consumedTokens = studioState.currentTokensConsumed,
+                    remainingBudget = studioState.remainingBudget,
+                    totalSession = studioState.sessionTotalTokens
                 )
             }
 
             // ---- Session transcript ----
-            if (state.studioSession.isEmpty() && !state.isExecuting) {
+            if (studioState.studioSession.isEmpty() && !studioState.isExecuting) {
                 item {
                     SessionIntroCard(agentName = state.activeAgent?.identity?.name ?: "الوكيل")
                 }
             } else {
-                items(state.studioSession, key = { it.id }) { turn ->
+                items(studioState.studioSession, key = { it.id }) { turn ->
                     TurnBubble(
                         turn = turn,
                         onCopy = { clipboard.setText(AnnotatedString(turn.answer)) }
@@ -231,13 +246,13 @@ fun StudioScreen(
                 }
 
                 // ---- Live execution turn ----
-                if (state.isExecuting || state.streamText.isNotBlank()) {
+                if (studioState.isExecuting || studioState.streamText.isNotBlank()) {
                     item {
                         LiveExecutionCard(
-                            streamText = state.streamText,
-                            isExecuting = state.isExecuting,
-                            events = state.executionLog.takeLast(6),
-                            onCopy = { clipboard.setText(AnnotatedString(state.streamText)) }
+                            streamText = studioState.streamText,
+                            isExecuting = studioState.isExecuting,
+                            events = studioState.executionLog.takeLast(6),
+                            onCopy = { clipboard.setText(AnnotatedString(studioState.streamText)) }
                         )
                     }
                 }
@@ -246,25 +261,36 @@ fun StudioScreen(
 
         // ---- Prompt composer ----
         PromptComposer(
-            value = state.promptInput,
-            isExecuting = state.isExecuting,
-            onValueChange = viewModel::updatePromptInput,
-            onExecute = viewModel::executePrompt,
-            onCancel = viewModel::cancelExecution,
-            onClearSession = viewModel::clearStudioSession,
-            hasSession = state.studioSession.isNotEmpty()
+            value = studioState.promptInput,
+            isExecuting = studioState.isExecuting,
+            onValueChange = studioViewModel::updatePromptInput,
+            onExecute = { studioViewModel.executePrompt(agent = state.activeAgent) },
+            onCancel = studioViewModel::cancelExecution,
+            onClearSession = studioViewModel::clearStudioSession,
+            hasSession = studioState.studioSession.isNotEmpty()
         )
     }
 
-    // ---- Durable session browser ----
-    if (state.isSessionBrowserOpen) {
+    // ---- Durable session browser (ADR-6 slice 2: registry = SessionsViewModel,
+    // conversation binding = StudioViewModel; deletion notifies the studio) ----
+    if (sessionsState.isSessionBrowserOpen) {
         SessionBrowserDialog(
-            sessions = state.sessions,
-            activeSessionId = state.activeSessionId,
-            onOpen = viewModel::openSession,
-            onDelete = viewModel::deleteSession,
-            onNewSession = viewModel::startNewSession,
-            onDismiss = { viewModel.setSessionBrowserOpen(false) }
+            sessions = sessionsState.sessions,
+            activeSessionId = studioState.activeSessionId,
+            onOpen = { sessionId ->
+                studioViewModel.openSession(sessionId)
+                sessionsViewModel.setSessionBrowserOpen(false)
+            },
+            onDelete = { sessionId ->
+                sessionsViewModel.deleteSession(sessionId) { deleted ->
+                    studioViewModel.onSessionDeleted(deleted)
+                }
+            },
+            onNewSession = {
+                studioViewModel.startNewSession(agent = state.activeAgent)
+                sessionsViewModel.setSessionBrowserOpen(false)
+            },
+            onDismiss = { sessionsViewModel.setSessionBrowserOpen(false) }
         )
     }
 

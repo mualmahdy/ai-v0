@@ -77,12 +77,95 @@
 الأول: إقلاع المحاكي أو خطوة الاختبارات نفسها). لا يعيق هذا إنتاج
 apk-debug (android.yml مسار مستقل).
 
+## الشريحة 2 (مُسلَّمة — Phase 6)
+
+### ما سُلِّم
+
+1. **StudioViewModel** (زمن التشغيل المحادثي — الأثقل كما وُصف في الجدول):
+   - الحالة: 18 حقلاً غادرت `UiState` (promptInput / isExecuting /
+     executionLog / streamText / studioSession / sessionTurnStartMs /
+     chatMode / activeSessionId / selectedModelResourceId /
+     selectedModelDisplayName / isDegraded / degradedReason /
+     currentTokensConsumed / sessionTotalTokens / remainingBudget /
+     networkPolicy / قناتا الخطأ والبانر الخاصتين بالميزة) إلى
+     `StudioUiState` خاصة.
+   - السلوك: نواة التنفيذ كاملة (`executePrompt` / `cancelExecution` عبر
+     ExecutionHost المُسنَد إلى مساحة العمل)، quick-chat عبر الوكيل
+     القانوني، تثبيت النموذج (`selectModel` → `setSessionModel`)،
+     `setNetworkPolicy` (مدخل الجلسة)، ضمان الجلسة الدائمة قبل التنفيذ
+     (`ensureActiveSession`)، وحفظ الدورات (`persistTurnDurably` مع
+     التسمية من أول سؤال).
+   - **درزة الوكيل**: `activeAgent` بقيت حالة مشتركة في MainViewModel
+     (يقرؤها TasksScreen وExplorerScreen) — الشاشة تمرر الوكيل المختار
+     معاملاً إلى `executePrompt(agent)` / `startNewSession(agent)`.
+   - **ناقل إشارات الميزة** (`StudioSignal`): أحداث التنفيذ ذات الأثر
+     العابر للميزة (Started للربط بتتبع النشاط، DecisionMade /
+     ObservationRecorded / Completed / Error لمرايا العرض القرارية) +
+     تغيّر سياسة الشبكة تُنشَر على `MutableSharedFlow` يملكه MainActivity؛
+     MainViewModel يجمعها في `observeStudioSignals` ويحدّث المرايا —
+     لا حالة قابلة للتغيير مشتركة بين الاثنين.
+
+2. **SessionsViewModel** (سجل الجلسات الدائمة):
+   - الحالة: قائمة الجلسات (نطاق GAP-14: مشروع/مشترك)، علم متصفح
+     الجلسات، قناة خطأ خاصة.
+   - السلوك: المراقبة عبر **flatMapLatest** — إصلاح سباق «آخر كاتب»
+     الموروث (المراقب القديم كان يُطلق جامعاً جديداً لكل تبديل دون
+     إلغاء السابق، فتتراكم الجامعات ويتنافس إرسالها). `deleteSession`
+     تُخطِر الاستوديو عبر callback يُطلق بعد استقرار الاستدعاء (ترتيب
+     حتمي لمسح الربط النشط).
+
+3. **تكليف MainViewModel** (تقلّص من 2293 إلى ~1730 سطراً):
+   - فُقدت تبعيتان كاملتان: `conversationSessionService` و`appContext`
+     (الأخيرة كانت لأجل خدمة التنفيذ الأمامية فقط).
+   - مرايا العرض القرارية (latestDecision / decisionUncertainty /
+     caseBaseList) وشبكة الجلسة (networkPolicy) تبقى لكن مصدرها ناقل
+     الإشارات — نفس نمط autonomyPolicy من الشريحة 1.
+
+4. **الشاشات**:
+   - Studio: تركيب ثلاثي (viewModel للكتالوج/الموارد، studioViewModel
+     للمحادثة، sessionsViewModel للسجل)؛ شريط الجلسات يحسب عنوان الجلسة
+     النشطة من قائمة السجل بمعرّف ربط المحادثة.
+   - Settings: قسم «سياسات التنفيذ (الجلسة)» يعرض ويغيّر سياسة الشبكة
+     عبر قيمة + lambda إلى ميزة الاستوديو (نمط تفويض الشريحة 1 معكوساً).
+   - Explorer: صف «الجلسات» يقرأ القائمة من SessionsViewModel (صاحبها).
+
+5. **GAP-21 — الاختبارات السلوكية**: `StudioViewModelTest` (18 اختباراً
+   عبر النواة الحقيقية: ExecuteAgentTaskUseCase → AgentOrchestrator مع
+   مزوّد LLM محلي وهمي عند PORT فقط، وWorkspaceRuntimeService و
+   ConversationSessionService الحقيقيين فوق مزيفات DAO/المستودع) +
+   `SessionsViewModelTest` (8 اختبارات: عزل نطاق GAP-14، إعادة النطاق
+   بالتبديل، حذف بترتيب callback). 26 اختباراً جديداً.
+
+### صدق مكتشف (سلوك قائم لم يُغيَّر — موثَّق)
+
+- طوبولوجيا أحداث النهاية عند فشل المزود: خطأ المزود يمرّ عبر
+  ExecutionService **ثم** تصدر الحلقة `Completed` بنص الاحتياط
+  «اكتملت معالجة المهمة.» — فيُلحق دوران (فاشل ثم «ناجح») في النص.
+  هذا سلوك خط الأنابيب قبل الشريحة نفسه (المجمع المنقول حرفياً)،
+  أثبته الاختبار كما هو؛ أي تصحيح له عقد التنفيذ الطرفي هو قرار
+  مستقبلي (شريحة Decision) وليس من نطاق إعادة التصميم.
+- إلغاء الاستوديو كان يصفّر `isExecutingWorkflow` ( علم ميزة المهام)
+  دون أن يُلغي فعلاً تنفيذ خطة العمل الجارية — كذبة عرض موروثة؛ بعد
+  التفكيك كل ميزة تصفّر علمها فقط.
+- المراقب القديم لقائمة الجلسات كان يراكم الجامعات (سباق آخر كاتب) —
+  أُصلح في SessionsViewModel بـ flatMapLatest (الملاحظة نفسها نقلت،
+  فكُتبت صحيحة).
+
+### التحقق من CI (طلب المستخدم الصريح — مُثبَت بقرار حقيقي)
+
+- **android.yml ناجح على GitHub**: التشغيلة #53 «Build Android APK»
+  على `0966d3d` (دمج المرحلة 5) — `completed / success` بتاريخ
+  2026-09-13T15:24:42Z. نجاح الـ job يشمل خطوات التحميل (لا ينجح
+  إلا إذا خرجت كل خطوة بـ 0)، فتتأكد آلية `ai-v0-ultimate-debug-apk`.
+  أول نجاح كامل للـ workflow بعد 52 فشلاً متتالياً (الخلل YAML).
+- e2e-device.yml لا يزال فاشلاً (تشغيلات 10–14) — الحالة الصادقة
+  نفسها الموثقة أدناه: تشخيصه يحتاج سجلات Actions (صلاحية المالك).
+
 ## الشرائح التالية (الترتيب المقترح)
 
 | الشريحة | المحتوى | ملاحظات |
 |---|---|---|
-| 2 | StudioViewModel + SessionsViewModel (الاستوديو: المحادثة، الجلسات الدائمة، quick chat) | الأثقل؛ ينقل `setNetworkPolicy` (مدخل جلسة) و`provisionLocalSemanticModel` مع KnowledgeViewModel |
-| 3 | KnowledgeViewModel + وصل المعرفة | `semanticModelReady` المشتركة تنتقل هنا |
+| 3 | KnowledgeViewModel + وصل المعرفة | `semanticModelReady` المشتركة تنتقل هنا مع `provisionLocalSemanticModel` |
 | 4 | GovernanceViewModel (+ الموافقات) | يعتمد على أسطح ADR-2 القائمة |
 | 5 | ProvidersViewModel + wizard | 1231 سطراً حالياً — أكبر شاشة |
 | 6 | RadarViewModel / Decision / Tasks المتبقي | مع مصفوفة Roborazzi (GAP-21) |

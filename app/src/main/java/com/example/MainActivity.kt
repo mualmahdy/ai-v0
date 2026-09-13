@@ -16,14 +16,20 @@ import androidx.compose.ui.unit.LayoutDirection
 import com.example.presentation.di.AppContainer
 import com.example.presentation.di.FilesViewModelFactory
 import com.example.presentation.di.MainViewModelFactory
+import com.example.presentation.di.SessionsViewModelFactory
 import com.example.presentation.di.SettingsViewModelFactory
+import com.example.presentation.di.StudioViewModelFactory
 import com.example.presentation.di.TasksViewModelFactory
 import com.example.presentation.ui.MainAppScreen
 import com.example.presentation.viewmodel.FilesViewModel
 import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.SessionsViewModel
 import com.example.presentation.viewmodel.SettingsViewModel
+import com.example.presentation.viewmodel.StudioSignal
+import com.example.presentation.viewmodel.StudioViewModel
 import com.example.presentation.viewmodel.TasksViewModel
 import com.example.ui.theme.MyApplicationTheme
+import kotlinx.coroutines.flow.MutableSharedFlow
 
 class MainActivity : ComponentActivity() {
 
@@ -32,7 +38,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val viewModel: MainViewModel by viewModels {
-        MainViewModelFactory(appContainer)
+        MainViewModelFactory(appContainer, studioSignalBus)
     }
 
     // GAP-11 (Design Closure 2026): the tasks feature ViewModel — the
@@ -51,6 +57,22 @@ class MainActivity : ComponentActivity() {
 
     private val settingsViewModel: SettingsViewModel by viewModels {
         SettingsViewModelFactory(appContainer)
+    }
+
+    // ADR-6 SLICE 2 (Design Closure 2026 UI-redesign track): the STUDIO and
+    // SESSIONS feature ViewModels — the conversation runtime and the
+    // durable-session registry left the MainViewModel (same freeze rule).
+    // The per-Activity studio signal bus connects them: StudioViewModel
+    // emits cross-feature projections (execution events, session policy
+    // changes); MainViewModel collects them into its display mirrors.
+    private val studioSignalBus = MutableSharedFlow<StudioSignal>(extraBufferCapacity = 256)
+
+    private val studioViewModel: StudioViewModel by viewModels {
+        StudioViewModelFactory(appContainer, studioSignalBus)
+    }
+
+    private val sessionsViewModel: SessionsViewModel by viewModels {
+        SessionsViewModelFactory(appContainer)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,7 +103,9 @@ class MainActivity : ComponentActivity() {
                             viewModel = viewModel,
                             tasksViewModel = tasksViewModel,
                             filesViewModel = filesViewModel,
-                            settingsViewModel = settingsViewModel
+                            settingsViewModel = settingsViewModel,
+                            studioViewModel = studioViewModel,
+                            sessionsViewModel = sessionsViewModel
                         )
                     }
                 }
