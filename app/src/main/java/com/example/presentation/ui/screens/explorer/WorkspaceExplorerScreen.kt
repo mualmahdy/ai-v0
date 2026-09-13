@@ -12,10 +12,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Extension
@@ -23,10 +24,12 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -41,36 +44,35 @@ import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.domain.core.resource.ResourceType
 import com.example.domain.core.session.ChatMode
 import com.example.presentation.ui.navigation.WorkspaceRoutes
+import com.example.presentation.viewmodel.FilesViewModel
 import com.example.presentation.viewmodel.MainViewModel
 
 /**
  * ============================================================================
- * WorkspaceExplorerScreen — UNIFIED OBJECT EXPLORER (report gap: "unified
- * resource Explorer NOT FIXED — everything is scattered across screens")
+ * WorkspaceExplorerScreen — UNIFIED OBJECT EXPLORER
  * ============================================================================
  *
- * ONE place discovers every workspace object and its live count:
+ * ONE place discovers every workspace object and its live count. Every row
+ * deep-links into the owning surface; counts are BACKEND TRUTH (Room-backed
+ * flows), nothing is fabricated.
  *
- *   Workspace Explorer
- *   ├ Agents          (durable registry)
- *   ├ Models          (enabled LLM resources — exact-boundable)
- *   ├ Resources       (all materialized resource types)
- *   ├ Tools/MCP/Skills (extensions ecosystem)
- *   ├ Knowledge       (RAG documents)
- *   ├ Files           (workspace sandbox files)
- *   ├ Tasks/Workflows (builder + durable library + resumable)
- *   └ Sessions        (durable conversation sessions)
- *
- * Every row deep-links into the owning surface. Counts are BACKEND TRUTH
- * (Room-backed flows through the UiState) — nothing is fabricated.
+ * ADR-6 slice 1 (Design Closure 2026 UI-redesign track) — REDESIGNED:
+ *  - rows are grouped into three labeled sections (ذكاء التنفيذ / الموارد
+ *    والأدوات / المعرفة والمحتوى / الخطط والجلسات) instead of one flat list;
+ *  - each row carries a count chip on the trailing edge + a chevron
+ *    affordance (RTL);
+ *  - the FILES count now comes from the extracted FilesViewModel (the
+ *    workspaceFiles field left the shared UiState).
  */
 @Composable
 fun WorkspaceExplorerScreen(
     viewModel: MainViewModel,
+    filesViewModel: FilesViewModel,
     onNavigate: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
+    val filesState by filesViewModel.state.collectAsState()
 
     Column(
         modifier = modifier
@@ -91,7 +93,7 @@ fun WorkspaceExplorerScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp)
         )
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         val llmResources = state.materializedResources.filter {
             it.resourceType == ResourceType.LLM &&
@@ -99,10 +101,14 @@ fun WorkspaceExplorerScreen(
                     it.lifecycleState == ResourceLifecycleState.ACTIVE)
         }
 
+        // ===================== Section 1: ذكاء التنفيذ =====================
+        ExplorerSectionLabel("ذكاء التنفيذ")
         ExplorerRow(
             icon = Icons.Default.Psychology,
             title = "الوكلاء",
-            subtitle = "${state.availableAgents.size} وكيل في السجل الدائم (نشط: ${state.activeAgent?.identity?.name ?: "—"})",
+            count = state.availableAgents.size,
+            countLabel = "وكيل",
+            subtitle = "في السجل الدائم (نشط: ${state.activeAgent?.identity?.name ?: "—"})",
             route = WorkspaceRoutes.STUDIO,
             onNavigate = onNavigate,
             testTag = "explorer_agents"
@@ -110,16 +116,23 @@ fun WorkspaceExplorerScreen(
         ExplorerRow(
             icon = Icons.Default.Dns,
             title = "النماذج (LLM)",
+            count = llmResources.size,
+            countLabel = "نموذج",
             subtitle = if (llmResources.isEmpty()) "لا نماذج مفعّلة — اربط مزوداً أولاً"
-            else "${llmResources.size} نموذج مفعّل (${llmResources.joinToString(", ") { it.metadata["displayName"] ?: it.metadata["offeringId"] ?: it.resourceId.value }.take(80)})",
+            else llmResources.joinToString(", ") { it.metadata["displayName"] ?: it.metadata["offeringId"] ?: it.resourceId.value }.take(80),
             route = WorkspaceRoutes.PROVIDERS,
             onNavigate = onNavigate,
             testTag = "explorer_models"
         )
+
+        // ===================== Section 2: الموارد والأدوات =====================
+        ExplorerSectionLabel("الموارد والأدوات")
         ExplorerRow(
             icon = Icons.Default.Storage,
             title = "الموارد المادية (Runtime)",
-            subtitle = "${state.materializedResources.size} مورد مسجّل — LLM / بحث / تضمين / أدوات",
+            count = state.materializedResources.size,
+            countLabel = "مورد",
+            subtitle = "مسجّل — LLM / بحث / تضمين / أدوات",
             route = WorkspaceRoutes.PROVIDERS,
             onNavigate = onNavigate,
             testTag = "explorer_resources"
@@ -127,16 +140,22 @@ fun WorkspaceExplorerScreen(
         ExplorerRow(
             icon = Icons.Default.Extension,
             title = "الأدوات و MCP والمهارات",
+            count = state.mcpServers.size + state.skills.size + state.plugins.size,
+            countLabel = "عنصر",
             subtitle = "${state.mcpServers.size} خادم MCP • ${state.skills.size} مهارة • ${state.plugins.size} إضافة",
             route = WorkspaceRoutes.EXTENSIONS,
             onNavigate = onNavigate,
             testTag = "explorer_extensions"
         )
+
+        // ===================== Section 3: المعرفة والمحتوى =====================
+        ExplorerSectionLabel("المعرفة والمحتوى")
         ExplorerRow(
             icon = Icons.Default.MenuBook,
             title = "المعرفة (RAG)",
-            subtitle = "${state.knowledgeDocuments.size} مستند معرفي" +
-                if (state.semanticModelReady) " • تضمين دلالي محلي جاهز" else "",
+            count = state.knowledgeDocuments.size,
+            countLabel = "مستند",
+            subtitle = if (state.semanticModelReady) "تضمين دلالي محلي جاهز" else "تضمين معجمي (النموذج الدلالي غير مُجهّز)",
             route = WorkspaceRoutes.KNOWLEDGE,
             onNavigate = onNavigate,
             testTag = "explorer_knowledge"
@@ -144,15 +163,22 @@ fun WorkspaceExplorerScreen(
         ExplorerRow(
             icon = Icons.Default.Folder,
             title = "الملفات",
-            subtitle = "${state.workspaceFiles.size} ملف في صندوق مساحة العمل",
+            count = filesState.files.size,
+            countLabel = "ملف",
+            subtitle = "في ملعب مساحة العمل",
             route = WorkspaceRoutes.FILES,
             onNavigate = onNavigate,
             testTag = "explorer_files"
         )
+
+        // ===================== Section 4: الخطط والجلسات =====================
+        ExplorerSectionLabel("الخطط والجلسات")
         ExplorerRow(
             icon = Icons.Default.AccountTree,
             title = "المهام وخطط العمل",
-            subtitle = "${state.workflowLibrary.size} خطة محفوظة • ${state.resumableWorkflows.size} تنفيذ قابل للاستئناف",
+            count = state.workflowLibrary.size,
+            countLabel = "خطة",
+            subtitle = "${state.resumableWorkflows.size} تنفيذ قابل للاستئناف",
             route = WorkspaceRoutes.TASKS,
             onNavigate = onNavigate,
             testTag = "explorer_workflows"
@@ -160,24 +186,40 @@ fun WorkspaceExplorerScreen(
         ExplorerRow(
             icon = Icons.Default.Schedule,
             title = "الجلسات (محادثات دائمة)",
+            count = state.sessions.size,
+            countLabel = "جلسة",
             subtitle = when {
                 state.sessions.isEmpty() -> "لا جلسات بعد"
                 else -> {
                     val quick = state.sessions.count { it.mode == ChatMode.QUICK_CHAT }
-                    "${state.sessions.size} جلسة محفوظة ($quick محادثة سريعة) • ${state.sessions.sumOf { it.turnCount }} دورة"
+                    "$quick محادثة سريعة • ${state.sessions.sumOf { it.turnCount }} دورة"
                 }
             },
             route = WorkspaceRoutes.STUDIO,
             onNavigate = onNavigate,
             testTag = "explorer_sessions"
         )
+        Spacer(modifier = Modifier.height(16.dp))
     }
+}
+
+@Composable
+private fun ExplorerSectionLabel(label: String) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+    )
 }
 
 @Composable
 private fun ExplorerRow(
     icon: ImageVector,
     title: String,
+    count: Int,
+    countLabel: String,
     subtitle: String,
     route: String,
     onNavigate: (String) -> Unit,
@@ -199,12 +241,19 @@ private fun ExplorerRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.padding(14.dp)
         ) {
-            Icon(
-                icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(22.dp)
-            )
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+            ) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .padding(6.dp)
+                        .size(18.dp)
+                )
+            }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
@@ -216,6 +265,27 @@ private fun ExplorerRow(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "$count",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(2.dp))
+                Text(
+                    text = countLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    Icons.Default.ChevronLeft,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp)
                 )
             }
         }

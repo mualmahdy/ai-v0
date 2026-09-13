@@ -1985,7 +1985,6 @@ class MainViewModelFactory(
                 connectProviderUseCase = appContainer.connectProviderUseCase,
                 manageWorkspaceBudgetUseCase = appContainer.manageWorkspaceBudgetUseCase,
                 manageMemoryUseCase = appContainer.manageMemoryUseCase,
-                manageWorkspaceFilesUseCase = appContainer.manageWorkspaceFilesUseCase,
                 componentRegistry = appContainer.componentRegistry,
                 cbrMdpEngine = appContainer.cbrMdpEngine,
                 extensionManager = appContainer.extensionManager,
@@ -2040,6 +2039,46 @@ class TasksViewModelFactory(
             return com.example.presentation.viewmodel.TasksViewModel(
                 taskBoardService = appContainer.taskBoardService,
                 agentOrchestrator = appContainer.agentOrchestrator,
+                workspaceRuntimeService = appContainer.workspaceRuntimeService
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 1 (Design Closure 2026 UI-redesign track) — factory for the
+ * FILES feature ViewModel: the sandbox explorer state/behavior extracted
+ * from MainViewModel (same pattern as TasksViewModelFactory).
+ */
+class FilesViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.FilesViewModel::class.java)) {
+            return com.example.presentation.viewmodel.FilesViewModel(
+                manageWorkspaceFilesUseCase = appContainer.manageWorkspaceFilesUseCase,
+                activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace,
+                bootstrapState = appContainer.workspaceRuntimeService.bootstrapState
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 1 (Design Closure 2026 UI-redesign track) — factory for the
+ * SETTINGS feature ViewModel: the workspace-management mutations extracted
+ * from MainViewModel (same pattern as TasksViewModelFactory).
+ */
+class SettingsViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.SettingsViewModel::class.java)) {
+            return com.example.presentation.viewmodel.SettingsViewModel(
                 workspaceRuntimeService = appContainer.workspaceRuntimeService
             ) as T
         }

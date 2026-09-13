@@ -14,10 +14,14 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.unit.LayoutDirection
 import com.example.presentation.di.AppContainer
+import com.example.presentation.di.FilesViewModelFactory
 import com.example.presentation.di.MainViewModelFactory
+import com.example.presentation.di.SettingsViewModelFactory
 import com.example.presentation.di.TasksViewModelFactory
 import com.example.presentation.ui.MainAppScreen
+import com.example.presentation.viewmodel.FilesViewModel
 import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.SettingsViewModel
 import com.example.presentation.viewmodel.TasksViewModel
 import com.example.ui.theme.MyApplicationTheme
 
@@ -36,6 +40,17 @@ class MainActivity : ComponentActivity() {
     // growing MainViewModel).
     private val tasksViewModel: TasksViewModel by viewModels {
         TasksViewModelFactory(appContainer)
+    }
+
+    // ADR-6 slice 1 (Design Closure 2026 UI-redesign track): the FILES and
+    // SETTINGS feature ViewModels — the sandbox explorer and the workspace
+    // manager left the MainViewModel (same freeze rule).
+    private val filesViewModel: FilesViewModel by viewModels {
+        FilesViewModelFactory(appContainer)
+    }
+
+    private val settingsViewModel: SettingsViewModel by viewModels {
+        SettingsViewModelFactory(appContainer)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,7 +77,12 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxSize(),
                         color = MaterialTheme.colorScheme.background
                     ) {
-                        MainAppScreen(viewModel = viewModel, tasksViewModel = tasksViewModel)
+                        MainAppScreen(
+                            viewModel = viewModel,
+                            tasksViewModel = tasksViewModel,
+                            filesViewModel = filesViewModel,
+                            settingsViewModel = settingsViewModel
+                        )
                     }
                 }
             }

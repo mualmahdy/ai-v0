@@ -184,7 +184,7 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.ProjectSnapshotEntity::class,
         com.example.infrastructure.persistence.entities.AuditEventEntity::class
     ],
-    version = 17,
+    version = AppDatabase.SCHEMA_VERSION,
     // GAP-01 (Design Closure 2026, ADR-1): schema export is now enabled and
     // committed under app/schemas/ — every future schema change gets a
     // committed baseline JSON, enabling MigrationTestHelper tests and CI
@@ -280,6 +280,14 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun auditEventDao(): com.example.infrastructure.persistence.dao.AuditEventDao
 
     companion object {
+        /**
+         * SINGLE SOURCE OF TRUTH for the Room schema version (ADR-6 slice 1:
+         * the Settings "About" card previously HARDCODED "Room v12" while the
+         * database had already reached v17 — a stale honesty violation. UI
+         * surfaces read this constant instead of a literal).
+         */
+        const val SCHEMA_VERSION = 17
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 

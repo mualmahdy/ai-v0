@@ -58,7 +58,17 @@ android {
       isMinifyEnabled = true
       isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      // GAP-22 follow-up (Design Closure 2026 — honest CI): the release AAB is
+      // UNSIGNED unless signing material is actually present (env-provided
+      // keystore for release.yml, or a local my-upload-key.jks). The previous
+      // android.yml attempt injected EMPTY android.injected.signing.* values,
+      // which made AGP build a broken "externalOverride" signing config —
+      // validateSigningRelease then failed resolving a daemon directory as a
+      // keystore, so that CI step could never pass. With no signing config
+      // assigned, AGP emits an honest unsigned bundle instead.
+      signingConfig = if (!System.getenv("KEYSTORE_PATH").isNullOrBlank() ||
+        file("${rootDir}/my-upload-key.jks").exists()
+      ) signingConfigs.getByName("release") else null
     }
     debug {
       // Standard AGP debug signing (auto-generated keystore) — see FIX F-12.

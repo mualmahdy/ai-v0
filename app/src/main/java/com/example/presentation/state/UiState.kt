@@ -32,7 +32,6 @@ import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.ConversationSession
 import com.example.domain.core.storage.ProjectMetadata
-import com.example.domain.core.storage.WorkspaceFileEntry
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.workflow.ExecutionMode
 import com.example.domain.core.workflow.WorkflowExecutionReport
@@ -247,11 +246,10 @@ data class UiState(
     val newDocTitle: String = "",
     val newDocContent: String = "",
 
-    // Files Tab State
-    val workspaceFiles: List<WorkspaceFileEntry> = emptyList(),
-    val selectedFileContent: String? = null,
-    val selectedFilePath: String? = null,
-    val isFileLoading: Boolean = false,
+    // Files feature — REMOVED (ADR-6 slice 1, Design Closure 2026
+    // UI-redesign track): workspaceFiles / selectedFileContent /
+    // selectedFilePath / isFileLoading now live in FilesViewModel's own
+    // FilesUiState. The explorer count reads the FilesViewModel flow.
 
     // GAP-24 (Design Closure 2026, ADR-8): measurement-health snapshot for
     // the governance observatory "صحة القياس" card — honest counters of the

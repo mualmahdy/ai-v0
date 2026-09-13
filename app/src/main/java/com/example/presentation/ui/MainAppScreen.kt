@@ -110,6 +110,8 @@ import com.example.presentation.viewmodel.MainViewModel
 fun MainAppScreen(
     viewModel: MainViewModel,
     tasksViewModel: com.example.presentation.viewmodel.TasksViewModel? = null,
+    filesViewModel: com.example.presentation.viewmodel.FilesViewModel,
+    settingsViewModel: com.example.presentation.viewmodel.SettingsViewModel,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -169,7 +171,7 @@ fun MainAppScreen(
                 activeResourceCount = activeResourceCount,
                 allWorkspaces = allWorkspaces.map { it.name to it.id },
                 activeWorkspaceId = activeWorkspace?.id,
-                onSwitchWorkspace = { viewModel.switchWorkspace(it) },
+                onSwitchWorkspace = settingsViewModel::switchWorkspace,
                 onCreateWorkspace = { createWorkspaceOpen = true },
                 onOpenSettings = { navController.navigate(WorkspaceRoutes.SETTINGS) }
             )
@@ -237,6 +239,8 @@ fun MainAppScreen(
                     navController = navController,
                     viewModel = viewModel,
                     tasksViewModel = tasksViewModel,
+                    filesViewModel = filesViewModel,
+                    settingsViewModel = settingsViewModel,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -246,7 +250,7 @@ fun MainAppScreen(
     if (createWorkspaceOpen) {
         CreateWorkspaceDialog(
             onConfirm = { name, description ->
-                viewModel.createWorkspace(name, description)
+                settingsViewModel.createWorkspace(name, description)
                 createWorkspaceOpen = false
             },
             onDismiss = { createWorkspaceOpen = false }
@@ -332,6 +336,8 @@ private fun WorkspaceNavHost(
     navController: NavHostController,
     viewModel: MainViewModel,
     tasksViewModel: com.example.presentation.viewmodel.TasksViewModel? = null,
+    filesViewModel: com.example.presentation.viewmodel.FilesViewModel,
+    settingsViewModel: com.example.presentation.viewmodel.SettingsViewModel,
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
@@ -346,6 +352,9 @@ private fun WorkspaceNavHost(
             StudioScreen(
                 viewModel = viewModel,
                 onNavigate = navigate,
+                // ADR-6 slice 1: the autonomy mutation routes to the SETTINGS
+                // feature ViewModel (authoritative service routing).
+                onAutonomyPolicy = settingsViewModel::setAutonomyPolicy,
                 modifier = Modifier.fillMaxSize().imePadding()
             )
         }
@@ -364,7 +373,7 @@ private fun WorkspaceNavHost(
         }
         composable(WorkspaceRoutes.FILES) {
             FilesScreen(
-                viewModel = viewModel,
+                filesViewModel = filesViewModel,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -415,15 +424,15 @@ private fun WorkspaceNavHost(
         composable(WorkspaceRoutes.SETTINGS) {
             SettingsScreen(
                 viewModel = viewModel,
+                settingsViewModel = settingsViewModel,
                 onNavigate = navigate,
                 modifier = Modifier.fillMaxSize()
             )
         }
-        // UNIFIED OBJECT EXPLORER (report gap: everything was scattered —
-        // one place now discovers every workspace object).
         composable(WorkspaceRoutes.EXPLORER) {
             com.example.presentation.ui.screens.explorer.WorkspaceExplorerScreen(
                 viewModel = viewModel,
+                filesViewModel = filesViewModel,
                 onNavigate = navigate,
                 modifier = Modifier.fillMaxSize()
             )

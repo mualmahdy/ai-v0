@@ -108,6 +108,12 @@ import com.example.presentation.viewmodel.MainViewModel
 fun StudioScreen(
     viewModel: MainViewModel,
     onNavigate: (String) -> Unit,
+    /**
+     * ADR-6 slice 1: the autonomy-policy mutation moved to the SETTINGS
+     * feature ViewModel (authoritative service routing) — the Studio keeps
+     * DISPLAYING the effective policy and delegates the mutation here.
+     */
+    onAutonomyPolicy: (AutonomyPolicy) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -166,7 +172,7 @@ fun StudioScreen(
                     networkPolicy = state.networkPolicy,
                     autonomyPolicy = state.autonomyPolicy,
                     onNetworkPolicy = viewModel::setNetworkPolicy,
-                    onAutonomyPolicy = viewModel::setAutonomyPolicy
+                    onAutonomyPolicy = onAutonomyPolicy
                 )
             }
 

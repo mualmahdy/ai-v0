@@ -40,7 +40,12 @@ jobs:
       run: |
         ./gradlew :app:compileDebugKotlin --no-daemon --stacktrace
 
-    - name: Unit tests (Phase 4 invariants: no silent fallback, single write authority, version bump)
+    # NOTE(workflow-YAML): a "name:" value containing ": " MUST be quoted —
+    # an unquoted colon in a mapping value invalidates the whole workflow
+    # file (GitHub fails the run before creating any job). This exact bug
+    # made android.yml fail 52/52 runs since its introduction while the
+    # deleted build-apk.yml silently remained the only APK producer.
+    - name: "Unit tests (Phase 4 invariants: no silent fallback, single write authority, version bump)"
       run: |
         ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
 
@@ -50,28 +55,33 @@ jobs:
 
     # P0-4 (audit 2026 §30 — no release pipeline): the PR gate now ALSO
     # proves the RELEASE variant builds (R8 minification, real keep rules,
-    # AAB bundling) BEFORE release day. Unsigned here — signing secrets are
-    # exercised by release.yml; a CI proof that minification does not break
-    # the build is the minimum release-readiness bar.
+    # AAB bundling) BEFORE release day. Unsigned here — the build.gradle.kts
+    # release block only assigns a signing config when KEYSTORE_PATH is
+    # provided (release.yml supplies it), so this step produces an honest
+    # unsigned AAB and a CI proof that minification does not break the build.
+    # (The previous empty android.injected.signing.* injection is removed —
+    # it created a broken "externalOverride" signing config that failed
+    # validateSigningRelease before this step could ever pass.)
     - name: Build Release AAB (minified, unsigned — release-readiness gate)
       run: |
-        ./gradlew :app:bundleRelease --no-daemon --stacktrace \
-          -Pandroid.injected.signing.store.file= \
-          -Pandroid.injected.signing.store.password= \
-          -Pandroid.injected.signing.key.alias= \
-          -Pandroid.injected.signing.key.password=
+        ./gradlew :app:bundleRelease --no-daemon --stacktrace
 
+    # The debug APK artifact keeps the naming convention of the deleted
+    # build-apk.yml (the only workflow that ever delivered an APK from CI)
+    # so existing download links/habits keep working: ai-v0-ultimate-debug-apk.
     - name: Upload APK artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: app-debug-apks
+        name: ai-v0-ultimate-debug-apk
         path: app/build/outputs/**/*.apk
+        retention-days: 14
 
     - name: Upload release AAB artifact
       uses: actions/upload-artifact@v4
       with:
         name: app-release-aab-unsigned
         path: app/build/outputs/bundle/release/*.aab
+        retention-days: 14
 
     - name: Upload test reports
       if: always()

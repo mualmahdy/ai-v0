@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -18,10 +17,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
@@ -29,7 +30,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -42,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -50,35 +53,52 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.domain.core.storage.WorkspaceFileEntry
 import com.example.presentation.ui.components.BusyIndicator
 import com.example.presentation.ui.components.ConfirmDialog
 import com.example.presentation.ui.components.EmptyState
 import com.example.presentation.ui.components.SectionHeader
 import com.example.presentation.ui.components.StatusBadge
-import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.FilesViewModel
 
 /**
  * ============================================================================
  * FilesScreen — the real sandbox workspace file explorer
  * ============================================================================
  *
- * Previously a bare flat list + raw editor. Now: live search/filter, file
- * CREATION (governed write into the sandbox), file DELETION (with confirm),
- * folder/file semantics, size + mtime metadata, and a monospace editor with
- * save — all bound to the fail-closed active-workspace project contract.
+ * ADR-6 slice 1 (Design Closure 2026 UI-redesign track) — REDESIGNED on top
+ * of the extracted FilesViewModel (the state left MainViewModel/UiState):
+ *
+ *  - directories are grouped FIRST (navigation before leaf content);
+ *  - a sort control (name / size / last-modified) with a persistent choice;
+ *  - the header carries live counts (folders / files / total size);
+ *  - the feature's own diagnostic banner + error snackbar render locally
+ *    (previously they round-tripped through the global MainViewModel state);
+ *  - search, governed CREATE, DELETE with confirm, and the monospace editor
+ *    with save are unchanged in behavior (and keep their testTags).
  */
 @Composable
 fun FilesScreen(
-    viewModel: MainViewModel,
+    filesViewModel: FilesViewModel,
     modifier: Modifier = Modifier
 ) {
-    val state by viewModel.uiState.collectAsState()
+    val state by filesViewModel.state.collectAsState()
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var createFileOpen by rememberSaveable { mutableStateOf(false) }
     var deleteFileTarget by rememberSaveable { mutableStateOf<String?>(null) }
-    var editorContent by rememberSaveable { mutableStateOf<String?>(null) }
+    var sortOrder by rememberSaveable { mutableStateOf(FileSort.NAME) }
+    val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
 
-    LaunchedEffect(Unit) { viewModel.refreshFiles() }
+    // The listing refreshes on every visit to this route and on every
+    // active-project switch (FilesViewModel observes the workspace).
+    LaunchedEffect(Unit) { filesViewModel.refreshFiles() }
+
+    LaunchedEffect(state.errorMessage) {
+        state.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            filesViewModel.dismissError()
+        }
+    }
 
     // ---- Editor mode ----
     if (state.selectedFilePath != null && state.selectedFileContent != null) {
@@ -86,8 +106,8 @@ fun FilesScreen(
             path = state.selectedFilePath ?: "",
             initialContent = state.selectedFileContent ?: "",
             isLoading = state.isFileLoading,
-            onBack = viewModel::closeFileEditor,
-            onSave = { viewModel.saveFile(state.selectedFilePath ?: "", it) },
+            onBack = filesViewModel::closeFileEditor,
+            onSave = { filesViewModel.saveFile(state.selectedFilePath ?: "", it) },
             onDelete = { deleteFileTarget = state.selectedFilePath }
         )
         deleteFileTarget?.let { target ->
@@ -96,7 +116,7 @@ fun FilesScreen(
                 message = "سيُحذف الملف «$target» من ملعب مساحة العمل نهائياً.",
                 confirmLabel = "حذف",
                 onConfirm = {
-                    viewModel.deleteWorkspaceFile(target)
+                    filesViewModel.deleteWorkspaceFile(target)
                     deleteFileTarget = null
                 },
                 onDismiss = { deleteFileTarget = null }
@@ -106,85 +126,156 @@ fun FilesScreen(
     }
 
     // ---- Explorer mode ----
-    val filteredFiles = if (searchQuery.isBlank()) state.workspaceFiles
-    else state.workspaceFiles.filter { it.relativePath.contains(searchQuery, ignoreCase = true) }
+    val filteredFiles = if (searchQuery.isBlank()) state.files
+    else state.files.filter { it.relativePath.contains(searchQuery, ignoreCase = true) }
 
-    Column(modifier = modifier.testTag("files_workspace_screen")) {
-        SectionHeader(
-            icon = Icons.Default.Folder,
-            title = "ملفات ملعب مساحة العمل",
-            subtitle = "ملعب معزول لكل مشروع — عمليات محكومة ومُدقّقة أمنياً",
-            trailing = {
-                IconButton(
-                    onClick = viewModel::refreshFiles,
-                    modifier = Modifier.testTag("refresh_files_button")
-                ) {
-                    Icon(
-                        Icons.Default.Refresh,
-                        contentDescription = "تحديث",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+    val directories = filteredFiles.filter { it.isDirectory }.sortedWith(sortOrder.comparator())
+    val plainFiles = filteredFiles.filter { !it.isDirectory }.sortedWith(sortOrder.comparator())
+    val totalSize = plainFiles.sumOf { it.sizeBytes }
+
+    androidx.compose.material3.Scaffold(
+        modifier = modifier.testTag("files_workspace_screen"),
+        snackbarHost = { androidx.compose.material3.SnackbarHost(snackbarHostState) }
+    ) { innerPadding ->
+        Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            SectionHeader(
+                icon = Icons.Default.Folder,
+                title = "ملفات ملعب مساحة العمل",
+                subtitle = "ملعب معزول لكل مشروع — عمليات محكومة ومُدقّقة أمنياً • " +
+                    "${directories.size} مجلد • ${plainFiles.size} ملف • ${formatSize(totalSize)}",
+                trailing = {
+                    SortMenu(sortOrder = sortOrder, onSelect = { sortOrder = it })
+                    IconButton(
+                        onClick = filesViewModel::refreshFiles,
+                        modifier = Modifier.testTag("refresh_files_button")
+                    ) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = "تحديث",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(
+                        onClick = { createFileOpen = true },
+                        modifier = Modifier.testTag("btn_create_file")
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "ملف جديد",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
-                IconButton(
-                    onClick = { createFileOpen = true },
-                    modifier = Modifier.testTag("btn_create_file")
+            )
+
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = { Text("ابحث في المسارات…") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .testTag("input_file_search")
+            )
+
+            state.diagnosticBanner?.let { banner ->
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 2.dp)
+                        .clickable { filesViewModel.dismissBanner() }
+                        .testTag("files_diagnostic_banner")
                 ) {
-                    Icon(
-                        Icons.Default.Add,
-                        contentDescription = "ملف جديد",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = banner,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            maxLines = 2
+                        )
+                    }
                 }
             }
-        )
 
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = { searchQuery = it },
-            placeholder = { Text("ابحث في المسارات…") },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp)
-                .testTag("input_file_search")
-        )
+            if (state.isFileLoading && state.files.isEmpty()) {
+                BusyIndicator("جاري قراءة ملفات الملعب…")
+            }
 
-        if (state.isFileLoading && state.workspaceFiles.isEmpty()) {
-            BusyIndicator("جاري قراءة ملفات الملعب…")
-        }
-
-        if (filteredFiles.isEmpty()) {
-            EmptyState(
-                icon = Icons.Default.Folder,
-                title = if (searchQuery.isBlank()) "لا توجد ملفات في الملعب" else "لا نتائج مطابقة",
-                hint = if (searchQuery.isBlank())
-                    "أنشئ ملفاً جديداً أو شغّل مهارة الهيكلة من قسم الملحقات لتوليد هيكل معماري."
-                else "جرّب مصطلحاً آخر أو امسح البحث.",
-                action = if (searchQuery.isBlank()) {
-                    {
-                        Button(onClick = { createFileOpen = true }) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("إنشاء ملف")
+            if (filteredFiles.isEmpty()) {
+                EmptyState(
+                    icon = Icons.Default.Folder,
+                    title = if (searchQuery.isBlank()) "لا توجد ملفات في الملعب" else "لا نتائج مطابقة",
+                    hint = if (searchQuery.isBlank())
+                        "أنشئ ملفاً جديداً أو شغّل مهارة الهيكلة من قسم الملحقات لتوليد هيكل معماري."
+                    else "جرّب مصطلحاً آخر أو امسح البحث.",
+                    action = if (searchQuery.isBlank()) {
+                        {
+                            Button(onClick = { createFileOpen = true }) {
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("إنشاء ملف")
+                            }
+                        }
+                    } else null
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 16.dp, vertical = 4.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (directories.isNotEmpty()) {
+                        item(key = "dirs_header") {
+                            Text(
+                                text = "المجلدات",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+                            )
+                        }
+                        items(directories, key = { it.relativePath }) { file ->
+                            FileRow(
+                                entry = file,
+                                onOpen = { filesViewModel.openFile(file.relativePath) },
+                                onDelete = { deleteFileTarget = file.relativePath }
+                            )
                         }
                     }
-                } else null
-            )
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    horizontal = 16.dp, vertical = 4.dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                items(filteredFiles, key = { it.relativePath }) { file ->
-                    FileRow(
-                        entry = file,
-                        onOpen = { viewModel.openFile(file.relativePath) },
-                        onDelete = { deleteFileTarget = file.relativePath }
-                    )
+                    if (plainFiles.isNotEmpty()) {
+                        item(key = "files_header") {
+                            Text(
+                                text = "الملفات",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 4.dp, top = 8.dp)
+                            )
+                        }
+                        items(plainFiles, key = { it.relativePath }) { file ->
+                            FileRow(
+                                entry = file,
+                                onOpen = { filesViewModel.openFile(file.relativePath) },
+                                onDelete = { deleteFileTarget = file.relativePath }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -193,7 +284,7 @@ fun FilesScreen(
     if (createFileOpen) {
         CreateFileDialog(
             onConfirm = { path ->
-                viewModel.createWorkspaceFile(path, "")
+                filesViewModel.createFile(path, "")
                 createFileOpen = false
             },
             onDismiss = { createFileOpen = false }
@@ -206,7 +297,7 @@ fun FilesScreen(
             message = "سيُحذف «$target» نهائياً من ملعب مساحة العمل الحالية.",
             confirmLabel = "حذف",
             onConfirm = {
-                viewModel.deleteWorkspaceFile(target)
+                filesViewModel.deleteWorkspaceFile(target)
                 deleteFileTarget = null
             },
             onDismiss = { deleteFileTarget = null }
@@ -214,9 +305,55 @@ fun FilesScreen(
     }
 }
 
+/** Explorer sort orders (persisted via rememberSaveable by the caller). */
+enum class FileSort(val label: String) {
+    NAME("الاسم"),
+    SIZE("الحجم"),
+    MODIFIED("آخر تعديل");
+
+    fun comparator(): java.util.Comparator<WorkspaceFileEntry> = when (this) {
+        NAME -> compareBy(String.CASE_INSENSITIVE_ORDER) { it.relativePath.substringAfterLast('/') }
+        SIZE -> compareByDescending<WorkspaceFileEntry> { it.sizeBytes }
+            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.relativePath }
+        MODIFIED -> compareByDescending<WorkspaceFileEntry> { it.lastModifiedMs }
+            .thenBy(String.CASE_INSENSITIVE_ORDER) { it.relativePath }
+    }
+}
+
+@Composable
+private fun SortMenu(sortOrder: FileSort, onSelect: (FileSort) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    IconButton(
+        onClick = { expanded = true },
+        modifier = Modifier.testTag("btn_file_sort")
+    ) {
+        Icon(
+            Icons.AutoMirrored.Filled.Sort,
+            contentDescription = "ترتيب: ${sortOrder.label}",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        FileSort.entries.forEach { option ->
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        option.label,
+                        fontWeight = if (option == sortOrder) FontWeight.Bold else FontWeight.Normal
+                    )
+                },
+                onClick = {
+                    onSelect(option)
+                    expanded = false
+                }
+            )
+        }
+    }
+}
+
 @Composable
 private fun FileRow(
-    entry: com.example.domain.core.storage.WorkspaceFileEntry,
+    entry: WorkspaceFileEntry,
     onOpen: () -> Unit,
     onDelete: () -> Unit
 ) {

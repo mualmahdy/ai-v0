@@ -13,7 +13,6 @@ import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
 import com.example.application.usecases.ManageMemoryUseCase
 import com.example.application.usecases.ManageWorkspaceBudgetUseCase
-import com.example.application.usecases.ManageWorkspaceFilesUseCase
 import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.Outcome
 import com.example.domain.core.agent.AgentBudget
@@ -71,7 +70,6 @@ class MainViewModel(
     private val executeAgentTaskUseCase: ExecuteAgentTaskUseCase,
     private val executeWorkflowUseCase: ExecuteWorkflowUseCase,
     private val manageMemoryUseCase: ManageMemoryUseCase,
-    private val manageWorkspaceFilesUseCase: ManageWorkspaceFilesUseCase,
     // GAP-19 (Design Closure 2026, ADR-6 step 2): extracted use-cases —
     // the simulation/provider-chain/budget business logic left the VM.
     private val decisionSimulationUseCase: DecisionSimulationUseCase? = null,
@@ -431,8 +429,19 @@ class MainViewModel(
                         }
                         // Reload RAG knowledge for the new workspace scope.
                         ragPipelineService.loadFromPersistence()
-                        // Refresh files for the new active project.
-                        refreshFiles()
+                        // AUTONOMY DISPLAY SYNC (ADR-6 slice 1): the policy
+                        // mutations now live in SettingsViewModel (routed to
+                        // the AUTHORITATIVE service). This collector mirrors
+                        // the persisted column back into the shared display
+                        // state so the Studio badge stays live without the
+                        // MainViewModel owning the mutation. The sandbox file
+                        // listing ALSO no longer refreshes here — the new
+                        // FilesViewModel observes the active project itself.
+                        val autonomy = workspaceRuntimeService
+                            .autonomyPolicyForWorkspace(workspace.id)
+                        if (autonomy != null) {
+                            _uiState.update { it.copy(autonomyPolicy = autonomy) }
+                        }
                     }
                 }
             }.onFailure { e ->
@@ -441,33 +450,15 @@ class MainViewModel(
         }
     }
 
-    /**
-     * Phase 2 — Switches to a different workspace. The UI calls this when the user
-     * picks a workspace from the workspace switcher.
+    /*
+     * ADR-6 slice 1 (Design Closure 2026 UI-redesign track) — the workspace
+     * management mutations (switchWorkspace / createWorkspace /
+     * updateWorkspaceNetworkPolicy / setAutonomyPolicy) and the ENTIRE files
+     * feature (refreshFiles / openFile / closeFileEditor / saveFile /
+     * createWorkspaceFile / deleteWorkspaceFile + the four UiState fields
+     * + currentProjectIdOrInform) moved to SettingsViewModel and
+     * FilesViewModel. MainViewModel keeps only the shared DISPLAY mirrors.
      */
-    fun switchWorkspace(workspaceId: String) {
-        viewModelScope.launch {
-            workspaceRuntimeService.switchWorkspace(workspaceId)
-        }
-    }
-
-    /**
-     * Phase 2 — Creates a new workspace and switches to it.
-     */
-    fun createWorkspace(name: String, description: String) {
-        viewModelScope.launch {
-            workspaceRuntimeService.createWorkspace(name = name, description = description)
-        }
-    }
-
-    /**
-     * Phase 2 — Updates the network policy of the active workspace.
-     */
-    fun updateWorkspaceNetworkPolicy(policy: NetworkPolicy) {
-        viewModelScope.launch {
-            workspaceRuntimeService.updateNetworkPolicy(policy)
-        }
-    }
 
     /**
      * Local-first semantic RAG provisioning (audit 2026 fix): downloads the
@@ -684,8 +675,10 @@ class MainViewModel(
             // corrupt DB row — crashed the app during ViewModel init).
             runCatching {
                 refreshMemories()
-                refreshFiles()
                 simulateDecision()
+                // (ADR-6 slice 1) the initial sandbox listing is now loaded
+                // by FilesViewModel's own workspace collector — no files
+                // responsibility remains in this ViewModel.
             }.onFailure { e ->
                 _uiState.update { it.copy(errorMessage = "تعذر تحميل البيانات الأولية: ${e.localizedMessage}") }
             }
@@ -704,31 +697,10 @@ class MainViewModel(
         simulateDecision()
     }
 
-    /**
-     * REPAIR ORDER §20 — AUTONOMY POLICY SOURCE OF TRUTH.
-     *
-     * Previously this was UI-ONLY state (decorative: UiState.autonomyPolicy
-     * had ZERO runtime consumers, and the workspace's authoritative column
-     * was frozen at creation with NO update path). The UI toggle now
-     * propagates to the AUTHORITATIVE governance layer
-     * (WorkspaceRuntimeService.updateAutonomyPolicy → the persisted
-     * workspace column consumed by the execution pipeline); the UI merely
-     * DISPLAYS the effective policy (kept in sync from the authoritative
-     * activeWorkspace flow).
-     */
-    fun setAutonomyPolicy(policy: AutonomyPolicy) {
-        viewModelScope.launch {
-            runCatching {
-                workspaceRuntimeService.updateAutonomyPolicy(policy)
-            }.onSuccess {
-                _uiState.update { it.copy(autonomyPolicy = policy) }
-            }.onFailure { e ->
-                _uiState.update {
-                    it.copy(errorMessage = "تعذر تحديث سياسة الاستقلالية: ${e.localizedMessage}")
-                }
-            }
-        }
-    }
+    // setAutonomyPolicy moved to SettingsViewModel (ADR-6 slice 1) — the
+    // mutation routes to the authoritative service there; the display
+    // mirror in UiState.autonomyPolicy is synced by observeWorkspace from
+    // the persisted column. See the block comment above observeWorkspace.
 
     // --- Prompt & Task Execution ---
     fun updatePromptInput(input: String) {
@@ -1726,7 +1698,11 @@ class MainViewModel(
             when (val outcome = extensionManager.executeSkill(skillId, parameters)) {
                 is Outcome.Success -> {
                     _uiState.update { it.copy(diagnosticBanner = outcome.value) }
-                    refreshFiles()
+                    // (ADR-6 slice 1) the sandbox listing refresh moved with
+                    // the Files feature — FilesViewModel re-lists on every
+                    // visit to the Files screen and on project switches, so
+                    // files a skill generated appear when the user opens the
+                    // explorer.
                 }
                 is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
                 else -> Unit
@@ -2142,112 +2118,6 @@ class MainViewModel(
                 executeWorkflow(resumable.plan, resumable.completedStepIds)
             }.onFailure { failure ->
                 _uiState.update { it.copy(diagnosticBanner = "تعذر استئناف التنفيذ: ${failure.localizedMessage}") }
-            }
-        }
-    }
-
-    // --- Files Operations ---
-
-    /**
-     * GAP-CLOSURE P0-04: the file operations use the ACTIVE WORKSPACE'S OWN
-     * project — never the legacy implicit projectId=1L fallback. When no
-     * project is bound the operation fails honestly with a user-visible
-     * message instead of silently reading/writing the shared legacy project.
-     *
-     * REPAIR ORDER §3A — the failure message now reflects the BOOTSTRAP
-     * STATE MACHINE: while bootstrapping, the message says so (wait); on an
-     * explicit failure phase (e.g. PROJECT_NOT_FOUND after deleting every
-     * project), the message is actionable instead of the recurring raw
-     * error. The gate is [BootstrapState.isReady].
-     */
-    private fun currentProjectIdOrInform(): Long? {
-        val projectId = _uiState.value.activeProject?.id?.takeIf { it > 0L }
-        if (projectId == null || projectId <= 0L) {
-            val phase = bootstrapState.value
-            val message = when {
-                phase.isReady -> "لا يوجد مشروع مرتبط بمساحة العمل النشطة — أنشئ مشروعاً جديداً أو اختر مشروعاً."
-                phase.isFailed -> (phase.phase as? com.example.application.bootstrap.BootstrapPhase.Failed)?.message
-                    ?: "فشل تهيئة سياق مساحة العمل."
-                else -> "جارٍ تهيئة سياق مساحة العمل (${phase.phase.label}) — أعد المحاولة بعد لحظات."
-            }
-            _uiState.update { it.copy(errorMessage = message) }
-        }
-        return projectId
-    }
-
-    fun refreshFiles() {
-        val projectId = currentProjectIdOrInform() ?: return
-        viewModelScope.launch {
-            _uiState.update { it.copy(isFileLoading = true) }
-            when (val outcome = manageWorkspaceFilesUseCase.listProjectFiles(projectId)) {
-                is Outcome.Success -> _uiState.update { it.copy(workspaceFiles = outcome.value, isFileLoading = false) }
-                is Outcome.Degraded -> _uiState.update { it.copy(workspaceFiles = outcome.partialValue ?: emptyList(), isFileLoading = false) }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage, isFileLoading = false) }
-            }
-        }
-    }
-
-    fun openFile(relativePath: String) {
-        val projectId = currentProjectIdOrInform() ?: return
-        viewModelScope.launch {
-            _uiState.update { it.copy(isFileLoading = true, selectedFilePath = relativePath) }
-            when (val outcome = manageWorkspaceFilesUseCase.readProjectFile(projectId, relativePath)) {
-                is Outcome.Success -> _uiState.update { it.copy(selectedFileContent = outcome.value, isFileLoading = false) }
-                is Outcome.Degraded -> _uiState.update { it.copy(selectedFileContent = outcome.partialValue, isFileLoading = false) }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage, isFileLoading = false) }
-            }
-        }
-    }
-
-    /**
-     * FIX P0-5 (audit c03919d): proper editor close. Previously the editor's
-     * back button called openFile("") which attempted to READ a file with an
-     * empty relative path; now the editor state is cleared directly.
-     */
-    fun closeFileEditor() {
-        _uiState.update { it.copy(selectedFilePath = null, selectedFileContent = null) }
-    }
-
-    fun saveFile(relativePath: String, content: String) {
-        val projectId = currentProjectIdOrInform() ?: return
-        viewModelScope.launch {
-            when (val outcome = manageWorkspaceFilesUseCase.writeProjectFile(projectId, relativePath, content)) {
-                is Outcome.Success -> {
-                    refreshFiles()
-                    openFile(relativePath)
-                }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> refreshFiles()
-            }
-        }
-    }
-
-    /**
-     * Creates a new file in the active workspace project (create + write in
-     * one governed operation), then refreshes the file list.
-     */
-    fun createWorkspaceFile(relativePath: String, content: String) {
-        if (relativePath.isBlank()) return
-        saveFile(relativePath, content)
-    }
-
-    /** Deletes a workspace project file (governed, fail-closed, audited). */
-    fun deleteWorkspaceFile(relativePath: String) {
-        val projectId = currentProjectIdOrInform() ?: return
-        viewModelScope.launch {
-            when (val outcome = manageWorkspaceFilesUseCase.deleteProjectFile(projectId, relativePath)) {
-                is Outcome.Success -> {
-                    _uiState.update {
-                        it.copy(
-                            diagnosticBanner = "تم حذف الملف: $relativePath",
-                            selectedFilePath = null,
-                            selectedFileContent = null
-                        )
-                    }
-                    refreshFiles()
-                }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> refreshFiles()
             }
         }
     }
