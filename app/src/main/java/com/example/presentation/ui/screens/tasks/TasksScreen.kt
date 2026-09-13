@@ -109,8 +109,13 @@ fun TasksScreen(
         viewModel.updateWorkflowStep(index, transform)
     }
 
-    val cycleError = detectCycle(steps)
-    val canExecute = goal.isNotBlank() && steps.isNotEmpty() && cycleError == null
+    // (GAP-19 / ADR-6 step 6 — DELETED: the client-side detectCycle DFS.
+    // The WorkflowEngine's validatePlan is the cycle authority
+    // (CyclicDependencyDetected, test-pinned in WorkflowEngineTest) — a
+    // SECOND detector in Compose could only drift from it. Cyclic plans
+    // still surface honestly: executeWorkflow fails through the engine
+    // and the report card renders the failure.)
+    val canExecute = goal.isNotBlank() && steps.isNotEmpty()
 
     Column(modifier = modifier.testTag("screen_tasks_workflows")) {
         Column(
@@ -318,33 +323,6 @@ fun TasksScreen(
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.SemiBold
                     )
-                }
-            }
-
-            if (cycleError != null) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer
-                    )
-                ) {
-                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Default.WarningAmber,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "تبعية دائرية مكتشفة ($cycleError) — لا يمكن تنفيذ الرسم كـ DAG.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
-                        )
-                    }
                 }
             }
 
@@ -711,36 +689,6 @@ private fun WorkflowReportCard(report: com.example.domain.core.workflow.Workflow
 }
 
 // ---------------------------------------------------------------------------
-// Cycle detection (client-side DAG validation)
-// ---------------------------------------------------------------------------
-
-private fun detectCycle(steps: List<com.example.presentation.state.WorkflowBuilderStep>): String? {
-    val ids = steps.map { it.id }.toSet()
-    // Unknown dependency references are dropped silently here (engine is the
-    // authority); we only detect true cycles.
-    val edges = steps.associate { it.id to it.dependencies.filter { d -> d in ids }.toSet() }
-    val visiting = mutableSetOf<String>()
-    val visited = mutableSetOf<String>()
-
-    fun dfs(node: String): String? {
-        if (node in visiting) return node
-        if (node in visited) return null
-        visiting.add(node)
-        for (dep in edges[node].orEmpty()) {
-            dfs(dep)?.let { return it }
-        }
-        visiting.remove(node)
-        visited.add(node)
-        return null
-    }
-
-    for (id in ids) {
-        dfs(id)?.let { return "عبر الخطوة $it" }
-    }
-    return null
-}
-
-// ---------------------------------------------------------------------------
 // WORKFLOW LIBRARY + RESUMABLE (report gap-closure: durable assets)
 // ---------------------------------------------------------------------------
 
@@ -752,7 +700,7 @@ private fun detectCycle(steps: List<com.example.presentation.state.WorkflowBuild
  */
 @Composable
 private fun WorkflowLibraryCard(
-    library: List<com.example.application.workflow.WorkflowLibraryService.WorkflowDefinitionSummary>,
+    library: List<com.example.domain.core.workflow.WorkflowDefinitionSummary>,
     onLoad: (String) -> Unit,
     onRun: (String) -> Unit,
     onClone: (String) -> Unit,
@@ -871,7 +819,7 @@ private fun WorkflowLibraryCard(
  */
 @Composable
 private fun ResumableWorkflowsCard(
-    resumable: List<com.example.application.workflow.ResumableWorkflow>,
+    resumable: List<com.example.domain.core.workflow.ResumableWorkflow>,
     onResume: (String) -> Unit
 ) {
     Card(

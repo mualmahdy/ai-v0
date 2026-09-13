@@ -32,7 +32,15 @@ import java.util.UUID
  */
 class PermissionGrantService(
     private val permissionGrantDao: PermissionGrantDao,
-    private val telemetryPort: TelemetryPort
+    private val telemetryPort: TelemetryPort,
+    /**
+     * GAP-02 part 2 (Design Closure 2026, ADR-2c): the device-local user
+     * principal id. "Allow always" from the approvals surface grants
+     * EXECUTE to the USER principal — on this single-user device that
+     * standing consent covers the AGENTS acting on the user's behalf.
+     * Null (default) = device-user coverage disabled (tests, fakes).
+     */
+    private val deviceUserPrincipalId: () -> String? = { null }
 ) {
 
     /**
@@ -131,6 +139,29 @@ class PermissionGrantService(
         val now = System.currentTimeMillis()
         if (grant.expiresAtEpochMs != null && grant.expiresAtEpochMs < now) return@withContext false
         true
+    }
+
+    /**
+     * GAP-02 part 2 (ADR-2c): standing-consent check — the principal's OWN
+     * grant, OR the device user's grant covering the agents acting on this
+     * single-user device (the "allow always" surface grants to USER).
+     * Fixes the Phase-1 latent mismatch: a USER grant never satisfied the
+     * AGENT-principal checks at the execution boundary / autonomy governor.
+     */
+    suspend fun checkCoveringDeviceUser(
+        principalType: PrincipalType,
+        principalId: String,
+        resourceType: SecurableResourceType,
+        resourceId: String,
+        permission: Permission,
+        workspaceId: String? = null
+    ): Boolean {
+        if (check(principalType, principalId, resourceType, resourceId, permission, workspaceId)) {
+            return true
+        }
+        val deviceUser = deviceUserPrincipalId() ?: return false
+        if (principalType == PrincipalType.USER && principalId == deviceUser) return false
+        return check(PrincipalType.USER, deviceUser, resourceType, resourceId, permission, workspaceId)
     }
 
     /**

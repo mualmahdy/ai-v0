@@ -165,8 +165,8 @@ data class UiState(
     val isExecutingWorkflow: Boolean = false,
     // WORKFLOW LIBRARY (report gap: durable, re-editable authored assets).
     val workflowBuilder: WorkflowBuilderState = WorkflowBuilderState(),
-    val workflowLibrary: List<com.example.application.workflow.WorkflowLibraryService.WorkflowDefinitionSummary> = emptyList(),
-    val resumableWorkflows: List<com.example.application.workflow.ResumableWorkflow> = emptyList(),
+    val workflowLibrary: List<com.example.domain.core.workflow.WorkflowDefinitionSummary> = emptyList(),
+    val resumableWorkflows: List<com.example.domain.core.workflow.ResumableWorkflow> = emptyList(),
 
     // Decision Intelligence (CBR-MDP)
     val latestDecision: DecisionResult? = null,

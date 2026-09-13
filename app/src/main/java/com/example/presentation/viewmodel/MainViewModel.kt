@@ -7,9 +7,12 @@ import com.example.application.provider.ProviderControlPlaneService
 import com.example.application.radar.IntelligenceRadarPipeline
 import com.example.application.rag.RagPipelineService
 import com.example.application.registry.ComponentRegistry
+import com.example.application.usecases.ConnectProviderUseCase
+import com.example.application.usecases.DecisionSimulationUseCase
 import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
 import com.example.application.usecases.ManageMemoryUseCase
+import com.example.application.usecases.ManageWorkspaceBudgetUseCase
 import com.example.application.usecases.ManageWorkspaceFilesUseCase
 import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.Outcome
@@ -22,10 +25,7 @@ import com.example.domain.core.capability.CapabilityDescriptor
 import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.decision.CaseBase
 import com.example.domain.core.decision.CbrMdpEngine
-import com.example.domain.core.decision.DecisionAction
-import com.example.domain.core.decision.DecisionActionType
 import com.example.domain.core.decision.DecisionResult
-import com.example.domain.core.decision.DecisionState
 import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.evolution.EvolutionStage
@@ -34,13 +34,7 @@ import com.example.domain.core.memory.MemoryProvenance
 import com.example.domain.core.memory.MemoryType
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.provider.HealthStatus
-import com.example.domain.core.provider.Provider
-import com.example.domain.core.provider.ProviderService
-import com.example.domain.core.provider.ServiceConfiguration
-import com.example.domain.core.provider.ServiceType
 import com.example.domain.core.provider.ServiceValidationResult
-import com.example.domain.core.provider.offering.OfferingType
-import com.example.domain.core.provider.offering.ServiceOffering
 import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.task.AutonomyPolicy
@@ -57,7 +51,7 @@ import com.example.domain.core.workspace.ResourceNode
 import com.example.domain.core.workspace.ResourceType
 import com.example.presentation.state.StudioTurn
 import com.example.presentation.state.UiState
-import com.example.presentation.ui.screens.ProviderPreset
+import com.example.application.provider.ProviderPreset
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -78,6 +72,11 @@ class MainViewModel(
     private val executeWorkflowUseCase: ExecuteWorkflowUseCase,
     private val manageMemoryUseCase: ManageMemoryUseCase,
     private val manageWorkspaceFilesUseCase: ManageWorkspaceFilesUseCase,
+    // GAP-19 (Design Closure 2026, ADR-6 step 2): extracted use-cases —
+    // the simulation/provider-chain/budget business logic left the VM.
+    private val decisionSimulationUseCase: DecisionSimulationUseCase? = null,
+    private val connectProviderUseCase: ConnectProviderUseCase? = null,
+    private val manageWorkspaceBudgetUseCase: ManageWorkspaceBudgetUseCase? = null,
     private val componentRegistry: ComponentRegistry,
     private val cbrMdpEngine: CbrMdpEngine,
     private val extensionManager: ExtensionManager,
@@ -88,7 +87,8 @@ class MainViewModel(
     private val workspaceRuntimeService: WorkspaceRuntimeService,
     // Phase 5 — intelligence services for the Unified Activity Feed
     private val telemetryService: com.example.application.observability.TelemetryService? = null,
-    private val workspaceContextEngine: com.example.application.workspace.WorkspaceContextEngine? = null,
+    // (ADR-7 fate: workspaceContextEngine param removed with the deleted
+    // engine — its suggestions flow was permanently empty.)
     private val telemetryPort: com.example.domain.ports.observability.TelemetryPort? = null,
     /**
      * Real connectivity state (audit 2026 fix): replaces the previous
@@ -203,14 +203,10 @@ class MainViewModel(
 
     // Phase 5 — Unified Activity Feed state flows. These power the new
     // UnifiedActivityFeedScreen which renders a single timeline of
-    // suggestions + execution trace + audit events.
-    val activeSuggestions: StateFlow<List<com.example.domain.core.workspace.context.ProactiveSuggestion>> =
-        workspaceContextEngine?.suggestions?.let { flow ->
-            flow.mapNotNull { map ->
-                map.flatMap { it.value }
-            }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
-        } ?: MutableStateFlow(emptyList<com.example.domain.core.workspace.context.ProactiveSuggestion>()).asStateFlow()
-
+    // execution trace + audit events.
+    // (ADR-7 fate: the suggestions flow was removed with its dead engine —
+    // WorkspaceContextEngine had zero live inputs, so the flow was
+    // permanently empty.)
     val activeExecutionTrace: StateFlow<List<com.example.domain.core.observability.ExecutionTraceNode>> =
         telemetryPort?.let { port ->
             // GAP-04 (Design Closure 2026): the feed reflects ONLY the active
@@ -377,26 +373,18 @@ class MainViewModel(
      */
     fun setWorkspaceBudgetAllocationUsd(amountUsd: Double) {
         val economics = economicGovernanceService ?: return
+        val budgetUseCase = manageWorkspaceBudgetUseCase ?: return
         _uiState.update { it.copy(isSavingBudgetAllocation = true) }
         viewModelScope.launch {
             runCatching {
-                val scope = com.example.domain.core.budget.BudgetScope(
-                    com.example.domain.core.budget.BudgetScopeType.WORKSPACE,
-                    workspaceRuntimeService.requireActiveWorkspaceId()
+                // GAP-19 (ADR-6 step 2): the budget POLICY (HARD_LIMIT +
+                // AUTO_LOCAL_FALLBACK, warn 80%, micro-USD conversion) lives
+                // in ManageWorkspaceBudgetUseCase.
+                budgetUseCase(
+                    workspaceId = workspaceRuntimeService.requireActiveWorkspaceId(),
+                    amountUsd = amountUsd
                 )
-                economics.setAllocation(
-                    scope = scope,
-                    allocated = com.example.domain.core.budget.MoneyAmount.of(
-                        (amountUsd * 1_000_000.0).toLong(), "USD"
-                    ),
-                    policy = com.example.domain.core.budget.BudgetPolicy(
-                        actions = listOf(
-                            com.example.domain.core.budget.BudgetPolicyAction.HARD_LIMIT,
-                            com.example.domain.core.budget.BudgetPolicyAction.AUTO_LOCAL_FALLBACK
-                        ),
-                        warnThresholdRatio = 0.8f
-                    )
-                )
+                economics // (service presence guard retained above)
             }
             _uiState.update {
                 it.copy(
@@ -1383,33 +1371,25 @@ class MainViewModel(
     }
 
     private suspend fun simulateDecisionInternal() {
+        // GAP-19 (ADR-6 step 2): the simulation business rules (state
+        // construction + candidate set + engine evaluation) live in
+        // DecisionSimulationUseCase; the VM only projects the result.
+        val useCase = decisionSimulationUseCase
+        if (useCase == null) {
+            // Honest fallback for legacy constructions without the use-case:
+            // the preview is unavailable rather than fabricated.
+            return
+        }
         val current = _uiState.value
-        val state = DecisionState(
-            taskId = TaskId(UUID.randomUUID().toString()),
+        val outcome = useCase(
             taskComplexity = current.decisionTaskComplexity,
-            requiresVision = false,
-            requiresToolCalling = true,
-            requiresWebSearch = current.decisionTaskComplexity > 0.7f,
-            requiresCoding = true,
-            networkPolicy = current.networkPolicy,
-            uncertaintyScore = current.decisionUncertainty
+            uncertaintyScore = current.decisionUncertainty,
+            networkPolicy = current.networkPolicy
         )
-
-        val candidateActions = listOf(
-            DecisionAction(DecisionActionType.SELECT_AGENT, targetId = "code_craftsman"),
-            DecisionAction(DecisionActionType.SELECT_MODEL, targetId = "gemini-2.5-flash", estimatedCost = 0.001),
-            DecisionAction(DecisionActionType.SELECT_PROVIDER, targetId = if (current.networkPolicy == NetworkPolicy.OFFLINE) "local_ollama" else "gemini_google"),
-            DecisionAction(DecisionActionType.SEARCH, targetId = "multi_source_search", estimatedCost = 0.005),
-            DecisionAction(DecisionActionType.RETRIEVE_KNOWLEDGE, targetId = "rag_knowledge_base"),
-            DecisionAction(DecisionActionType.CREATE_PLAN, targetId = "dag_workflow_engine"),
-            DecisionAction(DecisionActionType.STOP)
-        )
-
-        val result = cbrMdpEngine.evaluateAndSelectAction(state, candidateActions)
         _uiState.update {
             it.copy(
-                latestDecision = result,
-                caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
+                latestDecision = outcome.decision,
+                caseBaseList = outcome.caseBase
             )
         }
     }
@@ -1595,184 +1575,48 @@ class MainViewModel(
         modelName: String,
         apiKey: String?
     ) {
-        if (preset.requiresApiKey && apiKey.isNullOrBlank()) {
-            _uiState.update {
-                it.copy(
-                    wizardResult = "هذا المزوّد يتطلب مفتاح API — أدخل المفتاح ثم أعد المحاولة",
-                    wizardResultIsSuccess = false
-                )
-            }
-            return
-        }
+        // GAP-19 (ADR-6 step 2): the 7-step connection chain (id scheme,
+        // domain construction, capability map, materialize+validate) lives
+        // in ConnectProviderUseCase; the VM projects progress + result into
+        // the wizard UiState only.
+        val useCase = connectProviderUseCase ?: return
         viewModelScope.launch {
             _uiState.update {
                 it.copy(wizardRunning = true, wizardStep = 1, wizardStepLabel = "إنشاء المزوّد…", wizardResult = null)
             }
-
-            val providerId = "prov_${System.currentTimeMillis()}"
-            val serviceId = "${providerId}_${preset.serviceType.code}"
-            val authAlias = "${providerId}_key"
-            val offeringId = when (preset.serviceType) {
-                ServiceType.SEARCH -> "${providerId}_search"
-                else -> "${providerId}_${modelName.replace(Regex("[^A-Za-z0-9._-]"), "_")}"
-            }
-
-            // 1. Provider
-            val provider = Provider(
-                id = providerId,
-                name = providerName,
-                description = "${preset.displayName} — ${preset.description}",
-                websiteUrl = preset.websiteUrl,
-                isLocal = preset.isLocal,
-                isEnabled = true
-            )
-            when (val r = providerControlPlaneService.createProvider(provider)) {
-                is Outcome.Error -> {
-                    failWizard("تعذر إنشاء المزوّد: ${r.diagnosticMessage}"); return@launch
-                }
-                else -> Unit
-            }
-
-            // 2. Service
-            _uiState.update { it.copy(wizardStep = 2, wizardStepLabel = "تسجيل الخدمة (${preset.serviceType.displayName})…") }
-            val service = ProviderService(
-                id = serviceId,
-                providerId = providerId,
-                name = "${preset.displayName} — ${preset.serviceType.displayName}",
-                serviceType = preset.serviceType,
-                supportedProtocolIds = listOf(preset.protocolId.code),
-                isEnabled = true
-            )
-            when (val r = providerControlPlaneService.addService(service)) {
-                is Outcome.Error -> {
-                    failWizard("تعذر تسجيل الخدمة: ${r.diagnosticMessage}"); return@launch
-                }
-                else -> Unit
-            }
-
-            // 3. Configuration (+ vault key)
-            _uiState.update { it.copy(wizardStep = 3, wizardStepLabel = "حفظ الإعدادات و المفتاح…") }
-            val config = ServiceConfiguration(
-                id = "cfg_${serviceId}",
-                serviceId = serviceId,
-                protocolId = preset.protocolId,
-                endpointUrl = endpointUrl,
-                defaultOfferingId = modelName,
-                authAlias = authAlias,
-                isEnabled = true,
-                isDefault = true
-            )
-            when (val r = providerControlPlaneService.saveConfiguration(config)) {
-                is Outcome.Error -> {
-                    failWizard("تعذر حفظ الإعدادات: ${r.diagnosticMessage}"); return@launch
-                }
-                else -> Unit
-            }
-            if (!apiKey.isNullOrBlank()) {
-                when (val r = providerControlPlaneService.storeSecret(authAlias, apiKey)) {
-                    is Outcome.Error -> {
-                        failWizard("تعذر حفظ المفتاح في القبو المشفّر: ${r.diagnosticMessage}"); return@launch
+            when (
+                val result = useCase(
+                    preset = preset,
+                    providerName = providerName,
+                    endpointUrl = endpointUrl,
+                    modelName = modelName,
+                    apiKey = apiKey,
+                    onStep = { step, label ->
+                        _uiState.update { it.copy(wizardStep = step, wizardStepLabel = label) }
                     }
-                    else -> Unit
-                }
-            }
-
-            // 4. Offering
-            _uiState.update { it.copy(wizardStep = 4, wizardStepLabel = "تسجيل النموذج/النقطة…") }
-            val offering = ServiceOffering(
-                id = offeringId,
-                serviceId = serviceId,
-                offeringType = when (preset.serviceType) {
-                    ServiceType.SEARCH -> OfferingType.ENDPOINT
-                    else -> OfferingType.MODEL
-                },
-                name = modelName.ifBlank { preset.displayName },
-                description = preset.description,
-                contextWindowTokens = preset.contextWindowTokens,
-                // GAP-25 (Design Closure 2026, honest capability
-                // declarations): REASONING + STREAMING are UNVERIFIED
-                // defaults for LLM presets — the wizard's validation step
-                // proves endpoint reachability + auth via GET /models ONLY;
-                // it never probes streaming (SSE) or reasoning behavior.
-                // The discovery path (DiscoveryAdapterFactory) already
-                // declares only verified capabilities; these provisional
-                // defaults stay because decision-engine contracts filter
-                // offerings by them — capability VERIFICATION is deferred
-                // to the ADR-6 redesign track, not fabricated here.
-                supportedCapabilities = when (preset.serviceType) {
-                    ServiceType.LLM -> setOf(
-                        CapabilityType.LLM_GENERATION,
-                        CapabilityType.REASONING,
-                        CapabilityType.STREAMING
-                    )
-                    ServiceType.EMBEDDING -> setOf(
-                        CapabilityType.EMBEDDING,
-                        CapabilityType.MEMORY_RETRIEVAL
-                    )
-                    else -> setOf(CapabilityType.SEARCH)
-                },
-                isLocal = preset.isLocal,
-                isAvailable = true,
-                discoverySource = "USER_CONNECT_WIZARD"
-            )
-            when (val r = providerControlPlaneService.registerOffering(offering)) {
-                is Outcome.Error -> {
-                    failWizard("تعذر تسجيل النموذج: ${r.diagnosticMessage}"); return@launch
-                }
-                else -> Unit
-            }
-
-            // 5. Materialize
-            _uiState.update { it.copy(wizardStep = 5, wizardStepLabel = "تهيئة المورد التشغيلي…") }
-            val resourceId = when (
-                val r = providerControlPlaneService.materializeResource(providerId, serviceId, offeringId)
-            ) {
-                is Outcome.Success -> r.value.resourceId
-                is Outcome.Error -> {
-                    failWizard("تعذر تهيئة المورد: ${r.diagnosticMessage}"); return@launch
-                }
-                else -> return@launch
-            }
-
-            // 6. Validate (network check with the stored key)
-            _uiState.update {
-                it.copy(
-                    wizardStep = 6,
-                    wizardStepLabel = "التحقق الفعلي من الاتصال بمفتاحك… (طلب شبكة واحد)"
                 )
-            }
-            when (val r = providerControlPlaneService.validateResource(resourceId)) {
-                is Outcome.Success -> {
-                    val result = r.value
-                    if (result.isSuccess) {
-                        // validateResource auto-promoted the record to ENABLED.
-                        _uiState.update {
-                            it.copy(
-                                wizardRunning = false,
-                                wizardStep = 7,
-                                wizardStepLabel = null,
-                                wizardResult = "تم ربط «${preset.displayName}» بنجاح — المورد مُفعّل وجاهز للاستخدام (${result.message})",
-                                wizardResultIsSuccess = true,
-                                diagnosticBanner = "تم تفعيل ${preset.displayName} بنجاح"
-                            )
-                        }
-                    } else {
-                        _uiState.update {
-                            it.copy(
-                                wizardRunning = false,
-                                wizardStep = 6,
-                                wizardStepLabel = null,
-                                wizardResult = "تم الحفظ لكن التحقق فشل: ${result.message}\n" +
-                                    "راجع المفتاح/العنوان ثم اضغط «إعادة التحقق» في بطاقة المورد.",
-                                wizardResultIsSuccess = false
-                            )
-                        }
-                    }
+            ) {
+                is ConnectProviderUseCase.Result.Rejected -> failWizard(result.message)
+                is ConnectProviderUseCase.Result.Failed -> failWizard(result.message)
+                is ConnectProviderUseCase.Result.SavedUnverified -> _uiState.update {
+                    it.copy(
+                        wizardRunning = false,
+                        wizardStep = 6,
+                        wizardStepLabel = null,
+                        wizardResult = result.message,
+                        wizardResultIsSuccess = false
+                    )
                 }
-                is Outcome.Error -> {
-                    failWizard("فشل التحقق: ${r.diagnosticMessage}")
+                is ConnectProviderUseCase.Result.Connected -> _uiState.update {
+                    it.copy(
+                        wizardRunning = false,
+                        wizardStep = 7,
+                        wizardStepLabel = null,
+                        wizardResult = result.message,
+                        wizardResultIsSuccess = true,
+                        diagnosticBanner = "تم تفعيل ${preset.displayName} بنجاح"
+                    )
                 }
-                else -> Unit
             }
         }
     }

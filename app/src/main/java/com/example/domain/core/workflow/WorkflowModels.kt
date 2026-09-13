@@ -118,3 +118,37 @@ data class WorkflowExecutionReport(
     val totalDurationMs: Long,
     val totalTokensConsumed: Int
 )
+
+/**
+ * GAP-19 (Design Closure 2026, ADR-6 step 4): library summary row moved
+ * from `WorkflowLibraryService` (application) to the DOMAIN workflow models
+ * — presentation state (UiState/screens) consumed an application-nested
+ * type, a layering drift. No payload: cheap for lists.
+ */
+data class WorkflowDefinitionSummary(
+    val workflowId: WorkflowId,
+    val workspaceId: String,
+    val name: String,
+    val goal: String,
+    val executionMode: ExecutionMode,
+    val stepCount: Int,
+    val version: Int,
+    val runCount: Int,
+    val lastRunAtEpochMs: Long?,
+    val updatedAtEpochMs: Long
+)
+
+/**
+ * GAP-19 (Design Closure 2026, ADR-6 step 4): resumable-execution snapshot
+ * moved from `WorkflowPersistenceService` (application) to the DOMAIN
+ * workflow models — same layering drift, same pure move.
+ */
+data class ResumableWorkflow(
+    val workflowId: WorkflowId,
+    val workspaceId: String,
+    val plan: WorkflowPlan,
+    val currentStepIndex: Int,
+    val completedStepIds: Set<String>,
+    val failedStepIds: Set<String>,
+    val startedAtEpochMs: Long
+)

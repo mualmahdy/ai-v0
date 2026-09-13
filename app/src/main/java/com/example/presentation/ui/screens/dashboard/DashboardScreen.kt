@@ -61,7 +61,6 @@ fun DashboardScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
-    val suggestions by viewModel.activeSuggestions.collectAsState()
 
     val activeResourceCount = state.materializedResources.count { it.lifecycleState.name == "ENABLED" }
 
@@ -87,10 +86,13 @@ fun DashboardScreen(
                 tint = MaterialTheme.colorScheme.tertiary,
                 modifier = Modifier.weight(1f)
             )
+            // ADR-7 fate: the always-zero "اقتراح استباقي" stat was removed
+            // with its dead engine (WorkspaceContextEngine) — a permanently
+            // empty counter is a fabricated capability, not a metric.
             DashboardStat(
                 icon = Icons.Default.AutoAwesome,
-                value = "${suggestions.size}",
-                label = "اقتراح استباقي",
+                value = "${state.materializedResources.size}",
+                label = "مورد مُسجّل",
                 tint = MaterialTheme.colorScheme.secondary,
                 modifier = Modifier.weight(1f)
             )

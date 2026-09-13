@@ -1,6 +1,7 @@
 package com.example.application.workflow
 
 import com.example.domain.core.workflow.WorkflowExecutionReport
+import com.example.domain.core.workflow.ResumableWorkflow
 import com.example.domain.core.workflow.WorkflowFailure
 import com.example.domain.core.workflow.WorkflowId
 import com.example.domain.core.workflow.WorkflowPlan
@@ -546,16 +547,6 @@ class WorkflowPersistenceService(
         const val PLAN_SCHEMA_VERSION = 3
     }
 }
-
-data class ResumableWorkflow(
-    val workflowId: WorkflowId,
-    val workspaceId: String,
-    val plan: WorkflowPlan,
-    val currentStepIndex: Int,
-    val completedStepIds: Set<String>,
-    val failedStepIds: Set<String>,
-    val startedAtEpochMs: Long
-)
 
 data class WorkflowExecutionState(
     val workflowId: WorkflowId,

@@ -344,8 +344,21 @@ class ExecutionService(
          * (EXECUTE_TOOL / EXECUTE_MCP / MODEL_TOOL_CALL). Extension-managed
          * SKILLS keep the grant-gated path (their governance authority is
          * the permission-grant boundary; they are not ToolPort adapters).
+         *
+         * GAP-02 part 2 (Design Closure 2026): SELF-GOVERNING tools
+         * ([com.example.domain.ports.tools.SelfAdmittingTool] — the governed
+         * coding toolchain adapters) run their OWN admission pipeline inside
+         * execute() with the SAME AdmissionControlService instance. This
+         * boundary must NOT re-admit them (double admission would
+         * double-consume the one-shot approval token and duplicate
+         * rate-limit/budget/audit work); it keeps its non-consent defenses:
+         * declaration resolution, tool-lifecycle enforcement and the agent
+         * capability check, then delegates consent entirely to the tool's
+         * internal pipeline.
          */
         requireAdmission: Boolean = true,
+        /** True when the resolved tool admits itself (single internal gate). */
+        selfGoverning: Boolean = false,
         /**
          * GAP-05 (ADR-5): the materialized resource id when the tool is
          * REMOTE (MCP) — carried into the budget authorization so paid
@@ -384,6 +397,25 @@ class ExecutionService(
                     message = "الأداة '$toolName' مُسحوبة أو معطلة (lifecycle state) ولا يمكن تنفيذها عبر أي مسار تنفيذ."
                 )
             }
+        }
+
+        // --- 1.75 SELF-GOVERNING TOOLS (GAP-02 part 2) -------------------
+        // The governed coding toolchain adapters (SelfAdmittingTool) run the
+        // SAME admission pipeline internally — single gate, one one-shot
+        // token consumption, one audit trail. This boundary MUST NOT
+        // re-admit them (double admission would double-consume the approval
+        // token and duplicate rate-limit/budget/audit work). What remains
+        // HERE is the non-consent defense the tool's own pipeline cannot
+        // make: this boundary's tool-lifecycle enforcement above. The
+        // security ceiling, grant check, and all admission stages run
+        // inside the tool's internal pipeline.
+        if (selfGoverning) {
+            auditAuthorization(
+                agent, toolName, actionType, executionId, "ALLOW",
+                "SELF_GOVERNED_ADMISSION: الأداة تنفّذ عبر مسار القبول الداخلي الخاص بها (السلسلة البرمجية المحكومة) — بوابة واحدة تُستهلك مرة واحدة.",
+                workspaceId
+            )
+            return ToolAuthorization.Allowed
         }
 
         // --- 2. Security policy ceiling (with declaration facts) ---
@@ -438,7 +470,12 @@ class ExecutionService(
                 )
             }
             val allowed = try {
-                service.check(
+                // GAP-02 part 2 (ADR-2c): standing consent covers the device
+                // user's "allow always" grants (USER principal) in addition
+                // to the agent's own grant — fixes the Phase-1 mismatch
+                // where a USER grant never satisfied this AGENT-principal
+                // check, so "allow always" could never unlock the tool.
+                service.checkCoveringDeviceUser(
                     principalType = com.example.domain.core.security.governance.PrincipalType.AGENT,
                     principalId = agent.identity.id.value,
                     resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
@@ -1688,13 +1725,16 @@ class ExecutionService(
         // CANONICAL AUTHORIZATION BOUNDARY (defect family 2): security
         // ceiling + fail-closed sensitive-tool permission grants. Replaces
         // the two separate (and separately-bypassable) checks.
+        // GAP-02 part 2: self-admitting tools skip this boundary's consent
+        // chain — their OWN internal pipeline is the single gate.
         when (val auth = authorizeToolExecution(
             agent = agent,
             toolName = toolName,
             arguments = action.payload,
             actionType = "EXECUTE_TOOL",
             executionId = executionId,
-            isMcp = false
+            isMcp = false,
+            selfGoverning = tool is com.example.domain.ports.tools.SelfAdmittingTool
         )) {
             is ToolAuthorization.Denied -> return ExecutionResult(
                 isSuccess = false,
@@ -1707,7 +1747,10 @@ class ExecutionService(
         val toolInput = ToolInput(
             toolName = toolName,
             arguments = action.payload,
-            executionId = executionId
+            executionId = executionId,
+            // GAP-02 part 2: governed tools attribute their admission audit
+            // rows to the EXECUTING agent (no anonymous principal).
+            principalId = agent.identity.id.value
         )
 
         val callId = "call_${System.currentTimeMillis()}"
@@ -2375,19 +2418,25 @@ class ExecutionService(
         val toolInput = ToolInput(
             toolName = toolName,
             arguments = parsedArguments,
-            executionId = executionId
+            executionId = executionId,
+            // GAP-02 part 2: governed tools attribute their admission audit
+            // rows to the EXECUTING agent (no anonymous principal).
+            principalId = agent.identity.id.value
         )
 
         // CANONICAL AUTHORIZATION BOUNDARY (defect family 2): security
         // ceiling + closed-world classification + fail-closed sensitive-tool
         // permission grants — ONE path for every model-initiated tool call.
+        // GAP-02 part 2: self-admitting tools skip this boundary's consent
+        // chain — their OWN internal pipeline is the single gate.
         when (val auth = authorizeToolExecution(
             agent = agent,
             toolName = toolName,
             arguments = parsedArguments,
             actionType = "MODEL_TOOL_CALL",
             executionId = executionId,
-            isMcp = false
+            isMcp = false,
+            selfGoverning = tool is com.example.domain.ports.tools.SelfAdmittingTool
         )) {
             is ToolAuthorization.Denied -> {
                 val failure = when (auth.failureCode) {

@@ -584,13 +584,18 @@ class RagPipelineService(
      */
     /**
      * GAP-CLOSURE P2-05: the retrieval-budget parameter is DEPRECATED on
-     * this pipeline entry point — the authoritative retrieval-budget
-     * authority is the RagIntelligence layer
-     * (domain.core.rag.intelligence.RagRequest.maxTokenBudget), and callers
-     * should migrate there. Retained for source compatibility only.
+     * this pipeline entry point — the pipeline itself owns its bounded
+     * scan/assembly budget (topK selection + snippet packing); callers must
+     * not pass an unsolicited budget. Retained for source compatibility
+     * only.
+     *
+     * (Design Closure 2026, D-7: the former claim that "budget authority
+     * moved to RagIntelligenceService" was FALSE — that service was
+     * production-dead its whole life and is now deleted. This pipeline IS
+     * the retrieval authority.)
      */
     @Deprecated(
-        message = "Retrieval budget authority moved to RagIntelligenceService (RagRequest.maxTokenBudget). Use the parameterless budget overload.",
+        message = "The retrieval budget parameter is unused — this pipeline owns its bounded scan and assembly. Use the budget-less overload.",
         replaceWith = ReplaceWith("retrieveRelevantContext(query, topK)")
     )
     suspend fun retrieveRelevantContext(query: String, topK: Int = 4, maxTokenBudget: Int = 2000): AssembledRagContext =

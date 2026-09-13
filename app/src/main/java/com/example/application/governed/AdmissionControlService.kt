@@ -73,6 +73,18 @@ fun interface RateLimitCheckPort {
     fun tryAcquire(scopeKey: String): Boolean
 }
 
+/**
+ * GAP-02 part 2 (Design Closure 2026, ADR-2c): STANDING-CONSENT check for
+ * stage 9 — "an explicit EXECUTE grant IS recorded consent". Production
+ * wiring is device-user-aware (a USER-principal grant covers the agents
+ * acting on that single-user device). Null = no standing-consent path;
+ * the token path (approve-once) and the pause path (requestApproval) are
+ * then the only ways to satisfy the approval stage.
+ */
+fun interface ConsentGrantPort {
+    suspend fun hasStandingConsent(request: ToolAdmissionRequest): Boolean
+}
+
 class AdmissionControlService(
     private val toolDeclarations: ToolDeclarationResolver,
     private val principalAuthorization: PrincipalAuthorizationPort,
@@ -82,6 +94,8 @@ class AdmissionControlService(
     private val approvalGate: HumanApprovalGate,
     private val sandboxService: SandboxLifecycleService,
     private val auditSink: AdmissionAuditPort,
+    /** GAP-02 part 2: standing-consent (EXECUTE grant) check at stage 9. */
+    private val consentGrantPort: ConsentGrantPort? = null,
     private val policy: SecurityPolicy = SecurityPolicy(),
     private val pathPolicy: WorkspacePathPolicy = WorkspacePathPolicy.Default,
     /** projectId -> canonical absolute workspace root (production: File-based). */
@@ -260,6 +274,16 @@ class AdmissionControlService(
         trace += AdmissionStageOutcome(AdmissionStage.RATE_LIMIT, true, AdmissionDecision.ALLOWED, "ضمن حدود المعدل.", clock() - rateStart)
 
         // -------- 9. HUMAN APPROVAL ---------------------------------------
+        // GAP-02 part 2 (ADR-2c unified consent): stage 9 is THE single
+        // consent authority. Three ways to satisfy it, in honesty order:
+        //   (1) STANDING CONSENT — a verified explicit EXECUTE grant
+        //       (consentGrantPort; production: device-user-aware grant
+        //       lookup). No token is consumed.
+        //   (2) ONE-SHOT TOKEN — the user APPROVED the persisted request for
+        //       THIS (executionId, toolName); consumed exactly once.
+        //   (3) PAUSE — a new approval request is persisted
+        //       (NEEDS_HUMAN_APPROVAL) and the governance surface renders
+        //       it for the user.
         val approvalStart = clock()
         val needsApproval = declaration.requiresHumanConsent ||
             ceiling.securityDecision == SecurityDecision.REQUIRE_CONSENT ||
@@ -267,6 +291,16 @@ class AdmissionControlService(
             risk == RiskLevel.HIGH || risk == RiskLevel.CRITICAL
 
         if (needsApproval) {
+            val standingConsent = try {
+                consentGrantPort?.hasStandingConsent(request) ?: false
+            } catch (_: Exception) {
+                // Standing-consent lookup failure must fail CLOSED toward
+                // the explicit-consent paths (token / pause), never open.
+                false
+            }
+            if (standingConsent) {
+                trace += AdmissionStageOutcome(AdmissionStage.HUMAN_APPROVAL, true, AdmissionDecision.ALLOWED, "استُوفيت الموافقة بمنح EXECUTE دائم صريح (رضا مسجل — دون استهلاك رمز).", clock() - approvalStart)
+            } else {
             val token = request.approvalTokenId
             if (token == null) {
                 val approval = approvalGate.requestApproval(
@@ -296,6 +330,7 @@ class AdmissionControlService(
                 return result
             }
             trace += AdmissionStageOutcome(AdmissionStage.HUMAN_APPROVAL, true, AdmissionDecision.ALLOWED, "رمز موافقة صالح تم استهلاكه لمرة واحدة.", clock() - approvalStart)
+            }
         } else {
             trace += AdmissionStageOutcome(AdmissionStage.HUMAN_APPROVAL, true, AdmissionDecision.ALLOWED, "لا تتطلب موافقة بشرية.", clock() - approvalStart)
         }

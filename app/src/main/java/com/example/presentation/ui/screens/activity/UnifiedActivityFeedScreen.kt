@@ -62,11 +62,13 @@ import java.util.Locale
  * UnifiedActivityFeedScreen — actionable, filterable workspace timeline
  * ============================================================================
  *
- * The feed now FILTERS (suggestions / execution trace / audit events), the
- * proactive suggestions are TAPPABLE (each kind routes to the screen where
- * the user can actually resolve it), audit decisions get semantic badges,
- * and every row shows formatted timestamps. TestTags added (previously
- * missing entirely).
+ * The feed FILTERS (execution trace / audit events) and audit decisions
+ * get semantic badges, with formatted timestamps and testTags.
+ * ADR-7 fate (Design Closure 2026): the permanently-EMPTY "proactive
+ * suggestions" source was REMOVED — its engine (WorkspaceContextEngine)
+ * was deleted with every input path dead, so the filter and its cards
+ * showed a fabricated zero forever. The feed is now honest: real trace
+ * rows and real audit rows only.
  */
 @Composable
 fun UnifiedActivityFeedScreen(
@@ -74,7 +76,6 @@ fun UnifiedActivityFeedScreen(
     onNavigate: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val suggestions by viewModel.activeSuggestions.collectAsState()
     val executionTrace by viewModel.activeExecutionTrace.collectAsState()
     val auditEvents by viewModel.recentAuditEvents.collectAsState()
     var filterIndex by rememberSaveable { mutableIntStateOf(0) }
@@ -90,8 +91,7 @@ fun UnifiedActivityFeedScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             val filters = listOf(
-                "الكل (${suggestions.size + executionTrace.size + auditEvents.size})",
-                "اقتراحات (${suggestions.size})",
+                "الكل (${executionTrace.size + auditEvents.size})",
                 "التنفيذ (${executionTrace.size})",
                 "التدقيق (${auditEvents.size})"
             )
@@ -109,45 +109,19 @@ fun UnifiedActivityFeedScreen(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            if (suggestions.isEmpty() && executionTrace.isEmpty() && auditEvents.isEmpty()) {
+            if (executionTrace.isEmpty() && auditEvents.isEmpty()) {
                 item {
                     EmptyState(
                         icon = Icons.Default.NotificationsActive,
                         title = "لا نشاط في مساحة العمل بعد",
-                        hint = "يظهر هنا: اقتراحات استباقية من محرك السياق، آثار التنفيذ الحي، وأحداث التدقيق الأمني.",
+                        hint = "يظهر هنا: آثار التنفيذ الحي وأحداث التدقيق الأمني.",
                         modifier = Modifier.padding(top = 24.dp)
                     )
                 }
             }
 
-            // ===================== Suggestions =====================
-            if (filterIndex == 0 || filterIndex == 1) {
-                if (suggestions.isNotEmpty()) {
-                    item {
-                        SectionHeader(
-                            icon = Icons.Default.NotificationsActive,
-                            title = "اقتراحات استباقية",
-                            subtitle = "مشتقة من محرك سياق مساحة العمل — اضغط للمعالجة"
-                        )
-                    }
-                    items(suggestions, key = { it.id }) { suggestion ->
-                        SuggestionCard(
-                            title = suggestion.titleAr,
-                            description = suggestion.descriptionAr,
-                            kindIcon = suggestionKindIcon(suggestion.kind.name),
-                            severityTint = severityTint(suggestion.severity.name),
-                            severityText = severityText(suggestion.severity.name),
-                            timeText = timeFormat.format(Date(suggestion.createdAtEpochMs)),
-                            actionText = suggestion.recommendedAction ?: "معالجة",
-                            onAction = { onNavigate(suggestionRoute(suggestion.kind.name)) },
-                            tag = "suggestion_${suggestion.id}"
-                        )
-                    }
-                }
-            }
-
             // ===================== Execution trace =====================
-            if (filterIndex == 0 || filterIndex == 2) {
+            if (filterIndex == 0 || filterIndex == 1) {
                 if (executionTrace.isNotEmpty()) {
                     item {
                         SectionHeader(
@@ -216,7 +190,7 @@ fun UnifiedActivityFeedScreen(
             }
 
             // ===================== Audit events =====================
-            if (filterIndex == 0 || filterIndex == 3) {
+            if (filterIndex == 0 || filterIndex == 2) {
                 if (auditEvents.isNotEmpty()) {
                     item {
                         SectionHeader(
@@ -292,114 +266,6 @@ fun UnifiedActivityFeedScreen(
             }
 
             item { Spacer(modifier = Modifier.height(12.dp)) }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Mapping helpers
-// ---------------------------------------------------------------------------
-
-private fun suggestionKindIcon(kind: String): ImageVector = when (kind) {
-    "UNUSED_RESOURCE", "STALE_RESOURCE" -> Icons.Default.Bolt
-    "FAILED_EXECUTION" -> Icons.Default.ErrorOutline
-    "HIGH_LATENCY" -> Icons.Default.Schedule
-    "APPROACHING_BUDGET" -> Icons.Default.Paid
-    "CONFIGURATION_GAP" -> Icons.Default.AccountTree
-    "KNOWLEDGE_GAP" -> Icons.Default.Info
-    "AGENT_AVAILABILITY" -> Icons.Default.NotificationsActive
-    "SECURITY_REMINDER" -> Icons.Default.Gavel
-    else -> Icons.Default.Info
-}
-
-@Composable
-private fun severityTint(severity: String) = when (severity) {
-    "CRITICAL" -> MaterialTheme.colorScheme.error
-    "ACTION_REQUIRED" -> MaterialTheme.colorScheme.secondary
-    "WARN" -> MaterialTheme.colorScheme.secondary
-    else -> MaterialTheme.colorScheme.primary
-}
-
-private fun severityText(severity: String): String = when (severity) {
-    "CRITICAL" -> "حرج"
-    "ACTION_REQUIRED" -> "يتطلب إجراءً"
-    "WARN" -> "تحذير"
-    else -> "معلومة"
-}
-
-private fun suggestionRoute(kind: String): String = when (kind) {
-    "UNUSED_RESOURCE", "STALE_RESOURCE", "CONFIGURATION_GAP" -> WorkspaceRoutes.PROVIDERS
-    "FAILED_EXECUTION", "AGENT_AVAILABILITY" -> WorkspaceRoutes.STUDIO
-    "APPROACHING_BUDGET" -> WorkspaceRoutes.GOVERNANCE
-    "KNOWLEDGE_GAP" -> WorkspaceRoutes.KNOWLEDGE
-    "SECURITY_REMINDER" -> WorkspaceRoutes.GOVERNANCE
-    "HIGH_LATENCY" -> WorkspaceRoutes.PROVIDERS
-    else -> WorkspaceRoutes.MORE
-}
-
-@Composable
-private fun SuggestionCard(
-    title: String,
-    description: String,
-    kindIcon: ImageVector,
-    severityTint: androidx.compose.ui.graphics.Color,
-    severityText: String,
-    timeText: String,
-    actionText: String,
-    onAction: () -> Unit,
-    tag: String
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .testTag(tag),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = severityTint.copy(alpha = 0.10f)
-        )
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                kindIcon,
-                contentDescription = null,
-                tint = severityTint,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.weight(1f)
-                    )
-                    StatusBadge(text = severityText, tint = severityTint)
-                }
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2
-                )
-                Text(
-                    text = timeText,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline
-                )
-            }
-            IconButton(onClick = onAction, modifier = Modifier.testTag("${tag}_action")) {
-                Icon(
-                    Icons.AutoMirrored.Filled.NavigateNext,
-                    contentDescription = actionText,
-                    tint = severityTint
-                )
-            }
         }
     }
 }

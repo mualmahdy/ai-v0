@@ -311,23 +311,15 @@ private fun CandidateCard(
             }
 
             // ---- Lifecycle actions by stage ----
+            // GAP-19 (Design Closure 2026, ADR-6 step 6): the advance action
+            // DERIVES from the domain's EvolutionStageTransitions table (the
+            // same table the pipeline's governance gate enforces) — the
+            // per-stage forward target is no longer hardcoded here, so the
+            // screen and the gate can never drift apart. The special stages
+            // (audit pair / governance pair / registered operations / final
+            // rejection) keep their explicit multi-action rows.
             Spacer(modifier = Modifier.height(10.dp))
             when (candidate.stage) {
-                EvolutionStage.DISCOVERED -> {
-                    LifecycleAction("فهم وتحليل دلالي", Icons.Default.TrendingUp) {
-                        onAdvance(EvolutionStage.UNDERSTOOD)
-                    }
-                }
-                EvolutionStage.UNDERSTOOD -> {
-                    LifecycleAction("تصنيف المرشح", Icons.Default.TrendingUp) {
-                        onAdvance(EvolutionStage.CLASSIFIED)
-                    }
-                }
-                EvolutionStage.CLASSIFIED -> {
-                    LifecycleAction("تقييم أمني وتقني", Icons.Default.TrendingUp) {
-                        onAdvance(EvolutionStage.EVALUATED)
-                    }
-                }
                 EvolutionStage.EVALUATED -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
@@ -342,11 +334,6 @@ private fun CandidateCard(
                         ) { Text("تدقيق فاشل", style = MaterialTheme.typography.labelSmall) }
                     }
                 }
-                EvolutionStage.CANDIDATE -> {
-                    LifecycleAction("ترقية لبانتظار الحوكمة", Icons.Default.TrendingUp) {
-                        onAdvance(EvolutionStage.APPROVAL_PENDING)
-                    }
-                }
                 EvolutionStage.APPROVAL_PENDING -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
@@ -359,16 +346,6 @@ private fun CandidateCard(
                             onClick = { onGovernance(false) },
                             modifier = Modifier.weight(1f)
                         ) { Text("رفض", style = MaterialTheme.typography.labelSmall) }
-                    }
-                }
-                EvolutionStage.INTEGRATED -> {
-                    LifecycleAction("تحقق واختبار", Icons.Default.CheckCircle) {
-                        onAdvance(EvolutionStage.VERIFIED)
-                    }
-                }
-                EvolutionStage.VERIFIED -> {
-                    LifecycleAction("تسجيل بمصفوفة القدرات", Icons.Default.CheckCircle) {
-                        onAdvance(EvolutionStage.REGISTERED)
                     }
                 }
                 EvolutionStage.REGISTERED -> {
@@ -393,6 +370,15 @@ private fun CandidateCard(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.outline
                     )
+                }
+                else -> {
+                    // Generic forward advance, derived from the domain table.
+                    val next = com.example.domain.core.evolution.EvolutionStageTransitions.nextOf(candidate.stage)
+                    if (next != null) {
+                        LifecycleAction("التقدم إلى ${next.displayName}", Icons.Default.TrendingUp) {
+                            onAdvance(next)
+                        }
+                    }
                 }
             }
         }

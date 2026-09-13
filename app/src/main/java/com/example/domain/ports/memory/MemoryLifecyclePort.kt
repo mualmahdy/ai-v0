@@ -1,18 +1,18 @@
 package com.example.domain.ports.memory
 
-import com.example.domain.core.memory.MemoryEntry
-import com.example.domain.core.memory.lifecycle.CognitiveMemoryType
-import com.example.domain.core.memory.lifecycle.ForgettingPolicy
 import com.example.domain.core.memory.lifecycle.MemoryConsolidationRequest
 import com.example.domain.core.memory.lifecycle.MemoryNamespace
-import com.example.domain.core.memory.lifecycle.RankedMemoryRecord
 
 /**
- * Memory Lifecycle Port — the write/maintenance side of the memory system.
+ * Memory Lifecycle Port — the maintenance side of the memory system.
  *
- * `MemoryRepositoryPort` (pre-existing) only has write/retrieve/delete.
- * This port adds the cognitive lifecycle operations requested in the
- * audit: decay, consolidate, rank, forget, namespace.
+ * `MemoryRepositoryPort` (pre-existing) owns write/retrieve/delete.
+ * This port owns the production-called lifecycle operations: decay,
+ * consolidate, namespace.
+ *
+ * (Design Closure 2026, ADR-7 fate — D-9: rank / forget / storeScoped /
+ *  retrieveScoped were DELETED with their zero-caller implementations.
+ *  The production surface is exactly what production calls.)
  */
 interface MemoryLifecyclePort {
 
@@ -36,59 +36,7 @@ interface MemoryLifecyclePort {
     ): List<MemoryConsolidationRequest>
 
     /**
-     * Rank memories by the cognitive ranking function:
-     *   finalRank = similarity * 0.5 + importance * 0.2 + recency * 0.15 + decay * 0.15
-     *
-     * Used by `MemoryRepositoryPort.retrieveMemories` once the lifecycle
-     * service has evaluated decay scores.
-     */
-    suspend fun rank(
-        memories: List<MemoryEntry>,
-        queryEmbedding: FloatArray? = null,
-        queryText: String = ""
-    ): List<RankedMemoryRecord>
-
-    /**
-     * Apply the forgetting policy: archive memories below
-     * `policy.archiveDecayThreshold`, delete memories archived longer
-     * than `policy.deleteArchivedAfterMs` ago, and enforce the per-
-     * workspace/agent/global caps (LRU eviction).
-     */
-    suspend fun forget(policy: ForgettingPolicy = ForgettingPolicy()): ForgetResult
-
-    /**
      * Get or create a per-agent memory namespace within a workspace.
      */
     suspend fun ensureNamespace(workspaceId: String, agentId: String): MemoryNamespace
-
-    /**
-     * Store a memory in a specific namespace (workspace + agent scope).
-     */
-    suspend fun storeScoped(
-        workspaceId: String,
-        agentId: String?,
-        type: CognitiveMemoryType,
-        content: String,
-        importance: Float = 1.0f,
-        confidence: Float = 1.0f,
-        tags: List<String> = emptyList()
-    ): String
-
-    /**
-     * Retrieve memories scoped to a workspace + optional agent.
-     * If `agentId` is null, returns workspace-shared + global memories.
-     */
-    suspend fun retrieveScoped(
-        workspaceId: String,
-        agentId: String? = null,
-        query: String,
-        topK: Int = 5,
-        types: List<CognitiveMemoryType> = emptyList()
-    ): List<RankedMemoryRecord>
 }
-
-data class ForgetResult(
-    val archivedCount: Int,
-    val deletedCount: Int,
-    val lruEvictedCount: Int
-)

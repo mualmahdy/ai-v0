@@ -278,17 +278,10 @@ class IntelligenceRadarPipeline(
             ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
 
         // Gate 1 — no stage skipping (single forward step or rejection).
-        val order = listOf(
-            EvolutionStage.DISCOVERED,
-            EvolutionStage.UNDERSTOOD,
-            EvolutionStage.CLASSIFIED,
-            EvolutionStage.EVALUATED,
-            EvolutionStage.CANDIDATE,
-            EvolutionStage.APPROVAL_PENDING,
-            EvolutionStage.INTEGRATED,
-            EvolutionStage.VERIFIED,
-            EvolutionStage.REGISTERED
-        )
+        // GAP-19 (ADR-6 step 6): the transition table is the DOMAIN's
+        // EvolutionStageTransitions — the SAME table the radar screen's
+        // buttons derive from (previously an inline duplicate here).
+        val order = com.example.domain.core.evolution.EvolutionStageTransitions.ordered
         val currentIndex = order.indexOf(current.stage)
         val targetIndex = order.indexOf(nextStage)
         val isSingleForwardStep = currentIndex >= 0 && targetIndex == currentIndex + 1

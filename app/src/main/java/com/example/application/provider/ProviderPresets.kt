@@ -1,4 +1,4 @@
-package com.example.presentation.ui.screens
+package com.example.application.provider
 
 import com.example.domain.core.provider.ServiceProtocolId
 import com.example.domain.core.provider.ServiceType
@@ -17,6 +17,11 @@ import com.example.domain.core.provider.ServiceType
  *   → Validate → Enable
  *
  * so a user picks a provider, pastes one API key, and gets a working resource.
+ *
+ * GAP-19 (Design Closure 2026, ADR-6 step 4): moved from
+ * presentation.ui.screens to the APPLICATION layer — MainViewModel (and the
+ * ConnectProviderUseCase) consumed a UI-package type, a reverse dependency
+ * the layering rules forbid. Pure move; no behavior change.
  */
 data class ProviderPreset(
     val id: String,

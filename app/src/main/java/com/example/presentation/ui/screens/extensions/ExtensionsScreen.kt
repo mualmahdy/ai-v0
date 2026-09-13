@@ -41,6 +41,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -403,10 +404,14 @@ fun ExtensionsScreen(
     }
 
     // ---- Run skill dialog ----
+    // GAP-19 (ADR-6 step 6): the form GENERATES from the manifest's declared
+    // parameters (no skill-id string branching).
     runSkillTarget?.let { skillId ->
+        val manifest = state.skills.firstOrNull { it.id == skillId }
         RunSkillDialog(
             skillId = skillId,
-            skillName = state.skills.firstOrNull { it.id == skillId }?.name ?: skillId,
+            skillName = manifest?.name ?: skillId,
+            parameters = manifest?.parameters ?: emptyList(),
             onConfirm = { params ->
                 viewModel.executeSkillDirectly(skillId, params)
                 runSkillTarget = null
@@ -478,59 +483,61 @@ private fun AddMcpDialog(
 private fun RunSkillDialog(
     skillId: String,
     skillName: String,
+    parameters: List<com.example.domain.core.extension.SkillParameterDefinition>,
     onConfirm: (Map<String, Any?>) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var moduleName by rememberSaveable { mutableStateOf("feature_module") }
-    var content by rememberSaveable { mutableStateOf("") }
+    // GAP-19 (ADR-6 step 6): the form GENERATES from the manifest's DECLARED
+    // parameters (previously hardcoded skillId.contains("scaffold") branches
+    // — a new skill could never expose its parameters without UI code).
+    val values = remember(parameters) {
+        mutableMapOf<String, String>().also { map ->
+            parameters.forEach { p -> map[p.name] = p.defaultValue ?: "" }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("تنفيذ: $skillName", fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (skillId.contains("scaffold")) {
-                    OutlinedTextField(
-                        value = moduleName,
-                        onValueChange = { moduleName = it },
-                        label = { Text("اسم الوحدة النمطية") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().testTag("input_skill_module")
-                    )
+                if (parameters.isEmpty()) {
                     Text(
-                        text = "سيولّد هيكل Clean Architecture كامل (domain/application/ports/infrastructure) داخل ملعب مساحة العمل.",
+                        text = "هذه المهارة لا تعلن معاملات — ستُنفَّذ مباشرة.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                } else {
+                }
+                parameters.forEach { param ->
+                    val current = values[param.name] ?: ""
                     OutlinedTextField(
-                        value = content,
-                        onValueChange = { content = it },
-                        label = { Text("الشيفرة/النص المراد تدقيقه") },
+                        value = current,
+                        onValueChange = { values[param.name] = it },
+                        label = { Text(param.label) },
+                        singleLine = !param.isMultiline,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 120.dp)
-                            .testTag("input_skill_content")
+                            .then(
+                                if (param.isMultiline) Modifier.heightIn(min = 120.dp) else Modifier
+                            )
+                            .testTag("input_skill_${param.name}")
                     )
-                    Text(
-                        text = "فحص أمني: تسريب مفاتيح، ثغرات، حقن أوامر.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    param.description?.let { hint ->
+                        Text(
+                            text = hint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    val params: Map<String, Any?> = if (skillId.contains("scaffold")) {
-                        mapOf("moduleName" to moduleName)
-                    } else {
-                        mapOf("content" to content)
-                    }
-                    onConfirm(params)
+                    onConfirm(values.toMap())
                 },
-                enabled = if (skillId.contains("scaffold")) moduleName.isNotBlank() else content.isNotBlank()
+                enabled = parameters.all { p -> !p.isRequired || (values[p.name] ?: "").isNotBlank() }
             ) {
                 Text("تنفيذ", fontWeight = FontWeight.Bold)
             }

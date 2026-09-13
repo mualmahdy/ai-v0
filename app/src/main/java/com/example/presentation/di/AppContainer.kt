@@ -18,7 +18,6 @@ import com.example.application.provider.ProviderControlPlaneService
 import com.example.application.radar.IntelligenceRadarPipeline
 import com.example.application.rag.KnowledgePersistenceService
 import com.example.application.rag.RagPipelineService
-import com.example.application.rag.RagIntelligenceService
 import com.example.application.registry.ComponentRegistry
 import com.example.application.resource.DurableResourceRegistryService
 import com.example.application.resource.RegistryBackedResourceRecordRepository
@@ -26,13 +25,16 @@ import com.example.application.security.SecurityGuardService
 import com.example.application.security.PermissionGrantService
 import com.example.application.governed.AdmissionControlService
 import com.example.application.governed.CodingToolchainService
+import com.example.application.governed.GovernedCodingToolAdapter
 import com.example.application.governed.HumanApprovalGate
 import com.example.application.governed.SandboxLifecycleService
 import com.example.application.governed.BudgetAuthorizationPort
 import com.example.application.governed.BudgetAuthorizationOutcome
+import com.example.application.governed.ConsentGrantPort
 import com.example.application.governed.ToolDeclarationResolver
 import com.example.domain.core.runtime.IsolationLevel
 import com.example.domain.core.security.governance.BudgetAuthorizationVerdict
+import com.example.domain.core.security.governance.SecurableResourceType
 import com.example.domain.core.security.governance.ToolAdmissionRequest
 import com.example.domain.ports.governed.AdmissionAuditPort
 import com.example.domain.ports.governed.HumanApprovalStorePort
@@ -44,7 +46,6 @@ import com.example.application.memory.MemoryLifecycleService
 import com.example.application.search.SearchIntelligenceService
 import com.example.application.tools.ToolLifecycleService
 import com.example.application.agent.AgentLifecycleService
-import com.example.application.workspace.WorkspaceContextEngine
 import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.application.workflow.WorkflowPersistenceService
 import com.example.application.task.TaskDecompositionService
@@ -275,13 +276,12 @@ class AppContainer(context: Context) {
         )
     }
 
-    /** §4/§6/§8 — centralized scope resolution + access enforcement. */
-    val contextResolverService: com.example.application.context.ContextResolverService by lazy {
-        com.example.application.context.ContextResolverService(
-            database = database,
-            activeWorkspaceIdProvider = { workspaceRuntimeService.activeWorkspaceIdOrNull() }
-        )
-    }
+    // (GAP-02 part 2 / ADR-7 fate — DELETED: ContextResolverService was
+    // wired with ZERO callers in main and test, its "ONE service… every
+    // service" KDoc was contradicted by the 8+ production sites reading
+    // ExecutionScope inline, and its injected AppDatabase was never used.
+    // The real scope authority — ScopeRules + the pinned ExecutionScope —
+    // remains the canonical path. See docs/PRODUCT-DECISIONS.md D-8.)
 
     // --- RAG persistence ---
     val knowledgePersistenceService: KnowledgePersistenceService by lazy {
@@ -342,13 +342,31 @@ class AppContainer(context: Context) {
     val securityGuardService: SecurityGuardService by lazy { SecurityGuardService() }
 
     // --- Concrete Tools (in-app extensions) ---
-    val fileSystemTool: FileSystemTool by lazy {
-        // P0-04: agent-driven file operations target the ACTIVE workspace's
-        // OWN project — never the legacy shared project 1L.
-        FileSystemTool(
-            storagePort = workspaceStorage,
-            projectIdProvider = { workspaceRuntimeService.activeProjectIdOrNull() }
-        )
+    // GAP-02 part 2 (Design Closure 2026, ADR-2c): the governed coding
+    // toolchain is now THE production file-tool path — one
+    // [GovernedCodingToolAdapter] per governed tool name (read_file,
+    // write_file, apply_patch, delete_file, …), each running the FULL
+    // admission pipeline internally (single gate, one-shot token,
+    // optimistic concurrency, atomic patches). The legacy
+    // `workspace_file_tool` registration is RETIRED from production: its
+    // SecurityGuard name-classification treated even `action="delete"` as
+    // a read/ALLOW, and its silent overwrite had no consent, hash-check or
+    // patch semantics — a standing bypass around the governed toolchain.
+    // (The FileSystemTool CLASS remains for the tests that pin streaming
+    // argument assembly and scope binding.)
+    val governedCodingToolAdapters: List<GovernedCodingToolAdapter> by lazy {
+        CodingToolchainService.Companion.declarations.keys.map { governedToolName ->
+            GovernedCodingToolAdapter(
+                toolchain = codingToolchainService,
+                governedToolName = governedToolName,
+                workspaceIdProvider = { workspaceRuntimeService.activeWorkspaceIdOrNull() },
+                projectIdProvider = { workspaceRuntimeService.activeProjectIdOrNull() },
+                fallbackPrincipalId = { localPrincipalId },
+                approvalTokenProvider = { executionId, toolName ->
+                    humanApprovalGate.findApprovedToken(executionId, toolName)
+                }
+            )
+        }
     }
 
     val safeDiagnosticsTool: SafeDiagnosticsTool by lazy {
@@ -471,7 +489,9 @@ class AppContainer(context: Context) {
     val componentRegistry: ComponentRegistry by lazy {
         ComponentRegistry(durableResourceRegistryService).apply {
             registerMemoryRepository(memoryVectorStore)
-            registerTool(fileSystemTool)
+            // GAP-02 part 2: the governed coding toolchain replaces the
+            // retired workspace_file_tool as the production file path.
+            governedCodingToolAdapters.forEach { registerTool(it) }
             registerTool(safeDiagnosticsTool)
         }
     }
@@ -826,27 +846,26 @@ class AppContainer(context: Context) {
         }
     }
 
-    /** Principal authorization via the Room-backed PermissionGrantService. */
+    /** Principal authorization seam (production: consent deferred to stage 9). */
     val principalAuthorizationPort: PrincipalAuthorizationPort by lazy {
         PrincipalAuthorizationPort { principalType, principalId, resourceType, resourceId, permission, workspaceId ->
-            // P0-1 (audit 2026 §15 — Universal Admission): the principal
-            // authorization stage follows the SAME policy the canonical
-            // execution boundary applies — an explicit workspace-scoped (or
-            // global) grant is REQUIRED for sensitive / consent-requiring
-            // resources and fail-closes without one; ordinary non-sensitive
-            // tools remain permitted for authenticated principals (the
-            // security-ceiling, risk, budget, approval and sandbox stages of
-            // the admission pipeline still gate them).
-            val declaration = resolveToolDeclarationFor(resourceId)
-            val sensitive = declaration?.isSensitive == true ||
-                declaration?.requiresHumanConsent == true
-            if (sensitive) {
-                permissionGrantService.check(
-                    principalType, principalId, resourceType, resourceId, permission, workspaceId
-                )
-            } else {
-                true
-            }
+            // GAP-02 part 2 (Design Closure 2026, ADR-2c — consent
+            // unification): sensitive-tool CONSENT no longer hard-denies at
+            // stage 2. Stage 9 is the single consent authority — standing
+            // EXECUTE grant (consentGrantPort, device-user-aware), one-shot
+            // approval token, or a persisted PAUSE (NEEDS_HUMAN_APPROVAL)
+            // that the approvals surface renders. Previously the exact-
+            // principal grant requirement HERE made the Phase-1 approve-
+            // once loop unreachable in production for consent-requiring
+            // tools (the pause could never be created), and the USER-
+            // principal "allow always" grant never matched the AGENT-
+            // principal check — the loop was closed only in test fixtures.
+            // Stage 2 retains the principal-VALIDITY seam: in this
+            // single-user product every principal is user-configured
+            // (agents from the canonical catalog; the user is the device
+            // principal) → true. The security-ceiling, risk, path, budget,
+            // rate, approval and sandbox stages still gate everything.
+            true
         }
     }
 
@@ -924,6 +943,19 @@ class AppContainer(context: Context) {
             approvalGate = humanApprovalGate,
             sandboxService = sandboxLifecycleService,
             auditSink = admissionAuditPort,
+            // GAP-02 part 2 (ADR-2c): standing-consent check at stage 9 —
+            // device-user-aware (the "allow always" surface grants to the
+            // USER principal; that covers the agents acting for this user).
+            consentGrantPort = ConsentGrantPort { request ->
+                permissionGrantService.checkCoveringDeviceUser(
+                    request.principalType,
+                    request.principalId,
+                    SecurableResourceType.TOOL,
+                    request.toolName,
+                    com.example.domain.core.security.governance.Permission.EXECUTE,
+                    request.workspaceId
+                )
+            },
             workspaceRootResolver = { projectId ->
                 val dir = File(appContext.filesDir, "workspaces/proj_$projectId")
                 if (dir.exists()) dir.canonicalPath else null
@@ -1161,7 +1193,10 @@ class AppContainer(context: Context) {
                     val workspaceId = com.example.domain.core.execution.ExecutionScope
                         .currentWorkspaceIdOrNull() ?: workspaceRuntimeService.activeWorkspaceIdOrNull()
                     val granted = runCatching {
-                        permissionGrantService.check(
+                        // GAP-02 part 2: device-user-aware standing consent —
+                        // the USER-principal "allow always" grant covers the
+                        // agent acting for that user.
+                        permissionGrantService.checkCoveringDeviceUser(
                             principalType = com.example.domain.core.security.governance.PrincipalType.AGENT,
                             principalId = agent.identity.id.value,
                             resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
@@ -1369,19 +1404,34 @@ class AppContainer(context: Context) {
         ManageWorkspaceFilesUseCase(workspaceStorage)
     }
 
+    // GAP-19 (Design Closure 2026, ADR-6 step 2): business rules extracted
+    // from MainViewModel into application use-cases.
+    val decisionSimulationUseCase: com.example.application.usecases.DecisionSimulationUseCase by lazy {
+        com.example.application.usecases.DecisionSimulationUseCase(cbrMdpEngine)
+    }
+
+    val connectProviderUseCase: com.example.application.usecases.ConnectProviderUseCase by lazy {
+        com.example.application.usecases.ConnectProviderUseCase(providerControlPlaneService)
+    }
+
+    val manageWorkspaceBudgetUseCase: com.example.application.usecases.ManageWorkspaceBudgetUseCase by lazy {
+        com.example.application.usecases.ManageWorkspaceBudgetUseCase(economicGovernanceService)
+    }
+
     // ========================================================================
     // Phase 5 — P0/P1 Intelligence Layer (audit remediation)
     // ========================================================================
     // Each service below closes one of the gaps identified in the audit:
     //   - TelemetryService             → Observability (25-35% → 55%)
     //   - MemoryLifecycleService       → Memory Intelligence (35-40% → 55%)
-    //   - WorkspaceContextEngine       → Workspace Intelligence (40-45% → 55%)
     //   - ToolLifecycleService         → Tool Ecosystem (30-40% → 55%)
     //   - SearchIntelligenceService    → Search Intelligence (35-40% → 55%)
-    //   - RagIntelligenceService       → RAG Intelligence (40-45% → 55%)
     //   - AgentLifecycleService        → Agent Intelligence (35-40% → 55%)
     //   - WorkflowPersistenceService   → Workflow Intelligence (40-45% → 55%)
     //   - TaskDecompositionService     → Task Intelligence (40-45% → 55%)
+    // (Design Closure 2026: WorkspaceContextEngine + RagIntelligenceService
+    //  from this list were deleted — wired with zero production consumers;
+    //  see docs/PRODUCT-DECISIONS.md D-7/D-10.)
     //   - CircuitBreakerService        → Production Resilience (35-45% → 55%)
     //   - PermissionGrantService       → Security Governance (40-45% → 55%)
     //   - DecisionIntelligenceService  → Decision Intelligence (~45% → 55%)
@@ -1409,20 +1459,24 @@ class AppContainer(context: Context) {
     }
 
     val memoryLifecycleService: MemoryLifecycleService by lazy {
+        // (ADR-7 fate — D-9: rank/forget/storeScoped/retrieveScoped deleted
+        // with the zero-caller APIs; the embeddingProvider + memoryRepository
+        // constructor params were never read by the surviving surface.)
         MemoryLifecycleService(
             memoryDao = database.memoryDao(),
-            namespaceDao = database.agentMemoryNamespaceDao(),
-            memoryRepository = memoryVectorStore,
-            embeddingProvider = localEmbeddingRouter
+            namespaceDao = database.agentMemoryNamespaceDao()
         )
     }
 
-    val workspaceContextEngine: WorkspaceContextEngine by lazy {
-        WorkspaceContextEngine(
-            resourceEdgeDao = database.resourceEdgeDao(),
-            workspaceRuntimeService = workspaceRuntimeService
-        )
-    }
+    // (ADR-7/ADR-4 fate — DELETED: WorkspaceContextEngine. Every input path
+    // was dead (registerResource/registerDependency/recordExecutionActivity
+    // had zero callers) so resource_edges was never written, events had zero
+    // collectors, and the ONLY production-read surface — the suggestions
+    // flow feeding a dashboard stat + a feed line — was permanently EMPTY.
+    // Its no-op lock (eventsLock.let{} that never acquired) was latent only
+    // because no writer ever ran. The resource_edges TABLE/DAO/entity stay
+    // schema-registered (no v18 touch in this phase); they are droppable at
+    // the next ADR-1 schema change. See docs/PRODUCT-DECISIONS.md D-10.)
 
     val toolLifecycleService: ToolLifecycleService by lazy {
         ToolLifecycleService(
@@ -1444,7 +1498,11 @@ class AppContainer(context: Context) {
         ).apply {
             // Pre-cache in-app tool declarations so lifecycle state machine
             // (validate/authorize/expose) works for them from the start.
-            cacheDeclaration("tool_workspace_file_tool", fileSystemTool.declaration)
+            // GAP-02 part 2: the governed toolchain adapters replace the
+            // retired workspace_file_tool.
+            governedCodingToolAdapters.forEach { adapter ->
+                cacheDeclaration("tool_${adapter.declaration.name}", adapter.declaration)
+            }
             cacheDeclaration("tool_safe_diagnostics_tool", safeDiagnosticsTool.declaration)
         }
     }
@@ -1462,15 +1520,16 @@ class AppContainer(context: Context) {
         )
     }
 
-    val ragIntelligenceService: RagIntelligenceService by lazy {
-        RagIntelligenceService(
-            documentChunkDao = database.documentChunkDao(),
-            embeddingProvider = localEmbeddingRouter,
-            // P0 CONVERGENCE: real document titles survive the intelligence
-            // reload path (previously reloaded chunks lost their titles).
-            documentDao = database.knowledgeDocumentDao()
-        )
-    }
+    // (ADR-4/ADR-7 fate — DELETED: RagIntelligenceService. Tested-only with
+    // zero production callers while the LIVE pipeline (RagPipelineService)
+    // already ships hybrid retrieval — semantic 0.6 + lexical F1 0.4 +
+    // contains-boost rerank + bounded scan — UNDER the gap-closed guards
+    // (scope-mode isolation, embedding-compat boundary, Arabic
+    // normalization, per-chunk retrievalMode). V2's BM25/RRF/heuristic-
+    // rerank delta over that is marginal and does not justify a second
+    // retrieval authority — the exact DUPLICATED AUTHORITY pattern this
+    // audit eliminates. Agentic retrieval (ADR-4 medium-term) stays on the
+    // redesign track. See docs/PRODUCT-DECISIONS.md D-7.)
 
     val agentLifecycleService: AgentLifecycleService by lazy {
         // REPAIR (defect family 4): dryRun now executes through the REAL
@@ -1540,10 +1599,44 @@ class AppContainer(context: Context) {
 
     val circuitBreakerService: CircuitBreakerService by lazy { CircuitBreakerService() }
 
+    /**
+     * GAP-17 closure (Phase 4): persists breaker STATE CHANGES to
+     * tool_health_snapshots (identity mapping: resourceId ↔ toolId — this
+     * sink is the only production writer of those rows). Fail-open: counted
+     * + stderr, never blocks the execution path. Restore happens in
+     * [bootstrapRuntime].
+     */
+    val circuitBreakerStateSink: com.example.application.resilience.CircuitBreakerStateSink by lazy {
+        com.example.application.resilience.CircuitBreakerStateSink(
+            service = circuitBreakerService,
+            writer = { resourceId, snapshot ->
+                database.toolHealthDao().upsert(
+                    com.example.infrastructure.persistence.entities.ToolHealthSnapshotEntity(
+                        toolId = resourceId,
+                        totalCalls = snapshot.totalCalls.toLong(),
+                        successCount = snapshot.successCount.toLong(),
+                        failureCount = snapshot.failureCount.toLong(),
+                        degradedCount = 0L,
+                        averageLatencyMs = 0.0,
+                        p95LatencyMs = 0L,
+                        lastFailureCode = snapshot.lastFailureCode,
+                        lastErrorMessage = snapshot.lastErrorMessage,
+                        circuitState = snapshot.state.storageCode,
+                        openedAtEpochMs = snapshot.openedAtEpochMs,
+                        lastUpdatedEpochMs = snapshot.lastUpdatedEpochMs
+                    )
+                )
+            }
+        )
+    }
+
     val permissionGrantService: PermissionGrantService by lazy {
         PermissionGrantService(
             permissionGrantDao = database.permissionGrantDao(),
-            telemetryPort = telemetryPort
+            telemetryPort = telemetryPort,
+            // GAP-02 part 2 (ADR-2c): the device-local user — "allow always"
+            // grants (USER principal) cover the agents acting for this user.
+            deviceUserPrincipalId = { localPrincipalId }
         )
     }
 
@@ -1780,6 +1873,33 @@ class AppContainer(context: Context) {
                         }
                 }
             }
+            // GAP-17 closure (Design Closure 2026, Phase 4): circuit-breaker
+            // state is now DURABLE. (1) RESTORE: re-seed breakers from the
+            // persisted tool_health_snapshots rows (identity mapping — the
+            // breaker resourceId IS the row's toolId; this sink is the only
+            // production writer of those rows). A restored OPEN breaker keeps
+            // fail-fasting until its cooldown elapses. (2) SINK: persist state
+            // CHANGES (not every counter bump); persistence failures are
+            // counted + logged fail-open and never block execution.
+            runCatching {
+                database.toolHealthDao().all().forEach { row ->
+                    circuitBreakerService.restorePersisted(
+                        com.example.domain.core.resilience.CircuitBreakerSnapshot(
+                            resourceId = row.toolId,
+                            state = com.example.domain.core.resilience.CircuitBreakerState.valueOf(row.circuitState),
+                            failureCount = row.failureCount,
+                            successCount = row.successCount,
+                            consecutiveFailures = 0,
+                            totalCalls = row.totalCalls,
+                            openedAtEpochMs = row.openedAtEpochMs,
+                            lastFailureCode = row.lastFailureCode,
+                            lastErrorMessage = row.lastErrorMessage,
+                            lastUpdatedEpochMs = row.lastUpdatedEpochMs
+                        )
+                    )
+                }
+            }.onFailure { recordBootstrapDegradation("CIRCUIT_BREAKER_RESTORE_FAILED", it) }
+            circuitBreakerStateSink.startIn(this)
             } catch (t: Throwable) {
                 // P1-8: a bootstrap step threw. The readiness gate is STILL
                 // released below — the failure is attributed honestly so the
@@ -1861,6 +1981,9 @@ class MainViewModelFactory(
             return MainViewModel(
                 executeAgentTaskUseCase = appContainer.executeAgentTaskUseCase,
                 executeWorkflowUseCase = appContainer.executeWorkflowUseCase,
+                decisionSimulationUseCase = appContainer.decisionSimulationUseCase,
+                connectProviderUseCase = appContainer.connectProviderUseCase,
+                manageWorkspaceBudgetUseCase = appContainer.manageWorkspaceBudgetUseCase,
                 manageMemoryUseCase = appContainer.manageMemoryUseCase,
                 manageWorkspaceFilesUseCase = appContainer.manageWorkspaceFilesUseCase,
                 componentRegistry = appContainer.componentRegistry,
@@ -1872,10 +1995,9 @@ class MainViewModelFactory(
                 workspaceRuntimeService = appContainer.workspaceRuntimeService,
                 // GAP-CLOSURE P1-08/P1-10 — canonical durable agent registry.
                 agentRegistryService = appContainer.agentRegistryService,
-                // Phase 5 — pass the new intelligence services for the
-                // Unified Activity Feed + proactive suggestion surface.
+                // Phase 5 — pass the intelligence services for the
+                // Unified Activity Feed.
                 telemetryService = appContainer.telemetryService,
-                workspaceContextEngine = appContainer.workspaceContextEngine,
                 telemetryPort = appContainer.telemetryPort,
                 networkMonitorProvider = appContainer.networkMonitor,
                 appContext = appContainer.appContext,

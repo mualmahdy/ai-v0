@@ -136,3 +136,85 @@ verification (probe-based) belongs to the ADR-6 redesign track.
 is the explanatory comment from Phase 1 (GAP-08/ADR-7 deleted the dead
 GEMINI plumbing; no BuildConfig field is generated from it). Re-add a real
 key only when a live consumer is wired.
+
+---
+
+## D-7 — Retrieval authority is ONE pipeline (RagIntelligenceService deleted)
+
+**Decision (2026-09, ADR-4/ADR-7):** `RagIntelligenceService` and its
+`domain.core.rag.intelligence` models are DELETED. The service was
+production-dead its whole life (tested-only, zero production callers)
+while the LIVE pipeline (`RagPipelineService`) already ships hybrid
+retrieval — semantic 0.6 + lexical F1 0.4 + contains-boost rerank +
+bounded scan — under the gap-closed guards (scope-mode isolation,
+embedding-compatibility boundary, Arabic normalization, per-chunk
+retrievalMode). Its v2 delta (BM25/RRF/heuristic rerank) was marginal and
+never justified a SECOND retrieval authority — the exact DUPLICATED
+AUTHORITY pattern this closure eliminates. The retired `@Deprecated`
+message on `retrieveRelevantContext(query, topK, maxTokenBudget)` no
+longer claims a "budget authority moved to RagIntelligenceService" that
+never existed: the pipeline owns its bounded scan/assembly budget.
+
+**Reopen when:** agentic retrieval (ADR-4 medium-term — passing retrieval
+tools to the model in AGENT modes) lands on the redesign track; it extends
+the ONE pipeline, it does not resurrect the deleted layer.
+
+---
+
+## D-8 — Scope resolution authority: ScopeRules + pinned ExecutionScope
+
+**Decision (2026-09, ADR-7):** `ContextResolverService` is DELETED. It was
+wired with ZERO callers (main and test), its "ONE service… every service"
+KDoc was contradicted by the 8+ production sites that read
+`ExecutionScope` inline, and its injected `AppDatabase` was never used.
+The canonical scope authority remains the pinned
+`ExecutionScope` (workspace + sandbox project bound at execution launch)
+plus `ScopeRules`; every service resolves scope from the coroutine context
+— there is no second resolver to drift from it.
+
+**Reopen when:** a real multi-source scope-resolution need appears (e.g.
+flow-restore of an interrupted execution's scope) — extend
+`ExecutionScope`/`ScopeRules`, do not re-introduce a parallel resolver.
+
+---
+
+## D-9 — Memory lifecycle surface = what production calls
+
+**Decision (2026-09, ADR-7):** `rank` / `forget` / `storeScoped` /
+`retrieveScoped` are DELETED from `MemoryLifecyclePort` (and
+`MemoryLifecycleService`), together with `ForgettingPolicy`,
+`RankedMemoryRecord`, the MemoryDao methods that served ONLY them
+(getMemoriesBelowDecay, deleteArchivedOlderThan, activeCountGlobal,
+leastRecentlyUsedGlobal, getActiveForWorkspaceAndAgentAndTypes,
+getMemoryById), and the service's never-read `memoryRepository` +
+`embeddingProvider` constructor params. All four APIs had ZERO production
+callers since inception; `rank` was reachable only from the uncalled
+`retrieveScoped` and carried an N+1 (one getMemoryById round-trip per
+memory); `forget`'s semantics overlap the production-called `applyDecay` +
+`consolidate`. The production surface is exactly what production calls:
+decay + consolidate (bootstrap) and namespaces (AgentLifecycleService).
+
+**Reopen when:** a real ranking consumer appears (e.g. the memory screen
+sorting by final rank) — re-derive it from the LIVE retrieval scores
+(`RoomVectorStoreAdapter`), not from a second N+1 path.
+
+---
+
+## D-10 — WorkspaceContextEngine deleted; resource_edges schema stays until ADR-1
+
+**Decision (2026-09, ADR-7):** `WorkspaceContextEngine`, its
+`domain.core.workspace.context` models (events, snapshot, suggestions,
+signals — zero importers after the engine's deletion) are DELETED. Every
+input path was dead (`registerResource`/`registerDependency`/
+`recordExecutionActivity` had zero callers) so `resource_edges` was never
+written, its events had zero collectors, and the only production-read
+surface — the suggestions flow feeding a dashboard stat + a feed filter +
+their cards — was permanently EMPTY: a fabricated-zero capability, removed
+with the engine (feed filter/cards + the dashboard stat now show real
+rows only). The `resource_edges` TABLE/DAO/entity stay schema-registered
+(NO v18 touch in this phase — schema changes are frozen to ADR-1); they
+are droppable at the next ADR-1 schema change.
+
+**Reopen when:** the redesign track actually builds a live resource-graph
+surface — then wire a REAL input path first (writers before readers), or
+drop the table at the next ADR-1 schema touch.

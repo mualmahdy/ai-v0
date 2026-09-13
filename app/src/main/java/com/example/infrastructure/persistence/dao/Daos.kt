@@ -148,24 +148,17 @@ interface MemoryDao {
     @Query("SELECT * FROM memory_records WHERE isArchived = 0 AND memoryType IN (:types)")
     suspend fun getActiveByTypes(types: List<String>): List<MemoryEntity>
 
-    @Query("SELECT * FROM memory_records WHERE isArchived = 0 AND workspaceId IS :workspaceId AND memoryType IN (:types) AND (agentId IS :agentId OR agentId IS NULL)")
-    suspend fun getActiveForWorkspaceAndAgentAndTypes(
-        workspaceId: String?,
-        agentId: String?,
-        types: List<String>
-    ): List<MemoryEntity>
-
     @Query("SELECT * FROM memory_records WHERE lastDecayEvaluatedAtEpochMs < :cutoff AND isArchived = 0")
     suspend fun getMemoriesDueForDecay(cutoff: Long): List<MemoryEntity>
 
-    @Query("SELECT * FROM memory_records WHERE decayScore < :threshold AND isArchived = 0")
-    suspend fun getMemoriesBelowDecay(threshold: Float): List<MemoryEntity>
+    // (Design Closure 2026, ADR-7 fate — D-9: the DAO methods that served
+    //  ONLY the deleted forget/rank/storeScoped/retrieveScoped APIs were
+    //  removed with them: getMemoriesBelowDecay, deleteArchivedOlderThan,
+    //  activeCountGlobal, leastRecentlyUsedGlobal,
+    //  getActiveForWorkspaceAndAgentAndTypes, getMemoryById.)
 
     @Query("SELECT * FROM memory_records WHERE isArchived = 1 AND lastAccessedEpochMs < :cutoff")
     suspend fun getArchivedOlderThan(cutoff: Long): List<MemoryEntity>
-
-    @Query("SELECT * FROM memory_records WHERE id = :id LIMIT 1")
-    suspend fun getMemoryById(id: String): MemoryEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMemory(memory: MemoryEntity)
@@ -188,23 +181,14 @@ interface MemoryDao {
     @Query("DELETE FROM memory_records")
     suspend fun clearAll()
 
-    @Query("DELETE FROM memory_records WHERE isArchived = 1 AND lastAccessedEpochMs < :cutoff")
-    suspend fun deleteArchivedOlderThan(cutoff: Long): Int
-
     @Query("SELECT COUNT(*) FROM memory_records WHERE isArchived = 0 AND workspaceId IS :workspaceId")
     suspend fun activeCountForWorkspace(workspaceId: String?): Int
 
     @Query("SELECT COUNT(*) FROM memory_records WHERE isArchived = 0 AND agentId IS :agentId")
     suspend fun activeCountForAgent(agentId: String?): Int
 
-    @Query("SELECT COUNT(*) FROM memory_records WHERE isArchived = 0")
-    suspend fun activeCountGlobal(): Int
-
     @Query("SELECT * FROM memory_records WHERE isArchived = 0 AND workspaceId IS :workspaceId ORDER BY lastAccessedEpochMs ASC LIMIT :limit")
     suspend fun leastRecentlyUsedForWorkspace(workspaceId: String?, limit: Int): List<MemoryEntity>
-
-    @Query("SELECT * FROM memory_records WHERE isArchived = 0 ORDER BY lastAccessedEpochMs ASC LIMIT :limit")
-    suspend fun leastRecentlyUsedGlobal(limit: Int): List<MemoryEntity>
 }
 
 @Dao

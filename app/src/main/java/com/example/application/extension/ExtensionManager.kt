@@ -11,6 +11,7 @@ import com.example.domain.core.extension.McpTransportType
 import com.example.domain.core.extension.PluginManifest
 import com.example.domain.core.extension.PluginState
 import com.example.domain.core.extension.SkillManifest
+import com.example.domain.core.extension.SkillParameterDefinition
 import com.example.domain.core.extension.SkillState
 import com.example.domain.core.provider.HealthStatus
 import com.example.domain.core.tools.ToolDeclaration
@@ -78,6 +79,18 @@ class ExtensionManager(
                 category = "ARCHITECTURE",
                 requiredCapabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.FILE_STORAGE),
                 requiredTools = listOf("workspace_fs"),
+                // GAP-19 (ADR-6 step 6): parameters DECLARED on the manifest —
+                // the run-skill form derives from these (previously the dialog
+                // branched on skillId.contains("scaffold")).
+                parameters = listOf(
+                    SkillParameterDefinition(
+                        name = "moduleName",
+                        label = "اسم الوحدة النمطية",
+                        description = "سيولّد هيكل Clean Architecture كامل (domain/application/ports/infrastructure) داخل ملعب مساحة العمل.",
+                        isRequired = true,
+                        defaultValue = "feature_module"
+                    )
+                ),
                 state = SkillState.ENABLED,
                 isVerified = true,
                 installedTimestampMs = System.currentTimeMillis()
@@ -90,6 +103,15 @@ class ExtensionManager(
                 category = "SECURITY",
                 requiredCapabilities = setOf(CapabilityType.LLM_GENERATION, CapabilityType.TOOL_EXECUTION),
                 requiredTools = listOf("safe_diagnostics"),
+                parameters = listOf(
+                    SkillParameterDefinition(
+                        name = "content",
+                        label = "الشيفرة/النص المراد تدقيقه",
+                        description = "فحص أمني: تسريب مفاتيح، ثغرات، حقن أوامر.",
+                        isRequired = true,
+                        isMultiline = true
+                    )
+                ),
                 state = SkillState.ENABLED,
                 isVerified = true,
                 installedTimestampMs = System.currentTimeMillis()

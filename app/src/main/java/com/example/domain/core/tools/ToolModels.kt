@@ -35,11 +35,17 @@ data class ToolDeclaration(
 
 /**
  * Input payload sent to a tool for execution.
+ *
+ * GAP-02 part 2 (Design Closure 2026): `principalId` carries the EXECUTING
+ * principal (the agent id on agent-driven paths) so governed tools can
+ * attribute their admission audit rows to the real actor instead of an
+ * anonymous placeholder. Null = the caller could not attribute the call.
  */
 data class ToolInput(
     val toolName: String,
     val arguments: Map<String, Any?>,
     val executionId: String? = null,
+    val principalId: String? = null,
     val contextAttributes: Map<String, String> = emptyMap()
 )
 

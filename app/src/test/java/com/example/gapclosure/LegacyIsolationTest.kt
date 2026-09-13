@@ -168,4 +168,42 @@ class LegacyIsolationTest {
             files.any { relativePath(it) == "com/example/application/orchestration/AgentOrchestrator.kt" }
         )
     }
+
+    @Test
+    fun `P4 dead-tail stays deleted - no resurrection without a new ADR`() {
+        // Phase 4 (Design Closure 2026, ADR-7 delete branch, decisions
+        // D-7/D-8/D-9/D-10 in docs/PRODUCT-DECISIONS.md): pins the ABSENCE
+        // of the deleted zero-caller surface — RagIntelligenceService,
+        // ContextResolverService, WorkspaceContextEngine (+ its context
+        // models package), the memory rank/forget/scoped APIs, and the
+        // presentation-layer ProviderPresets (moved to application).
+        // Usage-shaped patterns: an import, a re-declaration, or a
+        // construction site. Prose fate-notes (KDoc "DELETED: …") are
+        // intentionally NOT flagged — only a real resurrection is.
+        val violations = forbiddenReferences(
+            patterns = listOf(
+                Regex("import com\\.example\\.[a-zA-Z.]*RagIntelligenceService"),
+                Regex("class RagIntelligenceService"),
+                Regex("RagIntelligenceService\\("),
+                Regex("import com\\.example\\.[a-zA-Z.]*ContextResolverService"),
+                Regex("class ContextResolverService"),
+                Regex("ContextResolverService\\("),
+                Regex("import com\\.example\\.[a-zA-Z.]*WorkspaceContextEngine"),
+                Regex("class WorkspaceContextEngine"),
+                Regex("WorkspaceContextEngine\\("),
+                Regex("import com\\.example\\.domain\\.core\\.workspace\\.context\\."),
+                Regex("class ForgettingPolicy"),
+                Regex("ForgettingPolicy\\("),
+                Regex("class RankedMemoryRecord"),
+                Regex("RankedMemoryRecord\\("),
+                Regex("import com\\.example\\.presentation\\.ui\\.screens\\.(ProviderPreset|PROVIDER_PRESETS)")
+            ),
+            allowlist = emptySet()
+        )
+        assertEquals(
+            "P4 dead-tail must stay deleted (see PRODUCT-DECISIONS D-7..D-10): $violations",
+            0,
+            violations.size
+        )
+    }
 }

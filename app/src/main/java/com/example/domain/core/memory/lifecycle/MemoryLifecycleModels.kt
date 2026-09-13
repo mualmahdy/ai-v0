@@ -1,6 +1,5 @@
 package com.example.domain.core.memory.lifecycle
 
-import com.example.domain.core.memory.MemoryEntry
 import com.example.domain.core.memory.MemoryType
 
 /**
@@ -113,34 +112,9 @@ data class MemoryConsolidationRequest(
     val reason: String
 )
 
-/**
- * Forgetting policy. Drives which memories get archived/deleted when
- * the store exceeds a size threshold or when decay_score drops below
- * `minDecayScore` for an extended period.
- */
-data class ForgettingPolicy(
-    val maxActiveMemoriesPerWorkspace: Int = 500,
-    val maxActiveMemoriesPerAgent: Int = 200,
-    val globalMaxActiveMemories: Int = 5000,
-    val archiveDecayThreshold: Float = 0.02f,
-    val deleteArchivedAfterMs: Long = 90L * 24 * 60 * 60 * 1000
-)
-
-/**
- * Ranked memory record — extends `ScoredMemoryRecord` with the new
- * ranking dimensions (importance × confidence × recency × decay).
- */
-data class RankedMemoryRecord(
-    val entry: MemoryEntry,
-    val cognitiveType: CognitiveMemoryType,
-    val similarityScore: Float,
-    val importanceScore: Float,
-    val recencyScore: Float,
-    val decayScore: Float,
-    val finalRankScore: Float,
-    val workspaceId: String?,
-    val agentId: String?
-)
+// (Design Closure 2026, ADR-7 fate — D-9: ForgettingPolicy and
+//  RankedMemoryRecord were DELETED with the zero-caller forget/rank/
+//  storeScoped/retrieveScoped APIs of MemoryLifecyclePort.)
 
 /**
  * Memory namespace descriptor — the scope at which a memory lives.

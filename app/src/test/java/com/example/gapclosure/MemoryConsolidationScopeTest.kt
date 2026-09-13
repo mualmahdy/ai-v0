@@ -63,8 +63,7 @@ class MemoryConsolidationScopeTest {
             .build()
         service = MemoryLifecycleService(
             memoryDao = db.memoryDao(),
-            namespaceDao = db.agentMemoryNamespaceDao(),
-            memoryRepository = StubMemoryRepository
+            namespaceDao = db.agentMemoryNamespaceDao()
         )
     }
 

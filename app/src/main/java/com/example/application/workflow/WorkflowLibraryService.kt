@@ -1,6 +1,7 @@
 package com.example.application.workflow
 
 import com.example.domain.core.workflow.ExecutionMode
+import com.example.domain.core.workflow.WorkflowDefinitionSummary
 import com.example.domain.core.workflow.StepNode
 import com.example.domain.core.workflow.WorkflowId
 import com.example.domain.core.workflow.WorkflowPlan
@@ -36,20 +37,6 @@ class WorkflowLibraryService(
     private val planSerializer: WorkflowPersistenceService,
     private val workspaceIdProvider: suspend () -> String
 ) {
-
-    /** Library summary row (no plan payload — cheap for lists). */
-    data class WorkflowDefinitionSummary(
-        val workflowId: WorkflowId,
-        val workspaceId: String,
-        val name: String,
-        val goal: String,
-        val executionMode: ExecutionMode,
-        val stepCount: Int,
-        val version: Int,
-        val runCount: Int,
-        val lastRunAtEpochMs: Long?,
-        val updatedAtEpochMs: Long
-    )
 
     /** Live, most-recently-updated-first library for a workspace. */
     fun observeLibrary(workspaceId: String): Flow<List<WorkflowDefinitionSummary>> =

@@ -31,12 +31,16 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * ----------------------------------------------------------------------------
  * GAP-17 (Design Closure 2026) — honest scope declaration:
- *  - DURABILITY: breaker state lives in a ConcurrentHashMap ONLY. It is
- *    LOST on process death — after a restart every breaker resets to
- *    CLOSED and the failure threshold re-accumulates from zero. This is
- *    a declared trade-off, not an accident (persistence would belong with
- *    the tool_health_snapshots.circuitState column — deferred to the
- *    ADR-8 audit-unification track, which owns that table's readers).
+ *  - DURABILITY (Phase 4 closure — the deferral is LIFTED): breaker state
+ *    is now PERSISTED. The composition root collects [states] and writes
+ *    state CHANGES to `tool_health_snapshots.circuitState` (identity
+ *    mapping: breaker resourceId ↔ toolId — the only production writer of
+ *    those rows), and re-seeds the breakers from the same table at
+ *    bootstrap via [restorePersisted]. State (OPEN/HALF_OPEN/OPENED-AT)
+ *    survives process death; counter rows reflect the LAST transition
+ *    (counters are not per-call persisted — see CircuitBreakerStateSink).
+ *    Persistence failures are fail-open observability: logged, never
+ *    blocking the execution path.
  *  - COVERAGE: the gate is consulted on the LLM and SEARCH execution
  *    paths only (see ExecutionService wiring). Tools, MCP and embeddings
  *    are NOT gated — adding them is a deliberate follow-up decision, not
@@ -178,6 +182,19 @@ open class CircuitBreakerService(
     suspend fun reset(resourceId: String) {
         probeLeases.remove(resourceId)
         transition(resourceId, CircuitBreakerState.CLOSED)
+    }
+
+    /**
+     * GAP-17 (Phase 4 closure): re-seed a breaker from PERSISTED state at
+     * bootstrap. The restored snapshot's `openedAtEpochMs` anchors the
+     * cooldown — a restored OPEN breaker still fail-fasts until the
+     * cooldown elapses (then arms a fresh HALF_OPEN probe), which is the
+     * honest durability semantic: a restart does not reset failure
+     * history.
+     */
+    fun restorePersisted(snapshot: CircuitBreakerSnapshot) {
+        breakers[snapshot.resourceId] = snapshot
+        _states.value = breakers.toMap()
     }
 
     fun current(resourceId: String): CircuitBreakerSnapshot {
