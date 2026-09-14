@@ -11,8 +11,6 @@ import com.example.domain.core.extension.IntegrationDescriptor
 import com.example.domain.core.extension.McpServerDescriptor
 import com.example.domain.core.extension.PluginManifest
 import com.example.domain.core.extension.SkillManifest
-import com.example.domain.core.memory.MemoryEntry
-import com.example.domain.core.memory.ScoredMemoryRecord
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.provider.Provider
 import com.example.domain.core.provider.ProviderService
@@ -25,8 +23,6 @@ import com.example.domain.core.radar.RadarRecommendation
 import com.example.domain.core.budget.BudgetStatus
 import com.example.domain.core.budget.UsageCostRecord
 import com.example.domain.core.radar.RadarSnapshot
-import com.example.domain.core.rag.AssembledRagContext
-import com.example.domain.core.rag.KnowledgeDocument
 import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.task.AutonomyPolicy
@@ -228,19 +224,13 @@ data class UiState(
     val credentialInput: String = "",
     val isSavingCredential: Boolean = false,
 
-    // Memory & Knowledge RAG
-    val memoryQuery: String = "",
-    val retrievedMemories: List<ScoredMemoryRecord> = emptyList(),
-    val allMemories: List<MemoryEntry> = emptyList(),
-    val isSearchingMemory: Boolean = false,
-    val newMemoryContent: String = "",
-    // TRUE when the on-device ONNX semantic embedding model is provisioned.
-    val semanticModelReady: Boolean = false,
-    val isProvisioningSemanticModel: Boolean = false,
-    val knowledgeDocuments: List<KnowledgeDocument> = emptyList(),
-    val assembledRagContext: AssembledRagContext? = null,
-    val newDocTitle: String = "",
-    val newDocContent: String = "",
+    // Memory & Knowledge RAG — REMOVED (ADR-6 slice 3, Design Closure 2026
+    // UI-redesign track): memoryQuery / retrievedMemories / allMemories /
+    // isSearchingMemory / newMemoryContent / semanticModelReady /
+    // isProvisioningSemanticModel / knowledgeDocuments / assembledRagContext /
+    // newDocTitle / newDocContent now live in KnowledgeViewModel's own
+    // KnowledgeUiState. The Explorer/Settings surfaces read the knowledge
+    // feature's own flow (value+lambda / owner-VM composition).
 
     // Files feature — REMOVED (ADR-6 slice 1, Design Closure 2026
     // UI-redesign track): workspaceFiles / selectedFileContent /

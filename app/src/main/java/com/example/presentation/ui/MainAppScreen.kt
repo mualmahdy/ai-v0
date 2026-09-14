@@ -114,6 +114,10 @@ fun MainAppScreen(
     settingsViewModel: com.example.presentation.viewmodel.SettingsViewModel,
     studioViewModel: com.example.presentation.viewmodel.StudioViewModel,
     sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
+    // ADR-6 slice 3: the KNOWLEDGE feature ViewModel (RAG base + semantic
+    // engine + memory browser) — owned here, passed to the screens that
+    // render or read its state.
+    knowledgeViewModel: com.example.presentation.viewmodel.KnowledgeViewModel,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -123,6 +127,10 @@ fun MainAppScreen(
     // degradation banners) render in the SAME global honest surfaces as
     // the shared ones — each from its OWN source of truth.
     val studioState by studioViewModel.state.collectAsState()
+    // ADR-6 SLICE 3: the knowledge feature's honest error channel (ingest
+    // failures, deletion errors, memory-store errors) — same global
+    // snackbar pattern, dismissed from its own state.
+    val knowledgeState by knowledgeViewModel.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val navController = rememberNavController()
     var createWorkspaceOpen by rememberSaveable { mutableStateOf(false) }
@@ -141,6 +149,15 @@ fun MainAppScreen(
         studioState.errorMessage?.let { error ->
             snackbarHostState.showSnackbar(error)
             studioViewModel.dismissError()
+        }
+    }
+
+    // ADR-6 SLICE 3: the knowledge feature's honest error channel — the
+    // same global snackbar surface, its own source of truth.
+    LaunchedEffect(knowledgeState.errorMessage) {
+        knowledgeState.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            knowledgeViewModel.clearErrorMessage()
         }
     }
 
@@ -271,6 +288,7 @@ fun MainAppScreen(
                     settingsViewModel = settingsViewModel,
                     studioViewModel = studioViewModel,
                     sessionsViewModel = sessionsViewModel,
+                    knowledgeViewModel = knowledgeViewModel,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -370,6 +388,9 @@ private fun WorkspaceNavHost(
     settingsViewModel: com.example.presentation.viewmodel.SettingsViewModel,
     studioViewModel: com.example.presentation.viewmodel.StudioViewModel,
     sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
+    // ADR-6 slice 3: the knowledge feature VM — composed into the Knowledge /
+    // Settings / Explorer destinations.
+    knowledgeViewModel: com.example.presentation.viewmodel.KnowledgeViewModel,
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
@@ -401,7 +422,7 @@ private fun WorkspaceNavHost(
         }
         composable(WorkspaceRoutes.KNOWLEDGE) {
             KnowledgeScreen(
-                viewModel = viewModel,
+                knowledgeViewModel = knowledgeViewModel,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -466,6 +487,12 @@ private fun WorkspaceNavHost(
                 // autonomy delegation, direction reversed).
                 sessionNetworkPolicy = studioViewModel.state.collectAsState().value.networkPolicy,
                 onSessionNetworkPolicy = studioViewModel::setNetworkPolicy,
+                // ADR-6 slice 3: the SEMANTIC ENGINE card — the readiness
+                // flags and the provisioning mutation come from the
+                // knowledge feature VM as value + lambda (same delegation).
+                semanticModelReady = knowledgeViewModel.state.collectAsState().value.semanticModelReady,
+                isProvisioningSemanticModel = knowledgeViewModel.state.collectAsState().value.isProvisioningSemanticModel,
+                onProvisionSemanticModel = knowledgeViewModel::provisionLocalSemanticModel,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -474,6 +501,10 @@ private fun WorkspaceNavHost(
                 viewModel = viewModel,
                 filesViewModel = filesViewModel,
                 sessionsViewModel = sessionsViewModel,
+                // ADR-6 slice 3: the knowledge row (doc count + semantic
+                // readiness subtitle) reads the knowledge feature VM — its
+                // owner (same pattern as the files/sessions rows).
+                knowledgeViewModel = knowledgeViewModel,
                 onNavigate = navigate,
                 modifier = Modifier.fillMaxSize()
             )

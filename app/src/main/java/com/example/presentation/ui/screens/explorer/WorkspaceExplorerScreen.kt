@@ -71,12 +71,17 @@ fun WorkspaceExplorerScreen(
     // ADR-6 slice 2: the durable-session registry list (the sessions row
     // count/subtitle) — read from the sessions feature VM, its owner.
     sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
+    // ADR-6 slice 3: the knowledge feature state (the RAG row count + the
+    // semantic-readiness subtitle) — read from the knowledge feature VM,
+    // its owner.
+    knowledgeViewModel: com.example.presentation.viewmodel.KnowledgeViewModel,
     onNavigate: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
     val filesState by filesViewModel.state.collectAsState()
     val sessionsState by sessionsViewModel.state.collectAsState()
+    val knowledgeState by knowledgeViewModel.state.collectAsState()
 
     Column(
         modifier = modifier
@@ -157,9 +162,9 @@ fun WorkspaceExplorerScreen(
         ExplorerRow(
             icon = Icons.Default.MenuBook,
             title = "المعرفة (RAG)",
-            count = state.knowledgeDocuments.size,
+            count = knowledgeState.knowledgeDocuments.size,
             countLabel = "مستند",
-            subtitle = if (state.semanticModelReady) "تضمين دلالي محلي جاهز" else "تضمين معجمي (النموذج الدلالي غير مُجهّز)",
+            subtitle = if (knowledgeState.semanticModelReady) "تضمين دلالي محلي جاهز" else "تضمين معجمي (النموذج الدلالي غير مُجهّز)",
             route = WorkspaceRoutes.KNOWLEDGE,
             onNavigate = onNavigate,
             testTag = "explorer_knowledge"

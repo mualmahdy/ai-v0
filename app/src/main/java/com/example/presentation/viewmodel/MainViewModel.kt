@@ -5,13 +5,11 @@ import androidx.lifecycle.viewModelScope
 import com.example.application.extension.ExtensionManager
 import com.example.application.provider.ProviderControlPlaneService
 import com.example.application.radar.IntelligenceRadarPipeline
-import com.example.application.rag.RagPipelineService
 import com.example.application.registry.ComponentRegistry
 import com.example.application.usecases.ConnectProviderUseCase
 import com.example.application.usecases.DecisionSimulationUseCase
 import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
-import com.example.application.usecases.ManageMemoryUseCase
 import com.example.application.usecases.ManageWorkspaceBudgetUseCase
 import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.Outcome
@@ -28,9 +26,6 @@ import com.example.domain.core.decision.DecisionResult
 import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.evolution.EvolutionStage
-import com.example.domain.core.memory.MemoryEntry
-import com.example.domain.core.memory.MemoryProvenance
-import com.example.domain.core.memory.MemoryType
 import com.example.domain.core.provider.HealthStatus
 import com.example.domain.core.provider.ServiceValidationResult
 import com.example.domain.core.resource.ResourceId
@@ -58,7 +53,10 @@ import java.util.UUID
 class MainViewModel(
     private val executeAgentTaskUseCase: ExecuteAgentTaskUseCase,
     private val executeWorkflowUseCase: ExecuteWorkflowUseCase,
-    private val manageMemoryUseCase: ManageMemoryUseCase,
+    // (ADR-6 slice 3) the knowledge feature — RAG documents, semantic-model
+    // provisioning/readiness, and the long-term memory browser — left this
+    // ViewModel for KnowledgeViewModel (with manageMemoryUseCase and
+    // ragPipelineService, its whole dependency set).
     // GAP-19 (Design Closure 2026, ADR-6 step 2): extracted use-cases —
     // the simulation/provider-chain/budget business logic left the VM.
     private val decisionSimulationUseCase: DecisionSimulationUseCase? = null,
@@ -68,7 +66,6 @@ class MainViewModel(
     private val cbrMdpEngine: CbrMdpEngine,
     private val extensionManager: ExtensionManager,
     private val intelligenceRadarPipeline: IntelligenceRadarPipeline,
-    private val ragPipelineService: RagPipelineService,
     private val providerControlPlaneService: ProviderControlPlaneService,
     // Phase 2 — workspace runtime service for multi-workspace support
     private val workspaceRuntimeService: WorkspaceRuntimeService,
@@ -468,8 +465,9 @@ class MainViewModel(
                                 )
                             )
                         }
-                        // Reload RAG knowledge for the new workspace scope.
-                        ragPipelineService.loadFromPersistence()
+                        // (ADR-6 slice 3) the RAG index reload on workspace
+                        // re-scope now lives in KnowledgeViewModel — it owns
+                        // the workspace-scoped knowledge feature.
                         // AUTONOMY DISPLAY SYNC (ADR-6 slice 1): the policy
                         // mutations now live in SettingsViewModel (routed to
                         // the AUTHORITATIVE service). This collector mirrors
@@ -501,44 +499,11 @@ class MainViewModel(
      * FilesViewModel. MainViewModel keeps only the shared DISPLAY mirrors.
      */
 
-    /**
-     * Local-first semantic RAG provisioning (audit 2026 fix): downloads the
-     * on-device sentence-transformer ONCE (~23MB int8). Idempotent — no-ops
-     * when already provisioned, and fails honestly (offline, network error)
-     * without ever fabricating a "semantic" mode.
-     */
-    fun provisionLocalSemanticModel() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isProvisioningSemanticModel = true) }
-            runCatching {
-                when (val r = ragPipelineService.provisionSemanticModel()) {
-                    is Outcome.Success -> _uiState.update {
-                        it.copy(
-                            semanticModelReady = true,
-                            isProvisioningSemanticModel = false,
-                            // GAP-07: honest — new ingest + queries are semantic;
-                            // pre-provisioning chunks stay lexical (boundary).
-                            diagnosticBanner = "النموذج الدلالي المحلي جاهز — الاسترجاع والدمج الجديد دلالي على الجهاز؛ المتجهات القديمة تبقى معجمية (حد التوافق)."
-                        )
-                    }
-                    is Outcome.Error -> _uiState.update {
-                        it.copy(
-                            isProvisioningSemanticModel = false,
-                            diagnosticBanner = "تعذر تجهيز النموذج الدلالي المحلي: ${r.failure}"
-                        )
-                    }
-                    else -> _uiState.update { it.copy(isProvisioningSemanticModel = false) }
-                }
-            }.onFailure {
-                _uiState.update { it.copy(isProvisioningSemanticModel = false) }
-            }
-        }
-    }
-
-    /** Refreshes the honest on-device semantic-model readiness flag. */
-    fun refreshSemanticModelStatus() {
-        _uiState.update { it.copy(semanticModelReady = ragPipelineService.isLocalSemanticModelReady) }
-    }
+    // (ADR-6 slice 3) provisionLocalSemanticModel / refreshSemanticModelStatus
+    // — the semantic engine — moved to KnowledgeViewModel, the owner of the
+    // previously-shared semanticModelReady / isProvisioningSemanticModel
+    // state. Settings receives them as value+lambda; Explorer reads the
+    // knowledge feature's own flow.
 
     private fun observeSubsystems() {
         viewModelScope.launch {
@@ -591,11 +556,8 @@ class MainViewModel(
                 _uiState.update { it.copy(evolutionCandidates = cand) }
             }
         }
-        viewModelScope.launch {
-            ragPipelineService.documents.collect { docs ->
-                _uiState.update { it.copy(knowledgeDocuments = docs) }
-            }
-        }
+        // (ADR-6 slice 3) the knowledge documents collector moved to
+        // KnowledgeViewModel — the listing's owner.
     }
 
     /**
@@ -715,11 +677,12 @@ class MainViewModel(
             // FIX R-5: guarded initial load (previously an exception here — e.g.
             // corrupt DB row — crashed the app during ViewModel init).
             runCatching {
-                refreshMemories()
-                simulateDecision()
                 // (ADR-6 slice 1) the initial sandbox listing is now loaded
-                // by FilesViewModel's own workspace collector — no files
-                // responsibility remains in this ViewModel.
+                // by FilesViewModel's own workspace collector; (ADR-6 slice 3)
+                // the initial memory listing is now loaded by
+                // KnowledgeViewModel's init — no knowledge responsibility
+                // remains in this ViewModel.
+                simulateDecision()
             }.onFailure { e ->
                 _uiState.update { it.copy(errorMessage = "تعذر تحميل البيانات الأولية: ${e.localizedMessage}") }
             }
@@ -1300,61 +1263,10 @@ class MainViewModel(
         }
     }
 
-    // --- Knowledge & RAG Operations ---
-    fun updateDocTitle(title: String) {
-        _uiState.update { it.copy(newDocTitle = title) }
-    }
-
-    fun updateDocContent(content: String) {
-        _uiState.update { it.copy(newDocContent = content) }
-    }
-
-    fun ingestNewDocument() {
-        val title = _uiState.value.newDocTitle.trim()
-        val content = _uiState.value.newDocContent.trim()
-        if (title.isEmpty() || content.isEmpty()) return
-
-        viewModelScope.launch {
-            // FIX P0-8 (audit c03919d): sanitize the title so it cannot inject
-            // path separators into the workspace:// source URI.
-            val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_")
-            val ingested = ragPipelineService.ingestDocument(safeTitle, content, "workspace://docs/$safeTitle.md")
-            // GAP-CLOSURE P1-14: surface honest persistence failure to the user.
-            _uiState.update {
-                when (ingested.persistenceState) {
-                    com.example.domain.core.rag.KnowledgePersistenceState.FAILED -> it.copy(
-                        newDocTitle = "",
-                        newDocContent = "",
-                        diagnosticBanner = ingested.persistenceDiagnostic ?: "تعذر حفظ المستند في قاعدة البيانات."
-                    )
-                    else -> it.copy(newDocTitle = "", newDocContent = "")
-                }
-            }
-        }
-    }
-
-    fun queryKnowledgeRag(query: String) {
-        if (query.isBlank()) return
-        viewModelScope.launch {
-            val assembled = ragPipelineService.retrieveRelevantContext(query)
-            _uiState.update { it.copy(assembledRagContext = assembled) }
-        }
-    }
-
-    /**
-     * Deletes a knowledge document from BOTH the in-memory index and the
-     * durable Room store (honest outcome surfaced to the user).
-     */
-    fun deleteKnowledgeDocument(documentId: String) {
-        viewModelScope.launch {
-            when (val outcome = ragPipelineService.deleteDocument(documentId)) {
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.failure) }
-                else -> _uiState.update {
-                    it.copy(diagnosticBanner = "تم حذف المستند من قاعدة المعرفة.")
-                }
-            }
-        }
-    }
+    // (ADR-6 slice 3) Knowledge & RAG operations — updateDocTitle /
+    // updateDocContent / ingestNewDocument / queryKnowledgeRag /
+    // deleteKnowledgeDocument — moved to KnowledgeViewModel with the whole
+    // knowledge feature state.
 
     // --- Workflow & Task ---
     fun executeWorkflow(plan: WorkflowPlan) {
@@ -1602,61 +1514,9 @@ class MainViewModel(
         }
     }
 
-    // --- Memory Operations ---
-    fun updateMemoryQuery(q: String) {
-        _uiState.update { it.copy(memoryQuery = q) }
-    }
-
-    fun searchMemory() {
-        val q = _uiState.value.memoryQuery.trim()
-        if (q.isEmpty()) return
-        viewModelScope.launch {
-            _uiState.update { it.copy(isSearchingMemory = true) }
-            when (val outcome = manageMemoryUseCase.retrieveContext(q)) {
-                is Outcome.Success -> _uiState.update { it.copy(retrievedMemories = outcome.value, isSearchingMemory = false) }
-                is Outcome.Degraded -> _uiState.update { it.copy(retrievedMemories = outcome.partialValue ?: emptyList(), isSearchingMemory = false) }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage, isSearchingMemory = false) }
-            }
-        }
-    }
-
-    fun updateNewMemoryContent(text: String) {
-        _uiState.update { it.copy(newMemoryContent = text) }
-    }
-
-    fun addNewMemory() {
-        val content = _uiState.value.newMemoryContent.trim()
-        if (content.isEmpty()) return
-        viewModelScope.launch {
-            val entry = MemoryEntry(
-                id = UUID.randomUUID().toString(),
-                content = content,
-                type = MemoryType.FACTUAL_INSIGHT,
-                confidence = 1.0f,
-                provenance = MemoryProvenance(sourceSessionId = "MANUAL_ENTRY", createdAtTimestampMs = System.currentTimeMillis()),
-                isActive = true
-            )
-            when (val outcome = manageMemoryUseCase.recordInsight(entry)) {
-                is Outcome.Success -> {
-                    _uiState.update { it.copy(newMemoryContent = "") }
-                    refreshMemories()
-                }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> refreshMemories()
-            }
-        }
-    }
-
-    fun refreshMemories() {
-        viewModelScope.launch {
-            when (val outcome = manageMemoryUseCase.getActiveMemories()) {
-                is Outcome.Success -> _uiState.update { it.copy(allMemories = outcome.value) }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> Unit
-            }
-        }
-    }
-
+    // (ADR-6 slice 3) Memory operations — updateMemoryQuery / searchMemory /
+    // updateNewMemoryContent / addNewMemory / refreshMemories — moved to
+    // KnowledgeViewModel with the memory-browser state.
 
     fun clearErrorMessage() {
         _uiState.update { it.copy(errorMessage = null) }

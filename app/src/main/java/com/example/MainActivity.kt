@@ -15,6 +15,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.unit.LayoutDirection
 import com.example.presentation.di.AppContainer
 import com.example.presentation.di.FilesViewModelFactory
+import com.example.presentation.di.KnowledgeViewModelFactory
 import com.example.presentation.di.MainViewModelFactory
 import com.example.presentation.di.SessionsViewModelFactory
 import com.example.presentation.di.SettingsViewModelFactory
@@ -22,6 +23,7 @@ import com.example.presentation.di.StudioViewModelFactory
 import com.example.presentation.di.TasksViewModelFactory
 import com.example.presentation.ui.MainAppScreen
 import com.example.presentation.viewmodel.FilesViewModel
+import com.example.presentation.viewmodel.KnowledgeViewModel
 import com.example.presentation.viewmodel.MainViewModel
 import com.example.presentation.viewmodel.SessionsViewModel
 import com.example.presentation.viewmodel.SettingsViewModel
@@ -75,6 +77,14 @@ class MainActivity : ComponentActivity() {
         SessionsViewModelFactory(appContainer)
     }
 
+    // ADR-6 slice 3 (Design Closure 2026 UI-redesign track): the KNOWLEDGE
+    // feature ViewModel — the RAG knowledge base, the local semantic engine
+    // (previously-shared semanticModelReady), and the long-term memory
+    // browser left the MainViewModel (same freeze rule).
+    private val knowledgeViewModel: KnowledgeViewModel by viewModels {
+        KnowledgeViewModelFactory(appContainer)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -105,7 +115,8 @@ class MainActivity : ComponentActivity() {
                             filesViewModel = filesViewModel,
                             settingsViewModel = settingsViewModel,
                             studioViewModel = studioViewModel,
-                            sessionsViewModel = sessionsViewModel
+                            sessionsViewModel = sessionsViewModel,
+                            knowledgeViewModel = knowledgeViewModel
                         )
                     }
                 }

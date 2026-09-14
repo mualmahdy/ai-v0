@@ -89,6 +89,16 @@ fun SettingsScreen(
     sessionNetworkPolicy: com.example.domain.core.network.NetworkPolicy,
     /** ADR-6 slice 2: delegates the mutation to the studio feature VM. */
     onSessionNetworkPolicy: (com.example.domain.core.network.NetworkPolicy) -> Unit,
+    /**
+     * ADR-6 slice 3: the SEMANTIC ENGINE readiness (owned by
+     * KnowledgeViewModel) — passed as value + lambda, same delegation as
+     * the session policy above.
+     */
+    semanticModelReady: Boolean,
+    /** ADR-6 slice 3: honest in-flight flag for the provisioning button. */
+    isProvisioningSemanticModel: Boolean,
+    /** ADR-6 slice 3: delegates the mutation to the knowledge feature VM. */
+    onProvisionSemanticModel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -223,19 +233,22 @@ fun SettingsScreen(
                 SettingsCard {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("الحالة: ", style = MaterialTheme.typography.bodyMedium)
-                        if (state.semanticModelReady) {
+                        if (semanticModelReady) {
                             StatusBadge("جاهز", MaterialTheme.colorScheme.tertiary)
                         } else {
                             StatusBadge("غير مُجهّز", MaterialTheme.colorScheme.secondary)
                         }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
+                    // ADR-6 slice 3: the values and the mutation come from the
+                    // KNOWLEDGE feature ViewModel (value + lambda) — the owner
+                    // of the semantic-engine state since this slice.
                     Button(
-                        onClick = viewModel::provisionLocalSemanticModel,
-                        enabled = !state.isProvisioningSemanticModel && !state.semanticModelReady,
+                        onClick = onProvisionSemanticModel,
+                        enabled = !isProvisioningSemanticModel && !semanticModelReady,
                         modifier = Modifier.fillMaxWidth().testTag("btn_settings_provision_semantic")
                     ) {
-                        if (state.isProvisioningSemanticModel) {
+                        if (isProvisioningSemanticModel) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),
                                 strokeWidth = 2.dp,
@@ -244,7 +257,7 @@ fun SettingsScreen(
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("جاري التجهيز…")
                         } else {
-                            Text(if (state.semanticModelReady) "النموذج جاهز" else "تجهيز النموذج (~23MB)")
+                            Text(if (semanticModelReady) "النموذج جاهز" else "تجهيز النموذج (~23MB)")
                         }
                     }
                 }

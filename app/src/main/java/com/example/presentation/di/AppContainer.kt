@@ -1990,12 +1990,10 @@ class MainViewModelFactory(
                 decisionSimulationUseCase = appContainer.decisionSimulationUseCase,
                 connectProviderUseCase = appContainer.connectProviderUseCase,
                 manageWorkspaceBudgetUseCase = appContainer.manageWorkspaceBudgetUseCase,
-                manageMemoryUseCase = appContainer.manageMemoryUseCase,
                 componentRegistry = appContainer.componentRegistry,
                 cbrMdpEngine = appContainer.cbrMdpEngine,
                 extensionManager = appContainer.extensionManager,
                 intelligenceRadarPipeline = appContainer.intelligenceRadarPipeline,
-                ragPipelineService = appContainer.ragPipelineService,
                 providerControlPlaneService = appContainer.providerControlPlaneService,
                 workspaceRuntimeService = appContainer.workspaceRuntimeService,
                 // GAP-CLOSURE P1-08/P1-10 — canonical durable agent registry.
@@ -2134,6 +2132,29 @@ class SessionsViewModelFactory(
         if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.SessionsViewModel::class.java)) {
             return com.example.presentation.viewmodel.SessionsViewModel(
                 conversationSessionService = appContainer.conversationSessionService,
+                activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 3 (Design Closure 2026 UI-redesign track) — factory for the
+ * KNOWLEDGE feature ViewModel: the RAG knowledge base, the local semantic
+ * engine (owner of the previously-shared readiness state), and the
+ * long-term memory browser extracted from MainViewModel (with its whole
+ * dependency set: ragPipelineService + manageMemoryUseCase).
+ */
+class KnowledgeViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.KnowledgeViewModel::class.java)) {
+            return com.example.presentation.viewmodel.KnowledgeViewModel(
+                ragPipelineService = appContainer.ragPipelineService,
+                manageMemoryUseCase = appContainer.manageMemoryUseCase,
                 activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace
             ) as T
         }

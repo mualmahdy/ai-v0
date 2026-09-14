@@ -1,5 +1,6 @@
 package com.example.presentation.ui.screens.knowledge
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -59,7 +61,7 @@ import com.example.presentation.ui.components.InfoRow
 import com.example.presentation.ui.components.MetricBar
 import com.example.presentation.ui.components.SectionHeader
 import com.example.presentation.ui.components.StatusBadge
-import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.KnowledgeViewModel
 
 /**
  * ============================================================================
@@ -69,15 +71,21 @@ import com.example.presentation.viewmodel.MainViewModel
  * Full RAG surface, previously primitive: retrieval with per-chunk scores
  * and modes, document management (list + delete with honest persistence
  * states + ingest dialog), the LONG-TERM MEMORY browser (search / add /
- * browse — VM functions that existed with NO screen), and the local ONNX
- * semantic engine provisioning surface.
+ * browse), and the local ONNX semantic engine provisioning surface.
+ *
+ * ADR-6 SLICE 3 (Design Closure 2026 UI-redesign track): the screen now
+ * composes on the KNOWLEDGE feature's own ViewModel — the 11 knowledge/
+ * memory/semantic fields it used to read from the shared UiState live in
+ * [KnowledgeViewModel.KnowledgeUiState], and this feature's transient
+ * banner renders locally from its own source of truth (same pattern as the
+ * Files/Studio screens since slices 1–2).
  */
 @Composable
 fun KnowledgeScreen(
-    viewModel: MainViewModel,
+    knowledgeViewModel: KnowledgeViewModel,
     modifier: Modifier = Modifier
 ) {
-    val state by viewModel.uiState.collectAsState()
+    val state by knowledgeViewModel.state.collectAsState()
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var ingestDialogOpen by rememberSaveable { mutableStateOf(false) }
     var deleteDocTarget by rememberSaveable { mutableStateOf<String?>(null) }
@@ -87,12 +95,22 @@ fun KnowledgeScreen(
             Tab(
                 selected = selectedTab == 0,
                 onClick = { selectedTab = 0 },
-                text = { Text("قاعدة المعرفة", fontWeight = FontWeight.Bold) }
+                text = {
+                    Text(
+                        "قاعدة المعرفة (${state.knowledgeDocuments.size})",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             )
             Tab(
                 selected = selectedTab == 1,
                 onClick = { selectedTab = 1 },
-                text = { Text("الذاكرة طويلة المدى", fontWeight = FontWeight.Bold) }
+                text = {
+                    Text(
+                        "الذاكرة (${state.allMemories.size})",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             )
             Tab(
                 selected = selectedTab == 2,
@@ -101,15 +119,41 @@ fun KnowledgeScreen(
             )
         }
 
+        // The feature's OWN transient diagnostic banner (ADR-6 slice 3) —
+        // provisioning outcomes, honest persistence failures, deletion
+        // confirmations; dismissed from the feature's own state.
+        state.diagnosticBanner?.let { banner ->
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .clickable { knowledgeViewModel.dismissDiagnosticBanner() }
+                    .testTag("knowledge_diagnostic_banner")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = banner,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+
         when (selectedTab) {
             0 -> KnowledgeBaseTab(
                 state = state,
-                viewModel = viewModel,
+                viewModel = knowledgeViewModel,
                 onIngest = { ingestDialogOpen = true },
                 onDeleteDoc = { deleteDocTarget = it }
             )
-            1 -> MemoryTab(state = state, viewModel = viewModel)
-            2 -> SemanticEngineTab(state = state, viewModel = viewModel)
+            1 -> MemoryTab(state = state, viewModel = knowledgeViewModel)
+            2 -> SemanticEngineTab(state = state, viewModel = knowledgeViewModel)
         }
     }
 
@@ -117,10 +161,10 @@ fun KnowledgeScreen(
         IngestDocumentDialog(
             title = state.newDocTitle,
             content = state.newDocContent,
-            onTitleChange = viewModel::updateDocTitle,
-            onContentChange = viewModel::updateDocContent,
+            onTitleChange = knowledgeViewModel::updateDocTitle,
+            onContentChange = knowledgeViewModel::updateDocContent,
             onConfirm = {
-                viewModel.ingestNewDocument()
+                knowledgeViewModel.ingestNewDocument()
                 ingestDialogOpen = false
             },
             onDismiss = { ingestDialogOpen = false }
@@ -134,7 +178,7 @@ fun KnowledgeScreen(
             message = "سيُحذف «$docTitle» مع كل مقاطعه (Chunks) من قاعدة المعرفة نهائياً.",
             confirmLabel = "حذف",
             onConfirm = {
-                viewModel.deleteKnowledgeDocument(docId)
+                knowledgeViewModel.deleteKnowledgeDocument(docId)
                 deleteDocTarget = null
             },
             onDismiss = { deleteDocTarget = null }
@@ -148,8 +192,8 @@ fun KnowledgeScreen(
 
 @Composable
 private fun KnowledgeBaseTab(
-    state: com.example.presentation.state.UiState,
-    viewModel: MainViewModel,
+    state: KnowledgeViewModel.KnowledgeUiState,
+    viewModel: KnowledgeViewModel,
     onIngest: () -> Unit,
     onDeleteDoc: (String) -> Unit
 ) {
@@ -162,7 +206,11 @@ private fun KnowledgeBaseTab(
             SectionHeader(
                 icon = Icons.Default.Search,
                 title = "استرجاع من قاعدة المعرفة (RAG)",
-                subtitle = "استرجاع هجين: دلالي + معجمي، مع درجات ملاءمة لكل مقطع"
+                subtitle = if (state.semanticModelReady) {
+                    "استرجاع هجين دلالي — النموذج المحلي جاهز"
+                } else {
+                    "استرجاع معجمي (النموذج الدلالي غير مُجهّز — تبويب المحرك)"
+                }
             )
         }
         item {
@@ -369,8 +417,8 @@ private fun KnowledgeBaseTab(
 
 @Composable
 private fun MemoryTab(
-    state: com.example.presentation.state.UiState,
-    viewModel: MainViewModel
+    state: KnowledgeViewModel.KnowledgeUiState,
+    viewModel: KnowledgeViewModel
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -583,8 +631,8 @@ private fun MemoryTab(
 
 @Composable
 private fun SemanticEngineTab(
-    state: com.example.presentation.state.UiState,
-    viewModel: MainViewModel
+    state: KnowledgeViewModel.KnowledgeUiState,
+    viewModel: KnowledgeViewModel
 ) {
     // Refresh the honest provisioning flag whenever the tab is shown.
     LaunchedEffect(Unit) { viewModel.refreshSemanticModelStatus() }

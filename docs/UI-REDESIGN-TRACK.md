@@ -198,11 +198,63 @@ with exit code 1" عند `#step:7:516`)، مدة 4m36s (مطابقة تقريب�
   شُخِّص وأُصلِح في Phase 8 (الجذران والتحقق في القسم المخصّص أعلاه)؛
   الحكم النهائي = التشغيلة 17 بعد الدمج.
 
+## الشريحة 3 (مُسلَّمة — Phase 8)
+
+### ما سُلِّم
+
+1. **KnowledgeViewModel** (قاعدة المعرفة + الذاكرة + المحرك الدلالي):
+   - الحالة: 11 حقلاً غادرت `UiState` المشتركة (knowledgeDocuments /
+     assembledRagContext / newDocTitle / newDocContent / **semanticModelReady /
+     isProvisioningSemanticModel** — المشتركة سابقاً — / memoryQuery /
+     retrievedMemories / allMemories / isSearchingMemory / newMemoryContent)
+     إلى `KnowledgeUiState` خاصة، مع قناتَي خطأ وبانر خاصتين بالميزة.
+   - السلوك (منقولاً حرفياً): الإدخال بتطهير العنوان (P0-8) مع صدق فشل
+     الحفظ (P1-14)، الاسترجاع الهجين، الحذف بنتيجته الصادقة، تجهيز
+     النموذج الدلالي المحلي (GAP-07)، مرآة الجاهزية (GAP-25)، وعمليات
+     الذاكرة كاملة (بحث/إضافة/تحديث) عبر `ManageMemoryUseCase`.
+   - **إعادة التكييف**: جامع المستندات الحية انتقل من `observeSubsystems`
+     (كان آخر مسؤولية معرفية فيها)، وإعادة تحميل الفهرس عند تبديل مساحة
+     العمل انتقلت من `observeWorkspace`، والتحميل الأولي للذكريات انتقل
+     من `loadInitialData` — MainViewModel فقدت تبعيتَي
+     `ragPipelineService` و`manageMemoryUseCase` بالكامل (1730→1630
+     سطراً).
+
+2. **الشاشات** (تركيب على الحالة المفككة):
+   - Knowledge: تبويبات بعناوين حية بعدادات (مستندات/ذكريات)، عنوان
+     قسم الاسترجاع يقرأ جاهزية المحرك من مالكها، بانر تشخيصي محلي
+     قابل للإخفاء (نمط الشريحتين 1–2).
+   - Settings: بطاقة المحرك الدلالي تستقبل **قيمة + lambda** من
+     ميزة المعرفة (نمط تفويض سياسة الجلسة من الشريحة 2 معكوساً).
+   - Explorer: صف «المعرفة» يقرأ العدد والعنوان الفرعي من
+     `knowledgeViewModel` (نمط صفوف الملفات/الجلسات).
+   - MainAppScreen: قناة خطأ المعرفة تُعرض في snackbar العام من
+     مصدر حقيقتها الخاص وتُخفى من مالكها (نمط الاستوديو).
+
+3. **GAP-21 — الاختبارات السلوكية**: `KnowledgeViewModelTest` —
+   **21 اختباراً** فوق الخدمات الحقيقية: `RagPipelineService` الحقيقي
+   (بلا تزييف عند مستوى الخدمة؛ مزيفات DAO/المنفذ فقط) و
+   `ManageMemoryUseCase` الحقيقي فوق مستودع ذاكرة في الذاكرة. أبرز ما
+   يُثبَّت: إعادة تحميل المعرفة بتغيّر مساحة العمل النشطة؛ **مسار نجاح
+   التجهيز عبر الموجّه الحقيقي** (`LocalSemanticEmbeddingRouter` فوق
+   `OnnxSemanticEmbeddingAdapter` حقيقي بملفات نموذج مزيفة تحت
+   Robolectric — `isProvisioned` بفحص المهايئ نفسه، وprovision ينجح
+   بلا شبكة) ومسار فشله الصادق؛ تطهير العنوان؛ تشخيص FAILED الحقيقي؛
+   متغيرات Outcome الثلاثة للذاكرة (مع بقاء نص المستخدم عند فشل
+   التخزين). مساعد `awaitUntil` موثّق للأعمال التي تقفز إلى
+   Dispatchers حقيقية داخل الخدمة.
+
+### التحقق (تشغيلات فعلية)
+
+- كامل `testDebugUnitTest` بـ `--rerun-tasks`: **112 suites / 732
+  tests / 0 failures / 0 errors / 0 skipped** (ارتفع من 111/711
+  بالشريحة والمرآة).
+- `assembleDebug` (100,623,032 bytes) و`compileDebugAndroidTestKotlin`
+  ناجحة.
+
 ## الشرائح التالية (الترتيب المقترح)
 
 | الشريحة | المحتوى | ملاحظات |
 |---|---|---|
-| 3 | KnowledgeViewModel + وصل المعرفة | `semanticModelReady` المشتركة تنتقل هنا مع `provisionLocalSemanticModel` |
 | 4 | GovernanceViewModel (+ الموافقات) | يعتمد على أسطح ADR-2 القائمة |
 | 5 | ProvidersViewModel + wizard | 1231 سطراً حالياً — أكبر شاشة |
 | 6 | RadarViewModel / Decision / Tasks المتبقي | مع مصفوفة Roborazzi (GAP-21) |
