@@ -21,7 +21,7 @@ import org.junit.runner.RunWith
  * emulator via .github/workflows/e2e-device.yml) and pins the DURABLE
  * substrate on a real device:
  *
- *  1. LAUNCH: the app process + Room database open cleanly (v13 schema).
+ *  1. LAUNCH: the app process + Room database open cleanly (v17 schema).
  *  2. DURABLE SESSIONS: a conversation session + turns written by one
  *     process are readable after a full DB close/reopen (kill → restart
  *     simulation, same substrate the Studio transcript relies on).
@@ -38,8 +38,15 @@ class DurableWorkspaceE2ETest {
     }
 
     @Test
-    fun appLaunches_databaseOpensAtSchemaV13() {
+    fun appLaunches_databaseOpensAtLatestSchema() {
         val database = db()
+        // LAUNCH proof: force the actual open and pin the on-disk version to
+        // the single source of truth (AppDatabase.SCHEMA_VERSION) — a fresh
+        // emulator database is created at exactly that version.
+        assertEquals(
+            com.example.infrastructure.persistence.AppDatabase.SCHEMA_VERSION.toLong(),
+            database.openHelper.readableDatabase.version
+        )
         assertNotNull(database.conversationSessionDao())
         assertNotNull(database.conversationTurnDao())
         assertNotNull(database.workflowDefinitionDao())
@@ -72,6 +79,14 @@ class DurableWorkspaceE2ETest {
             eventCount = 1
         )
         first.close()
+        // Process death clears ALL process memory — including the
+        // AppDatabase singleton. A real kill gives the restarted process a
+        // FRESH getInstance() over the same durable file. close() alone used
+        // to leave the cached singleton pointing at the CLOSED database, and
+        // getInstance() kept handing that closed instance back — the root
+        // cause behind every red e2e run since this workflow was introduced
+        // (runs 1–15). See AppDatabase.resetInstanceForProcessDeath().
+        com.example.infrastructure.persistence.AppDatabase.resetInstanceForProcessDeath()
 
         // "Kill process → reopen" on the SAME device file.
         val reopened = com.example.infrastructure.persistence.AppDatabase.getInstance(context)

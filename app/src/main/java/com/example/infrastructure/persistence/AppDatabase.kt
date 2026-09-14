@@ -1826,5 +1826,23 @@ abstract class AppDatabase : RoomDatabase() {
                 instance
             }
         }
+
+        /**
+         * TEST-ONLY hook (e2e-device.yml root cause, runs 1–15): models the
+         * MEMORY half of process death. A real process kill clears all process
+         * memory — including [INSTANCE] — while the durable file survives on
+         * disk. Instrumentation tests simulate that kill with close() plus this
+         * reset, so the next getInstance() re-opens the SAME file as a NEW
+         * instance, exactly like a restarted process. Without it, close() left
+         * the cached singleton pointing at a CLOSED database and getInstance()
+         * kept handing the closed instance back (the reopen phase then threw
+         * IllegalStateException on its first query). Production never calls
+         * this: the app process holds ONE open database for its lifetime.
+         */
+        internal fun resetInstanceForProcessDeath() {
+            synchronized(this) {
+                INSTANCE = null
+            }
+        }
     }
 }

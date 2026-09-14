@@ -221,6 +221,10 @@ class Migration14to15AndDurableApprovalTest {
             assertTrue(dao.getTasksForWorkspace("ws_c").isEmpty())
         } finally {
             context.deleteDatabase("agent_orchestrator_platform.db")
+            // Cross-test hygiene (e2e root cause): deleteDatabase alone leaves
+            // the process-singleton pointing at a DELETED file — any later
+            // getInstance() user in this JVM would inherit that stale handle.
+            AppDatabase.resetInstanceForProcessDeath()
         }
     }
 
@@ -289,6 +293,10 @@ class Migration14to15AndDurableApprovalTest {
             assertNull(store2.findPendingFor("exec_999", "delete_file"))
         } finally {
             context.deleteDatabase("agent_orchestrator_platform.db")
+            // Cross-test hygiene (e2e root cause): deleteDatabase alone leaves
+            // the process-singleton pointing at a DELETED file — any later
+            // getInstance() user in this JVM would inherit that stale handle.
+            AppDatabase.resetInstanceForProcessDeath()
         }
     }
 }
