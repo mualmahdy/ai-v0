@@ -65,50 +65,50 @@
    - **التحقق المحلي (CI-تساوي)**: compileDebugKotlin ✓،
      testDebugUnitTest ✓، assembleDebug ✓، bundleRelease ✓ (AAB غير
      موقّع 36MB) — أول تشغيل ناجح مُوثّق لسلسلة android.yml كاملة.
-   - اسم工件 الـ APK: `ai-v0-ultimate-debug-apk` (نفس اصطلاح
+   - اسم artifact الـ APK: `ai-v0-ultimate-debug-apk` (نفس اصطلاح
      build-apk.yml المحذوف) + retention 14 يوماً.
 
-### حالة e2e-device.yml (مُشخَّصة ومُصلَحة — Phase 7)
+### حالة e2e-device.yml (الجذر الحقيقي مُشخَّص ومُصلَح — Phase 8)
 
-**الجذر (مُثبت)**: فشلت كل التشغيلات 1–15 (من إنشاء الـ workflow في
-3b10cc2) على الخطوة نفسها. الأدلة العامة (بدون صلاحيات admin): تعليق
-الخطوة "The process '/usr/bin/sh' failed with exit code 1"، نجاح خطوة
-رفع النتائج (`if: always()`) بما يعني وجود ملفات نتائج (19.6KB —
-حجم سيناريو اختبار فاشل مع stack trace، وليس فشل تجميع أو إقلاع)،
-ومدة الـ job الكاملة 4m35s (متسقة مع بناءٍ ذي كاش دافئ + تشغيل اختبارات
-قصير). الجذر في الكود: `DurableWorkspaceE2ETest.durableSession_survivesDatabaseReopen`
-ينمذج موت العملية بـ `close()` ثم `getInstance()` — لكن `getInstance`
-سِنغلتِن عمليات: ظل `INSTANCE` يشير إلى القاعدة **المغلقة** بعد الـ
-close، فأعادت `getInstance` المثيل المغلق نفسه، وأول استعلام في مرحلة
-"إعادة الفتح" قذف `IllegalStateException`. اختبارات JVM للديمومة لم
-تلتقط هذا أبداً لأنها تبني مثيلاتها مباشرة
-(`ProcessDeathRecoveryTest`/`ConversationSessionDurabilityTest` بـ
-`openDb()` خاص) بينما الـ e2e يستخدم مسار الإنتاج الصحيح
-(`AppContainer → getInstance`) — فاصطدم بالنصف المفقود من نمذجة موت
-العملية.
+**التشغيلة 16 (على دمج Phase 7 نفسه): فاشلة** — بأدلة عامة موثّقة: أيقونة
+حمراء على `965fcd4`، تعليق الخطوة نفسه ("The process '/usr/bin/sh' failed
+with exit code 1" عند `#step:7:516`)، مدة 4m36s (مطابقة تقريباً لـ4m35s
+التشغيلات 1–15: بناء ناجح + محاكي أقلع + اختبارات عملت)، وartifact
+النتائج 20.4KB (مقابل 19.6KB — ملف نتائج للاختبارات التي ركضت).
 
-**الإصلاح (Phase 7 — patch مستقل)**:
-1. `AppDatabase.resetInstanceForProcessDeath()` — خطاف **اختباري فقط**
-   (internal، لا سلوك إنتاجي يتغير): يمثل النصف الذاكري لموت العملية؛
-   العملية الحقيقية تبدأ بذاكرة فارغة والملف الدائم يبقى على القرص.
-2. الـ e2e: `close()` ثم `resetInstanceForProcessDeath()` ثم
-   `getInstance()` — مثيل جديد مفتوح على الملف نفسه، كما في إعادة
-   التشغيل الحقيقية. (وعنوان اختبار الإقلاع صُحّح: v13 → latest/SCHEMA_VERSION
-   مع assert فعلي على `readableDatabase.version`.)
-3. `AppDatabaseSingletonProcessDeathTest` (JVM/Robolectric) — مرآة
-   كاملة لمسار e2e على مسار الإنتاج نفسه، مع تشغيل تحكّمي موثّق: بدون
-   الـ reset يعود المثيل المغلق نفسه (RED مُعاد إنتاجه محلياً)، ومعه
-   يعود مثيل جديد والبيانات باقية (GREEN).
-4. نظافة عابرة للاختبارات: `Migration14to15AndDurableApprovalTest` كان
-   يحذف الملف في `finally` دون تصفير السِنغلتِن (لغم لكل مستخدم
-   `getInstance` لاحق في نفس الـ JVM) — أُضيف الـ reset هناك.
+**الجذر (مُثبت بإعادة إنتاج محلية كاملة)**: توكيد **أضافته Phase 7 نفسها**
+إلى اختبار الإقلاع كان هو الفشل —
+`assertEquals(SCHEMA_VERSION.toLong(), readableDatabase.version)`:
+توقيع `SupportSQLiteDatabase.getVersion()` في androidx.sqlite 2.5.0 هو
+**`int`**، فاختار Kotlin التحميلة `assertEquals(Object, Object)` وأصبح
+`Long(17) ≠ Integer(17)` — **فشل حتمي في كل بيئة** (المحاكي الفعلي
+منها). المرآة الجديدة
+`E2ESuiteRobolectricMirrorTest` أعادت إنتاج الفشل محلياً حرفياً قبل
+الإصلاح (`expected: java.lang.Long<17> but was: java.lang.Integer<17>`)
+— علماً أن جسم اختبار موت العملية (اختبار 2) عبر بنجاح في المرآة:
+إصلاح السِنغلتِن في Phase 7 كان صحيحاً وعاملاً؛ ما أبقى التشغيلة حمراء
+هو التوكيد الجديد فقط.
 
-**التحقق المحلي (تشغيلات فعلية)**: الاختبار الجديد RED→GREEN مُوثّق؛
-كامل `testDebugUnitTest` بـ `--rerun`: 110 suites / 708 tests /
-0/0/0؛ `compileDebugAndroidTestKotlin` و `assembleDebugAndroidTest`
-(960,884 bytes) و `assembleDebug` (100,270,222 bytes) ناجحة كلها.
+**الإصلاح**: توسيع **الجانبين** إلى `long`
+(`SCHEMA_VERSION.toLong()` و `version.toLong()`) — تبقى التحميلة
+البدائية `(long, long)` ولا صندقة كائنات. الإصلاح مطبّق في الاختبار
+وفي مرآته معاً.
 
-**حكم الـ CI الفعلي**: معلق على التشغيلة 16 بعد دمج هذا الـ patch —
+**درس منهجي (لماذا لم تلتقطه مجموعات JVM قبل الدمج)**: مرآة Phase 7
+(`AppDatabaseSingletonProcessDeathTest`) غطّت تسلسل اختبار 2 وحده؛
+توكيد اختبار 1 لم يُنفَّذ قط على JVM قبل الدمج. المرآة الجديدة تغطي
+**المجموعة كاملة** (الأجسام الأربعة حرفياً، بثلاثة ترتيبات، عملية
+واحدة وملف DB واحد مشترك كما على المحاكي) — وكانت هي الكاشف الفعلي
+هنا، وهي تبقى شبكة الانحدار الدائمة للمسار.
+
+**التحقق المحلي (تشغيلات فعلية، JUnit XML)**: المرآة 3/3 خضراء بعد
+الإصلاح (كانت 3/3 حمراء قبله — RED→GREEN موثّق)؛ كامل
+`testDebugUnitTest`: **111 suites / 711 tests / 0 failures / 0 errors /
+0 skipped** (العدد ارتفع من 110/708 بمرآة المجموعة)؛
+`compileDebugAndroidTestKotlin` و `assembleDebugAndroidTest`
+(960,856 bytes) و `assembleDebug` (100,270,222 bytes) ناجحة كلها.
+
+**حكم الـ CI الفعلي**: معلق على التشغيلة 17 بعد دمج هذا الـ patch —
 لا يُدَّعى النجاح قبل حدوثه. (apk-debug مستقل عن هذا المسار كما كان.)
 
 ## الشريحة 2 (مُسلَّمة — Phase 6)
@@ -192,10 +192,11 @@ close، فأعادت `getInstance` المثيل المغلق نفسه، وأول
   2026-09-13T15:24:42Z. نجاح الـ job يشمل خطوات التحميل (لا ينجح
   إلا إذا خرجت كل خطوة بـ 0)، فتتأكد آلية `ai-v0-ultimate-debug-apk`.
   أول نجاح كامل للـ workflow بعد 52 فشلاً متتالياً (الخلل YAML).
-- e2e-device.yml: **مُشخَّص ومُصلَح في Phase 7** (الجذر والتحقق في
-  القسم المخصّص أعلاه) — الجذر كان سِنغلتِن `AppDatabase` يعيد المثيل
-  المغلق بعد `close()` في اختبار إعادة الفتح؛ الحكم النهائي = التشغيلة
-  16 بعد الدمج.
+- e2e-device.yml: الجذر الأول (سِنغلتِن `AppDatabase` يعيد المثيل المغلق
+  بعد `close()` في اختبار إعادة الفتح) شُخِّص وأُصلِح في Phase 7؛ كشف
+  التشغيلة 16 جذراً ثانياً في التوكيد الذي أضافته Phase 7 نفسها —
+  شُخِّص وأُصلِح في Phase 8 (الجذران والتحقق في القسم المخصّص أعلاه)؛
+  الحكم النهائي = التشغيلة 17 بعد الدمج.
 
 ## الشرائح التالية (الترتيب المقترح)
 

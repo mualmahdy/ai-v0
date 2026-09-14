@@ -1,57 +1,71 @@
-package com.example.e2e
+package com.example.e2emirror
 
-import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import com.example.infrastructure.persistence.AppDatabase
+import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
  * ============================================================================
- * REPORT GAP-CLOSURE — DurableWorkspaceE2ETest (device/emulator E2E)
+ * E2E FULL-SUITE ROBOLECTRIC MIRROR (run-16 diagnostic harness)
  * ============================================================================
  *
- * Report verdict: "E2E/device proof NOT SUFFICIENT — 385 JVM tests do not
- * prove the product on a real device: launch → navigate → create workspace
- * → connect model → chat → persistence → kill process → reopen → resume."
+ * e2e-device.yml run #16 (commit 965fcd4, the Phase-7 singleton fix) STILL
+ * failed at the same step with the same shape: 4m36s job (≈ the 4m35s of
+ * runs 1–15), green results-artifact upload, 20.4 KB result XML (vs 19.6 KB
+ * before) — i.e. the suite BUILT, the emulator BOOTED, the tests RAN, and at
+ * least one still FAILED. Phase 7's mirror covered only the
+ * durableSession_survivesDatabaseReopen sequence; this harness mirrors the
+ * ENTIRE DurableWorkspaceE2ETest suite the way the emulator executes it:
  *
- * This E2E suite runs under `connectedDebugAndroidTest` (CI runs it on an
- * emulator via .github/workflows/e2e-device.yml) and pins the DURABLE
- * substrate on a real device:
+ *   - ONE process (one Robolectric application),
+ *   - ONE durable database file shared across all four test bodies,
+ *   - the singleton left OPEN between bodies (only test 2 closes/resets it),
+ *   - bodies executed in declaration order AND in alternate orders (the
+ *     device runner's method order is deterministic but hash-based).
  *
- *  1. LAUNCH: the app process + Room database open cleanly (v17 schema).
- *  2. DURABLE SESSIONS: a conversation session + turns written by one
- *     process are readable after a full DB close/reopen (kill → restart
- *     simulation, same substrate the Studio transcript relies on).
- *  3. WORKFLOW LIBRARY: an authored workflow definition round-trips.
- *  4. AGENT REGISTRY: the canonical agents (incl. the QUICK-CHAT agent)
- *     are seeded durably.
+ * If a body fails here, that is the run-16 root cause candidate. If all
+ * bodies pass in all orders, the failure is device/emulator-specific and the
+ * artifact XML is required for the verdict (owner logs).
  */
-@RunWith(AndroidJUnit4::class)
-class DurableWorkspaceE2ETest {
+@RunWith(RobolectricTestRunner::class)
+class E2ESuiteRobolectricMirrorTest {
 
-    private fun db(): com.example.infrastructure.persistence.AppDatabase {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        return com.example.infrastructure.persistence.AppDatabase.getInstance(context)
+    private val productionDbName = "agent_orchestrator_platform.db"
+    private lateinit var context: Context
+
+    @Before
+    fun freshEmulator() {
+        context = ApplicationProvider.getApplicationContext()
+        // A fresh emulator has no prior process state and no prior file.
+        AppDatabase.resetInstanceForProcessDeath()
+        context.deleteDatabase(productionDbName)
     }
 
-    @Test
-    fun appLaunches_databaseOpensAtLatestSchema() {
+    @After
+    fun cleanProcess() {
+        AppDatabase.resetInstanceForProcessDeath()
+        context.deleteDatabase(productionDbName)
+    }
+
+    // ---- verbatim mirrors of DurableWorkspaceE2ETest bodies ----
+
+    private fun db(): AppDatabase = AppDatabase.getInstance(context)
+
+    private fun body1_launch() {
         val database = db()
-        // LAUNCH proof: force the actual open and pin the on-disk version to
-        // the single source of truth (AppDatabase.SCHEMA_VERSION) — a fresh
-        // emulator database is created at exactly that version.
-        // NOTE (run-16 root cause): SupportSQLiteDatabase.getVersion() is
-        // declared `int` (androidx.sqlite 2.5.0). Comparing it against a
-        // Long makes Kotlin resolve assertEquals(Object, Object) and
-        // Long(17) != Integer(17) fails on EVERY runtime (emulator included)
-        // — the assertion this suite gained in the Phase-7 patch was itself
-        // the reason run #16 stayed red after the singleton fix landed.
-        // Widening BOTH sides keeps the primitive (long, long) overload.
+        // Mirrors the FIXED e2e assertion (run-16 root cause): both sides
+        // widened to long — SupportSQLiteDatabase.getVersion() is `int`.
         assertEquals(
-            com.example.infrastructure.persistence.AppDatabase.SCHEMA_VERSION.toLong(),
+            AppDatabase.SCHEMA_VERSION.toLong(),
             database.openHelper.readableDatabase.version.toLong()
         )
         assertNotNull(database.conversationSessionDao())
@@ -60,10 +74,8 @@ class DurableWorkspaceE2ETest {
         assertNotNull(database.agentDefinitionDao())
     }
 
-    @Test
-    fun durableSession_survivesDatabaseReopen() = kotlinx.coroutines.runBlocking {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val first = com.example.infrastructure.persistence.AppDatabase.getInstance(context)
+    private fun body2_sessionSurvivesReopen() = runBlocking {
+        val first = AppDatabase.getInstance(context)
         val service = com.example.application.session.ConversationSessionService(
             repository = com.example.infrastructure.persistence.repository.RoomConversationSessionRepository(
                 database = first,
@@ -86,17 +98,8 @@ class DurableWorkspaceE2ETest {
             eventCount = 1
         )
         first.close()
-        // Process death clears ALL process memory — including the
-        // AppDatabase singleton. A real kill gives the restarted process a
-        // FRESH getInstance() over the same durable file. close() alone used
-        // to leave the cached singleton pointing at the CLOSED database, and
-        // getInstance() kept handing that closed instance back — the root
-        // cause behind every red e2e run since this workflow was introduced
-        // (runs 1–15). See AppDatabase.resetInstanceForProcessDeath().
-        com.example.infrastructure.persistence.AppDatabase.resetInstanceForProcessDeath()
-
-        // "Kill process → reopen" on the SAME device file.
-        val reopened = com.example.infrastructure.persistence.AppDatabase.getInstance(context)
+        AppDatabase.resetInstanceForProcessDeath()
+        val reopened = AppDatabase.getInstance(context)
         val loaded = com.example.infrastructure.persistence.repository
             .RoomConversationSessionRepository(
                 database = reopened,
@@ -109,9 +112,7 @@ class DurableWorkspaceE2ETest {
         assertEquals("اختبار E2E", loaded.turns.first().prompt)
     }
 
-    @Test
-    fun workflowLibrary_definitionRoundTripsOnDevice() = kotlinx.coroutines.runBlocking {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
+    private fun body3_workflowRoundTrip() = runBlocking {
         val database = db()
         val persistence = com.example.application.workflow.WorkflowPersistenceService(
             workflowExecutionDao = database.workflowExecutionDao(),
@@ -144,17 +145,43 @@ class DurableWorkspaceE2ETest {
         assertEquals("architect_orchestrator", restored.steps.first().assignedAgentId)
     }
 
-    @Test
-    fun canonicalAgents_areSeededDurably() = kotlinx.coroutines.runBlocking {
+    private fun body4_agentsSeeded() = runBlocking {
         val database = db()
         val registry = com.example.application.agent.AgentRegistryService(database.agentDefinitionDao())
         registry.ensureSeeded(com.example.application.agent.CanonicalAgentCatalog.defaults)
         val agents = registry.listAgents()
         assertTrue(agents.any { it.identity.id.value == "agent_quick_chat" })
-        // Full-fidelity round-trip on a real device: goals/policies survive.
         val saved = registry.saveAgent(
             agents.first().copy(goals = listOf(com.example.domain.core.agent.AgentGoal("هدف E2E", 2)))
         )
         assertTrue(saved.goals.any { it.description == "هدف E2E" })
+    }
+
+    // ---- suite executions ----
+
+    @Test
+    fun suite_declarationOrder() {
+        body1_launch()
+        body2_sessionSurvivesReopen()
+        body3_workflowRoundTrip()
+        body4_agentsSeeded()
+    }
+
+    @Test
+    fun suite_reopenFirst_thenOthers() {
+        body2_sessionSurvivesReopen()
+        body1_launch()
+        body3_workflowRoundTrip()
+        body4_agentsSeeded()
+    }
+
+    @Test
+    fun suite_isolatedBodies_sharedFile() {
+        // The device runner may interleave: each body still sees the shared
+        // durable file + whatever singleton state earlier bodies left.
+        body1_launch()
+        body3_workflowRoundTrip()
+        body4_agentsSeeded()
+        body2_sessionSurvivesReopen()
     }
 }
