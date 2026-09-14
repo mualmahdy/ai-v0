@@ -10,7 +10,6 @@ import com.example.application.usecases.ConnectProviderUseCase
 import com.example.application.usecases.DecisionSimulationUseCase
 import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
-import com.example.application.usecases.ManageWorkspaceBudgetUseCase
 import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.Outcome
 import com.example.domain.core.agent.AgentBudget
@@ -57,11 +56,16 @@ class MainViewModel(
     // provisioning/readiness, and the long-term memory browser — left this
     // ViewModel for KnowledgeViewModel (with manageMemoryUseCase and
     // ragPipelineService, its whole dependency set).
+    // (ADR-6 slice 4) the governance observatory — capability radar,
+    // economic budget, and the human approval surface — left for
+    // GovernanceViewModel (with capabilityRadarService,
+    // economicGovernanceService, humanApprovalGate,
+    // permissionGrantService, manageWorkspaceBudgetUseCase,
+    // networkMonitorProvider and the local principal id).
     // GAP-19 (Design Closure 2026, ADR-6 step 2): extracted use-cases —
     // the simulation/provider-chain/budget business logic left the VM.
     private val decisionSimulationUseCase: DecisionSimulationUseCase? = null,
     private val connectProviderUseCase: ConnectProviderUseCase? = null,
-    private val manageWorkspaceBudgetUseCase: ManageWorkspaceBudgetUseCase? = null,
     private val componentRegistry: ComponentRegistry,
     private val cbrMdpEngine: CbrMdpEngine,
     private val extensionManager: ExtensionManager,
@@ -75,28 +79,11 @@ class MainViewModel(
     // engine — its suggestions flow was permanently empty.)
     private val telemetryPort: com.example.domain.ports.observability.TelemetryPort? = null,
     /**
-     * Real connectivity state (audit 2026 fix): replaces the previous
-     * hardcoded `isNetworkAvailable = true` that made the OFFLINE policy
-     * unreachable in practice. Injected from the AppContainer; nullable so
-     * existing constructor call sites remain source-compatible.
-     */
-    private val networkMonitorProvider: com.example.infrastructure.network.NetworkMonitor? = null,
-    /**
      * GAP-CLOSURE P1-08/P1-10: canonical durable agent registry — the SAME
      * authority the runtime ComponentRegistry syncs from. Nullable for
      * source compatibility with existing call sites.
      */
     private val agentRegistryService: com.example.application.agent.AgentRegistryService? = null,
-    /**
-     * GOVERNANCE PHASE — the operational capability radar (evidence-derived,
-     * persisted). Nullable keeps existing constructor call sites compatible.
-     */
-    private val capabilityRadarService: com.example.application.radar.CapabilityRadarService? = null,
-    /**
-     * GOVERNANCE PHASE — economic governance facade (pricing, ledger,
-     * budgets, rate limits). Nullable keeps existing call sites compatible.
-     */
-    private val economicGovernanceService: com.example.application.budget.EconomicGovernanceService? = null,
     /**
      * WORKFLOW LIBRARY (report gap-closure): user-authored workflow assets
      * (save / load / edit / clone / run history).
@@ -108,16 +95,6 @@ class MainViewModel(
     private val workflowPersistenceService: com.example.application.workflow.WorkflowPersistenceService? = null,
     /** REPAIR ORDER §3A — observable bootstrap state machine. */
     private val bootstrapStateProvider: kotlinx.coroutines.flow.StateFlow<com.example.application.bootstrap.BootstrapState>? = null,
-    /** REPAIR ORDER §3B/§2.2 — human approval surface (consent loop). */
-    private val humanApprovalGate: com.example.application.governed.HumanApprovalGate? = null,
-    /**
-     * GAP-02 (Design Closure 2026, ADR-2): the EXPLICIT local principal
-     * identity — resolves approvals/grants with a durable device-local user
-     * id instead of the anonymous "user" constant.
-     */
-    private val localPrincipalId: String = "local-device-user",
-    /** GAP-02 (ADR-2c): "allow always" grants for sensitive tools. */
-    private val permissionGrantService: com.example.application.security.PermissionGrantService? = null,
     /**
      * ADR-6 SLICE 2 (Design Closure 2026 UI-redesign track): the STUDIO
      * signal bus — the conversation runtime moved to StudioViewModel, and
@@ -230,10 +207,9 @@ class MainViewModel(
         // gap-closure): workspace-scoped durable assets follow the active
         // workspace (continuity across switches).
         observeWorkspaceScopedAssets()
-        // GOVERNANCE PHASE: subscribe the observatory to the backend-truth
-        // radar flows (Room-backed, survive process death).
-        observeGovernance()
-        refreshGovernance()
+        // (ADR-6 slice 4) GOVERNANCE PHASE: the observatory subscription
+        // (observeGovernance) + the on-demand refresh moved to
+        // GovernanceViewModel with the whole governance feature state.
         // Phase 4 — first-run bootstrap: seeds local embedding + multi-source
         // search + Gemini provider records (idempotent, no network for in-process).
         providerControlPlaneService.launchBootstrapDefaults()
@@ -291,153 +267,19 @@ class MainViewModel(
         }
     }
 
-    /**
-     * GOVERNANCE PHASE — observatory data sources: radar statuses /
-     * recommendations / changes flow straight from Room; budget + ledger
-     * refresh on demand (suspend queries). All backend truth, no fabrication.
+    /*
+     * (ADR-6 slice 4, Design Closure 2026 UI-redesign track) the ENTIRE
+     * governance observatory moved to GovernanceViewModel: the Room-backed
+     * radar observers (statuses / recommendations / changes), the on-demand
+     * refresh (snapshot + budget/ledger summary + measurement health + the
+     * approval queue), the budget allocation editor, the recommendation
+     * dismissal, and the FULL approval loop (approve / reject /
+     * "allow always" standing grant) — with its whole dependency set
+     * (capabilityRadarService, economicGovernanceService,
+     * humanApprovalGate, permissionGrantService,
+     * manageWorkspaceBudgetUseCase, networkMonitorProvider,
+     * localPrincipalId).
      */
-    private fun observeGovernance() {
-        val radar = capabilityRadarService ?: return
-        viewModelScope.launch {
-            runCatching {
-                workspaceRuntimeService.activeWorkspace.collect { workspace ->
-                    val wsId = workspace?.id
-                    radar.observeCapabilityStatuses(wsId).collect { statuses ->
-                        _uiState.update { it.copy(radarCapabilityStatuses = statuses) }
-                    }
-                }
-            }
-        }
-        viewModelScope.launch {
-            runCatching {
-                workspaceRuntimeService.activeWorkspace.collect { workspace ->
-                    val wsId = workspace?.id
-                    radar.observeRecommendations(wsId).collect { recos ->
-                        _uiState.update { it.copy(radarRecommendations = recos) }
-                    }
-                }
-            }
-        }
-        viewModelScope.launch {
-            runCatching {
-                workspaceRuntimeService.activeWorkspace.collect { workspace ->
-                    val wsId = workspace?.id
-                    radar.observeChanges(wsId).collect { changes ->
-                        _uiState.update { it.copy(radarChanges = changes) }
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * GOVERNANCE PHASE — on-demand refresh: derives a fresh radar snapshot
-     * (evidence + registry facts) and reloads the budget/ledger summaries
-     * for the active workspace.
-     */
-    fun refreshGovernance() {
-        // GAP-02: the approval surface refreshes with the observatory.
-        refreshPendingApprovals()
-        viewModelScope.launch {
-            // P0-03: bootstrap-aware — skip honestly when no workspace yet.
-            val wsId = workspaceRuntimeService.awaitActiveWorkspaceId() ?: run {
-                _uiState.update { it.copy(diagnosticBanner = "مساحة العمل لم تجهز بعد — تعذر تحديث الحوكمة.") }
-                return@launch
-            }
-            val netAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: false
-            runCatching {
-                val snapshot = capabilityRadarService?.deriveSnapshot(
-                    workspaceId = wsId,
-                    networkPolicy = _uiState.value.networkPolicy,
-                    isNetworkAvailable = netAvailable
-                )
-                if (snapshot != null) {
-                    _uiState.update {
-                        it.copy(
-                            radarCapabilityStatuses = snapshot.capabilities,
-                            radarRecommendations = snapshot.recommendations,
-                            radarChanges = snapshot.changes
-                        )
-                    }
-                }
-            }.onFailure { failure ->
-                // GAP-13: the refresh degradations are surfaced, not swallowed.
-                _uiState.update {
-                    it.copy(diagnosticBanner = "تعذر تحديث لقطة قدرات الحوكمة: ${failure.localizedMessage}")
-                }
-            }
-            runCatching {
-                val economics = economicGovernanceService ?: return@launch
-                val status = economics.workspaceBudgetSummary(wsId)
-                val recent = economics.recentLedgerForWorkspace(wsId, limit = 25)
-                val tokens = economics.tokensConsumedForWorkspace(wsId)
-                _uiState.update {
-                    it.copy(
-                        workspaceBudgetStatus = status,
-                        costLedgerRecent = recent,
-                        workspaceTokensConsumed = tokens
-                    )
-                }
-            }.onFailure { failure ->
-                // GAP-13: economic-summary degradation is surfaced.
-                _uiState.update {
-                    it.copy(diagnosticBanner = "تعذر تحديث ملخص الميزانية: ${failure.localizedMessage}")
-                }
-            }
-            // GAP-24 (Design Closure 2026, ADR-8): honest measurement-health
-            // snapshot — the observatory shows the telemetry persistence
-            // layer's own failure counters, not just the data it persisted.
-            runCatching {
-                val health = telemetryPort?.measurementHealth()
-                if (health != null) {
-                    _uiState.update { it.copy(measurementHealth = health) }
-                }
-            }.onFailure { failure ->
-                _uiState.update {
-                    it.copy(diagnosticBanner = "تعذر قياس صحة طبقة القياس: ${failure.localizedMessage}")
-                }
-            }
-        }
-    }
-
-    /**
-     * GOVERNANCE PHASE — set the workspace monetary budget allocation (USD).
-     * Policy: HARD_LIMIT + warn at 80% (enforced at BOTH the decide-time
-     * gate in DecisionService and the pre-execution gate in
-     * ExecutionService.executeLlmStep — GAP-05/ADR-5). Local tools carry no
-     * cash cost and are honestly not cash-denied.
-     */
-    fun setWorkspaceBudgetAllocationUsd(amountUsd: Double) {
-        val economics = economicGovernanceService ?: return
-        val budgetUseCase = manageWorkspaceBudgetUseCase ?: return
-        _uiState.update { it.copy(isSavingBudgetAllocation = true) }
-        viewModelScope.launch {
-            runCatching {
-                // GAP-19 (ADR-6 step 2): the budget POLICY (HARD_LIMIT +
-                // AUTO_LOCAL_FALLBACK, warn 80%, micro-USD conversion) lives
-                // in ManageWorkspaceBudgetUseCase.
-                budgetUseCase(
-                    workspaceId = workspaceRuntimeService.requireActiveWorkspaceId(),
-                    amountUsd = amountUsd
-                )
-                economics // (service presence guard retained above)
-            }
-            _uiState.update {
-                it.copy(
-                    isSavingBudgetAllocation = false,
-                    budgetAllocationInputUsd = "%.2f".format(amountUsd)
-                )
-            }
-            refreshGovernance()
-        }
-    }
-
-    /** Dismisses a radar recommendation (persisted). */
-    fun dismissRadarRecommendation(id: String) {
-        viewModelScope.launch {
-            runCatching { capabilityRadarService?.dismissRecommendation(id) }
-        }
-    }
 
     /**
      * Phase 2 — Observes the active workspace and reacts to workspace switches:
@@ -1527,101 +1369,13 @@ class MainViewModel(
         _uiState.update { it.copy(diagnosticBanner = null) }
     }
 
-    // ====================================================================
-    // REPAIR ORDER §3B/§2.2 — APPROVAL SURFACE (the previously unreachable
-    // human-consent loop: pending approvals are now visible + resolvable).
-    // ====================================================================
-
-    /**
-     * GAP-02 (Design Closure 2026, ADR-2): REACTIVE approval surface —
-     * pending requests land in [UiState.pendingApprovals] where the
-     * governance screen renders them. Previously these functions had ZERO
-     * screen callers (the consent loop was a dead end).
+    /*
+     * (ADR-6 slice 4) the APPROVAL SURFACE (REPAIR ORDER §3B/§2.2 + GAP-02
+     * consent loop): refreshPendingApprovals / listPendingApprovals /
+     * approveSensitiveAction / rejectSensitiveAction /
+     * grantAlwaysForApproval — moved to GovernanceViewModel, the owner of
+     * the approval queue and the standing-grant flow.
      */
-    fun refreshPendingApprovals() {
-        val gate = humanApprovalGate ?: return
-        viewModelScope.launch {
-            val pending = runCatching { gate.pendingApprovals() }.getOrDefault(emptyList())
-            _uiState.update { it.copy(pendingApprovals = pending) }
-        }
-    }
-
-    fun listPendingApprovals(
-        onResult: (List<com.example.domain.ports.governed.HumanApprovalRequest>) -> Unit
-    ) {
-        val gate = humanApprovalGate ?: return onResult(emptyList())
-        viewModelScope.launch {
-            onResult(runCatching { gate.pendingApprovals() }.getOrDefault(emptyList()))
-        }
-    }
-
-    fun approveSensitiveAction(approvalId: String, resolvedBy: String = localPrincipalId) {
-        val gate = humanApprovalGate ?: return
-        viewModelScope.launch {
-            runCatching { gate.approve(approvalId, resolvedBy) }
-                .onSuccess { resolution ->
-                    val banner = if (resolution.name == "APPROVED") "تمت الموافقة على الإجراء الحساس." else resolution.name
-                    _uiState.update { it.copy(diagnosticBanner = banner) }
-                    refreshPendingApprovals()
-                }
-                .onFailure { e ->
-                    _uiState.update { it.copy(errorMessage = "تعذر تسجيل الموافقة: ${e.localizedMessage}") }
-                }
-        }
-    }
-
-    fun rejectSensitiveAction(approvalId: String, resolvedBy: String = localPrincipalId) {
-        val gate = humanApprovalGate ?: return
-        viewModelScope.launch {
-            runCatching { gate.reject(approvalId, resolvedBy) }
-                .onSuccess {
-                    _uiState.update { it.copy(diagnosticBanner = "تم رفض الإجراء الحساس.") }
-                    refreshPendingApprovals()
-                }
-                .onFailure { e ->
-                    _uiState.update { it.copy(errorMessage = "تعذر تسجيل الرفض: ${e.localizedMessage}") }
-                }
-        }
-    }
-
-    /**
-     * GAP-02 (ADR-2c): "السماح دائماً لهذه الأداة" — an EXECUTE
-     * permission-grant for the tool (recorded consent: future admissions of
-     * this tool pass without a new request), plus resolving the CURRENT
-     * pending request so the in-flight execution can also proceed (its
-     * one-shot token remains consumable).
-     */
-    fun grantAlwaysForApproval(approvalId: String) {
-        val gate = humanApprovalGate ?: return
-        val grants = permissionGrantService
-        viewModelScope.launch {
-            if (grants == null) {
-                _uiState.update { it.copy(errorMessage = "خدمة منح الأذونات غير متاحة.") }
-                return@launch
-            }
-            runCatching {
-                val pending = gate.pendingApprovals().firstOrNull { it.approvalId == approvalId }
-                if (pending != null) {
-                    grants.grant(
-                        principalType = com.example.domain.core.security.governance.PrincipalType.USER,
-                        principalId = localPrincipalId,
-                        // GLOBAL grant (workspaceId = null): standing consent for
-                        // the tool across the single-user device profile.
-                        resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
-                        resourceId = pending.toolName,
-                        permission = com.example.domain.core.security.governance.Permission.EXECUTE,
-                        grantedBy = localPrincipalId
-                    )
-                    gate.approve(approvalId, localPrincipalId)
-                }
-            }.onSuccess {
-                _uiState.update { it.copy(diagnosticBanner = "تم السماح دائماً بهذه الأداة (منح EXECUTE دائم).") }
-                refreshPendingApprovals()
-            }.onFailure { e ->
-                _uiState.update { it.copy(errorMessage = "تعذر تسجيل المنح الدائم: ${e.localizedMessage}") }
-            }
-        }
-    }
 
     private companion object {
         // (CONVERSATION_HISTORY_WINDOW moved to StudioViewModel with the

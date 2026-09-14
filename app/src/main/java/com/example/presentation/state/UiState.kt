@@ -17,12 +17,6 @@ import com.example.domain.core.provider.ProviderService
 import com.example.domain.core.provider.ServiceConfiguration
 import com.example.domain.core.provider.offering.ServiceOffering
 import com.example.domain.core.radar.RadarItem
-import com.example.domain.core.radar.CapabilityChangeRecord
-import com.example.domain.core.radar.RadarCapabilityStatus
-import com.example.domain.core.radar.RadarRecommendation
-import com.example.domain.core.budget.BudgetStatus
-import com.example.domain.core.budget.UsageCostRecord
-import com.example.domain.core.radar.RadarSnapshot
 import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.task.AutonomyPolicy
@@ -173,17 +167,13 @@ data class UiState(
     val evolutionCandidates: List<EvolutionCandidate> = emptyList(),
     val isRadarRefreshing: Boolean = false,
 
-    // GOVERNANCE PHASE — Capability Radar + Economic Budget observatory.
-    // Every field below is backend-truth (Room-backed flows); nothing here
-    // is fabricated or UI-assumed.
-    val radarCapabilityStatuses: List<RadarCapabilityStatus> = emptyList(),
-    val radarRecommendations: List<RadarRecommendation> = emptyList(),
-    val radarChanges: List<CapabilityChangeRecord> = emptyList(),
-    val workspaceBudgetStatus: BudgetStatus? = null,
-    val costLedgerRecent: List<UsageCostRecord> = emptyList(),
-    val workspaceTokensConsumed: Long = 0L,
-    val budgetAllocationInputUsd: String = "",
-    val isSavingBudgetAllocation: Boolean = false,
+    // GOVERNANCE OBSERVATORY — REMOVED (ADR-6 slice 4, Design Closure 2026
+    // UI-redesign track): radarCapabilityStatuses / radarRecommendations /
+    // radarChanges / workspaceBudgetStatus / costLedgerRecent /
+    // workspaceTokensConsumed / budgetAllocationInputUsd /
+    // isSavingBudgetAllocation / pendingApprovals / measurementHealth now
+    // live in GovernanceViewModel's own GovernanceUiState. The governance
+    // screen renders from the feature VM (its owner).
 
     // Extensions & Ecosystem
     val skills: List<SkillManifest> = emptyList(),
@@ -200,11 +190,6 @@ data class UiState(
     val isDiscoveringModels: Boolean = false,
     val isTestingProvider: Boolean = false,
     val testingProviderId: String? = null,
-
-    // GAP-02 (Design Closure 2026, ADR-2): the HUMAN APPROVAL SURFACE —
-    // pending consent requests rendered by the governance observatory
-    // (previously the consent loop was a dead end with no reachable UI).
-    val pendingApprovals: List<com.example.domain.ports.governed.HumanApprovalRequest> = emptyList(),
 
     // "Connect Provider" wizard — the guided full-chain path that ends with a
     // usable ENABLED resource (fix: user could add a provider but never use it).
@@ -237,11 +222,9 @@ data class UiState(
     // selectedFilePath / isFileLoading now live in FilesViewModel's own
     // FilesUiState. The explorer count reads the FilesViewModel flow.
 
-    // GAP-24 (Design Closure 2026, ADR-8): measurement-health snapshot for
-    // the governance observatory "صحة القياس" card — honest counters of the
-    // telemetry persistence layer itself (metric + audit write failures).
-    // Null = not yet measured (the fetch runs with refreshGovernance).
-    val measurementHealth: com.example.domain.core.observability.MeasurementHealth? = null,
+    // Measurement-health snapshot — REMOVED (ADR-6 slice 4): the GAP-24
+    // "صحة القياس" card now reads GovernanceViewModel's own state (the
+    // fetch runs with its refreshGovernance).
 
     // Error notification
     val errorMessage: String? = null

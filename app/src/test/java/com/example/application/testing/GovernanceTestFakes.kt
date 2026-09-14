@@ -249,7 +249,12 @@ class FakeRadarPersistence : CapabilityRadarPersistencePort {
         recommendations.values.filter { it.workspaceId == workspaceId && !it.isDismissed }
 
     override fun observeRecommendations(workspaceId: String?): Flow<List<RadarRecommendation>> =
-        recommendationsFlow.map { list -> list.filter { it.workspaceId == workspaceId } }
+        // Mirrors the Room DAO semantics (GovernanceDaos.RadarRecommendationDao
+        // .observeForWorkspace): DISMISSED recommendations leave the observed
+        // flow (isDismissed = 0 filter) — the fake previously kept them.
+        recommendationsFlow.map { list ->
+            list.filter { it.workspaceId == workspaceId && !it.isDismissed }
+        }
 
     override suspend fun dismissRecommendation(id: String) {
         recommendations[id]?.let {

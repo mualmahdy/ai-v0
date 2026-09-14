@@ -118,6 +118,9 @@ fun MainAppScreen(
     // engine + memory browser) — owned here, passed to the screens that
     // render or read its state.
     knowledgeViewModel: com.example.presentation.viewmodel.KnowledgeViewModel,
+    // ADR-6 slice 4: the GOVERNANCE feature ViewModel (observatory + human
+    // approval surface) — owned here, passed to the governance screen.
+    governanceViewModel: com.example.presentation.viewmodel.GovernanceViewModel,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -131,6 +134,10 @@ fun MainAppScreen(
     // failures, deletion errors, memory-store errors) — same global
     // snackbar pattern, dismissed from its own state.
     val knowledgeState by knowledgeViewModel.state.collectAsState()
+    // ADR-6 SLICE 4: the governance feature's honest error channel
+    // (approval resolution failures, standing-grant failures) — same global
+    // snackbar pattern, dismissed from its own state.
+    val governanceState by governanceViewModel.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val navController = rememberNavController()
     var createWorkspaceOpen by rememberSaveable { mutableStateOf(false) }
@@ -158,6 +165,15 @@ fun MainAppScreen(
         knowledgeState.errorMessage?.let { error ->
             snackbarHostState.showSnackbar(error)
             knowledgeViewModel.clearErrorMessage()
+        }
+    }
+
+    // ADR-6 SLICE 4: the governance feature's honest error channel — the
+    // same global snackbar surface, its own source of truth.
+    LaunchedEffect(governanceState.errorMessage) {
+        governanceState.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            governanceViewModel.clearErrorMessage()
         }
     }
 
@@ -289,6 +305,7 @@ fun MainAppScreen(
                     studioViewModel = studioViewModel,
                     sessionsViewModel = sessionsViewModel,
                     knowledgeViewModel = knowledgeViewModel,
+                    governanceViewModel = governanceViewModel,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -391,6 +408,9 @@ private fun WorkspaceNavHost(
     // ADR-6 slice 3: the knowledge feature VM — composed into the Knowledge /
     // Settings / Explorer destinations.
     knowledgeViewModel: com.example.presentation.viewmodel.KnowledgeViewModel,
+    // ADR-6 slice 4: the governance feature VM — composed into the
+    // Governance destination.
+    governanceViewModel: com.example.presentation.viewmodel.GovernanceViewModel,
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
@@ -466,7 +486,7 @@ private fun WorkspaceNavHost(
         }
         composable(WorkspaceRoutes.GOVERNANCE) {
             GovernanceScreen(
-                viewModel = viewModel,
+                viewModel = governanceViewModel,
                 modifier = Modifier.fillMaxSize()
             )
         }

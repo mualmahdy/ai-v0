@@ -1989,7 +1989,6 @@ class MainViewModelFactory(
                 executeWorkflowUseCase = appContainer.executeWorkflowUseCase,
                 decisionSimulationUseCase = appContainer.decisionSimulationUseCase,
                 connectProviderUseCase = appContainer.connectProviderUseCase,
-                manageWorkspaceBudgetUseCase = appContainer.manageWorkspaceBudgetUseCase,
                 componentRegistry = appContainer.componentRegistry,
                 cbrMdpEngine = appContainer.cbrMdpEngine,
                 extensionManager = appContainer.extensionManager,
@@ -2002,23 +2001,20 @@ class MainViewModelFactory(
                 // Unified Activity Feed.
                 telemetryService = appContainer.telemetryService,
                 telemetryPort = appContainer.telemetryPort,
-                networkMonitorProvider = appContainer.networkMonitor,
-                // GOVERNANCE PHASE — radar + economic governance surfaces for
-                // the GovernanceObservatoryScreen.
-                capabilityRadarService = appContainer.capabilityRadarService,
-                economicGovernanceService = appContainer.economicGovernanceService,
                 workflowLibraryService = appContainer.workflowLibraryService,
                 workflowPersistenceService = appContainer.workflowPersistenceService,
-                // REPAIR ORDER §3A — observable bootstrap state machine, and
-                // §3B/§2.2 — the approval surface (consent loop).
+                // REPAIR ORDER §3A — observable bootstrap state machine.
                 // GAP-08 (Design Closure 2026, ADR-7): the dead project /
                 // transfer / readiness / repair VM surface was deleted — the
                 // MainViewModel no longer receives those services (the
                 // services themselves remain alive for bootstrap & tests).
                 bootstrapStateProvider = appContainer.workspaceRuntimeService.bootstrapState,
-                humanApprovalGate = appContainer.humanApprovalGate,
-                localPrincipalId = appContainer.localPrincipalId,
-                permissionGrantService = appContainer.permissionGrantService,
+                // (ADR-6 slice 4) the governance observatory dependency set
+                // (capabilityRadarService, economicGovernanceService,
+                // humanApprovalGate, permissionGrantService,
+                // manageWorkspaceBudgetUseCase, networkMonitor,
+                // localPrincipalId) moved to GovernanceViewModelFactory with
+                // the governance feature extraction.
                 // ADR-6 slice 2 — the studio feature's outbound signal bus
                 // (conversationSessionService + appContext left this factory
                 // with the StudioViewModel extraction).
@@ -2156,6 +2152,38 @@ class KnowledgeViewModelFactory(
                 ragPipelineService = appContainer.ragPipelineService,
                 manageMemoryUseCase = appContainer.manageMemoryUseCase,
                 activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 4 (Design Closure 2026 UI-redesign track) — factory for the
+ * GOVERNANCE feature ViewModel: the observatory (capability radar +
+ * economic budget) and the human approval surface extracted from
+ * MainViewModel with its whole dependency set. Receives the per-Activity
+ * studio signal bus (it COLLECTS the session network-policy changes that
+ * feed the radar snapshot — its own display mirror, no shared state).
+ */
+class GovernanceViewModelFactory(
+    private val appContainer: AppContainer,
+    private val studioSignalBus: com.example.presentation.viewmodel.StudioSignalBus? = null
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.GovernanceViewModel::class.java)) {
+            return com.example.presentation.viewmodel.GovernanceViewModel(
+                workspaceRuntimeService = appContainer.workspaceRuntimeService,
+                capabilityRadarService = appContainer.capabilityRadarService,
+                economicGovernanceService = appContainer.economicGovernanceService,
+                humanApprovalGate = appContainer.humanApprovalGate,
+                permissionGrantService = appContainer.permissionGrantService,
+                manageWorkspaceBudgetUseCase = appContainer.manageWorkspaceBudgetUseCase,
+                networkMonitorProvider = appContainer.networkMonitor,
+                telemetryPort = appContainer.telemetryPort,
+                localPrincipalId = appContainer.localPrincipalId,
+                studioSignals = studioSignalBus
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

@@ -15,6 +15,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.unit.LayoutDirection
 import com.example.presentation.di.AppContainer
 import com.example.presentation.di.FilesViewModelFactory
+import com.example.presentation.di.GovernanceViewModelFactory
 import com.example.presentation.di.KnowledgeViewModelFactory
 import com.example.presentation.di.MainViewModelFactory
 import com.example.presentation.di.SessionsViewModelFactory
@@ -23,6 +24,7 @@ import com.example.presentation.di.StudioViewModelFactory
 import com.example.presentation.di.TasksViewModelFactory
 import com.example.presentation.ui.MainAppScreen
 import com.example.presentation.viewmodel.FilesViewModel
+import com.example.presentation.viewmodel.GovernanceViewModel
 import com.example.presentation.viewmodel.KnowledgeViewModel
 import com.example.presentation.viewmodel.MainViewModel
 import com.example.presentation.viewmodel.SessionsViewModel
@@ -85,6 +87,15 @@ class MainActivity : ComponentActivity() {
         KnowledgeViewModelFactory(appContainer)
     }
 
+    // ADR-6 slice 4 (Design Closure 2026 UI-redesign track): the GOVERNANCE
+    // feature ViewModel — the observatory (capability radar + economic
+    // budget) and the human approval surface left the MainViewModel (same
+    // freeze rule). Collects the studio bus's network-policy changes for
+    // the radar snapshot (its own display mirror).
+    private val governanceViewModel: GovernanceViewModel by viewModels {
+        GovernanceViewModelFactory(appContainer, studioSignalBus)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -116,7 +127,8 @@ class MainActivity : ComponentActivity() {
                             settingsViewModel = settingsViewModel,
                             studioViewModel = studioViewModel,
                             sessionsViewModel = sessionsViewModel,
-                            knowledgeViewModel = knowledgeViewModel
+                            knowledgeViewModel = knowledgeViewModel,
+                            governanceViewModel = governanceViewModel
                         )
                     }
                 }

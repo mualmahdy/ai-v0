@@ -12,9 +12,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.filled.AccountBalance
 import androidx.compose.material.icons.filled.GppMaybe
@@ -57,7 +59,7 @@ import com.example.presentation.ui.components.InfoRow
 import com.example.presentation.ui.components.MiniBarChart
 import com.example.presentation.ui.components.SectionHeader
 import com.example.presentation.ui.components.StatusBadge
-import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.GovernanceViewModel
 
 /**
  * ============================================================================
@@ -72,10 +74,10 @@ import com.example.presentation.viewmodel.MainViewModel
  */
 @Composable
 fun GovernanceScreen(
-    viewModel: MainViewModel,
+    viewModel: GovernanceViewModel,
     modifier: Modifier = Modifier
 ) {
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.state.collectAsState()
     var budgetInput by remember(state.budgetAllocationInputUsd) {
         mutableStateOf(state.budgetAllocationInputUsd)
     }
@@ -84,6 +86,40 @@ fun GovernanceScreen(
         modifier = modifier.testTag("governance_screen"),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        // ADR-6 slice 4: the feature's OWN transient diagnostic banner
+        // (approval resolutions, refresh degradations, budget outcomes) —
+        // same local-banner pattern as the knowledge feature; dismissed
+        // from the feature's own state.
+        state.diagnosticBanner?.let { banner ->
+            item {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clickable { viewModel.dismissDiagnosticBanner() }
+                        .testTag("governance_diagnostic_banner")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = banner,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "إخفاء",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
         item {
             SectionHeader(
                 icon = Icons.Default.Radar,

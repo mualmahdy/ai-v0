@@ -24,7 +24,9 @@ import kotlinx.coroutines.flow.map
  * WorkspaceRuntimeServiceTest — extracted here because two feature-VM test
  * suites now need them).
  */
-class FakeWorkspaceDaoForVm : WorkspaceDao {
+// (ADR-6 slice 4) open for the governance test's exploding-DAO variant —
+// the honest-gate path needs a bootstrap that fails without a workspace.
+open class FakeWorkspaceDaoForVm : WorkspaceDao {
     val stored = mutableMapOf<String, WorkspaceEntity>()
     var insertOrUpdateCount = 0
     var deactivateAllCount = 0
