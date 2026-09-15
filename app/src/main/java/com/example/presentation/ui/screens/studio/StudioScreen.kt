@@ -111,6 +111,12 @@ fun StudioScreen(
     studioViewModel: com.example.presentation.viewmodel.StudioViewModel,
     /** ADR-6 slice 2: the durable-session registry (browser list, sheet flag). */
     sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
+    /**
+     * ADR-6 slice 5: the PROVIDERS feature ViewModel — the model picker's
+     * resources and the connect-LLM gate read the feature's own flow (the
+     * materialized resources left the shared UiState with the extraction).
+     */
+    providersViewModel: com.example.presentation.viewmodel.ProvidersViewModel,
     onNavigate: (String) -> Unit,
     /**
      * ADR-6 slice 1: the autonomy-policy mutation moved to the SETTINGS
@@ -120,9 +126,12 @@ fun StudioScreen(
     onAutonomyPolicy: (AutonomyPolicy) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // SHARED state (catalog, agents, resources, autonomy display) stays on
-    // the MainViewModel; the CONVERSATION state is the studio feature's own.
+    // SHARED state (catalog, agents, autonomy display) stays on the
+    // MainViewModel; the CONVERSATION state is the studio feature's own, and
+    // the RESOURCES are the providers feature's (ADR-6 slice 5) — the screen
+    // composes the features' own flows (no shared mutable state).
     val state by viewModel.uiState.collectAsState()
+    val providersState by providersViewModel.state.collectAsState()
     val studioState by studioViewModel.state.collectAsState()
     val sessionsState by sessionsViewModel.state.collectAsState()
     val clipboard = LocalClipboardManager.current
@@ -140,7 +149,7 @@ fun StudioScreen(
         }
     }
 
-    val hasActiveLlm = state.materializedResources.any {
+    val hasActiveLlm = providersState.materializedResources.any {
         it.resourceType == ResourceType.LLM && it.lifecycleState == ResourceLifecycleState.ENABLED
     }
 
@@ -195,7 +204,7 @@ fun StudioScreen(
             when (studioState.chatMode) {
                 ChatMode.QUICK_CHAT -> item {
                     ModelPickerRow(
-                        resources = state.materializedResources.filter {
+                        resources = providersState.materializedResources.filter {
                             it.resourceType == ResourceType.LLM &&
                                 (it.lifecycleState == ResourceLifecycleState.ENABLED ||
                                     it.lifecycleState == ResourceLifecycleState.ACTIVE)

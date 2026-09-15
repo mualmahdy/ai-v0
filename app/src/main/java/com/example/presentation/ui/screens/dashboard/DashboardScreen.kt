@@ -57,12 +57,16 @@ import com.example.presentation.viewmodel.MainViewModel
 @Composable
 fun DashboardScreen(
     viewModel: MainViewModel,
+    // ADR-6 slice 5: the provider stats (registered providers, enabled /
+    // registered resources) read the providers feature VM — their owner.
+    providersViewModel: com.example.presentation.viewmodel.ProvidersViewModel,
     onNavigate: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
+    val providersState by providersViewModel.state.collectAsState()
 
-    val activeResourceCount = state.materializedResources.count { it.lifecycleState.name == "ENABLED" }
+    val activeResourceCount = providersState.materializedResources.count { it.lifecycleState.name == "ENABLED" }
 
     Column(modifier = modifier.testTag("dashboard_screen")) {
         // ---- Live system status ----
@@ -74,7 +78,7 @@ fun DashboardScreen(
         ) {
             DashboardStat(
                 icon = Icons.Default.Dns,
-                value = "${state.generalizedProviders.size}",
+                value = "${providersState.generalizedProviders.size}",
                 label = "مزوّد مسجّل",
                 tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.weight(1f)
@@ -91,7 +95,7 @@ fun DashboardScreen(
             // empty counter is a fabricated capability, not a metric.
             DashboardStat(
                 icon = Icons.Default.AutoAwesome,
-                value = "${state.materializedResources.size}",
+                value = "${providersState.materializedResources.size}",
                 label = "مورد مُسجّل",
                 tint = MaterialTheme.colorScheme.secondary,
                 modifier = Modifier.weight(1f)

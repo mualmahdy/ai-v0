@@ -18,6 +18,7 @@ import com.example.presentation.di.FilesViewModelFactory
 import com.example.presentation.di.GovernanceViewModelFactory
 import com.example.presentation.di.KnowledgeViewModelFactory
 import com.example.presentation.di.MainViewModelFactory
+import com.example.presentation.di.ProvidersViewModelFactory
 import com.example.presentation.di.SessionsViewModelFactory
 import com.example.presentation.di.SettingsViewModelFactory
 import com.example.presentation.di.StudioViewModelFactory
@@ -27,6 +28,7 @@ import com.example.presentation.viewmodel.FilesViewModel
 import com.example.presentation.viewmodel.GovernanceViewModel
 import com.example.presentation.viewmodel.KnowledgeViewModel
 import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.ProvidersViewModel
 import com.example.presentation.viewmodel.SessionsViewModel
 import com.example.presentation.viewmodel.SettingsViewModel
 import com.example.presentation.viewmodel.StudioSignal
@@ -96,6 +98,16 @@ class MainActivity : ComponentActivity() {
         GovernanceViewModelFactory(appContainer, studioSignalBus)
     }
 
+    // ADR-6 slice 5 (Design Closure 2026 UI-redesign track): the PROVIDERS
+    // feature ViewModel — the provider & resource control room (control-
+    // plane flows, first-run provider bootstrap seeding, connect wizard,
+    // credential dialog) left the MainViewModel (same freeze rule). Its
+    // init triggers the idempotent provider bootstrap seeding exactly where
+    // MainViewModel's init used to.
+    private val providersViewModel: ProvidersViewModel by viewModels {
+        ProvidersViewModelFactory(appContainer)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -128,7 +140,8 @@ class MainActivity : ComponentActivity() {
                             studioViewModel = studioViewModel,
                             sessionsViewModel = sessionsViewModel,
                             knowledgeViewModel = knowledgeViewModel,
-                            governanceViewModel = governanceViewModel
+                            governanceViewModel = governanceViewModel,
+                            providersViewModel = providersViewModel
                         )
                     }
                 }

@@ -57,6 +57,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -76,8 +77,7 @@ import com.example.application.provider.ProviderPreset
 import com.example.application.provider.PROVIDER_PRESETS
 import com.example.domain.core.provider.HealthStatus
 import com.example.domain.core.resource.ResourceLifecycleState
-import com.example.presentation.state.UiState
-import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.ProvidersViewModel
 
 /**
  * ============================================================================
@@ -94,8 +94,16 @@ import com.example.presentation.viewmodel.MainViewModel
  *   3. Action labels in clear Arabic + honest state badges (lifecycle &
  *      health color-coded), no pipeline jargon.
  */
+/**
+ * ADR-6 slice 5 (Design Closure 2026 UI-redesign track): the screen
+ * composes on the PROVIDERS feature ViewModel — its owner. The state and
+ * every mutation (test/discovery/lifecycle/wizard/credential) live in
+ * ProvidersViewModel's own ProvidersUiState; nothing provider-related
+ * flows through the shared MainViewModel anymore.
+ */
 @Composable
-fun ProviderServiceManagerScreen(state: UiState, viewModel: MainViewModel) {
+fun ProviderServiceManagerScreen(viewModel: ProvidersViewModel) {
+    val state by viewModel.state.collectAsState()
     val enabledResources = state.materializedResources.count {
         it.lifecycleState == ResourceLifecycleState.ENABLED
     }
@@ -365,7 +373,7 @@ private fun ProviderCard(
     isTesting: Boolean,
     testingId: String?,
     isDiscovering: Boolean,
-    viewModel: MainViewModel
+    viewModel: ProvidersViewModel
 ) {
     var expanded by remember { mutableStateOf(true) }
     val providerResources = resources.filter { it.providerId == provider.id }
@@ -489,7 +497,7 @@ private fun ServiceRow(
     isTesting: Boolean,
     testingId: String?,
     isDiscovering: Boolean,
-    viewModel: MainViewModel
+    viewModel: ProvidersViewModel
 ) {
     Surface(
         modifier = Modifier
@@ -610,7 +618,7 @@ private fun OfferingRow(
     provider: com.example.domain.core.provider.Provider,
     offering: com.example.domain.core.provider.offering.ServiceOffering,
     resources: List<com.example.domain.core.resource.ResourceRecord>,
-    viewModel: MainViewModel
+    viewModel: ProvidersViewModel
 ) {
     val matching = resources.firstOrNull { it.metadata["offeringId"] == offering.id }
     Row(
@@ -705,7 +713,7 @@ private fun LifecycleBadge(state: ResourceLifecycleState) {
 @Composable
 private fun ResourceRecordCard(
     resource: com.example.domain.core.resource.ResourceRecord,
-    viewModel: MainViewModel
+    viewModel: ProvidersViewModel
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -840,7 +848,10 @@ private fun CredentialInputDialog(
                             a precise failure diagnostic with next actions.
 */
 @Composable
-private fun ConnectProviderWizardDialog(state: UiState, viewModel: MainViewModel) {
+private fun ConnectProviderWizardDialog(
+    state: ProvidersViewModel.ProvidersUiState,
+    viewModel: ProvidersViewModel
+) {
     var selectedPreset by remember { mutableStateOf<ProviderPreset?>(null) }
     var providerName by remember { mutableStateOf("") }
     var endpointUrl by remember { mutableStateOf("") }

@@ -121,6 +121,11 @@ fun MainAppScreen(
     // ADR-6 slice 4: the GOVERNANCE feature ViewModel (observatory + human
     // approval surface) — owned here, passed to the governance screen.
     governanceViewModel: com.example.presentation.viewmodel.GovernanceViewModel,
+    // ADR-6 slice 5: the PROVIDERS feature ViewModel (control room: the
+    // provider/resource flows, the connect wizard, the credential dialog) —
+    // owned here; the providers screen composes on it and the shell's
+    // status chip reads its materialized resources.
+    providersViewModel: com.example.presentation.viewmodel.ProvidersViewModel,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -138,6 +143,10 @@ fun MainAppScreen(
     // (approval resolution failures, standing-grant failures) — same global
     // snackbar pattern, dismissed from its own state.
     val governanceState by governanceViewModel.state.collectAsState()
+    // ADR-6 SLICE 5: the providers feature's honest error channel (service
+    // test/discovery failures, resource lifecycle errors) — same global
+    // snackbar pattern, dismissed from its own state.
+    val providersState by providersViewModel.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val navController = rememberNavController()
     var createWorkspaceOpen by rememberSaveable { mutableStateOf(false) }
@@ -177,8 +186,16 @@ fun MainAppScreen(
         }
     }
 
+    // ADR-6 SLICE 5: the providers feature's honest error channel — the
+    // same global snackbar surface, its own source of truth.
+    LaunchedEffect(providersState.errorMessage) {
+        providersState.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            providersViewModel.clearErrorMessage()
+        }
+    }
+
     // ------------------------------------------------------------------
-    // GAP-23 (Design Closure 2026) — the HONEST STARTUP GATE.
     // bootstrapFailureMessage was previously collected by MainViewModel
     // but NEVER rendered: a failed bootstrap still showed the fully-
     // scaffolded app, and every project-dependent action popped an error
@@ -196,11 +213,11 @@ fun MainAppScreen(
         return
     }
 
-    val activeLlmCount = state.materializedResources.count {
+    val activeLlmCount = providersState.materializedResources.count {
         it.resourceType == com.example.domain.core.resource.ResourceType.LLM &&
             it.lifecycleState == ResourceLifecycleState.ENABLED
     }
-    val activeResourceCount = state.materializedResources.count {
+    val activeResourceCount = providersState.materializedResources.count {
         it.lifecycleState == ResourceLifecycleState.ENABLED
     }
 
@@ -296,6 +313,17 @@ fun MainAppScreen(
                     )
                 }
 
+                // ADR-6 SLICE 5: the PROVIDERS feature's own diagnostic
+                // banner (connection-test results, validation outcomes) —
+                // same global surface, own state + own dismiss.
+                providersState.diagnosticBanner?.let { banner ->
+                    DismissibleInfoBanner(
+                        message = banner,
+                        isDegraded = false,
+                        onDismiss = { providersViewModel.dismissDiagnosticBanner() }
+                    )
+                }
+
                 WorkspaceNavHost(
                     navController = navController,
                     viewModel = viewModel,
@@ -306,6 +334,7 @@ fun MainAppScreen(
                     sessionsViewModel = sessionsViewModel,
                     knowledgeViewModel = knowledgeViewModel,
                     governanceViewModel = governanceViewModel,
+                    providersViewModel = providersViewModel,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -411,6 +440,9 @@ private fun WorkspaceNavHost(
     // ADR-6 slice 4: the governance feature VM — composed into the
     // Governance destination.
     governanceViewModel: com.example.presentation.viewmodel.GovernanceViewModel,
+    // ADR-6 slice 5: the providers feature VM — composed into the Providers /
+    // Dashboard / Studio / Explorer destinations (owner-VM reads).
+    providersViewModel: com.example.presentation.viewmodel.ProvidersViewModel,
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
@@ -426,6 +458,9 @@ private fun WorkspaceNavHost(
                 viewModel = viewModel,
                 studioViewModel = studioViewModel,
                 sessionsViewModel = sessionsViewModel,
+                // ADR-6 slice 5: the model picker + the connect-LLM gate read
+                // the providers feature VM — the resource owner.
+                providersViewModel = providersViewModel,
                 onNavigate = navigate,
                 // ADR-6 slice 1: the autonomy mutation routes to the SETTINGS
                 // feature ViewModel (authoritative service routing).
@@ -455,14 +490,14 @@ private fun WorkspaceNavHost(
         composable(WorkspaceRoutes.MORE) {
             DashboardScreen(
                 viewModel = viewModel,
+                providersViewModel = providersViewModel,
                 onNavigate = navigate,
                 modifier = Modifier.fillMaxSize()
             )
         }
         composable(WorkspaceRoutes.PROVIDERS) {
             com.example.presentation.ui.screens.ProviderServiceManagerScreen(
-                state = viewModel.uiState.collectAsState().value,
-                viewModel = viewModel
+                viewModel = providersViewModel
             )
         }
         composable(WorkspaceRoutes.TASKS) {
@@ -525,6 +560,9 @@ private fun WorkspaceNavHost(
                 // readiness subtitle) reads the knowledge feature VM — its
                 // owner (same pattern as the files/sessions rows).
                 knowledgeViewModel = knowledgeViewModel,
+                // ADR-6 slice 5: the models/resources rows read the providers
+                // feature VM — their owner (same pattern).
+                providersViewModel = providersViewModel,
                 onNavigate = navigate,
                 modifier = Modifier.fillMaxSize()
             )

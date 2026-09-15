@@ -75,10 +75,15 @@ fun WorkspaceExplorerScreen(
     // semantic-readiness subtitle) — read from the knowledge feature VM,
     // its owner.
     knowledgeViewModel: com.example.presentation.viewmodel.KnowledgeViewModel,
+    // ADR-6 slice 5: the providers feature state (the models row subtitle +
+    // the resources row count) — read from the providers feature VM, its
+    // owner (same pattern as the files/sessions/knowledge rows).
+    providersViewModel: com.example.presentation.viewmodel.ProvidersViewModel,
     onNavigate: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
+    val providersState by providersViewModel.state.collectAsState()
     val filesState by filesViewModel.state.collectAsState()
     val sessionsState by sessionsViewModel.state.collectAsState()
     val knowledgeState by knowledgeViewModel.state.collectAsState()
@@ -104,7 +109,7 @@ fun WorkspaceExplorerScreen(
         )
         Spacer(modifier = Modifier.height(12.dp))
 
-        val llmResources = state.materializedResources.filter {
+        val llmResources = providersState.materializedResources.filter {
             it.resourceType == ResourceType.LLM &&
                 (it.lifecycleState == ResourceLifecycleState.ENABLED ||
                     it.lifecycleState == ResourceLifecycleState.ACTIVE)
@@ -139,7 +144,7 @@ fun WorkspaceExplorerScreen(
         ExplorerRow(
             icon = Icons.Default.Storage,
             title = "الموارد المادية (Runtime)",
-            count = state.materializedResources.size,
+            count = providersState.materializedResources.size,
             countLabel = "مورد",
             subtitle = "مسجّل — LLM / بحث / تضمين / أدوات",
             route = WorkspaceRoutes.PROVIDERS,

@@ -3,10 +3,8 @@ package com.example.presentation.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.application.extension.ExtensionManager
-import com.example.application.provider.ProviderControlPlaneService
 import com.example.application.radar.IntelligenceRadarPipeline
 import com.example.application.registry.ComponentRegistry
-import com.example.application.usecases.ConnectProviderUseCase
 import com.example.application.usecases.DecisionSimulationUseCase
 import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
@@ -25,17 +23,12 @@ import com.example.domain.core.decision.DecisionResult
 import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.evolution.EvolutionStage
-import com.example.domain.core.provider.HealthStatus
-import com.example.domain.core.provider.ServiceValidationResult
-import com.example.domain.core.resource.ResourceId
-import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.task.TaskId
 import com.example.domain.core.task.TaskLifecycleState
 import com.example.domain.core.workflow.WorkflowPlan
 import com.example.presentation.state.UiState
-import com.example.application.provider.ProviderPreset
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -62,15 +55,19 @@ class MainViewModel(
     // economicGovernanceService, humanApprovalGate,
     // permissionGrantService, manageWorkspaceBudgetUseCase,
     // networkMonitorProvider and the local principal id).
+    // (ADR-6 slice 5) the provider & resource control room — the four
+    // control-plane flow collectors, the first-run provider bootstrap
+    // seeding, the service test/discovery, the resource lifecycle ops, the
+    // "Connect Provider" wizard and the credential dialog — left for
+    // ProvidersViewModel (with providerControlPlaneService and
+    // connectProviderUseCase, its whole dependency set).
     // GAP-19 (Design Closure 2026, ADR-6 step 2): extracted use-cases —
     // the simulation/provider-chain/budget business logic left the VM.
     private val decisionSimulationUseCase: DecisionSimulationUseCase? = null,
-    private val connectProviderUseCase: ConnectProviderUseCase? = null,
     private val componentRegistry: ComponentRegistry,
     private val cbrMdpEngine: CbrMdpEngine,
     private val extensionManager: ExtensionManager,
     private val intelligenceRadarPipeline: IntelligenceRadarPipeline,
-    private val providerControlPlaneService: ProviderControlPlaneService,
     // Phase 2 — workspace runtime service for multi-workspace support
     private val workspaceRuntimeService: WorkspaceRuntimeService,
     // Phase 5 — intelligence services for the Unified Activity Feed
@@ -210,9 +207,9 @@ class MainViewModel(
         // (ADR-6 slice 4) GOVERNANCE PHASE: the observatory subscription
         // (observeGovernance) + the on-demand refresh moved to
         // GovernanceViewModel with the whole governance feature state.
-        // Phase 4 — first-run bootstrap: seeds local embedding + multi-source
-        // search + Gemini provider records (idempotent, no network for in-process).
-        providerControlPlaneService.launchBootstrapDefaults()
+        // (ADR-6 slice 5) PROVIDERS PHASE: the first-run provider bootstrap
+        // seeding (launchBootstrapDefaults) + the four control-plane flow
+        // collectors moved to ProvidersViewModel with the provider feature.
         // ADR-6 SLICE 2: collect the STUDIO feature's outbound signals — the
         // conversation runtime (execution, session binding, prompt state)
         // lives in StudioViewModel now; these are the cross-feature
@@ -348,26 +345,6 @@ class MainViewModel(
     // knowledge feature's own flow.
 
     private fun observeSubsystems() {
-        viewModelScope.launch {
-            providerControlPlaneService.allProvidersFlow.collect { providers ->
-                _uiState.update { it.copy(generalizedProviders = providers) }
-            }
-        }
-        viewModelScope.launch {
-            providerControlPlaneService.allServicesFlow.collect { services ->
-                _uiState.update { it.copy(generalizedServices = services) }
-            }
-        }
-        viewModelScope.launch {
-            providerControlPlaneService.allConfigurationsFlow.collect { configs ->
-                _uiState.update { it.copy(generalizedConfigurations = configs) }
-            }
-        }
-        viewModelScope.launch {
-            providerControlPlaneService.allResourcesFlow.collect { resources ->
-                _uiState.update { it.copy(materializedResources = resources) }
-            }
-        }
         viewModelScope.launch {
             extensionManager.skills.collect { skills ->
                 _uiState.update { it.copy(skills = skills) }
@@ -651,327 +628,18 @@ class MainViewModel(
         }
     }
 
-    // --- Provider & Resource Control Plane (Phase 4 — generalized API) ---
-
-    /**
-     * Test the connection for a ServiceConfiguration. Real protocol probe
-     * via the resource validators — for LLM services this is a lightweight
-     * GET /models reachability + authentication check (NOT a generation
-     * call; POST /chat/completions is never issued by validation).
-     * GAP-25 (Design Closure 2026): the previous KDoc claimed a POST
-     * /chat/completions probe, which never matched the implementation.
+    /*
+     * (ADR-6 slice 5, Design Closure 2026 UI-redesign track) the ENTIRE
+     * provider & resource control room moved to ProvidersViewModel: the four
+     * control-plane flow collectors (providers / services / configurations /
+     * materialized resources), the first-run provider bootstrap seeding, the
+     * service connection test, the offerings discovery, the resource
+     * materialize/validate/enable/disable ops, provider delete/toggle, the
+     * FULL "Connect Provider" wizard (ConnectProviderUseCase projection)
+     * and the credential input dialog (F-4: store + re-test + promote) —
+     * with its whole dependency set (providerControlPlaneService,
+     * connectProviderUseCase).
      */
-    fun testServiceConnection(configId: String) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isTestingProvider = true, testingProviderId = configId) }
-            try {
-                when (val outcome = providerControlPlaneService.testServiceConnection(configId)) {
-                    is Outcome.Success -> {
-                        _uiState.update {
-                            it.copy(
-                                isTestingProvider = false,
-                                diagnosticBanner = outcome.value.message
-                            )
-                        }
-                    }
-                    is Outcome.Error -> {
-                        _uiState.update {
-                            it.copy(
-                                isTestingProvider = false,
-                                errorMessage = outcome.diagnosticMessage
-                            )
-                        }
-                    }
-                    else -> _uiState.update { it.copy(isTestingProvider = false) }
-                }
-            } finally {
-                _uiState.update { it.copy(isTestingProvider = false) }
-            }
-        }
-    }
-
-    /**
-     * Discover offerings for a service. Explicit network discovery — produces
-     * `ServiceOffering`s but does NOT materialize ResourceRecords.
-     */
-    fun discoverOfferings(serviceId: String) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isDiscoveringModels = true) }
-            try {
-                when (val outcome = providerControlPlaneService.discoverOfferings(serviceId)) {
-                    is Outcome.Success -> {
-                        _uiState.update {
-                            it.copy(discoveredOfferings = outcome.value)
-                        }
-                    }
-                    is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                    else -> Unit
-                }
-            } finally {
-                _uiState.update { it.copy(isDiscoveringModels = false) }
-            }
-        }
-    }
-
-    /**
-     * Materialize a ServiceOffering into a ResourceRecord. The record starts
-     * at REGISTERED/runtimeSupported=false/UNKNOWN. The user must call
-     * `validateResource(resourceId)` to promote it to ENABLED/true/HEALTHY.
-     */
-    fun materializeResource(providerId: String, serviceId: String, offeringId: String) {
-        viewModelScope.launch {
-            when (val outcome = providerControlPlaneService.materializeResource(providerId, serviceId, offeringId)) {
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> Unit
-            }
-        }
-    }
-
-    /**
-     * Validate a materialized ResourceRecord. Runs the appropriate
-     * ResourceValidator and updates lifecycle/runtimeSupported/health.
-     */
-    fun validateResource(resourceId: String) {
-        viewModelScope.launch {
-            when (val outcome = providerControlPlaneService.validateResource(ResourceId(resourceId))) {
-                is Outcome.Success -> {
-                    _uiState.update {
-                        it.copy(diagnosticBanner = outcome.value.message)
-                    }
-                }
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> Unit
-            }
-        }
-    }
-
-    /**
-     * Enable a previously-validated resource.
-     */
-    fun enableResource(resourceId: String) {
-        viewModelScope.launch {
-            when (val outcome = providerControlPlaneService.enableResource(ResourceId(resourceId))) {
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> Unit
-            }
-        }
-    }
-
-    /**
-     * Disable a materialized resource (lifecycle → DISABLED).
-     */
-    fun disableResource(resourceId: String) {
-        viewModelScope.launch {
-            when (val outcome = providerControlPlaneService.disableResource(ResourceId(resourceId))) {
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> Unit
-            }
-        }
-    }
-
-    fun deleteProvider(id: String) {
-        viewModelScope.launch {
-            when (val outcome = providerControlPlaneService.deleteProvider(id)) {
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> Unit
-            }
-        }
-    }
-
-    fun toggleProvider(id: String, isEnabled: Boolean) {
-        viewModelScope.launch {
-            when (val outcome = providerControlPlaneService.toggleProvider(id, isEnabled)) {
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                else -> Unit
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // "Connect Provider" wizard — the FULL CHAIN in one guided action.
-    // Fix (user feedback: adding a provider left it unusable): previously the
-    // add-dialog persisted a bare Provider row with no Service/Config/Offering,
-    // so no resource could ever be materialized from it. The wizard walks:
-    //
-    //   1 Provider → 2 Service → 3 Configuration + vault key →
-    //   4 Offering → 5 Materialize → 6 Validate → (auto-ENABLED on success)
-    //
-    // Every step reports honest progress; a failure stops the chain and
-    // surfaces the real diagnostic (no fabricated success).
-    // ------------------------------------------------------------------
-
-    fun openConnectWizard() {
-        _uiState.update {
-            it.copy(
-                isConnectWizardOpen = true,
-                wizardRunning = false,
-                wizardStep = 0,
-                wizardStepLabel = null,
-                wizardResult = null
-            )
-        }
-    }
-
-    fun closeConnectWizard() {
-        if (_uiState.value.wizardRunning) return // no canceling mid-chain from the dialog
-        _uiState.update {
-            it.copy(
-                isConnectWizardOpen = false,
-                wizardStep = 0,
-                wizardStepLabel = null,
-                wizardResult = null,
-                wizardResultIsSuccess = true
-            )
-        }
-    }
-
-    fun connectProviderFullChain(
-        preset: ProviderPreset,
-        providerName: String,
-        endpointUrl: String,
-        modelName: String,
-        apiKey: String?
-    ) {
-        // GAP-19 (ADR-6 step 2): the 7-step connection chain (id scheme,
-        // domain construction, capability map, materialize+validate) lives
-        // in ConnectProviderUseCase; the VM projects progress + result into
-        // the wizard UiState only.
-        val useCase = connectProviderUseCase ?: return
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(wizardRunning = true, wizardStep = 1, wizardStepLabel = "إنشاء المزوّد…", wizardResult = null)
-            }
-            when (
-                val result = useCase(
-                    preset = preset,
-                    providerName = providerName,
-                    endpointUrl = endpointUrl,
-                    modelName = modelName,
-                    apiKey = apiKey,
-                    onStep = { step, label ->
-                        _uiState.update { it.copy(wizardStep = step, wizardStepLabel = label) }
-                    }
-                )
-            ) {
-                is ConnectProviderUseCase.Result.Rejected -> failWizard(result.message)
-                is ConnectProviderUseCase.Result.Failed -> failWizard(result.message)
-                is ConnectProviderUseCase.Result.SavedUnverified -> _uiState.update {
-                    it.copy(
-                        wizardRunning = false,
-                        wizardStep = 6,
-                        wizardStepLabel = null,
-                        wizardResult = result.message,
-                        wizardResultIsSuccess = false
-                    )
-                }
-                is ConnectProviderUseCase.Result.Connected -> _uiState.update {
-                    it.copy(
-                        wizardRunning = false,
-                        wizardStep = 7,
-                        wizardStepLabel = null,
-                        wizardResult = result.message,
-                        wizardResultIsSuccess = true,
-                        diagnosticBanner = "تم تفعيل ${preset.displayName} بنجاح"
-                    )
-                }
-            }
-        }
-    }
-
-    private fun failWizard(message: String) {
-        _uiState.update {
-            it.copy(
-                wizardRunning = false,
-                wizardStepLabel = null,
-                wizardResult = message,
-                wizardResultIsSuccess = false
-            )
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // FIX F-4 (audit c03919d): credential input dialog — a real user path to
-    // store an API key for a service configuration. Previously there was NO
-    // way to enter a key (the flag existed but nothing read it), so every
-    // remote provider stayed unusable.
-    // ------------------------------------------------------------------
-
-    fun openCredentialDialog(serviceId: String, serviceName: String, authAlias: String?) {
-        _uiState.update {
-            it.copy(
-                credentialDialogServiceId = serviceId,
-                credentialDialogServiceName = serviceName,
-                credentialDialogAuthAlias = authAlias,
-                credentialInput = ""
-            )
-        }
-    }
-
-    fun updateCredentialInput(value: String) {
-        _uiState.update { it.copy(credentialInput = value) }
-    }
-
-    fun closeCredentialDialog() {
-        _uiState.update {
-            it.copy(
-                credentialDialogServiceId = null,
-                credentialDialogServiceName = "",
-                credentialDialogAuthAlias = null,
-                credentialInput = "",
-                isSavingCredential = false
-            )
-        }
-    }
-
-    /**
-     * Stores the entered secret under the service's authAlias (or the service
-     * id as the storage key) and immediately runs a real connection test so
-     * the user gets honest feedback that the key works.
-     */
-    fun submitCredential() {
-        val state = _uiState.value
-        val serviceId = state.credentialDialogServiceId ?: return
-        val authAlias = state.credentialDialogAuthAlias ?: serviceId
-        val secret = state.credentialInput.trim()
-        if (secret.isEmpty()) return
-
-        _uiState.update { it.copy(isSavingCredential = true) }
-        viewModelScope.launch {
-            when (val outcome = providerControlPlaneService.storeSecret(authAlias, secret)) {
-                is Outcome.Success -> {
-                    _uiState.update {
-                        it.copy(
-                            isSavingCredential = false,
-                            diagnosticBanner = "تم حفظ المفتاح بنجاح. جاري التحقق من الاتصال..."
-                        )
-                    }
-                    closeCredentialDialog()
-                    // Explicit validation right after storing the key —
-                    // honest feedback instead of silent "saved".
-                    val config = providerControlPlaneService.getCurrentConfigurationForService(serviceId)
-                    if (config != null) {
-                        testServiceConnection(config.id)
-                    }
-                    // FIX (usable-provider flow): also promote the materialized
-                    // resource(s) of this service — validateResource runs the real
-                    // protocol check and flips the record to ENABLED/HEALTHY, so
-                    // entering the key on the seeded Gemini provider ACTIVATES it
-                    // for the Studio instead of leaving it at REGISTERED.
-                    val resourcesForService = _uiState.value.materializedResources
-                        .filter { it.serviceId == serviceId }
-                    for (resource in resourcesForService) {
-                        validateResource(resource.resourceId.value)
-                    }
-                }
-                is Outcome.Error -> {
-                    _uiState.update {
-                        it.copy(isSavingCredential = false, errorMessage = outcome.diagnosticMessage)
-                    }
-                }
-                else -> _uiState.update { it.copy(isSavingCredential = false) }
-            }
-        }
-    }
 
     // --- Extensibility Management ---
     fun toggleSkill(skillId: String) {

@@ -12,12 +12,7 @@ import com.example.domain.core.extension.McpServerDescriptor
 import com.example.domain.core.extension.PluginManifest
 import com.example.domain.core.extension.SkillManifest
 import com.example.domain.core.network.NetworkPolicy
-import com.example.domain.core.provider.Provider
-import com.example.domain.core.provider.ProviderService
-import com.example.domain.core.provider.ServiceConfiguration
-import com.example.domain.core.provider.offering.ServiceOffering
 import com.example.domain.core.radar.RadarItem
-import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.workflow.ExecutionMode
@@ -181,33 +176,18 @@ data class UiState(
     val mcpServers: List<McpServerDescriptor> = emptyList(),
     val integrations: List<IntegrationDescriptor> = emptyList(),
 
-    // Phase 4 — Generalized Provider Architecture
-    val generalizedProviders: List<Provider> = emptyList(),
-    val generalizedServices: List<ProviderService> = emptyList(),
-    val generalizedConfigurations: List<ServiceConfiguration> = emptyList(),
-    val discoveredOfferings: List<ServiceOffering> = emptyList(),
-    val materializedResources: List<ResourceRecord> = emptyList(),
-    val isDiscoveringModels: Boolean = false,
-    val isTestingProvider: Boolean = false,
-    val testingProviderId: String? = null,
-
-    // "Connect Provider" wizard — the guided full-chain path that ends with a
-    // usable ENABLED resource (fix: user could add a provider but never use it).
-    val isConnectWizardOpen: Boolean = false,
-    val wizardRunning: Boolean = false,
-    val wizardStep: Int = 0,
-    val wizardStepLabel: String? = null,
-    val wizardResult: String? = null,
-    val wizardResultIsSuccess: Boolean = true,
-
-    // FIX F-4 (audit c03919d): credential input dialog state — previously the
-    // dialog flag was set with no reader; now the ProviderServiceManager screen
-    // renders a real AlertDialog bound to these fields.
-    val credentialDialogServiceId: String? = null,
-    val credentialDialogServiceName: String = "",
-    val credentialDialogAuthAlias: String? = null,
-    val credentialInput: String = "",
-    val isSavingCredential: Boolean = false,
+    // Provider & Resource Control Plane — REMOVED (ADR-6 slice 5, Design
+    // Closure 2026 UI-redesign track): generalizedProviders /
+    // generalizedServices / generalizedConfigurations / discoveredOfferings /
+    // materializedResources / isDiscoveringModels / isTestingProvider /
+    // testingProviderId / the "Connect Provider" wizard fields
+    // (isConnectWizardOpen / wizardRunning / wizardStep / wizardStepLabel /
+    // wizardResult / wizardResultIsSuccess) and the credential-dialog fields
+    // (credentialDialogServiceId / credentialDialogServiceName /
+    // credentialDialogAuthAlias / credentialInput / isSavingCredential) now
+    // live in ProvidersViewModel's own ProvidersUiState. The providers
+    // screen, the Dashboard/Studio/Explorer provider reads and the top-bar
+    // status chip read the feature VM's own flow (owner-VM composition).
 
     // Memory & Knowledge RAG — REMOVED (ADR-6 slice 3, Design Closure 2026
     // UI-redesign track): memoryQuery / retrievedMemories / allMemories /

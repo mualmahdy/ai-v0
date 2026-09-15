@@ -1988,12 +1988,10 @@ class MainViewModelFactory(
                 executeAgentTaskUseCase = appContainer.executeAgentTaskUseCase,
                 executeWorkflowUseCase = appContainer.executeWorkflowUseCase,
                 decisionSimulationUseCase = appContainer.decisionSimulationUseCase,
-                connectProviderUseCase = appContainer.connectProviderUseCase,
                 componentRegistry = appContainer.componentRegistry,
                 cbrMdpEngine = appContainer.cbrMdpEngine,
                 extensionManager = appContainer.extensionManager,
                 intelligenceRadarPipeline = appContainer.intelligenceRadarPipeline,
-                providerControlPlaneService = appContainer.providerControlPlaneService,
                 workspaceRuntimeService = appContainer.workspaceRuntimeService,
                 // GAP-CLOSURE P1-08/P1-10 — canonical durable agent registry.
                 agentRegistryService = appContainer.agentRegistryService,
@@ -2015,6 +2013,10 @@ class MainViewModelFactory(
                 // manageWorkspaceBudgetUseCase, networkMonitor,
                 // localPrincipalId) moved to GovernanceViewModelFactory with
                 // the governance feature extraction.
+                // (ADR-6 slice 5) the provider control-plane dependency set
+                // (providerControlPlaneService + connectProviderUseCase)
+                // moved to ProvidersViewModelFactory with the provider
+                // feature extraction.
                 // ADR-6 slice 2 — the studio feature's outbound signal bus
                 // (conversationSessionService + appContext left this factory
                 // with the StudioViewModel extraction).
@@ -2184,6 +2186,30 @@ class GovernanceViewModelFactory(
                 telemetryPort = appContainer.telemetryPort,
                 localPrincipalId = appContainer.localPrincipalId,
                 studioSignals = studioSignalBus
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 5 (Design Closure 2026 UI-redesign track) — factory for the
+ * PROVIDERS feature ViewModel: the provider & resource control room (the
+ * control-plane flow collectors, the first-run provider bootstrap seeding,
+ * the service test/discovery, the resource lifecycle ops, the connect
+ * wizard and the credential dialog) extracted from MainViewModel with its
+ * whole dependency set (providerControlPlaneService +
+ * connectProviderUseCase).
+ */
+class ProvidersViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.ProvidersViewModel::class.java)) {
+            return com.example.presentation.viewmodel.ProvidersViewModel(
+                providerControlPlaneService = appContainer.providerControlPlaneService,
+                connectProviderUseCase = appContainer.connectProviderUseCase
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

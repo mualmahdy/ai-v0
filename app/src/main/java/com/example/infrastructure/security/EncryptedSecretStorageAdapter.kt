@@ -106,12 +106,20 @@ class EncryptedSecretStorageAdapter(
             Outcome.Success(Unit)
         } catch (e: SecurityException) {
             // FIX S-2: explicit failure — never silently downgrade security.
+            // (ADR-6 slice 5 display-honesty repair: the human-readable message
+            // now lives in diagnosticMessage — the VM surfaces THAT field, so
+            // the S-2 "explicit failure" actually reaches the user instead of
+            // an empty snackbar; the failure slot carries the machine code.)
             Outcome.Error(
+                "SECURE_STORAGE_UNAVAILABLE",
                 "فشل الحفظ: مخزن مفاتيح الجهاز (Android Keystore) غير متاح، " +
                     "ولن يتم استخدام مفتاح برمجي غير آمن. لا يمكن تخزين الأسرار في هذه البيئة."
             )
         } catch (e: Exception) {
-            Outcome.Error("فشل تشفير وحفظ المفتاح السري بأمان: ${e.localizedMessage}")
+            Outcome.Error(
+                "SECRET_ENCRYPTION_FAILED",
+                "فشل تشفير وحفظ المفتاح السري بأمان: ${e.localizedMessage}"
+            )
         }
     }
 
@@ -139,11 +147,16 @@ class EncryptedSecretStorageAdapter(
             Outcome.Success(plainText)
         } catch (e: SecurityException) {
             // FIX S-2: explicit failure — never silently downgrade security.
+            // (ADR-6 slice 5 display-honesty repair: message → diagnosticMessage.)
             Outcome.Error(
+                "SECURE_STORAGE_UNAVAILABLE",
                 "فشل الاسترجاع: مخزن مفاتيح الجهاز غير متاح — رُفض استخدام بديل برمجي غير آمن."
             )
         } catch (e: Exception) {
-            Outcome.Error("فشل فك تشفير المفتاح السري: ${e.localizedMessage}")
+            Outcome.Error(
+                "SECRET_DECRYPTION_FAILED",
+                "فشل فك تشفير المفتاح السري: ${e.localizedMessage}"
+            )
         }
     }
 
@@ -152,7 +165,10 @@ class EncryptedSecretStorageAdapter(
             prefs.edit().remove("secret_$alias").apply()
             Outcome.Success(Unit)
         } catch (e: Exception) {
-            Outcome.Error("فشل حذف المفتاح السري: ${e.localizedMessage}")
+            Outcome.Error(
+                "SECRET_DELETE_FAILED",
+                "فشل حذف المفتاح السري: ${e.localizedMessage}"
+            )
         }
     }
 
