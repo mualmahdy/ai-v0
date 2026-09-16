@@ -3,31 +3,15 @@ package com.example.presentation.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.application.extension.ExtensionManager
-import com.example.application.radar.IntelligenceRadarPipeline
 import com.example.application.registry.ComponentRegistry
-import com.example.application.usecases.DecisionSimulationUseCase
 import com.example.application.usecases.ExecuteAgentTaskUseCase
-import com.example.application.usecases.ExecuteWorkflowUseCase
 import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.Outcome
-import com.example.domain.core.agent.AgentBudget
 import com.example.domain.core.agent.AgentDefinition
-import com.example.domain.core.agent.AgentId
-import com.example.domain.core.agent.AgentIdentity
 import com.example.domain.core.agent.AgentRole
-import com.example.domain.core.capability.CapabilityDescriptor
 import com.example.domain.core.capability.CapabilityType
-import com.example.domain.core.decision.CaseBase
-import com.example.domain.core.decision.CbrMdpEngine
-import com.example.domain.core.decision.DecisionResult
-import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.events.ExecutionEvent
-import com.example.domain.core.evolution.EvolutionStage
-import com.example.domain.core.task.AutonomyPolicy
-import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.task.TaskId
-import com.example.domain.core.task.TaskLifecycleState
-import com.example.domain.core.workflow.WorkflowPlan
 import com.example.presentation.state.UiState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,12 +23,10 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(
     private val executeAgentTaskUseCase: ExecuteAgentTaskUseCase,
-    private val executeWorkflowUseCase: ExecuteWorkflowUseCase,
     // (ADR-6 slice 3) the knowledge feature — RAG documents, semantic-model
     // provisioning/readiness, and the long-term memory browser — left this
     // ViewModel for KnowledgeViewModel (with manageMemoryUseCase and
@@ -61,13 +43,18 @@ class MainViewModel(
     // "Connect Provider" wizard and the credential dialog — left for
     // ProvidersViewModel (with providerControlPlaneService and
     // connectProviderUseCase, its whole dependency set).
+    // (ADR-6 slice 6) the DECISION feature (cbrMdpEngine +
+    // decisionSimulationUseCase + the decision display mirrors), the RADAR
+    // & evolution observatory (intelligenceRadarPipeline + its two
+    // collectors + the six lifecycle actions) and the WORKFLOW feature
+    // (executeWorkflowUseCase, workflowLibraryService,
+    // workflowPersistenceService + the builder/library/resume surface)
+    // left for DecisionViewModel, RadarViewModel and WorkflowsViewModel
+    // with their whole dependency sets.
     // GAP-19 (Design Closure 2026, ADR-6 step 2): extracted use-cases —
     // the simulation/provider-chain/budget business logic left the VM.
-    private val decisionSimulationUseCase: DecisionSimulationUseCase? = null,
     private val componentRegistry: ComponentRegistry,
-    private val cbrMdpEngine: CbrMdpEngine,
     private val extensionManager: ExtensionManager,
-    private val intelligenceRadarPipeline: IntelligenceRadarPipeline,
     // Phase 2 — workspace runtime service for multi-workspace support
     private val workspaceRuntimeService: WorkspaceRuntimeService,
     // Phase 5 — intelligence services for the Unified Activity Feed
@@ -81,25 +68,18 @@ class MainViewModel(
      * source compatibility with existing call sites.
      */
     private val agentRegistryService: com.example.application.agent.AgentRegistryService? = null,
-    /**
-     * WORKFLOW LIBRARY (report gap-closure): user-authored workflow assets
-     * (save / load / edit / clone / run history).
-     */
-    private val workflowLibraryService: com.example.application.workflow.WorkflowLibraryService? = null,
-    /**
-     * WORKFLOW EXECUTION PERSISTENCE — resumable workflows surface.
-     */
-    private val workflowPersistenceService: com.example.application.workflow.WorkflowPersistenceService? = null,
     /** REPAIR ORDER §3A — observable bootstrap state machine. */
     private val bootstrapStateProvider: kotlinx.coroutines.flow.StateFlow<com.example.application.bootstrap.BootstrapState>? = null,
     /**
      * ADR-6 SLICE 2 (Design Closure 2026 UI-redesign track): the STUDIO
-     * signal bus — the conversation runtime moved to StudioViewModel, and
-     * this ViewModel COLLECTS the cross-feature projections of its
-     * execution events (activity-trace execution id, decision case-base /
-     * uncertainty mirrors) plus the session network-policy display mirror.
-     * Created once per Activity in MainActivity; nullable keeps the
-     * constructor source-compatible with test constructions.
+     * signal bus — the conversation runtime moved to StudioViewModel. After
+     * SLICE 6 this ViewModel collects ONLY the activity-feed stake (the
+     * live execution id from ExecutionEvent.Started); the DECISION mirrors
+     * and the network-policy re-simulation are collected by
+     * DecisionViewModel, and the policy display mirror by GovernanceViewModel
+     * — each feature its own collector. Created once per Activity in
+     * MainActivity; nullable keeps the constructor source-compatible with
+     * test constructions.
      */
     private val studioSignals: com.example.presentation.viewmodel.StudioSignalSource? = null
 ) : ViewModel() {
@@ -200,37 +180,35 @@ class MainViewModel(
         observeSubsystems()
         loadInitialData()
         observeWorkspace()
-        // DURABLE SESSIONS + WORKFLOW LIBRARY + RESUMABLE (report
-        // gap-closure): workspace-scoped durable assets follow the active
-        // workspace (continuity across switches).
-        observeWorkspaceScopedAssets()
         // (ADR-6 slice 4) GOVERNANCE PHASE: the observatory subscription
         // (observeGovernance) + the on-demand refresh moved to
         // GovernanceViewModel with the whole governance feature state.
         // (ADR-6 slice 5) PROVIDERS PHASE: the first-run provider bootstrap
         // seeding (launchBootstrapDefaults) + the four control-plane flow
         // collectors moved to ProvidersViewModel with the provider feature.
+        // (ADR-6 slice 6) the workspace-scoped WORKFLOW assets observer
+        // (library + resumable) moved to WorkflowsViewModel — its whole
+        // dependency set left with it.
         // ADR-6 SLICE 2: collect the STUDIO feature's outbound signals — the
         // conversation runtime (execution, session binding, prompt state)
-        // lives in StudioViewModel now; these are the cross-feature
-        // projections of its execution events + the session network-policy
-        // display mirror (decision preview + governance snapshot inputs).
+        // lives in StudioViewModel now; after slice 6 only the ACTIVITY-FEED
+        // stake (the live execution id) remains here.
         observeStudioSignals()
     }
 
     /**
-     * ADR-6 SLICE 2 — the studio signal bus collector. The conversation
-     * runtime moved to StudioViewModel; the shared display mirrors it used
-     * to write directly are updated HERE, from the feature's explicit
-     * signals (no shared mutable UiState between the two ViewModels):
+     * ADR-6 SLICES 2+6 — the studio signal bus collector. The conversation
+     * runtime moved to StudioViewModel; after the slice-6 extraction this
+     * ViewModel keeps only the ACTIVITY-FEED stake:
      *
      *  - Started → the live execution id (the activity feed's per-execution
-     *    trace binding — same semantics as the pre-slice collector);
-     *  - DecisionMade / ObservationRecorded / Completed / Error → the
-     *    decision-display mirrors (latest decision, uncertainty, case base);
-     *  - NetworkPolicyChanged → the session-policy display mirror + the
-     *    decision preview re-simulation (the old setNetworkPolicy behaviour
-     *    — policy change re-derives the preview — preserved exactly).
+     *    trace binding — same semantics as the pre-slice collector).
+     *
+     * The DECISION mirrors (DecisionMade / ObservationRecorded /
+     * Completed / Error → latest decision, uncertainty, case base) and the
+     * network-policy display mirror + re-simulation are collected by
+     * DecisionViewModel from the SAME bus — each feature its own stake, no
+     * shared mutable UiState between the ViewModels.
      */
     private fun observeStudioSignals() {
         val signals = studioSignals ?: return
@@ -240,25 +218,10 @@ class MainViewModel(
                     is com.example.presentation.viewmodel.StudioSignal.ExecutionEvent -> {
                         when (val event = signal.event) {
                             is ExecutionEvent.Started -> activeExecutionId.value = event.executionId
-                            is ExecutionEvent.DecisionMade -> _uiState.update {
-                                it.copy(latestDecision = event.decision)
-                            }
-                            is ExecutionEvent.ObservationRecorded -> _uiState.update {
-                                it.copy(
-                                    decisionUncertainty = event.updatedUncertainty,
-                                    caseBaseList = cbrMdpEngine.getCaseBase().getAllCases()
-                                )
-                            }
-                            is ExecutionEvent.Completed, is ExecutionEvent.Error -> _uiState.update {
-                                it.copy(caseBaseList = cbrMdpEngine.getCaseBase().getAllCases())
-                            }
                             else -> Unit
                         }
                     }
-                    is com.example.presentation.viewmodel.StudioSignal.NetworkPolicyChanged -> {
-                        _uiState.update { it.copy(networkPolicy = signal.policy) }
-                        simulateDecision()
-                    }
+                    is com.example.presentation.viewmodel.StudioSignal.NetworkPolicyChanged -> Unit
                 }
             }
         }
@@ -365,18 +328,10 @@ class MainViewModel(
                 _uiState.update { it.copy(integrations = integ) }
             }
         }
-        viewModelScope.launch {
-            intelligenceRadarPipeline.radarItems.collect { items ->
-                _uiState.update { it.copy(radarItems = items) }
-            }
-        }
-        viewModelScope.launch {
-            intelligenceRadarPipeline.evolutionCandidates.collect { cand ->
-                _uiState.update { it.copy(evolutionCandidates = cand) }
-            }
-        }
         // (ADR-6 slice 3) the knowledge documents collector moved to
         // KnowledgeViewModel — the listing's owner.
+        // (ADR-6 slice 6) the radar items + evolution candidates collectors
+        // moved to RadarViewModel — the radar observatory's owner.
     }
 
     /**
@@ -499,9 +454,9 @@ class MainViewModel(
                 // (ADR-6 slice 1) the initial sandbox listing is now loaded
                 // by FilesViewModel's own workspace collector; (ADR-6 slice 3)
                 // the initial memory listing is now loaded by
-                // KnowledgeViewModel's init — no knowledge responsibility
-                // remains in this ViewModel.
-                simulateDecision()
+                // KnowledgeViewModel's init; (ADR-6 slice 6) the initial
+                // decision simulation is now run by DecisionViewModel's own
+                // init — no decision responsibility remains here.
             }.onFailure { e ->
                 _uiState.update { it.copy(errorMessage = "تعذر تحميل البيانات الأولية: ${e.localizedMessage}") }
             }
@@ -531,114 +486,24 @@ class MainViewModel(
      * ADR-6 slice 2 — the durable-session REGISTRY surface (the browser
      * list with GAP-14 project scoping, the sheet flag, deletion) moved to
      * SessionsViewModel, which observes the active workspace itself.
+     *
+     * (ADR-6 slice 6) the workspace-scoped WORKFLOW assets observer — the
+     * library collector + the resumable refresh — moved to
+     * WorkflowsViewModel, rewritten with flatMapLatest (slice-4 precedent:
+     * the stacked inner collector per workspace emission is gone; the
+     * library reflects ONLY the active workspace).
      */
-
-    /**
-     * Subscribes the workflow library (+ resumable list) to the ACTIVE
-     * WORKSPACE (workspace continuity): switching workspaces repoints the
-     * workflow library and the resumable list. (The session browser list
-     * used to be observed here too — it moved to SessionsViewModel with a
-     * flatMapLatest re-scope on workspace/project change, fixing the
-     * stacked-collector last-writer race the old per-emission launch had.)
-     */
-    private fun observeWorkspaceScopedAssets() {
-        viewModelScope.launch {
-            runCatching {
-                workspaceRuntimeService.activeWorkspace.collect { workspace ->
-                    val wsId = workspace?.id ?: return@collect
-
-                    // Workflow library (user-authored assets).
-                    workflowLibraryService?.let { library ->
-                        launch {
-                            runCatching {
-                                library.observeLibrary(wsId).collect { defs ->
-                                    _uiState.update { it.copy(workflowLibrary = defs) }
-                                }
-                            }
-                        }
-                    }
-
-                    // Resumable workflow executions (durable resume surface).
-                    loadResumableWorkflows()
-                }
-            }
-        }
-    }
-
-    /** Refreshes the resumable (RUNNING/PAUSED/COMPENSATING) workflows list —
-     *  WORKSPACE-SCOPED (defect family 1): only the ACTIVE workspace's runs. */
-    fun loadResumableWorkflows() {
-        val persistence = workflowPersistenceService ?: return
-        viewModelScope.launch {
-            runCatching {
-                val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
-                _uiState.update { it.copy(resumableWorkflows = persistence.resumable(workspaceId)) }
-            }
-        }
-    }
-
-    // --- Decision Intelligence (CBR-MDP) ---
-    fun updateDecisionComplexity(value: Float) {
-        _uiState.update { it.copy(decisionTaskComplexity = value) }
-        simulateDecision()
-    }
-
-    fun updateDecisionUncertainty(value: Float) {
-        _uiState.update { it.copy(decisionUncertainty = value) }
-        simulateDecision()
-    }
-
-    fun simulateDecision() {
-        // Readiness-gated engine evaluation (defect family 5): the decision
-        // may suspend on case-base load readiness, so it runs scoped.
-        // GAP-23 (Design Closure 2026): the spinner flag is now WRITTEN
-        // honestly around the engine call — it was previously a no-writer
-        // field, so DecisionScreen's progress indicator could never appear.
-        viewModelScope.launch {
-            _uiState.update { it.copy(isSimulatingDecision = true) }
-            try {
-                simulateDecisionInternal()
-            } finally {
-                _uiState.update { it.copy(isSimulatingDecision = false) }
-            }
-        }
-    }
-
-    private suspend fun simulateDecisionInternal() {
-        // GAP-19 (ADR-6 step 2): the simulation business rules (state
-        // construction + candidate set + engine evaluation) live in
-        // DecisionSimulationUseCase; the VM only projects the result.
-        val useCase = decisionSimulationUseCase
-        if (useCase == null) {
-            // Honest fallback for legacy constructions without the use-case:
-            // the preview is unavailable rather than fabricated.
-            return
-        }
-        val current = _uiState.value
-        val outcome = useCase(
-            taskComplexity = current.decisionTaskComplexity,
-            uncertaintyScore = current.decisionUncertainty,
-            networkPolicy = current.networkPolicy
-        )
-        _uiState.update {
-            it.copy(
-                latestDecision = outcome.decision,
-                caseBaseList = outcome.caseBase
-            )
-        }
-    }
 
     /*
-     * (ADR-6 slice 5, Design Closure 2026 UI-redesign track) the ENTIRE
-     * provider & resource control room moved to ProvidersViewModel: the four
-     * control-plane flow collectors (providers / services / configurations /
-     * materialized resources), the first-run provider bootstrap seeding, the
-     * service connection test, the offerings discovery, the resource
-     * materialize/validate/enable/disable ops, provider delete/toggle, the
-     * FULL "Connect Provider" wizard (ConnectProviderUseCase projection)
-     * and the credential input dialog (F-4: store + re-test + promote) —
-     * with its whole dependency set (providerControlPlaneService,
-     * connectProviderUseCase).
+     * (ADR-6 slice 6, Design Closure 2026 UI-redesign track) the ENTIRE
+     * decision feature moved to DecisionViewModel: the state-vector
+     * sliders (updateDecisionComplexity / updateDecisionUncertainty with
+     * live re-simulation), simulateDecision / simulateDecisionInternal
+     * (through the REAL DecisionSimulationUseCase, GAP-19) with the honest
+     * no-use-case fallback, and the DECISION share of the studio signal bus
+     * (DecisionMade / ObservationRecorded / Completed / Error mirrors + the
+     * NetworkPolicyChanged re-simulation) — with its whole dependency set
+     * (cbrMdpEngine, decisionSimulationUseCase).
      */
 
     // --- Extensibility Management ---
@@ -687,346 +552,39 @@ class MainViewModel(
         }
     }
 
-    // --- Intelligence Radar & Evolution ---
-    fun refreshRadar() {
-        // GAP-23 (Design Closure 2026): the refresh indicator is now WRITTEN
-        // honestly around the pipeline call — previously a no-writer field,
-        // so RadarScreen's spinner could never appear.
-        viewModelScope.launch {
-            _uiState.update { it.copy(isRadarRefreshing = true) }
-            try {
-                intelligenceRadarPipeline.refreshRadarFeed()
-            } finally {
-                _uiState.update { it.copy(isRadarRefreshing = false) }
-            }
-        }
-    }
-
-    fun advanceCandidateStage(candidateId: String, nextStage: EvolutionStage) {
-        viewModelScope.launch {
-            // FIX F-10: surface the governance gate's verdict honestly instead
-            // of silently ignoring a rejected promotion.
-            when (val outcome = intelligenceRadarPipeline.advanceEvolutionStage(candidateId, nextStage)) {
-                is Outcome.Success -> {
-                    _uiState.update {
-                        it.copy(diagnosticBanner = "تمت ترقية المرشح إلى ${nextStage.displayName}.")
-                    }
-                }
-                is Outcome.Error -> {
-                    _uiState.update { it.copy(errorMessage = outcome.diagnosticMessage) }
-                }
-                else -> Unit
-            }
-        }
-    }
-
-    /**
-     * GAP-CLOSURE P1-17 — the acquisition loop is now COMPLETE and operable:
-     * security audit, governance approval, registration measurement, and
-     * retirement all have explicit, durable entry points.
+    /*
+     * (ADR-6 slice 6, Design Closure 2026 UI-redesign track) the ENTIRE
+     * intelligence radar & evolution observatory moved to RadarViewModel:
+     * the two pipeline observers (radarItems / evolutionCandidates), the
+     * honest refresh (refreshRadar with the GAP-23 spinner flag), and the
+     * FULL promotion lifecycle (advanceCandidateStage with the F-10 honest
+     * governance-gate verdict, recordCandidateSecurityAudit,
+     * recordCandidateGovernanceApproval, measureRegisteredCapability,
+     * retireRegisteredCapability — GAP-CLOSURE P1-17) — with its whole
+     * dependency set (intelligenceRadarPipeline).
      */
-    fun recordCandidateSecurityAudit(candidateId: String, passed: Boolean) {
-        viewModelScope.launch {
-            when (val r = intelligenceRadarPipeline.recordSecurityAudit(candidateId, passed, "تدقيق من مرصد التطور")) {
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = r.diagnosticMessage) }
-                is Outcome.Success -> _uiState.update {
-                    it.copy(diagnosticBanner = "نتيجة التدقيق الأمني: ${if (passed) "ناجح" else "فاشل"}.")
-                }
-                else -> Unit
-            }
-        }
-    }
-
-    fun recordCandidateGovernanceApproval(candidateId: String, approved: Boolean) {
-        viewModelScope.launch {
-            when (val r = intelligenceRadarPipeline.recordGovernanceApproval(candidateId, approved)) {
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = r.diagnosticMessage) }
-                is Outcome.Success -> _uiState.update {
-                    it.copy(diagnosticBanner = "موافقة الحوكمة: ${if (approved) "ممنوحة" else "مرفوضة"}.")
-                }
-                else -> Unit
-            }
-        }
-    }
-
-    fun measureRegisteredCapability(candidateId: String) {
-        viewModelScope.launch {
-            when (val r = intelligenceRadarPipeline.measureRegisteredCapability(candidateId)) {
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = r.diagnosticMessage) }
-                is Outcome.Success -> _uiState.update {
-                    it.copy(diagnosticBanner = "تم تسجيل قياس أساسي للقدرة في تدفق أدلة رادار القدرات.")
-                }
-                else -> Unit
-            }
-        }
-    }
-
-    fun retireRegisteredCapability(candidateId: String, reason: String) {
-        viewModelScope.launch {
-            when (val r = intelligenceRadarPipeline.retireCapability(candidateId, reason)) {
-                is Outcome.Error -> _uiState.update { it.copy(errorMessage = r.diagnosticMessage) }
-                is Outcome.Success -> _uiState.update {
-                    it.copy(diagnosticBanner = "أُحيلت القدرة المسجلة إلى التقاعد: $reason")
-                }
-                else -> Unit
-            }
-        }
-    }
 
     // (ADR-6 slice 3) Knowledge & RAG operations — updateDocTitle /
     // updateDocContent / ingestNewDocument / queryKnowledgeRag /
     // deleteKnowledgeDocument — moved to KnowledgeViewModel with the whole
     // knowledge feature state.
 
-    // --- Workflow & Task ---
-    fun executeWorkflow(plan: WorkflowPlan) {
-        executeWorkflow(plan, completedStepIds = emptySet())
-    }
-
-    /**
-     * DURABLE RESUME (report gap: "Resume later"): carries the steps a
-     * previous run already finished — the engine seeds them COMPLETED and
-     * never re-executes them.
+    /*
+     * (ADR-6 slice 6, Design Closure 2026 UI-redesign track) the ENTIRE
+     * workflow feature moved to WorkflowsViewModel: the execution with
+     * durable-resume seeding (executeWorkflow + the private completed-steps
+     * overload), the FULL builder (updateWorkflowName / Goal / Mode /
+     * addWorkflowStep / updateWorkflowStep / removeWorkflowStep /
+     * moveWorkflowStep / toggleWorkflowStepDependency /
+     * assignWorkflowStepAgent — canonical durable-agent binding — /
+     * applyWorkflowTemplate), the library lifecycle (saveWorkflowDefinition
+     * / loadWorkflowDefinitionIntoBuilder / runWorkflowDefinition /
+     * cloneWorkflowDefinition / deleteWorkflowDefinition) and
+     * resumeWorkflow — with its whole dependency set
+     * (executeWorkflowUseCase, workflowLibraryService,
+     * workflowPersistenceService). The TASK BOARD remains in
+     * TasksViewModel (its owner since GAP-11).
      */
-    private fun executeWorkflow(plan: WorkflowPlan, completedStepIds: Set<String>) {
-        if (_uiState.value.isExecutingWorkflow) return
-        _uiState.update { it.copy(isExecutingWorkflow = true, workflowReport = null, errorMessage = null) }
-        viewModelScope.launch {
-            try {
-                val report = executeWorkflowUseCase(plan, completedStepIds)
-                _uiState.update { it.copy(isExecutingWorkflow = false, workflowReport = report) }
-                // Refresh the resumable surface (a failed run is resumable).
-                loadResumableWorkflows()
-            } catch (e: Exception) {
-                _uiState.update { it.copy(isExecutingWorkflow = false, errorMessage = "فشل تنفيذ خطة العمل: ${e.localizedMessage}") }
-                loadResumableWorkflows()
-            }
-        }
-    }
-
-    // ==================================================================
-    // WORKFLOW BUILDER (report gap: authoring state lives in the ViewModel,
-    // not Compose memory — the definition is a durable, re-editable asset)
-    // ==================================================================
-
-    fun updateWorkflowName(name: String) {
-        _uiState.update { it.copy(workflowBuilder = it.workflowBuilder.copy(name = name)) }
-    }
-
-    fun updateWorkflowGoal(goal: String) {
-        _uiState.update { it.copy(workflowBuilder = it.workflowBuilder.copy(goal = goal)) }
-    }
-
-    fun updateWorkflowMode(mode: com.example.domain.core.workflow.ExecutionMode) {
-        _uiState.update { it.copy(workflowBuilder = it.workflowBuilder.copy(executionMode = mode)) }
-    }
-
-    fun addWorkflowStep() {
-        _uiState.update { state ->
-            val steps = state.workflowBuilder.steps
-            val newStep = com.example.presentation.state.WorkflowBuilderStep(
-                id = "step_${steps.size + 1}_${System.currentTimeMillis() % 1000}",
-                description = "",
-                role = com.example.domain.core.agent.AgentRole.GENERAL_ASSISTANT,
-                dependencies = emptySet()
-            )
-            state.copy(workflowBuilder = state.workflowBuilder.copy(steps = steps + newStep))
-        }
-    }
-
-    fun updateWorkflowStep(index: Int, transform: (com.example.presentation.state.WorkflowBuilderStep) -> com.example.presentation.state.WorkflowBuilderStep) {
-        _uiState.update { state ->
-            val steps = state.workflowBuilder.steps.toMutableList()
-            if (index in steps.indices) {
-                steps[index] = transform(steps[index])
-                state.copy(workflowBuilder = state.workflowBuilder.copy(steps = steps))
-            } else state
-        }
-    }
-
-    fun removeWorkflowStep(index: Int) {
-        _uiState.update { state ->
-            val steps = state.workflowBuilder.steps.toMutableList()
-            if (index in steps.indices) steps.removeAt(index)
-            state.copy(workflowBuilder = state.workflowBuilder.copy(steps = steps))
-        }
-    }
-
-    fun moveWorkflowStep(index: Int, delta: Int) {
-        _uiState.update { state ->
-            val steps = state.workflowBuilder.steps.toMutableList()
-            val target = index + delta
-            if (index in steps.indices && target in steps.indices) {
-                val moved = steps.removeAt(index)
-                steps.add(target, moved)
-                state.copy(workflowBuilder = state.workflowBuilder.copy(steps = steps))
-            } else state
-        }
-    }
-
-    fun toggleWorkflowStepDependency(index: Int, depId: String) {
-        updateWorkflowStep(index) { step ->
-            step.copy(
-                dependencies = if (depId in step.dependencies) step.dependencies - depId
-                else step.dependencies + depId
-            )
-        }
-    }
-
-    /**
-     * CANONICAL AGENT BINDING (report gap): assigns a DURABLE registry agent
-     * to a builder step — the step executes through the real agent (system
-     * prompt, capabilities, budget, version, lifecycle), not a synthetic one.
-     */
-    fun assignWorkflowStepAgent(index: Int, agentId: String?) {
-        updateWorkflowStep(index) { it.copy(assignedAgentId = agentId) }
-    }
-
-    /** Applies a built-in template to the builder. */
-    fun applyWorkflowTemplate(template: com.example.presentation.state.WorkflowBuilderState) {
-        _uiState.update { it.copy(workflowBuilder = template) }
-    }
-
-    // ==================================================================
-    // WORKFLOW LIBRARY (report gap: save → list → load → edit → clone →
-    // run — the USER-AUTHORED definition as a durable workspace asset)
-    // ==================================================================
-
-    /** Saves the current builder as a library definition (or re-saves it). */
-    fun saveWorkflowDefinition() {
-        val library = workflowLibraryService ?: return
-        viewModelScope.launch {
-            runCatching {
-                val builder = _uiState.value.workflowBuilder
-                val plan = WorkflowPlan(
-                    id = com.example.domain.core.workflow.WorkflowId(
-                        builder.editingDefinitionId ?: "wf_builder_${System.currentTimeMillis()}"
-                    ),
-                    goal = builder.goal.trim(),
-                    executionMode = builder.executionMode,
-                    steps = builder.steps.map { s ->
-                        com.example.domain.core.workflow.StepNode(
-                            id = s.id,
-                            taskId = com.example.domain.core.task.TaskId("task_${s.id}"),
-                            agentRole = s.role,
-                            description = s.description.ifBlank { "${s.role.displayName} — خطوة ${s.id}" },
-                            dependencies = s.dependencies,
-                            assignedAgentId = s.assignedAgentId
-                        )
-                    }
-                )
-                val id = library.saveDefinition(
-                    existingId = builder.editingDefinitionId?.let { com.example.domain.core.workflow.WorkflowId(it) },
-                    name = builder.name,
-                    plan = plan
-                )
-                _uiState.update {
-                    it.copy(
-                        workflowBuilder = it.workflowBuilder.copy(editingDefinitionId = id.value),
-                        diagnosticBanner = "تم حفظ خطة العمل في المكتبة (الإصدار محفوظ ويُحرَّر لاحقاً)."
-                    )
-                }
-            }.onFailure { e ->
-                _uiState.update { it.copy(errorMessage = "تعذر حفظ خطة العمل: ${e.localizedMessage}") }
-            }
-        }
-    }
-
-    /** Loads a library definition into the builder for editing. */
-    fun loadWorkflowDefinitionIntoBuilder(definitionId: String) {
-        val library = workflowLibraryService ?: return
-        viewModelScope.launch {
-            runCatching {
-                val summary = _uiState.value.workflowLibrary.firstOrNull { it.workflowId.value == definitionId }
-                val plan = library.loadDefinition(com.example.domain.core.workflow.WorkflowId(definitionId))
-                    ?: return@launch
-                _uiState.update {
-                    it.copy(
-                        workflowBuilder = com.example.presentation.state.WorkflowBuilderState(
-                            name = summary?.name ?: "خطة عمل",
-                            goal = plan.goal,
-                            executionMode = plan.executionMode,
-                            steps = plan.steps.map { s ->
-                                com.example.presentation.state.WorkflowBuilderStep(
-                                    id = s.id,
-                                    description = s.description,
-                                    role = s.agentRole,
-                                    dependencies = s.dependencies,
-                                    assignedAgentId = s.assignedAgentId
-                                )
-                            },
-                            editingDefinitionId = definitionId
-                        )
-                    )
-                }
-            }.onFailure { e ->
-                _uiState.update { it.copy(errorMessage = "تعذر تحميل خطة العمل: ${e.localizedMessage}") }
-            }
-        }
-    }
-
-    /** Runs a library definition directly (records the run). */
-    fun runWorkflowDefinition(definitionId: String) {
-        val library = workflowLibraryService ?: return
-        viewModelScope.launch {
-            runCatching {
-                val plan = library.loadDefinition(com.example.domain.core.workflow.WorkflowId(definitionId)) ?: return@launch
-                library.recordRun(com.example.domain.core.workflow.WorkflowId(definitionId))
-                executeWorkflow(plan)
-            }
-        }
-    }
-
-    /** Clones a library definition. */
-    fun cloneWorkflowDefinition(definitionId: String) {
-        val library = workflowLibraryService ?: return
-        viewModelScope.launch {
-            // GAP-13: degradation surfaced (was a bare runCatching).
-            runCatching { library.cloneDefinition(com.example.domain.core.workflow.WorkflowId(definitionId)) }
-                .onFailure { failure ->
-                    _uiState.update { it.copy(diagnosticBanner = "تعذر استنساخ خطة العمل: ${failure.localizedMessage}") }
-                }
-        }
-    }
-
-    /** Deletes a library definition. */
-    fun deleteWorkflowDefinition(definitionId: String) {
-        val library = workflowLibraryService ?: return
-        viewModelScope.launch {
-            // GAP-13: degradation surfaced (was a bare runCatching).
-            runCatching { library.deleteDefinition(com.example.domain.core.workflow.WorkflowId(definitionId)) }
-                .onFailure { failure ->
-                    _uiState.update { it.copy(diagnosticBanner = "تعذر حذف خطة العمل: ${failure.localizedMessage}") }
-                }
-        }
-    }
-
-    /**
-     * RESUMES a durable interrupted workflow execution (report gap:
-     * "Resume later"): the already-completed steps are seeded COMPLETED and
-     * never re-executed; remaining steps run with real prior outputs as
-     * upstream context.
-     */
-    fun resumeWorkflow(workflowId: String) {
-        val persistence = workflowPersistenceService ?: return
-        viewModelScope.launch {
-            // GAP-13: degradation surfaced (was a bare runCatching).
-            runCatching {
-                // WORKSPACE-SCOPED resume (defect family 1): a workflow of
-                // ANOTHER workspace cannot be resumed from this surface.
-                val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
-                val resumable = persistence.resumable(workspaceId).firstOrNull { it.workflowId.value == workflowId }
-                    ?: return@launch
-                executeWorkflow(resumable.plan, resumable.completedStepIds)
-            }.onFailure { failure ->
-                _uiState.update { it.copy(diagnosticBanner = "تعذر استئناف التنفيذ: ${failure.localizedMessage}") }
-            }
-        }
-    }
-
-    // (ADR-6 slice 3) Memory operations — updateMemoryQuery / searchMemory /
-    // updateNewMemoryContent / addNewMemory / refreshMemories — moved to
-    // KnowledgeViewModel with the memory-browser state.
 
     fun clearErrorMessage() {
         _uiState.update { it.copy(errorMessage = null) }

@@ -1986,12 +1986,8 @@ class MainViewModelFactory(
         if (modelClass.isAssignableFrom(MainViewModel::class.java)) {
             return MainViewModel(
                 executeAgentTaskUseCase = appContainer.executeAgentTaskUseCase,
-                executeWorkflowUseCase = appContainer.executeWorkflowUseCase,
-                decisionSimulationUseCase = appContainer.decisionSimulationUseCase,
                 componentRegistry = appContainer.componentRegistry,
-                cbrMdpEngine = appContainer.cbrMdpEngine,
                 extensionManager = appContainer.extensionManager,
-                intelligenceRadarPipeline = appContainer.intelligenceRadarPipeline,
                 workspaceRuntimeService = appContainer.workspaceRuntimeService,
                 // GAP-CLOSURE P1-08/P1-10 — canonical durable agent registry.
                 agentRegistryService = appContainer.agentRegistryService,
@@ -1999,8 +1995,6 @@ class MainViewModelFactory(
                 // Unified Activity Feed.
                 telemetryService = appContainer.telemetryService,
                 telemetryPort = appContainer.telemetryPort,
-                workflowLibraryService = appContainer.workflowLibraryService,
-                workflowPersistenceService = appContainer.workflowPersistenceService,
                 // REPAIR ORDER §3A — observable bootstrap state machine.
                 // GAP-08 (Design Closure 2026, ADR-7): the dead project /
                 // transfer / readiness / repair VM surface was deleted — the
@@ -2017,10 +2011,82 @@ class MainViewModelFactory(
                 // (providerControlPlaneService + connectProviderUseCase)
                 // moved to ProvidersViewModelFactory with the provider
                 // feature extraction.
+                // (ADR-6 slice 6) the decision (cbrMdpEngine +
+                // decisionSimulationUseCase), radar (intelligenceRadarPipeline)
+                // and workflow (executeWorkflowUseCase +
+                // workflowLibraryService + workflowPersistenceService)
+                // dependency sets moved to DecisionViewModelFactory,
+                // RadarViewModelFactory and WorkflowsViewModelFactory with
+                // their feature extractions.
                 // ADR-6 slice 2 — the studio feature's outbound signal bus
                 // (conversationSessionService + appContext left this factory
                 // with the StudioViewModel extraction).
                 studioSignals = studioSignalBus
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 6 (Design Closure 2026 UI-redesign track) — factory for the
+ * RADAR feature ViewModel: the intelligence radar & evolution observatory
+ * extracted from MainViewModel (same pattern as the slice-3/4/5 factories).
+ */
+class RadarViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.RadarViewModel::class.java)) {
+            return com.example.presentation.viewmodel.RadarViewModel(
+                intelligenceRadarPipeline = appContainer.intelligenceRadarPipeline
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 6 (Design Closure 2026 UI-redesign track) — factory for the
+ * DECISION feature ViewModel: the CBR-MDP cockpit extracted from
+ * MainViewModel. Receives the per-Activity studio signal bus — the feature
+ * COLLECTS the decision share of the studio's cross-feature projections
+ * (decision mirrors + network-policy re-simulation).
+ */
+class DecisionViewModelFactory(
+    private val appContainer: AppContainer,
+    private val studioSignalBus: com.example.presentation.viewmodel.StudioSignalBus? = null
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.DecisionViewModel::class.java)) {
+            return com.example.presentation.viewmodel.DecisionViewModel(
+                cbrMdpEngine = appContainer.cbrMdpEngine,
+                decisionSimulationUseCase = appContainer.decisionSimulationUseCase,
+                studioSignals = studioSignalBus
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 6 (Design Closure 2026 UI-redesign track) — factory for the
+ * WORKFLOWS feature ViewModel: the plan builder, durable library and
+ * resume surface extracted from MainViewModel (same pattern).
+ */
+class WorkflowsViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.WorkflowsViewModel::class.java)) {
+            return com.example.presentation.viewmodel.WorkflowsViewModel(
+                executeWorkflowUseCase = appContainer.executeWorkflowUseCase,
+                workflowLibraryService = appContainer.workflowLibraryService,
+                workflowPersistenceService = appContainer.workflowPersistenceService,
+                workspaceRuntimeService = appContainer.workspaceRuntimeService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

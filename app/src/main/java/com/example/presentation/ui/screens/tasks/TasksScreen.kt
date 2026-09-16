@@ -90,23 +90,31 @@ private data class BuilderStep(
 
 @Composable
 fun TasksScreen(
+    // ADR-6 slice 6: the AGENT CATALOG still reads the MainViewModel (the
+    // studio/catalog seam — the same composition StudioScreen uses), while
+    // the workflow feature composes on its OWN feature VM.
     viewModel: MainViewModel,
     tasksViewModel: com.example.presentation.viewmodel.TasksViewModel? = null,
+    // ADR-6 slice 6: the WORKFLOWS feature ViewModel — the plan builder,
+    // the durable library and the resume surface left the shared UiState;
+    // this screen composes on the feature's own state (its owner).
+    workflowsViewModel: com.example.presentation.viewmodel.WorkflowsViewModel,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
+    val wfState by workflowsViewModel.state.collectAsState()
 
     // WORKFLOW BUILDER STATE LIVES IN THE VIEWMODEL (report gap: the
     // authored definition must survive navigation and be save/load/edit-able
     // as a durable library asset — Compose `remember` state previously died
     // with the screen).
-    val builder = state.workflowBuilder
+    val builder = wfState.workflowBuilder
     val goal = builder.goal
     val executionMode = builder.executionMode
     val steps = builder.steps
 
     fun updateStep(index: Int, transform: (com.example.presentation.state.WorkflowBuilderStep) -> com.example.presentation.state.WorkflowBuilderStep) {
-        viewModel.updateWorkflowStep(index, transform)
+        workflowsViewModel.updateWorkflowStep(index, transform)
     }
 
     // (GAP-19 / ADR-6 step 6 — DELETED: the client-side detectCycle DFS.
@@ -149,18 +157,18 @@ fun TasksScreen(
 
             // ---- Workflow library (durable, re-editable assets) ----
             WorkflowLibraryCard(
-                library = state.workflowLibrary,
-                onLoad = viewModel::loadWorkflowDefinitionIntoBuilder,
-                onRun = viewModel::runWorkflowDefinition,
-                onClone = viewModel::cloneWorkflowDefinition,
-                onDelete = viewModel::deleteWorkflowDefinition
+                library = wfState.workflowLibrary,
+                onLoad = workflowsViewModel::loadWorkflowDefinitionIntoBuilder,
+                onRun = workflowsViewModel::runWorkflowDefinition,
+                onClone = workflowsViewModel::cloneWorkflowDefinition,
+                onDelete = workflowsViewModel::deleteWorkflowDefinition
             )
 
             // ---- Resumable executions (durable resume) ----
-            if (state.resumableWorkflows.isNotEmpty()) {
+            if (wfState.resumableWorkflows.isNotEmpty()) {
                 ResumableWorkflowsCard(
-                    resumable = state.resumableWorkflows,
-                    onResume = viewModel::resumeWorkflow
+                    resumable = wfState.resumableWorkflows,
+                    onResume = workflowsViewModel::resumeWorkflow
                 )
             }
 
@@ -177,7 +185,7 @@ fun TasksScreen(
                 Column(modifier = Modifier.padding(12.dp)) {
                     OutlinedTextField(
                         value = builder.name,
-                        onValueChange = viewModel::updateWorkflowName,
+                        onValueChange = workflowsViewModel::updateWorkflowName,
                         label = { Text("اسم خطة العمل (للمكتبة)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("input_workflow_name")
@@ -185,7 +193,7 @@ fun TasksScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = goal,
-                        onValueChange = viewModel::updateWorkflowGoal,
+                        onValueChange = workflowsViewModel::updateWorkflowGoal,
                         label = { Text("هدف خطة العمل") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("input_workflow_goal")
@@ -201,7 +209,7 @@ fun TasksScreen(
                         ExecutionMode.entries.forEach { mode ->
                             FilterChip(
                                 selected = mode == executionMode,
-                                onClick = { viewModel.updateWorkflowMode(mode) },
+                                onClick = { workflowsViewModel.updateWorkflowMode(mode) },
                                 label = {
                                     Text(
                                         when (mode) {
@@ -219,7 +227,7 @@ fun TasksScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
                             onClick = {
-                                viewModel.applyWorkflowTemplate(
+                                workflowsViewModel.applyWorkflowTemplate(
                                     com.example.presentation.state.WorkflowBuilderState(
                                         name = "قالب الهيكلة الكاملة",
                                         goal = "بناء ونشر وحدة معمارية متكاملة",
@@ -236,7 +244,7 @@ fun TasksScreen(
                         ) { Text("قالب الهيكلة الكاملة", style = MaterialTheme.typography.labelSmall) }
                         Button(
                             onClick = {
-                                viewModel.applyWorkflowTemplate(
+                                workflowsViewModel.applyWorkflowTemplate(
                                     com.example.presentation.state.WorkflowBuilderState(
                                         name = "قالب بحث + مراجعة",
                                         goal = "بحث موثوق ومراجعة النتائج",
@@ -256,7 +264,7 @@ fun TasksScreen(
                     // library): the authored plan becomes a versioned,
                     // re-editable, clonable workspace asset.
                     OutlinedButton(
-                        onClick = viewModel::saveWorkflowDefinition,
+                        onClick = workflowsViewModel::saveWorkflowDefinition,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("btn_save_workflow_definition"),
@@ -287,18 +295,18 @@ fun TasksScreen(
                     onDescriptionChange = { text -> updateStep(index) { it.copy(description = text) } },
                     onRoleChange = { role -> updateStep(index) { it.copy(role = role) } },
                     onToggleDependency = { depId ->
-                        viewModel.toggleWorkflowStepDependency(index, depId)
+                        workflowsViewModel.toggleWorkflowStepDependency(index, depId)
                     },
-                    onAssignAgent = { agentId -> viewModel.assignWorkflowStepAgent(index, agentId) },
-                    onMoveUp = { viewModel.moveWorkflowStep(index, -1) },
-                    onMoveDown = { viewModel.moveWorkflowStep(index, +1) },
-                    onRemove = { viewModel.removeWorkflowStep(index) }
+                    onAssignAgent = { agentId -> workflowsViewModel.assignWorkflowStepAgent(index, agentId) },
+                    onMoveUp = { workflowsViewModel.moveWorkflowStep(index, -1) },
+                    onMoveDown = { workflowsViewModel.moveWorkflowStep(index, +1) },
+                    onRemove = { workflowsViewModel.removeWorkflowStep(index) }
                 )
             }
 
             // ---- Add step ----
             Surface(
-                onClick = viewModel::addWorkflowStep,
+                onClick = workflowsViewModel::addWorkflowStep,
                 shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
                 modifier = Modifier
@@ -327,7 +335,7 @@ fun TasksScreen(
             }
 
             // ---- Execution report ----
-            state.workflowReport?.let { report ->
+            wfState.workflowReport?.let { report ->
                 Spacer(modifier = Modifier.height(10.dp))
                 WorkflowReportCard(report)
             }
@@ -356,15 +364,15 @@ fun TasksScreen(
                             )
                         }
                     )
-                    viewModel.executeWorkflow(plan)
+                    workflowsViewModel.executeWorkflow(plan)
                 },
-                enabled = canExecute && !state.isExecutingWorkflow,
+                enabled = canExecute && !wfState.isExecutingWorkflow,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 10.dp)
                     .testTag("btn_execute_workflow_dag")
             ) {
-                if (state.isExecutingWorkflow) {
+                if (wfState.isExecutingWorkflow) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
                         strokeWidth = 2.dp,

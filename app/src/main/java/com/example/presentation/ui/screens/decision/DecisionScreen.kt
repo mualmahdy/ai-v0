@@ -40,25 +40,26 @@ import com.example.presentation.ui.components.InfoRow
 import com.example.presentation.ui.components.MetricBar
 import com.example.presentation.ui.components.SectionHeader
 import com.example.presentation.ui.components.StatusBadge
-import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.DecisionViewModel
 
 /**
  * ============================================================================
  * DecisionScreen — the CBR-MDP engine cockpit
  * ============================================================================
  *
- * Real decision-engine surface: the chosen action with confidence donut and
- * rationale, ranked alternatives as metric bars, live simulation spinner
- * (previously missing), case-base statistics, and an honest explainer of
- * how decisions are made (retrieval + Q-learning + governance gates BEFORE
- * the engine).
+ * ADR-6 slice 6: composes on the DECISION feature ViewModel (its owner —
+ * the decision state left the shared UiState). Real decision-engine
+ * surface: the chosen action with confidence donut and rationale, ranked
+ * alternatives as metric bars, live simulation spinner (previously
+ * missing), case-base statistics, and an honest explainer of how decisions
+ * are made (retrieval + Q-learning + governance gates BEFORE the engine).
  */
 @Composable
 fun DecisionScreen(
-    viewModel: MainViewModel,
+    viewModel: DecisionViewModel,
     modifier: Modifier = Modifier
 ) {
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.state.collectAsState()
 
     LazyColumn(
         modifier = modifier.testTag("screen_decision_intelligence"),

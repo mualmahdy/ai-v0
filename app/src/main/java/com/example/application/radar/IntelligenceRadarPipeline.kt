@@ -275,7 +275,7 @@ class IntelligenceRadarPipeline(
      */
     suspend fun advanceEvolutionStage(candidateId: String, nextStage: EvolutionStage): Outcome<EvolutionCandidate, String> = withContext(Dispatchers.IO) {
         val current = _evolutionCandidates.value.firstOrNull { it.id == candidateId }
-            ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
+            ?: return@withContext Outcome.Error("CANDIDATE_NOT_FOUND", "المرشح غير موجود: $candidateId")
 
         // Gate 1 — no stage skipping (single forward step or rejection).
         // GAP-19 (ADR-6 step 6): the transition table is the DOMAIN's
@@ -346,7 +346,7 @@ class IntelligenceRadarPipeline(
         notes: String
     ): Outcome<EvolutionCandidate, String> = withContext(Dispatchers.IO) {
         val current = _evolutionCandidates.value.firstOrNull { it.id == candidateId }
-            ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
+            ?: return@withContext Outcome.Error("CANDIDATE_NOT_FOUND", "المرشح غير موجود: $candidateId")
         val updated = current.copy(
             securityAuditPassed = passed,
             evaluationNotes = "تدقيق أمني: ${if (passed) "ناجح" else "فاشل"} — $notes"
@@ -372,7 +372,7 @@ class IntelligenceRadarPipeline(
         approved: Boolean
     ): Outcome<EvolutionCandidate, String> = withContext(Dispatchers.IO) {
         val current = _evolutionCandidates.value.firstOrNull { it.id == candidateId }
-            ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
+            ?: return@withContext Outcome.Error("CANDIDATE_NOT_FOUND", "المرشح غير موجود: $candidateId")
         val updated = current.copy(
             governanceApproved = approved,
             evaluationNotes = "موافقة الحوكمة: ${if (approved) "ممنوحة" else "مرفوضة"}."
@@ -400,7 +400,7 @@ class IntelligenceRadarPipeline(
         candidateId: String
     ): Outcome<EvolutionCandidate, String> = withContext(Dispatchers.IO) {
         val current = _evolutionCandidates.value.firstOrNull { it.id == candidateId }
-            ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
+            ?: return@withContext Outcome.Error("CANDIDATE_NOT_FOUND", "المرشح غير موجود: $candidateId")
         if (current.stage != EvolutionStage.REGISTERED) {
             return@withContext Outcome.Error(
                 "GATE_MEASURE_REQUIRES_REGISTERED",
@@ -436,7 +436,7 @@ class IntelligenceRadarPipeline(
         reason: String
     ): Outcome<EvolutionCandidate, String> = withContext(Dispatchers.IO) {
         val current = _evolutionCandidates.value.firstOrNull { it.id == candidateId }
-            ?: return@withContext Outcome.Error("المرشح غير موجود: $candidateId")
+            ?: return@withContext Outcome.Error("CANDIDATE_NOT_FOUND", "المرشح غير موجود: $candidateId")
         if (current.stage != EvolutionStage.REGISTERED) {
             return@withContext Outcome.Error(
                 "GATE_RETIRE_REQUIRES_REGISTERED",

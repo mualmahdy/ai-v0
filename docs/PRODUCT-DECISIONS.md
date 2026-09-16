@@ -31,6 +31,40 @@ new screens after that point.
 
 ---
 
+## D-11 — Terminal-event topology: a non-fatal provider error is NOT terminal; the loop's Completed is honest about DEGRADED completion, not about success
+
+**Decision (2026-09, ADR-6 slice 6 — the "Decision slice" verdict the
+slice-2 findings deferred to):** the execution kernel's terminal-event
+topology stays AS IS. When a provider error is NON-FATAL at the step level
+(within the task's retry budget / degradation policy), the closed loop
+counts it and CONTINUES; the run eventually terminates with
+`ExecutionEvent.Completed` carrying whatever accumulated output exists —
+the Arabic fallback «اكتملت معالجة المهمة.» when nothing accumulated. The
+transcript therefore shows an Error entry followed by a Completed entry,
+which the Studio renders as two turns.
+
+**Why not "fix" it now (the honest scope call):**
+- The two events describe two DIFFERENT truths, not a contradiction: the
+  step failed (Error), and the run ended (Completed — possibly degraded).
+  `ExecutionEvent.Completed` already carries `isDegraded` +
+  `degradedReason`; the semantics are "the loop finished", not "every step
+  succeeded".
+- Making a provider error TERMINATE the loop would change retry/degradation
+  semantics (ADR-4 territory — the governed execution contract), a product
+  behavior change with its own blast radius (idempotency ledger, resumable
+  state, task persistence) — not a UI-redesign matter. The ADR-6 track's
+  own rule is verbatim moves + display-honesty repairs only.
+- The user-facing lie, if any, is in how the STUDIO RENDERS the pair, not
+  in the kernel's emissions.
+
+**Reopen when:** the Studio transcript rendering is redesigned to merge a
+non-fatal Error + subsequent degraded Completed into ONE turn (a display
+change owned by the Studio feature), OR a product decision makes provider
+errors terminal (an execution-contract change owned by ADR-4). Until then
+this topology is contractual.
+
+---
+
 ## D-2 — Audit truth: two tables, two documented mandates, ONE unified reader (GAP-24 / ADR-8 option ج)
 
 **Decision (2026-09):** keep BOTH audit tables with EXPLICIT, distinct

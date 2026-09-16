@@ -1,5 +1,6 @@
 package com.example.presentation.ui.screens.radar
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -47,24 +49,29 @@ import com.example.domain.core.radar.RadarCategory
 import com.example.presentation.ui.components.EmptyState
 import com.example.presentation.ui.components.SectionHeader
 import com.example.presentation.ui.components.StatusBadge
-import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.RadarViewModel
 
 /**
  * ============================================================================
  * RadarScreen — evolution pipeline + ecosystem feed, now with filters
  * ============================================================================
  *
- * Refresh with a live spinner (previously missing), stage FILTERING of
- * evolution candidates, category FILTERING of the ecosystem feed, richer
- * candidate cards (target type, security audit + governance gates, proven
- * confidence), and the full promotion lifecycle actions.
+ * ADR-6 slice 6: composes on the RADAR feature ViewModel (its owner — the
+ * radar state left the shared UiState). Refresh with a live spinner
+ * (previously missing), stage FILTERING of evolution candidates, category
+ * FILTERING of the ecosystem feed, richer candidate cards (target type,
+ * security audit + governance gates, proven confidence), the full promotion
+ * lifecycle actions, and the feature's own dismissible diagnostic banner
+ * (the slice-3/4 knowledge/governance pattern — promotion, audit and
+ * approval outcomes render contextually next to the candidates they
+ * concern).
  */
 @Composable
 fun RadarScreen(
-    viewModel: MainViewModel,
+    viewModel: RadarViewModel,
     modifier: Modifier = Modifier
 ) {
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.state.collectAsState()
     var stageFilter by rememberSaveable { mutableStateOf<String?>(null) }
     var categoryFilter by rememberSaveable { mutableStateOf<String?>(null) }
 
@@ -105,6 +112,34 @@ fun RadarScreen(
                     }
                 }
             )
+        }
+
+        // ADR-6 slice 6: the feature's own dismissible diagnostic banner
+        // (the knowledge/governance pattern) — promotion, audit, approval
+        // and retirement outcomes render from the feature's own state.
+        state.diagnosticBanner?.let { banner ->
+            item {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clickable { viewModel.dismissDiagnosticBanner() }
+                        .testTag("radar_diagnostic_banner")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = banner,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
         }
 
         // ===================== Candidates =====================

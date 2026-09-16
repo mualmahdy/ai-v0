@@ -19,16 +19,22 @@ import com.example.presentation.di.GovernanceViewModelFactory
 import com.example.presentation.di.KnowledgeViewModelFactory
 import com.example.presentation.di.MainViewModelFactory
 import com.example.presentation.di.ProvidersViewModelFactory
+import com.example.presentation.di.RadarViewModelFactory
+import com.example.presentation.di.DecisionViewModelFactory
 import com.example.presentation.di.SessionsViewModelFactory
 import com.example.presentation.di.SettingsViewModelFactory
 import com.example.presentation.di.StudioViewModelFactory
 import com.example.presentation.di.TasksViewModelFactory
+import com.example.presentation.di.WorkflowsViewModelFactory
 import com.example.presentation.ui.MainAppScreen
 import com.example.presentation.viewmodel.FilesViewModel
 import com.example.presentation.viewmodel.GovernanceViewModel
 import com.example.presentation.viewmodel.KnowledgeViewModel
 import com.example.presentation.viewmodel.MainViewModel
 import com.example.presentation.viewmodel.ProvidersViewModel
+import com.example.presentation.viewmodel.RadarViewModel
+import com.example.presentation.viewmodel.DecisionViewModel
+import com.example.presentation.viewmodel.WorkflowsViewModel
 import com.example.presentation.viewmodel.SessionsViewModel
 import com.example.presentation.viewmodel.SettingsViewModel
 import com.example.presentation.viewmodel.StudioSignal
@@ -108,6 +114,29 @@ class MainActivity : ComponentActivity() {
         ProvidersViewModelFactory(appContainer)
     }
 
+    // ADR-6 slice 6 (Design Closure 2026 UI-redesign track): the RADAR
+    // feature ViewModel — the intelligence radar & evolution observatory
+    // left the MainViewModel (same freeze rule).
+    private val radarViewModel: RadarViewModel by viewModels {
+        RadarViewModelFactory(appContainer)
+    }
+
+    // ADR-6 slice 6 (Design Closure 2026 UI-redesign track): the DECISION
+    // feature ViewModel — the CBR-MDP cockpit left the MainViewModel (same
+    // freeze rule). It COLLECTS the decision share of the studio signal bus
+    // itself (the governance pattern: each feature its own stake).
+    private val decisionViewModel: DecisionViewModel by viewModels {
+        DecisionViewModelFactory(appContainer, studioSignalBus)
+    }
+
+    // ADR-6 slice 6 (Design Closure 2026 UI-redesign track): the WORKFLOWS
+    // feature ViewModel — the plan builder, durable library and resume
+    // surface left the MainViewModel (same freeze rule). The TASK BOARD
+    // stays with TasksViewModel (its owner since GAP-11).
+    private val workflowsViewModel: WorkflowsViewModel by viewModels {
+        WorkflowsViewModelFactory(appContainer)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -141,7 +170,10 @@ class MainActivity : ComponentActivity() {
                             sessionsViewModel = sessionsViewModel,
                             knowledgeViewModel = knowledgeViewModel,
                             governanceViewModel = governanceViewModel,
-                            providersViewModel = providersViewModel
+                            providersViewModel = providersViewModel,
+                            radarViewModel = radarViewModel,
+                            decisionViewModel = decisionViewModel,
+                            workflowsViewModel = workflowsViewModel
                         )
                     }
                 }

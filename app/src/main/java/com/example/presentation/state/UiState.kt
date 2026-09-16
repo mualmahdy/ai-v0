@@ -2,21 +2,13 @@ package com.example.presentation.state
 
 import com.example.domain.core.DegradedReason
 import com.example.domain.core.agent.AgentDefinition
-import com.example.domain.core.decision.DecisionCase
-import com.example.domain.core.decision.DecisionResult
-import com.example.domain.core.decision.DecisionState
-import com.example.domain.core.evolution.EvolutionCandidate
-import com.example.domain.core.evolution.EvolutionStage
 import com.example.domain.core.extension.IntegrationDescriptor
 import com.example.domain.core.extension.McpServerDescriptor
 import com.example.domain.core.extension.PluginManifest
 import com.example.domain.core.extension.SkillManifest
-import com.example.domain.core.network.NetworkPolicy
-import com.example.domain.core.radar.RadarItem
 import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.workflow.ExecutionMode
-import com.example.domain.core.workflow.WorkflowExecutionReport
 
 /**
  * One conversational turn in the Studio session transcript: the user prompt,
@@ -102,29 +94,22 @@ data class UiState(
     val availableAgents: List<AgentDefinition> = emptyList(),
     // ------------------------------------------------------------------
     // ADR-6 SLICE 2 (Design Closure 2026 UI-redesign track): the ENTIRE
-    // conversation-runtime block (promptInput, isExecuting, executionLog,
-    // streamText, studioSession, sessionTurnStartMs, chatMode,
-    // activeSessionId, sessions, isSessionBrowserOpen,
-    // selectedModelResourceId, selectedModelDisplayName, isDegraded,
-    // degradedReason, currentTokensConsumed, sessionTotalTokens,
-    // remainingBudget) moved to StudioViewModel's own StudioUiState. The
-    // execution-event decision projections (latestDecision,
-    // decisionUncertainty, caseBaseList) stay here as DISPLAY mirrors fed
-    // by the studio signal bus (see MainViewModel.observeStudioSignals).
+    // conversation-runtime block moved to StudioViewModel's own
+    // StudioUiState. The execution-event DECISION projections that used to
+    // stay here as display mirrors left with the decision feature in
+    // SLICE 6: DecisionViewModel collects its own share of the studio
+    // signal bus (see DecisionViewModel.observeStudioSignals).
     // ------------------------------------------------------------------
     val isDegraded: Boolean = false,
     val degradedReason: DegradedReason? = null,
     val diagnosticBanner: String? = null,
     /**
-     * ADR-6 slice 2 — DISPLAY MIRROR ONLY: the SESSION network policy is
-     * owned by StudioViewModel (an execution-time input of the
-     * conversation); this mirror is synced from the studio signal bus so
-     * the decision preview (simulateDecision) and the governance radar
-     * snapshot keep reading ONE shared value. The persisted WORKSPACE
-     * policy (egress authority) lives on the workspace row — a different,
-     * unrelated field.
+     * ADR-6 SLICE 6 — the session network-policy DISPLAY MIRROR left the
+     * shared UiState with the decision feature (its only consumer): the
+     * simulation input mirror now lives in DecisionViewModel (synced from
+     * the studio signal bus), and the Settings surface reads the policy
+     * directly from StudioViewModel (its owner, value + mutation).
      */
-    val networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
     val autonomyPolicy: AutonomyPolicy = AutonomyPolicy.SUPERVISED,
     /**
      * REPAIR ORDER §3A + GAP-23 (Design Closure 2026) — the bootstrap
@@ -141,26 +126,25 @@ data class UiState(
     // Tasks & Workflows (GAP-23: the write-only UiState.activeTasks field was
     // removed — TasksScreen reads the LIVE board from TasksViewModel →
     // TaskBoardService → TaskDao, which is the single task-list authority.)
-    val workflowReport: WorkflowExecutionReport? = null,
-    val isExecutingWorkflow: Boolean = false,
-    // WORKFLOW LIBRARY (report gap: durable, re-editable authored assets).
-    val workflowBuilder: WorkflowBuilderState = WorkflowBuilderState(),
-    val workflowLibrary: List<com.example.domain.core.workflow.WorkflowDefinitionSummary> = emptyList(),
-    val resumableWorkflows: List<com.example.domain.core.workflow.ResumableWorkflow> = emptyList(),
+    // WORKFLOW FEATURE — REMOVED (ADR-6 slice 6, Design Closure 2026
+    // UI-redesign track): workflowReport / isExecutingWorkflow /
+    // workflowBuilder / workflowLibrary / resumableWorkflows now live in
+    // WorkflowsViewModel's own WorkflowsUiState. The builder state TYPES
+    // (WorkflowBuilderStep / WorkflowBuilderState) stay in this package as
+    // the feature's authored-asset state (the StudioTurn precedent, slice 2);
+    // TasksScreen composes on the workflows feature VM (its owner).
 
-    // Decision Intelligence (CBR-MDP)
-    val latestDecision: DecisionResult? = null,
-    val caseBaseList: List<DecisionCase> = emptyList(),
-    val isSimulatingDecision: Boolean = false,
-    val decisionTaskComplexity: Float = 0.6f,
-    val decisionUncertainty: Float = 0.2f,
+    // Decision Intelligence (CBR-MDP) — REMOVED (ADR-6 slice 6, Design
+    // Closure 2026 UI-redesign track): latestDecision / caseBaseList /
+    // isSimulatingDecision / decisionTaskComplexity / decisionUncertainty
+    // (and the networkPolicy display mirror) now live in DecisionViewModel's
+    // own DecisionUiState. The decision feature COLLECTS its share of the
+    // studio signal bus itself (decision mirrors + policy re-simulation).
 
-    // Intelligence Radar & Evolution Pipeline (GAP-23: isRadarRefreshing was
-    // previously a NO-WRITER field — a spinner that could never appear.
-    // refreshRadar() now sets it honestly around the pipeline call.)
-    val radarItems: List<RadarItem> = emptyList(),
-    val evolutionCandidates: List<EvolutionCandidate> = emptyList(),
-    val isRadarRefreshing: Boolean = false,
+    // Intelligence Radar & Evolution — REMOVED (ADR-6 slice 6, Design
+    // Closure 2026 UI-redesign track): radarItems / evolutionCandidates /
+    // isRadarRefreshing now live in RadarViewModel's own RadarUiState. The
+    // radar screen composes on the feature VM (its owner).
 
     // GOVERNANCE OBSERVATORY — REMOVED (ADR-6 slice 4, Design Closure 2026
     // UI-redesign track): radarCapabilityStatuses / radarRecommendations /

@@ -126,6 +126,18 @@ fun MainAppScreen(
     // owned here; the providers screen composes on it and the shell's
     // status chip reads its materialized resources.
     providersViewModel: com.example.presentation.viewmodel.ProvidersViewModel,
+    // ADR-6 slice 6: the RADAR feature ViewModel (the evolution observatory)
+    // — owned here; the radar screen composes on it and its honest error
+    // channel surfaces in the global snackbar.
+    radarViewModel: com.example.presentation.viewmodel.RadarViewModel,
+    // ADR-6 slice 6: the DECISION feature ViewModel (the CBR-MDP cockpit) —
+    // owned here; it collects the decision share of the studio signal bus
+    // itself, and the decision screen composes on it.
+    decisionViewModel: com.example.presentation.viewmodel.DecisionViewModel,
+    // ADR-6 slice 6: the WORKFLOWS feature ViewModel (plan builder + durable
+    // library + resume) — owned here; the tasks screen composes on it and
+    // the explorer's plans row reads its state.
+    workflowsViewModel: com.example.presentation.viewmodel.WorkflowsViewModel,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -147,6 +159,12 @@ fun MainAppScreen(
     // test/discovery failures, resource lifecycle errors) — same global
     // snackbar pattern, dismissed from its own state.
     val providersState by providersViewModel.state.collectAsState()
+    // ADR-6 SLICE 6: the radar/decision/workflows features' honest error
+    // channels — the same global snackbar surface, each dismissed from its
+    // own source of truth.
+    val radarState by radarViewModel.state.collectAsState()
+    val decisionState by decisionViewModel.state.collectAsState()
+    val workflowsState by workflowsViewModel.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val navController = rememberNavController()
     var createWorkspaceOpen by rememberSaveable { mutableStateOf(false) }
@@ -192,6 +210,33 @@ fun MainAppScreen(
         providersState.errorMessage?.let { error ->
             snackbarHostState.showSnackbar(error)
             providersViewModel.clearErrorMessage()
+        }
+    }
+
+    // ADR-6 SLICE 6: the radar feature's honest error channel (promotion
+    // gate failures, audit/approval errors) — same global snackbar.
+    LaunchedEffect(radarState.errorMessage) {
+        radarState.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            radarViewModel.clearErrorMessage()
+        }
+    }
+
+    // ADR-6 SLICE 6: the decision feature's honest error channel — same
+    // global snackbar.
+    LaunchedEffect(decisionState.errorMessage) {
+        decisionState.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            decisionViewModel.clearErrorMessage()
+        }
+    }
+
+    // ADR-6 SLICE 6: the workflows feature's honest error channel (save /
+    // load / execution failures) — same global snackbar.
+    LaunchedEffect(workflowsState.errorMessage) {
+        workflowsState.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            workflowsViewModel.clearErrorMessage()
         }
     }
 
@@ -335,6 +380,9 @@ fun MainAppScreen(
                     knowledgeViewModel = knowledgeViewModel,
                     governanceViewModel = governanceViewModel,
                     providersViewModel = providersViewModel,
+                    radarViewModel = radarViewModel,
+                    decisionViewModel = decisionViewModel,
+                    workflowsViewModel = workflowsViewModel,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -434,6 +482,9 @@ private fun WorkspaceNavHost(
     settingsViewModel: com.example.presentation.viewmodel.SettingsViewModel,
     studioViewModel: com.example.presentation.viewmodel.StudioViewModel,
     sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
+    radarViewModel: com.example.presentation.viewmodel.RadarViewModel,
+    decisionViewModel: com.example.presentation.viewmodel.DecisionViewModel,
+    workflowsViewModel: com.example.presentation.viewmodel.WorkflowsViewModel,
     // ADR-6 slice 3: the knowledge feature VM — composed into the Knowledge /
     // Settings / Explorer destinations.
     knowledgeViewModel: com.example.presentation.viewmodel.KnowledgeViewModel,
@@ -504,18 +555,25 @@ private fun WorkspaceNavHost(
             TasksScreen(
                 viewModel = viewModel,
                 tasksViewModel = tasksViewModel,
+                // ADR-6 slice 6: the builder/library/resume surface composes
+                // on the workflows feature VM — its owner.
+                workflowsViewModel = workflowsViewModel,
                 modifier = Modifier.fillMaxSize()
             )
         }
         composable(WorkspaceRoutes.DECISION) {
             DecisionScreen(
-                viewModel = viewModel,
+                // ADR-6 slice 6: the cockpit composes on the decision
+                // feature VM — its owner.
+                viewModel = decisionViewModel,
                 modifier = Modifier.fillMaxSize()
             )
         }
         composable(WorkspaceRoutes.RADAR) {
             RadarScreen(
-                viewModel = viewModel,
+                // ADR-6 slice 6: the observatory composes on the radar
+                // feature VM — its owner.
+                viewModel = radarViewModel,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -563,6 +621,9 @@ private fun WorkspaceNavHost(
                 // ADR-6 slice 5: the models/resources rows read the providers
                 // feature VM — their owner (same pattern).
                 providersViewModel = providersViewModel,
+                // ADR-6 slice 6: the plans row reads the workflows feature
+                // VM — its owner (same pattern).
+                workflowsViewModel = workflowsViewModel,
                 onNavigate = navigate,
                 modifier = Modifier.fillMaxSize()
             )

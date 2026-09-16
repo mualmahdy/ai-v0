@@ -79,6 +79,10 @@ fun WorkspaceExplorerScreen(
     // the resources row count) — read from the providers feature VM, its
     // owner (same pattern as the files/sessions/knowledge rows).
     providersViewModel: com.example.presentation.viewmodel.ProvidersViewModel,
+    // ADR-6 slice 6: the workflows feature state (the plans row count +
+    // the resumable subtitle) — read from the workflows feature VM, its
+    // owner (same pattern as the files/sessions/knowledge/providers rows).
+    workflowsViewModel: com.example.presentation.viewmodel.WorkflowsViewModel,
     onNavigate: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -87,6 +91,7 @@ fun WorkspaceExplorerScreen(
     val filesState by filesViewModel.state.collectAsState()
     val sessionsState by sessionsViewModel.state.collectAsState()
     val knowledgeState by knowledgeViewModel.state.collectAsState()
+    val workflowsState by workflowsViewModel.state.collectAsState()
 
     Column(
         modifier = modifier
@@ -190,9 +195,9 @@ fun WorkspaceExplorerScreen(
         ExplorerRow(
             icon = Icons.Default.AccountTree,
             title = "المهام وخطط العمل",
-            count = state.workflowLibrary.size,
+            count = workflowsState.workflowLibrary.size,
             countLabel = "خطة",
-            subtitle = "${state.resumableWorkflows.size} تنفيذ قابل للاستئناف",
+            subtitle = "${workflowsState.resumableWorkflows.size} تنفيذ قابل للاستئناف",
             route = WorkspaceRoutes.TASKS,
             onNavigate = onNavigate,
             testTag = "explorer_workflows"
