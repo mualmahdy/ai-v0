@@ -11,14 +11,12 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.application.decision.DecisionService
-import com.example.application.extension.ExtensionManager
 import com.example.application.orchestration.AgentOrchestrator
 import com.example.application.orchestration.WorkflowEngine
 import com.example.application.radar.IntelligenceRadarPipeline
 import com.example.application.registry.ComponentRegistry
 import com.example.application.security.SecurityGuardService
 import com.example.application.usecases.DecisionSimulationUseCase
-import com.example.application.usecases.ExecuteAgentTaskUseCase
 import com.example.application.usecases.ExecuteWorkflowUseCase
 import com.example.application.workflow.WorkflowLibraryService
 import com.example.application.workflow.WorkflowPersistenceService
@@ -30,15 +28,12 @@ import com.example.domain.core.workflow.ExecutionMode
 import com.example.domain.core.workflow.StepNode
 import com.example.domain.core.workflow.WorkflowId
 import com.example.domain.core.workflow.WorkflowPlan
-import com.example.infrastructure.integration.IntegrationGateway
-import com.example.infrastructure.mcp.McpClient
 import com.example.presentation.state.WorkflowBuilderState
 import com.example.presentation.state.WorkflowBuilderStep
 import com.example.presentation.ui.screens.decision.DecisionScreen
 import com.example.presentation.ui.screens.radar.RadarScreen
 import com.example.presentation.ui.screens.tasks.TasksScreen
 import com.example.presentation.viewmodel.DecisionViewModel
-import com.example.presentation.viewmodel.MainViewModel
 import com.example.presentation.viewmodel.RadarViewModel
 import com.example.presentation.viewmodel.TasksViewModel
 import com.example.presentation.viewmodel.WorkflowsViewModel
@@ -171,11 +166,6 @@ class Slice6ScreensRoborazziMatrixTest {
             val securityGuard = SecurityGuardService()
             val decisionService = DecisionService(CbrMdpEngine(), registry, securityGuard)
             val orchestrator = AgentOrchestrator(registry, securityGuard, decisionService)
-            val extensionManager = ExtensionManager(
-                componentRegistry = registry,
-                mcpClient = McpClient(),
-                integrationGateway = IntegrationGateway()
-            )
             val workspaceService = WorkspaceRuntimeService(
                 workspaceDao = com.example.presentation.viewmodel.FakeWorkspaceDaoForVm(),
                 projectDao = com.example.presentation.viewmodel.FakeProjectDaoForVm(),
@@ -195,11 +185,11 @@ class Slice6ScreensRoborazziMatrixTest {
                 workspaceIdProvider = { workspace.id }
             )
 
-            val mainViewModel = MainViewModel(
-                executeAgentTaskUseCase = ExecuteAgentTaskUseCase(orchestrator),
-                componentRegistry = registry,
-                extensionManager = extensionManager,
-                workspaceRuntimeService = workspaceService
+            // ADR-6 slice 7: the agent catalog composes on the agents
+            // feature VM (its owner) — same light REAL registry.
+            val agentsViewModel = com.example.presentation.viewmodel.AgentsViewModel(
+                agentRegistryService = null,
+                componentRegistry = registry
             )
             val tasksViewModel = TasksViewModel(
                 taskBoardService = com.example.application.orchestration.TaskBoardService(
@@ -256,7 +246,7 @@ class Slice6ScreensRoborazziMatrixTest {
 
             rtl {
                 TasksScreen(
-                    viewModel = mainViewModel,
+                    agentsViewModel = agentsViewModel,
                     tasksViewModel = tasksViewModel,
                     workflowsViewModel = workflowsViewModel,
                     modifier = Modifier.fillMaxSize()

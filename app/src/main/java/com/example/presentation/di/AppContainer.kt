@@ -1973,54 +1973,92 @@ private fun moreRestrictiveAutonomy(
 }
 
 class MainViewModelFactory(
-    private val appContainer: AppContainer,
-    /**
-     * ADR-6 SLICE 2: the per-Activity studio signal bus — MainViewModel
-     * COLLECTS the studio feature's cross-feature projections. Created in
-     * MainActivity, shared with StudioViewModelFactory.
-     */
-    private val studioSignalBus: com.example.presentation.viewmodel.StudioSignalBus? = null
+    private val appContainer: AppContainer
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(MainViewModel::class.java)) {
             return MainViewModel(
-                executeAgentTaskUseCase = appContainer.executeAgentTaskUseCase,
-                componentRegistry = appContainer.componentRegistry,
-                extensionManager = appContainer.extensionManager,
                 workspaceRuntimeService = appContainer.workspaceRuntimeService,
-                // GAP-CLOSURE P1-08/P1-10 — canonical durable agent registry.
-                agentRegistryService = appContainer.agentRegistryService,
-                // Phase 5 — pass the intelligence services for the
-                // Unified Activity Feed.
-                telemetryService = appContainer.telemetryService,
-                telemetryPort = appContainer.telemetryPort,
                 // REPAIR ORDER §3A — observable bootstrap state machine.
                 // GAP-08 (Design Closure 2026, ADR-7): the dead project /
                 // transfer / readiness / repair VM surface was deleted — the
                 // MainViewModel no longer receives those services (the
                 // services themselves remain alive for bootstrap & tests).
-                bootstrapStateProvider = appContainer.workspaceRuntimeService.bootstrapState,
-                // (ADR-6 slice 4) the governance observatory dependency set
-                // (capabilityRadarService, economicGovernanceService,
-                // humanApprovalGate, permissionGrantService,
-                // manageWorkspaceBudgetUseCase, networkMonitor,
-                // localPrincipalId) moved to GovernanceViewModelFactory with
-                // the governance feature extraction.
-                // (ADR-6 slice 5) the provider control-plane dependency set
-                // (providerControlPlaneService + connectProviderUseCase)
-                // moved to ProvidersViewModelFactory with the provider
-                // feature extraction.
-                // (ADR-6 slice 6) the decision (cbrMdpEngine +
-                // decisionSimulationUseCase), radar (intelligenceRadarPipeline)
-                // and workflow (executeWorkflowUseCase +
-                // workflowLibraryService + workflowPersistenceService)
-                // dependency sets moved to DecisionViewModelFactory,
-                // RadarViewModelFactory and WorkflowsViewModelFactory with
-                // their feature extractions.
-                // ADR-6 slice 2 — the studio feature's outbound signal bus
-                // (conversationSessionService + appContext left this factory
-                // with the StudioViewModel extraction).
+                bootstrapStateProvider = appContainer.workspaceRuntimeService.bootstrapState
+                // (ADR-6 slices 2–7) every feature dependency left with its
+                // feature ViewModel: the conversation runtime + session
+                // registry (slice 2), knowledge (3), governance (4),
+                // providers (5), decision/radar/workflows (6) and the agent
+                // catalog / extensions ecosystem / unified activity feed
+                // (7) — see the feature factories below. Two formerly-carried
+                // dependencies were DEAD (declared, never read) and are
+                // deleted outright: executeAgentTaskUseCase + telemetryService.
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 7 (Design Closure 2026 UI-redesign track) — factory for the
+ * AGENTS feature ViewModel: the durable agent catalog + the runtime
+ * registration seam extracted from MainViewModel (same pattern as the
+ * slice-3/4/5/6 factories).
+ */
+class AgentsViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.AgentsViewModel::class.java)) {
+            return com.example.presentation.viewmodel.AgentsViewModel(
+                // GAP-CLOSURE P1-08/P1-10 — the canonical durable registry.
+                agentRegistryService = appContainer.agentRegistryService,
+                // P1-10: create → configure → run (the runtime registration).
+                componentRegistry = appContainer.componentRegistry
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 7 (Design Closure 2026 UI-redesign track) — factory for the
+ * EXTENSIONS feature ViewModel: the MCP + skills + plugins + integrations
+ * control room extracted from MainViewModel (same pattern).
+ */
+class ExtensionsViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.ExtensionsViewModel::class.java)) {
+            return com.example.presentation.viewmodel.ExtensionsViewModel(
+                extensionManager = appContainer.extensionManager
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * ADR-6 slice 7 (Design Closure 2026 UI-redesign track) — factory for the
+ * ACTIVITY feature ViewModel: the unified activity feed (per-execution
+ * trace + workspace-scoped audit events) extracted from MainViewModel.
+ * Receives the per-Activity studio signal bus — the feature COLLECTS the
+ * activity stake (the live execution id) itself (the governance pattern).
+ */
+class ActivityViewModelFactory(
+    private val appContainer: AppContainer,
+    private val studioSignalBus: com.example.presentation.viewmodel.StudioSignalBus? = null
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.ActivityViewModel::class.java)) {
+            return com.example.presentation.viewmodel.ActivityViewModel(
+                telemetryPort = appContainer.telemetryPort,
+                workspaceRuntimeService = appContainer.workspaceRuntimeService,
                 studioSignals = studioSignalBus
             ) as T
         }

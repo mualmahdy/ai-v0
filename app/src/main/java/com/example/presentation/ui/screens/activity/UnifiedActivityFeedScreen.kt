@@ -52,7 +52,7 @@ import com.example.presentation.ui.components.EmptyState
 import com.example.presentation.ui.components.SectionHeader
 import com.example.presentation.ui.components.StatusBadge
 import com.example.presentation.ui.navigation.WorkspaceRoutes
-import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.ActivityViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -69,10 +69,14 @@ import java.util.Locale
  * was deleted with every input path dead, so the filter and its cards
  * showed a fabricated zero forever. The feed is now honest: real trace
  * rows and real audit rows only.
+ *
+ * ADR-6 slice 7: the screen composes on the ACTIVITY feature ViewModel
+ * (its owner — the per-execution trace binding + the workspace-scoped
+ * audit window left the MainViewModel with the extraction).
  */
 @Composable
 fun UnifiedActivityFeedScreen(
-    viewModel: MainViewModel,
+    viewModel: ActivityViewModel,
     onNavigate: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {

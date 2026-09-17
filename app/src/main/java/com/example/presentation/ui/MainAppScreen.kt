@@ -138,6 +138,19 @@ fun MainAppScreen(
     // library + resume) — owned here; the tasks screen composes on it and
     // the explorer's plans row reads its state.
     workflowsViewModel: com.example.presentation.viewmodel.WorkflowsViewModel,
+    // ADR-6 slice 7: the AGENTS feature ViewModel (the durable agent
+    // catalog + the runtime registration seam) — owned here; the Studio
+    // picker, the Tasks builder and the Explorer row compose on it, and
+    // its honest error channel surfaces in the global snackbar.
+    agentsViewModel: com.example.presentation.viewmodel.AgentsViewModel,
+    // ADR-6 slice 7: the EXTENSIONS feature ViewModel (MCP + skills +
+    // plugins + integrations) — owned here; the extensions screen composes
+    // on it and its honest error channel surfaces in the global snackbar.
+    extensionsViewModel: com.example.presentation.viewmodel.ExtensionsViewModel,
+    // ADR-6 slice 7: the ACTIVITY feature ViewModel (the unified activity
+    // feed) — owned here; the activity screen composes on it (it collects
+    // the studio bus's Started stake itself).
+    activityViewModel: com.example.presentation.viewmodel.ActivityViewModel,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -165,6 +178,12 @@ fun MainAppScreen(
     val radarState by radarViewModel.state.collectAsState()
     val decisionState by decisionViewModel.state.collectAsState()
     val workflowsState by workflowsViewModel.state.collectAsState()
+    // ADR-6 SLICE 7: the agents + extensions features' honest error
+    // channels — the same global snackbar surface, each dismissed from its
+    // own source of truth. (The activity feature is read-only flows — no
+    // error channel to surface.)
+    val agentsState by agentsViewModel.state.collectAsState()
+    val extensionsState by extensionsViewModel.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val navController = rememberNavController()
     var createWorkspaceOpen by rememberSaveable { mutableStateOf(false) }
@@ -237,6 +256,24 @@ fun MainAppScreen(
         workflowsState.errorMessage?.let { error ->
             snackbarHostState.showSnackbar(error)
             workflowsViewModel.clearErrorMessage()
+        }
+    }
+
+    // ADR-6 SLICE 7: the agents feature's honest error channel (registry
+    // unavailable, create failures) — same global snackbar.
+    LaunchedEffect(agentsState.errorMessage) {
+        agentsState.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            agentsViewModel.clearErrorMessage()
+        }
+    }
+
+    // ADR-6 SLICE 7: the extensions feature's honest error channel (skill
+    // execution failures) — same global snackbar.
+    LaunchedEffect(extensionsState.errorMessage) {
+        extensionsState.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            extensionsViewModel.clearErrorMessage()
         }
     }
 
@@ -383,6 +420,9 @@ fun MainAppScreen(
                     radarViewModel = radarViewModel,
                     decisionViewModel = decisionViewModel,
                     workflowsViewModel = workflowsViewModel,
+                    agentsViewModel = agentsViewModel,
+                    extensionsViewModel = extensionsViewModel,
+                    activityViewModel = activityViewModel,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -494,6 +534,12 @@ private fun WorkspaceNavHost(
     // ADR-6 slice 5: the providers feature VM — composed into the Providers /
     // Dashboard / Studio / Explorer destinations (owner-VM reads).
     providersViewModel: com.example.presentation.viewmodel.ProvidersViewModel,
+    // ADR-6 slice 7: the agents + extensions + activity feature VMs —
+    // composed into the Studio / Tasks / Explorer (agents), Extensions
+    // (extensions) and Activity (activity) destinations.
+    agentsViewModel: com.example.presentation.viewmodel.AgentsViewModel,
+    extensionsViewModel: com.example.presentation.viewmodel.ExtensionsViewModel,
+    activityViewModel: com.example.presentation.viewmodel.ActivityViewModel,
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
@@ -512,6 +558,9 @@ private fun WorkspaceNavHost(
                 // ADR-6 slice 5: the model picker + the connect-LLM gate read
                 // the providers feature VM — the resource owner.
                 providersViewModel = providersViewModel,
+                // ADR-6 slice 7: the agent catalog (picker + builder +
+                // delete) composes on the agents feature VM — its owner.
+                agentsViewModel = agentsViewModel,
                 onNavigate = navigate,
                 // ADR-6 slice 1: the autonomy mutation routes to the SETTINGS
                 // feature ViewModel (authoritative service routing).
@@ -521,7 +570,10 @@ private fun WorkspaceNavHost(
         }
         composable(WorkspaceRoutes.ACTIVITY) {
             UnifiedActivityFeedScreen(
-                viewModel = viewModel,
+                // ADR-6 slice 7: the unified feed composes on the activity
+                // feature VM — its owner (per-execution trace binding + the
+                // workspace-scoped audit window).
+                viewModel = activityViewModel,
                 onNavigate = navigate,
                 modifier = Modifier.fillMaxSize()
             )
@@ -553,7 +605,10 @@ private fun WorkspaceNavHost(
         }
         composable(WorkspaceRoutes.TASKS) {
             TasksScreen(
-                viewModel = viewModel,
+                // ADR-6 slice 7: the AGENT CATALOG (the step-agent assignment)
+                // composes on the agents feature VM — its owner. The screen's
+                // MainViewModel seam is GONE: every read now has an owner.
+                agentsViewModel = agentsViewModel,
                 tasksViewModel = tasksViewModel,
                 // ADR-6 slice 6: the builder/library/resume surface composes
                 // on the workflows feature VM — its owner.
@@ -585,7 +640,9 @@ private fun WorkspaceNavHost(
         }
         composable(WorkspaceRoutes.EXTENSIONS) {
             ExtensionsScreen(
-                viewModel = viewModel,
+                // ADR-6 slice 7: the extensions screen composes on the
+                // extensions feature VM — its owner.
+                viewModel = extensionsViewModel,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -624,6 +681,11 @@ private fun WorkspaceNavHost(
                 // ADR-6 slice 6: the plans row reads the workflows feature
                 // VM — its owner (same pattern).
                 workflowsViewModel = workflowsViewModel,
+                // ADR-6 slice 7: the agents row + the tools row read the
+                // agents + extensions feature VMs — their owners (same
+                // pattern).
+                agentsViewModel = agentsViewModel,
+                extensionsViewModel = extensionsViewModel,
                 onNavigate = navigate,
                 modifier = Modifier.fillMaxSize()
             )

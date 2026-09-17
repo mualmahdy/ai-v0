@@ -65,7 +65,6 @@ import com.example.domain.core.workflow.WorkflowPlan
 import com.example.presentation.ui.components.DonutChart
 import com.example.presentation.ui.components.SectionHeader
 import com.example.presentation.ui.components.StatusBadge
-import com.example.presentation.viewmodel.MainViewModel
 
 /**
  * ============================================================================
@@ -90,10 +89,10 @@ private data class BuilderStep(
 
 @Composable
 fun TasksScreen(
-    // ADR-6 slice 6: the AGENT CATALOG still reads the MainViewModel (the
-    // studio/catalog seam — the same composition StudioScreen uses), while
-    // the workflow feature composes on its OWN feature VM.
-    viewModel: MainViewModel,
+    // ADR-6 slice 7: the AGENT CATALOG composes on the agents feature VM
+    // (its owner) — the screen's LAST MainViewModel seam is gone; every
+    // read now has an owner (agents + tasks board + workflows).
+    agentsViewModel: com.example.presentation.viewmodel.AgentsViewModel,
     tasksViewModel: com.example.presentation.viewmodel.TasksViewModel? = null,
     // ADR-6 slice 6: the WORKFLOWS feature ViewModel — the plan builder,
     // the durable library and the resume surface left the shared UiState;
@@ -101,7 +100,9 @@ fun TasksScreen(
     workflowsViewModel: com.example.presentation.viewmodel.WorkflowsViewModel,
     modifier: Modifier = Modifier
 ) {
-    val state by viewModel.uiState.collectAsState()
+    // ADR-6 slice 7: the step-agent assignment reads the agents feature's
+    // own flow (availableAgents left the shared UiState with the catalog).
+    val agentsState by agentsViewModel.state.collectAsState()
     val wfState by workflowsViewModel.state.collectAsState()
 
     // WORKFLOW BUILDER STATE LIVES IN THE VIEWMODEL (report gap: the
@@ -289,7 +290,7 @@ fun TasksScreen(
                     index = index,
                     step = step,
                     allSteps = steps,
-                    availableAgents = state.availableAgents,
+                    availableAgents = agentsState.availableAgents,
                     isFirst = index == 0,
                     isLast = index == steps.lastIndex,
                     onDescriptionChange = { text -> updateStep(index) { it.copy(description = text) } },

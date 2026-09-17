@@ -117,6 +117,14 @@ fun StudioScreen(
      * materialized resources left the shared UiState with the extraction).
      */
     providersViewModel: com.example.presentation.viewmodel.ProvidersViewModel,
+    /**
+     * ADR-6 slice 7: the AGENTS feature ViewModel — the agent catalog
+     * (picker + builder + delete + the selection seam) composes on the
+     * feature's own flow (the catalog left the shared UiState with the
+     * extraction). The shell's autonomy-policy DISPLAY mirror stays on the
+     * MainViewModel (its owner — the workspace-scoped display mirror).
+     */
+    agentsViewModel: com.example.presentation.viewmodel.AgentsViewModel,
     onNavigate: (String) -> Unit,
     /**
      * ADR-6 slice 1: the autonomy-policy mutation moved to the SETTINGS
@@ -134,6 +142,9 @@ fun StudioScreen(
     val providersState by providersViewModel.state.collectAsState()
     val studioState by studioViewModel.state.collectAsState()
     val sessionsState by sessionsViewModel.state.collectAsState()
+    // ADR-6 slice 7: the AGENT CATALOG reads the agents feature's own
+    // flow (availableAgents / activeAgent left the shared UiState).
+    val agentsState by agentsViewModel.state.collectAsState()
     val clipboard = LocalClipboardManager.current
     val listState = rememberLazyListState()
 
@@ -182,7 +193,7 @@ fun StudioScreen(
                     onModeChange = studioViewModel::setChatMode,
                     onOpenSessions = { sessionsViewModel.setSessionBrowserOpen(true) },
                     onNewSession = {
-                        studioViewModel.startNewSession(agent = state.activeAgent)
+                        studioViewModel.startNewSession(agent = agentsState.activeAgent)
                         sessionsViewModel.setSessionBrowserOpen(false)
                     },
                     activeSessionTitle = sessionsState.sessions
@@ -217,16 +228,16 @@ fun StudioScreen(
                 ChatMode.AGENT -> {
                     item {
                         AgentCatalogRow(
-                            agents = state.availableAgents,
-                            activeAgentId = state.activeAgent?.identity?.id?.value,
-                            onSelect = viewModel::selectAgent,
+                            agents = agentsState.availableAgents,
+                            activeAgentId = agentsState.activeAgent?.identity?.id?.value,
+                            onSelect = agentsViewModel::selectAgent,
                             onDeleteRequest = { deleteAgentTarget = it },
                             onBuildAgent = { agentBuilderOpen = true }
                         )
                     }
 
                     // ---- Active agent card ----
-                    state.activeAgent?.let { agent ->
+                    agentsState.activeAgent?.let { agent ->
                         item { ActiveAgentCard(agent) }
                     }
                 }
@@ -244,7 +255,7 @@ fun StudioScreen(
             // ---- Session transcript ----
             if (studioState.studioSession.isEmpty() && !studioState.isExecuting) {
                 item {
-                    SessionIntroCard(agentName = state.activeAgent?.identity?.name ?: "الوكيل")
+                    SessionIntroCard(agentName = agentsState.activeAgent?.identity?.name ?: "الوكيل")
                 }
             } else {
                 items(studioState.studioSession, key = { it.id }) { turn ->
@@ -273,7 +284,7 @@ fun StudioScreen(
             value = studioState.promptInput,
             isExecuting = studioState.isExecuting,
             onValueChange = studioViewModel::updatePromptInput,
-            onExecute = { studioViewModel.executePrompt(agent = state.activeAgent) },
+            onExecute = { studioViewModel.executePrompt(agent = agentsState.activeAgent) },
             onCancel = studioViewModel::cancelExecution,
             onClearSession = studioViewModel::clearStudioSession,
             hasSession = studioState.studioSession.isNotEmpty()
@@ -296,7 +307,7 @@ fun StudioScreen(
                 }
             },
             onNewSession = {
-                studioViewModel.startNewSession(agent = state.activeAgent)
+                studioViewModel.startNewSession(agent = agentsState.activeAgent)
                 sessionsViewModel.setSessionBrowserOpen(false)
             },
             onDismiss = { sessionsViewModel.setSessionBrowserOpen(false) }
@@ -307,7 +318,7 @@ fun StudioScreen(
     if (agentBuilderOpen) {
         AgentBuilderDialog(
             onConfirm = { name, role, description, systemPrompt, capabilities ->
-                viewModel.createAgent(
+                agentsViewModel.createAgent(
                     name = name,
                     role = role,
                     description = description,
@@ -326,7 +337,7 @@ fun StudioScreen(
 
     // ---- Delete-agent confirmation ----
     deleteAgentTarget?.let { targetId ->
-        val agentName = state.availableAgents.firstOrNull {
+        val agentName = agentsState.availableAgents.firstOrNull {
             it.identity.id.value == targetId
         }?.identity?.name ?: ""
         com.example.presentation.ui.components.ConfirmDialog(
@@ -334,7 +345,7 @@ fun StudioScreen(
             message = "سيُحذف الوكيل «$agentName» من السجل الدائم نهائياً. هل تريد المتابعة؟",
             confirmLabel = "حذف",
             onConfirm = {
-                viewModel.deleteAgent(targetId)
+                agentsViewModel.deleteAgent(targetId)
                 deleteAgentTarget = null
             },
             onDismiss = { deleteAgentTarget = null }

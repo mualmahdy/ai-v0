@@ -54,7 +54,7 @@ import com.example.domain.core.extension.SkillState
 import com.example.presentation.ui.components.EmptyState
 import com.example.presentation.ui.components.SectionHeader
 import com.example.presentation.ui.components.StatusBadge
-import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.ExtensionsViewModel
 
 /**
  * ============================================================================
@@ -65,21 +65,56 @@ import com.example.presentation.viewmodel.MainViewModel
  * real control: PING an MCP server (health check + tool discovery), RUN an
  * executable skill with its parameters, CONNECT an integration with a token,
  * register new MCP servers — plus the honest enable/disable toggles.
+ *
+ * ADR-6 slice 7: the screen composes on the EXTENSIONS feature ViewModel
+ * (its owner — the four ecosystem lists + the seven operations left the
+ * shared UiState with the extraction), with a local dismissible diagnostic
+ * banner for the direct skill-execution results (the slice-3/4 pattern).
  */
 @Composable
 fun ExtensionsScreen(
-    viewModel: MainViewModel,
+    viewModel: ExtensionsViewModel,
     modifier: Modifier = Modifier
 ) {
-    val state by viewModel.uiState.collectAsState()
+    val state by viewModel.state.collectAsState()
     var addMcpOpen by rememberSaveable { mutableStateOf(false) }
     var runSkillTarget by rememberSaveable { mutableStateOf<String?>(null) }
     var connectIntegrationTarget by rememberSaveable { mutableStateOf<String?>(null) }
 
-    LazyColumn(
-        modifier = modifier.testTag("screen_extensions"),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
+    Column(modifier = modifier) {
+        // ADR-6 slice 7: the feature's own transient diagnostic banner
+        // (skill-execution results) — the slice-3/4 local-banner pattern.
+        state.diagnosticBanner?.let { banner ->
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = banner,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = viewModel::dismissDiagnosticBanner) {
+                        Text("إخفاء")
+                    }
+                }
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .testTag("screen_extensions"),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
         // ===================== MCP =====================
         item {
             SectionHeader(
@@ -390,6 +425,7 @@ fun ExtensionsScreen(
         }
 
         item { Spacer(modifier = Modifier.height(12.dp)) }
+        }
     }
 
     // ---- Add MCP dialog ----

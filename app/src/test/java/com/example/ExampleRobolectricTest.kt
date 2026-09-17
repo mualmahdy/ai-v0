@@ -26,7 +26,15 @@ class ExampleRobolectricTest {
     val factory = com.example.presentation.di.MainViewModelFactory(container)
     val viewModel = factory.create(com.example.presentation.viewmodel.MainViewModel::class.java)
 
-    org.junit.Assert.assertNotNull(viewModel.uiState.value.activeAgent)
-    org.junit.Assert.assertTrue(viewModel.uiState.value.availableAgents.isNotEmpty())
+    // (ADR-6 slice 7) MainViewModel is the honest APP SHELL now: the agent
+    // catalog lives in AgentsViewModel (its owner). The shell's bootstrap
+    // gate state is what this construction honestly carries.
+    org.junit.Assert.assertNotNull(viewModel.uiState.value.bootstrapPhase)
+    org.junit.Assert.assertNull(viewModel.uiState.value.bootstrapFailureMessage)
+    // The feature factories construct over the same real container.
+    val agentsFactory = com.example.presentation.di.AgentsViewModelFactory(container)
+    val agentsViewModel = agentsFactory.create(com.example.presentation.viewmodel.AgentsViewModel::class.java)
+    org.junit.Assert.assertNotNull(agentsViewModel.state.value.activeAgent)
+    org.junit.Assert.assertTrue(agentsViewModel.state.value.availableAgents.isNotEmpty())
   }
 }

@@ -1,11 +1,6 @@
 package com.example.presentation.state
 
 import com.example.domain.core.DegradedReason
-import com.example.domain.core.agent.AgentDefinition
-import com.example.domain.core.extension.IntegrationDescriptor
-import com.example.domain.core.extension.McpServerDescriptor
-import com.example.domain.core.extension.PluginManifest
-import com.example.domain.core.extension.SkillManifest
 import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.workflow.ExecutionMode
@@ -90,8 +85,12 @@ data class ExecutionStepItem(
  */
 data class UiState(
     val activeProject: ProjectMetadata? = null,
-    val activeAgent: AgentDefinition? = null,
-    val availableAgents: List<AgentDefinition> = emptyList(),
+    // AGENT CATALOG — REMOVED (ADR-6 slice 7, Design Closure 2026
+    // UI-redesign track): availableAgents / activeAgent now live in
+    // AgentsViewModel's own AgentsUiState (the durable-registry authority
+    // + the runtime registration seam). The Studio picker, the Tasks
+    // builder's step-agent assignment and the Explorer's agents row read
+    // the feature VM's own flow (owner-VM composition).
     // ------------------------------------------------------------------
     // ADR-6 SLICE 2 (Design Closure 2026 UI-redesign track): the ENTIRE
     // conversation-runtime block moved to StudioViewModel's own
@@ -154,11 +153,11 @@ data class UiState(
     // live in GovernanceViewModel's own GovernanceUiState. The governance
     // screen renders from the feature VM (its owner).
 
-    // Extensions & Ecosystem
-    val skills: List<SkillManifest> = emptyList(),
-    val plugins: List<PluginManifest> = emptyList(),
-    val mcpServers: List<McpServerDescriptor> = emptyList(),
-    val integrations: List<IntegrationDescriptor> = emptyList(),
+    // EXTENSIONS & ECOSYSTEM — REMOVED (ADR-6 slice 7, Design Closure 2026
+    // UI-redesign track): skills / plugins / mcpServers / integrations now
+    // live in ExtensionsViewModel's own ExtensionsUiState (the
+    // Room-backed extension control room). The extensions screen composes
+    // on the feature VM and the Explorer's tools row reads its own flow.
 
     // Provider & Resource Control Plane — REMOVED (ADR-6 slice 5, Design
     // Closure 2026 UI-redesign track): generalizedProviders /

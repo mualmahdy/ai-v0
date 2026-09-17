@@ -14,6 +14,9 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.unit.LayoutDirection
 import com.example.presentation.di.AppContainer
+import com.example.presentation.di.ActivityViewModelFactory
+import com.example.presentation.di.AgentsViewModelFactory
+import com.example.presentation.di.ExtensionsViewModelFactory
 import com.example.presentation.di.FilesViewModelFactory
 import com.example.presentation.di.GovernanceViewModelFactory
 import com.example.presentation.di.KnowledgeViewModelFactory
@@ -27,6 +30,9 @@ import com.example.presentation.di.StudioViewModelFactory
 import com.example.presentation.di.TasksViewModelFactory
 import com.example.presentation.di.WorkflowsViewModelFactory
 import com.example.presentation.ui.MainAppScreen
+import com.example.presentation.viewmodel.ActivityViewModel
+import com.example.presentation.viewmodel.AgentsViewModel
+import com.example.presentation.viewmodel.ExtensionsViewModel
 import com.example.presentation.viewmodel.FilesViewModel
 import com.example.presentation.viewmodel.GovernanceViewModel
 import com.example.presentation.viewmodel.KnowledgeViewModel
@@ -50,7 +56,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val viewModel: MainViewModel by viewModels {
-        MainViewModelFactory(appContainer, studioSignalBus)
+        MainViewModelFactory(appContainer)
     }
 
     // GAP-11 (Design Closure 2026): the tasks feature ViewModel — the
@@ -137,6 +143,30 @@ class MainActivity : ComponentActivity() {
         WorkflowsViewModelFactory(appContainer)
     }
 
+    // ADR-6 slice 7 (Design Closure 2026 UI-redesign track): the AGENTS
+    // feature ViewModel — the durable agent catalog + the runtime
+    // registration seam left the MainViewModel (same freeze rule). The
+    // Studio picker, the Tasks builder and the Explorer row compose on it.
+    private val agentsViewModel: AgentsViewModel by viewModels {
+        AgentsViewModelFactory(appContainer)
+    }
+
+    // ADR-6 slice 7 (Design Closure 2026 UI-redesign track): the
+    // EXTENSIONS feature ViewModel — the MCP + skills + plugins +
+    // integrations control room left the MainViewModel (same freeze rule).
+    private val extensionsViewModel: ExtensionsViewModel by viewModels {
+        ExtensionsViewModelFactory(appContainer)
+    }
+
+    // ADR-6 slice 7 (Design Closure 2026 UI-redesign track): the ACTIVITY
+    // feature ViewModel — the unified activity feed (per-execution trace +
+    // workspace-scoped audit events) left the MainViewModel (same freeze
+    // rule). It COLLECTS the activity stake of the studio signal bus itself
+    // (the live execution id — the governance pattern).
+    private val activityViewModel: ActivityViewModel by viewModels {
+        ActivityViewModelFactory(appContainer, studioSignalBus)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -173,7 +203,10 @@ class MainActivity : ComponentActivity() {
                             providersViewModel = providersViewModel,
                             radarViewModel = radarViewModel,
                             decisionViewModel = decisionViewModel,
-                            workflowsViewModel = workflowsViewModel
+                            workflowsViewModel = workflowsViewModel,
+                            agentsViewModel = agentsViewModel,
+                            extensionsViewModel = extensionsViewModel,
+                            activityViewModel = activityViewModel
                         )
                     }
                 }

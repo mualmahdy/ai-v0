@@ -83,6 +83,12 @@ fun WorkspaceExplorerScreen(
     // the resumable subtitle) — read from the workflows feature VM, its
     // owner (same pattern as the files/sessions/knowledge/providers rows).
     workflowsViewModel: com.example.presentation.viewmodel.WorkflowsViewModel,
+    // ADR-6 slice 7: the agents feature state (the agents row count + the
+    // active-agent subtitle) — read from the agents feature VM, its owner.
+    agentsViewModel: com.example.presentation.viewmodel.AgentsViewModel,
+    // ADR-6 slice 7: the extensions feature state (the tools row counts) —
+    // read from the extensions feature VM, its owner.
+    extensionsViewModel: com.example.presentation.viewmodel.ExtensionsViewModel,
     onNavigate: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -92,6 +98,10 @@ fun WorkspaceExplorerScreen(
     val sessionsState by sessionsViewModel.state.collectAsState()
     val knowledgeState by knowledgeViewModel.state.collectAsState()
     val workflowsState by workflowsViewModel.state.collectAsState()
+    // ADR-6 slice 7: the agents + extensions features' own flows (the
+    // catalog + ecosystem lists left the shared UiState).
+    val agentsState by agentsViewModel.state.collectAsState()
+    val extensionsState by extensionsViewModel.state.collectAsState()
 
     Column(
         modifier = modifier
@@ -125,9 +135,9 @@ fun WorkspaceExplorerScreen(
         ExplorerRow(
             icon = Icons.Default.Psychology,
             title = "الوكلاء",
-            count = state.availableAgents.size,
+            count = agentsState.availableAgents.size,
             countLabel = "وكيل",
-            subtitle = "في السجل الدائم (نشط: ${state.activeAgent?.identity?.name ?: "—"})",
+            subtitle = "في السجل الدائم (نشط: ${agentsState.activeAgent?.identity?.name ?: "—"})",
             route = WorkspaceRoutes.STUDIO,
             onNavigate = onNavigate,
             testTag = "explorer_agents"
@@ -159,9 +169,9 @@ fun WorkspaceExplorerScreen(
         ExplorerRow(
             icon = Icons.Default.Extension,
             title = "الأدوات و MCP والمهارات",
-            count = state.mcpServers.size + state.skills.size + state.plugins.size,
+            count = extensionsState.mcpServers.size + extensionsState.skills.size + extensionsState.plugins.size,
             countLabel = "عنصر",
-            subtitle = "${state.mcpServers.size} خادم MCP • ${state.skills.size} مهارة • ${state.plugins.size} إضافة",
+            subtitle = "${extensionsState.mcpServers.size} خادم MCP • ${extensionsState.skills.size} مهارة • ${extensionsState.plugins.size} إضافة",
             route = WorkspaceRoutes.EXTENSIONS,
             onNavigate = onNavigate,
             testTag = "explorer_extensions"
