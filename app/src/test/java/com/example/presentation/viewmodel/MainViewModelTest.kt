@@ -73,6 +73,12 @@ class MainViewModelTest {
     private lateinit var baseDir: File
     private lateinit var viewModel: MainViewModel
 
+    // TEST-side determinism (the slice-8 CI follow-up): every service the
+    // suite constructs gets its scope tracked here so tearDown can cancel
+    // the service's STANDING collectors before the Room pool closes (the
+    // 'connection pool has been closed' uncaught-exception family).
+    private var serviceScope: CoroutineScope? = null
+
     @Before
     fun setUp() {
         Dispatchers.setMain(dispatcher)
@@ -81,8 +87,12 @@ class MainViewModelTest {
     @After
     fun tearDown() {
         // TEST-side determinism (the slice-7 CI failure family, documented):
-        // cancel the shell VM's standing collectors BEFORE closing the DB.
+        // cancel the shell VM's standing collectors BEFORE closing the DB —
+        // and the injected SERVICE scope as well: the service holds its own
+        // standing Room collectors, and closing the DB under them is the
+        // slice-7 matrix failure's 'connection pool has been closed' family.
         if (this::viewModel.isInitialized) viewModel.viewModelScope.cancel()
+        serviceScope?.cancel()
         if (this::db.isInitialized) db.close()
         if (this::baseDir.isInitialized) baseDir.deleteRecursively()
         Dispatchers.resetMain()
@@ -119,11 +129,12 @@ class MainViewModelTest {
             database = db,
             projectRootResolver = { id -> File(baseDir, "proj_$id") }
         )
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined).also { serviceScope = it }
         val service = WorkspaceRuntimeService(
             workspaceDao = db.workspaceDao(),
             projectDao = db.projectDao(),
             bootstrapOrchestrator = orchestrator,
-            coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            coroutineScope = scope
         )
         viewModel = MainViewModel(
             workspaceRuntimeService = service,
@@ -149,10 +160,11 @@ class MainViewModelTest {
         // Legacy wiring (no orchestrator): the service itself is inert here;
         // the VM's contract is to mirror the single startup truth it is
         // given — the AppContainer seam, injected as in production.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined).also { serviceScope = it }
         val service = WorkspaceRuntimeService(
             workspaceDao = FakeWorkspaceDaoForVm(),
             projectDao = FakeProjectDaoForVm(),
-            coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            coroutineScope = scope
         )
         val provider = MutableStateFlow(BootstrapState.BOOTSTRAPPING)
         viewModel = MainViewModel(
@@ -173,10 +185,11 @@ class MainViewModelTest {
 
     @Test
     fun `the gate clears through the SAME flow when the state machine recovers`() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined).also { serviceScope = it }
         val service = WorkspaceRuntimeService(
             workspaceDao = FakeWorkspaceDaoForVm(),
             projectDao = FakeProjectDaoForVm(),
-            coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            coroutineScope = scope
         )
         val provider = MutableStateFlow(BootstrapState.BOOTSTRAPPING)
         viewModel = MainViewModel(
@@ -233,6 +246,18 @@ class MainViewModelTest {
     fun `the autonomy display mirror follows the persisted column across a re-scope`() {
         val service = newRealStack()
         awaitUntil { viewModel.uiState.value.bootstrapPhase == "READY" }
+        // TEST-side determinism (the slice-8 CI failure — c164c36's android.yml
+        // 'Unit tests' step, reproduced locally under the exact CI flags): the
+        // gate's READY phase and the service's active-workspace landing are
+        // TWO SEPARATE landings — the bootstrap state machine completes
+        // independently of the service's Room read that populates
+        // activeWorkspace, and nothing orders one before the other on the real
+        // dispatchers. Awaiting only the ADJACENT gate phase can read the
+        // service flow inside that gap (the CI NullPointerException on this
+        // exact line; green in isolation, red under full-suite load). Await
+        // the ACTUAL prerequisite — the documented
+        // await-the-SPECIFIC-terminal-signal family.
+        awaitUntil { service.activeWorkspace.value != null }
         val firstId = service.activeWorkspace.value!!.id
 
         // Mutate the persisted column out-of-band (the Settings surface's
@@ -261,10 +286,11 @@ class MainViewModelTest {
         // FIX R-5 (audit c03919d): an unhandled exception in this init-path
         // collector previously CRASHED the app. The honest contract: the
         // failure lands in the shell's error channel (the global snackbar).
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined).also { serviceScope = it }
         val service = WorkspaceRuntimeService(
             workspaceDao = ExplodingAutonomyDaoForShell(),
             projectDao = FakeProjectDaoForVm(),
-            coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            coroutineScope = scope
         )
         Thread.sleep(100) // let the legacy default-workspace bootstrap settle
         viewModel = MainViewModel(workspaceRuntimeService = service)
