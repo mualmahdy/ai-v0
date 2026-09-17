@@ -374,14 +374,12 @@ fun MainAppScreen(
                 .padding(innerPadding)
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Global honest diagnostic surface (degradation / results info).
-                state.diagnosticBanner?.let { banner ->
-                    DismissibleInfoBanner(
-                        message = banner,
-                        isDegraded = state.isDegraded,
-                        onDismiss = { viewModel.dismissDiagnosticBanner() }
-                    )
-                }
+                // ADR-6 SLICE 8 (D-13): the shell's own diagnostic-banner
+                // block was REMOVED — its UiState channel had no writer
+                // since the slice-2 extraction (a rendering surface that
+                // could never render anything). The FEATURE banners below
+                // are the real surfaces (each with its own writer + own
+                // dismiss); the shell keeps only the global error snackbar.
 
                 // ADR-6 SLICE 2: the STUDIO feature's own diagnostic banner
                 // (execution degradation, durable-turn persistence failures,

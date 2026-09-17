@@ -8,6 +8,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.application.decision.DecisionService
@@ -43,6 +44,7 @@ import com.github.takahirom.roborazzi.captureRoboImage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.junit.Rule
 import org.junit.Test
@@ -166,10 +168,11 @@ class Slice6ScreensRoborazziMatrixTest {
             val securityGuard = SecurityGuardService()
             val decisionService = DecisionService(CbrMdpEngine(), registry, securityGuard)
             val orchestrator = AgentOrchestrator(registry, securityGuard, decisionService)
+            val workspaceScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
             val workspaceService = WorkspaceRuntimeService(
                 workspaceDao = com.example.presentation.viewmodel.FakeWorkspaceDaoForVm(),
                 projectDao = com.example.presentation.viewmodel.FakeProjectDaoForVm(),
-                coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+                coroutineScope = workspaceScope
             )
             Thread.sleep(100) // let the default bootstrap settle
             val workspace = workspaceService.createWorkspace("مساحة اللقطة", "roborazzi")
@@ -256,6 +259,15 @@ class Slice6ScreensRoborazziMatrixTest {
             composeTestRule.waitUntil(5_000) { workflowsViewModel.state.value.resumableWorkflows.isNotEmpty() }
             composeTestRule.waitForIdle()
             composeTestRule.onRoot().captureRoboImage(filePath = "$screenshotDir/tasks_builder_console.png")
+            // Deterministic teardown (the slice-7 CI failure family): stop
+            // the feature VMs' standing collectors (the workflows library
+            // relay is a STANDING Room flow) and the service scope BEFORE
+            // the pool closes — a pending Room query step under a closed
+            // pool throws an uncaught "connection pool has been closed".
+            workflowsViewModel.viewModelScope.cancel()
+            tasksViewModel.viewModelScope.cancel()
+            agentsViewModel.viewModelScope.cancel()
+            workspaceScope.cancel()
         } finally {
             db.close()
         }

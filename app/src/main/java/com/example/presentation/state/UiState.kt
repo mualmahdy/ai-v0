@@ -1,6 +1,5 @@
 package com.example.presentation.state
 
-import com.example.domain.core.DegradedReason
 import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.workflow.ExecutionMode
@@ -99,9 +98,18 @@ data class UiState(
     // SLICE 6: DecisionViewModel collects its own share of the studio
     // signal bus (see DecisionViewModel.observeStudioSignals).
     // ------------------------------------------------------------------
-    val isDegraded: Boolean = false,
-    val degradedReason: DegradedReason? = null,
-    val diagnosticBanner: String? = null,
+    // SHELL DEGRADATION MIRROR + SHELL BANNER — REMOVED (ADR-6 slice 8,
+    // Design Closure 2026 UI-redesign track — the track's final cleanup,
+    // D-13): isDegraded / degradedReason had NO WRITER since the slice-2
+    // extraction (the only reader styled a banner whose degradation leg
+    // was permanently false), and diagnosticBanner itself had NO WRITER
+    // either (only its dismiss function existed — the shell banner block
+    // in MainAppScreen could never render anything). Degradation display
+    // lives where it is REAL: the Studio feature's own execution-
+    // degradation banner, the workflow report's DEGRADED outcome row and
+    // the durable execution rows. If a shell-scope diagnostic ever gains
+    // a real source, it gets a real channel — never a writerless hook.
+    // ------------------------------------------------------------------
     /**
      * ADR-6 SLICE 6 — the session network-policy DISPLAY MIRROR left the
      * shared UiState with the decision feature (its only consumer): the

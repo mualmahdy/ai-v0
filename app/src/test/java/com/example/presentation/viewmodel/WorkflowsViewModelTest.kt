@@ -1,6 +1,7 @@
 package com.example.presentation.viewmodel
 
 import android.content.Context
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.application.decision.DecisionService
@@ -33,6 +34,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -183,6 +185,15 @@ class WorkflowsViewModelTest {
 
     @After
     fun tearDown() {
+        // TEST-side determinism fix (the slice-7 CI failure family,
+        // documented): the feature VM's library collector is a STANDING
+        // Room flow (workflowDefinitionDao.forWorkspace relayed through
+        // flatMapLatest); closing the DB underneath a pending query step
+        // throws "connection pool has been closed" as an uncaught
+        // exception that the framework attributes to whichever test runs
+        // next. Cancel the scope FIRST — the test-side equivalent of
+        // onCleared() — then close the DB.
+        if (::viewModel.isInitialized) viewModel.viewModelScope.cancel()
         db.close()
         Dispatchers.resetMain()
     }
@@ -263,6 +274,14 @@ class WorkflowsViewModelTest {
         assertNotNull(viewModel.state.value.workflowBuilder.editingDefinitionId)
 
         // Edit-again lineage: mutate + re-save bumps the same definition.
+        // (TEST-side race fix — the documented await-the-SPECIFIC-terminal-
+        // signal family: the FIRST save's banner is still up, so awaiting
+        // "!= null" here passes VACUOUSLY and proves nothing about the
+        // re-save; the load below could then read the pre-save row and
+        // never see the edited goal. Dismiss first, so the awaited banner
+        // can only be the re-save's terminal signal.)
+        viewModel.dismissDiagnosticBanner()
+        assertNull(viewModel.state.value.diagnosticBanner)
         viewModel.updateWorkflowGoal("هدف معدّل")
         viewModel.saveWorkflowDefinition()
         awaitUntil { viewModel.state.value.diagnosticBanner != null }
@@ -417,6 +436,10 @@ class WorkflowsViewModelTest {
         lateViewModel.resumeWorkflow("wf_resumable")
         awaitUntil { lateViewModel.state.value.workflowReport != null }
         assertTrue(lateViewModel.state.value.workflowReport!!.overallOutcome is Outcome.Success)
+        // (TEST-side determinism: this locally-constructed VM's standing
+        // library collector outlives the method — cancelled here so the
+        // class teardown's db.close() cannot race a pending Room query.)
+        lateViewModel.viewModelScope.cancel()
     }
 
     @Test

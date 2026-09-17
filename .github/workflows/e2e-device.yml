@@ -24,8 +24,26 @@ jobs:
           java-version: '21'
           cache: 'gradle'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # FIX (Design Closure 2026 — slice 8): android-actions/setup-android@v3
+      # began failing on the CURRENT ubuntu-latest runner image (the job
+      # died at this very step on every push since slice 5 — runs for
+      # 2429fb8 / 8695369 / a291d22 all show "Set up Android SDK -> failure"
+      # with the instrumentation steps SKIPPED: the suite never executed,
+      # so even the honest GAP-22 scope claim below was unverifiable).
+      # The runner image ALREADY ships the Android SDK at ANDROID_HOME with
+      # cmdline-tools — the action only ever added license acceptance on
+      # top of that. We now accept the licenses directly on the
+      # pre-installed SDK and let android-emulator-runner provision the
+      # API-34 system image it needs (its documented behavior).
+      - name: Accept Android SDK licenses (pre-installed runner SDK)
+        run: |
+          SDKMANAGER="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found at $SDKMANAGER — the runner image changed."
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --version
 
       - name: Prepare environment
         run: |

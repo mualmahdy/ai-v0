@@ -65,6 +65,62 @@ this topology is contractual.
 
 ---
 
+## D-12 — i18n at UI-redesign track closure: Arabic-only stands; string extraction is the PREREQUISITE for any language expansion (GAP-20 / ADR-6 slice 8)
+
+**Decision (2026-09, ADR-6 slice 8 — the track-closure verdict the
+next-slices table deferred to):** the product stays **Arabic-only with
+inline literals** — D-1's substance is unchanged and now CONFIRMED as the
+deliberate end-state of the seven-slice UI-redesign track, not a temporary
+stopgap. The track deliberately introduced **zero** `stringResource()`
+migration: no NEW screens were created (every slice re-architected an
+EXISTING screen onto its feature ViewModel), and D-1's "new screens adopt
+resources from day one" clause was therefore never triggered. Mixing a
+~600-literal resource extraction into slices whose own rule was
+verbatim-move-plus-display-honesty-repairs-only would have been exactly the
+churn-without-user-value D-1 predicted, with real regression risk on every
+redesigned surface.
+
+**The standing rule going forward:** any language expansion — a second
+locale, per-app language selection, unpinning RTL — REQUIRES the string
+extraction as a PREREQUISITE, done screen-by-screen. The track made that
+migration tractable: every screen now has exactly ONE owning feature
+ViewModel whose GAP-21 behavioral suite pins its behavior, so a
+screen-scoped extraction can be verified per screen instead of as one
+unverifiable global churn.
+
+**Reopen when:** a concrete second-language requirement exists; or the
+D-11 Studio-transcript redesign lands and touches the remaining inline
+literals anyway.
+
+---
+
+## D-13 — the app shell keeps NO writerless display state: UiState.isDegraded / degradedReason / diagnosticBanner REMOVED (GAP-23 family / ADR-6 slice 8)
+
+**Decision (2026-09, ADR-6 slice 8 — the latent-shell-mirror verdict the
+slice-7 delivery deferred to):** the three shell fields are DELETED, not
+wired. `isDegraded` / `degradedReason` had NO WRITER since the slice-2
+extraction (their only reader styled a banner leg that was permanently
+false), and `diagnosticBanner` itself had NO WRITER either — the shell's
+banner block in MainAppScreen could never render anything, and its dismiss
+function dismissed a channel nobody wrote.
+
+**Why delete rather than write them:** there is NO honest shell-scope
+degradation source. The shell owns the bootstrap gate (which has its own
+explicit full-screen failure surface) and display mirrors; real
+degradation display already lives in the features that own real sources —
+the Studio feature's execution-degradation banner, the workflow report's
+DEGRADED outcome row, and the durable execution rows. Fabricating a
+shell-level writer (e.g. OR-ing feature degradations into the shell) would
+re-introduce exactly the shared-mutable-state coupling the seven slices
+removed, to style a banner that today renders nothing.
+
+**Reopen when:** a genuinely shell-scoped diagnostic gains a real source
+(e.g. a global resource-pressure or connectivity authority) — then it gets
+a REAL channel with a REAL writer, never a writerless hook resurrected from
+version control.
+
+---
+
 ## D-2 — Audit truth: two tables, two documented mandates, ONE unified reader (GAP-24 / ADR-8 option ج)
 
 **Decision (2026-09):** keep BOTH audit tables with EXPLICIT, distinct

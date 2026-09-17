@@ -8,6 +8,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.application.extension.ExtensionManager
@@ -30,6 +31,7 @@ import com.github.takahirom.roborazzi.captureRoboImage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.Rule
@@ -93,12 +95,13 @@ class Slice7ScreensRoborazziMatrixTest {
             .allowMainThreadQueries()
             .build()
         try {
+            val managerScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
             val manager = ExtensionManager(
                 componentRegistry = ComponentRegistry(),
                 mcpClient = McpClient(),
                 integrationGateway = IntegrationGateway(),
                 extensionConfigDao = db.extensionConfigDao(),
-                coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+                coroutineScope = managerScope
             )
             // Seed the richest honest state: a REGISTERED MCP server (the
             // honest UNKNOWN health — no fabricated discovery) and one
@@ -121,6 +124,14 @@ class Slice7ScreensRoborazziMatrixTest {
             }
             composeTestRule.waitForIdle()
             composeTestRule.onRoot().captureRoboImage(filePath = "$screenshotDir/extensions_loaded.png")
+            // Deterministic teardown (the slice-7 CI failure family): stop
+            // the VM's standing collectors and the manager's scope BEFORE
+            // the pool closes — a pending Room query step under a closed
+            // pool throws an uncaught "connection pool has been closed"
+            // that the compose test environment attributes to a later
+            // test (the actual CI failure).
+            viewModel.viewModelScope.cancel()
+            managerScope.cancel()
         } finally {
             db.close()
         }
@@ -137,18 +148,20 @@ class Slice7ScreensRoborazziMatrixTest {
             .allowMainThreadQueries()
             .build()
         try {
+            val telemetryScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
             val telemetry = RoomTelemetryRepository(
                 metricEventDao = db.metricEventDao(),
                 auditTrailDao = db.auditTrailDao(),
                 executionTraceDao = db.executionTraceDao(),
                 executionLogDao = db.executionLogDao(),
                 auditEventDao = db.auditEventDao(),
-                writeScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+                writeScope = telemetryScope
             )
+            val workspaceScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
             val workspaceService = WorkspaceRuntimeService(
                 workspaceDao = com.example.presentation.viewmodel.FakeWorkspaceDaoForVm(),
                 projectDao = com.example.presentation.viewmodel.FakeProjectDaoForVm(),
-                coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+                coroutineScope = workspaceScope
             )
             Thread.sleep(100) // let the default bootstrap settle
             val bus = MutableSharedFlow<com.example.presentation.viewmodel.StudioSignal>(extraBufferCapacity = 256)
@@ -236,6 +249,16 @@ class Slice7ScreensRoborazziMatrixTest {
             }
             composeTestRule.waitForIdle()
             composeTestRule.onRoot().captureRoboImage(filePath = "$screenshotDir/activity_loaded.png")
+            // Deterministic teardown (the slice-7 CI failure family, the
+            // ACTUAL CI repro): the Started-driven re-subscription leaves
+            // forExecution("exec_shot") freshly collecting when the test
+            // body ends; closing the pool underneath that pending query
+            // step threw the uncaught "connection pool has been closed".
+            // Cancel the VM's scope (the test-side onCleared()) and the
+            // service scopes FIRST, then close the DB.
+            viewModel.viewModelScope.cancel()
+            telemetryScope.cancel()
+            workspaceScope.cancel()
         } finally {
             db.close()
         }

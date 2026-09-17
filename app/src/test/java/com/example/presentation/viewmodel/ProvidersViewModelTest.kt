@@ -1,6 +1,7 @@
 package com.example.presentation.viewmodel
 
 import android.content.Context
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.application.provider.ProviderControlPlaneService
@@ -24,6 +25,7 @@ import com.example.infrastructure.security.EncryptedSecretStorageAdapter
 import com.example.infrastructure.validation.defaultResourceValidatorRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -123,6 +125,14 @@ class ProvidersViewModelTest {
 
     @After
     fun tearDown() {
+        // TEST-side determinism fix (the slice-7 CI failure family,
+        // documented): each feature VM holds FOUR standing Room-flow
+        // collectors (the control plane relays the repositories' observe
+        // flows directly); closing the DB underneath a pending query step
+        // throws an uncaught "connection pool has been closed". Cancel
+        // both scopes FIRST (the test-side onCleared()), then close.
+        if (::viewModel.isInitialized) viewModel.viewModelScope.cancel()
+        if (::viewModelFakeVault.isInitialized) viewModelFakeVault.viewModelScope.cancel()
         db.close()
         Dispatchers.resetMain()
     }

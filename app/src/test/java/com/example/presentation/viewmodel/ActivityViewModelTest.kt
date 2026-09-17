@@ -6,10 +6,12 @@ import com.example.domain.core.observability.AuditEvent
 import com.example.domain.core.observability.AuditSeverity
 import com.example.domain.core.observability.ExecutionTraceNode
 import com.example.infrastructure.observability.RoomTelemetryRepository
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -92,6 +94,14 @@ class ActivityViewModelTest {
 
     @After
     fun tearDown() {
+        // TEST-side determinism fix (the slice-7 CI failure family — the
+        // same leak the Roborazzi matrix hit): this VM's two standing
+        // Room-flow collectors (activeExecutionTrace's flatMapLatest + the
+        // audit stream) outlive the assertions; closing the DB underneath
+        // a pending query step throws an uncaught "connection pool has
+        // been closed". Cancel the scope FIRST (the test-side
+        // onCleared()), then close the DB.
+        if (::viewModel.isInitialized) viewModel.viewModelScope.cancel()
         db.close()
         Dispatchers.resetMain()
     }

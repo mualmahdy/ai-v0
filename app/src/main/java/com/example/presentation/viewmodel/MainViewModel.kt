@@ -25,8 +25,7 @@ import kotlinx.coroutines.launch
  *  - the workspace-scoped DISPLAY mirrors (activeProject +
  *    autonomyPolicy) synced from the authoritative WorkspaceRuntimeService
  *    on workspace switches;
- *  - the shell's own transient error + diagnostic-banner channels
- *    (the global snackbar + the app-shell banner);
+ *  - the shell's own transient error channel (the global snackbar);
  *  - the active-workspace / all-workspaces projections the shell's top
  *    bar composes on.
  *
@@ -48,6 +47,14 @@ import kotlinx.coroutines.launch
  * Two whole constructor dependencies this ViewModel carried were DEAD
  * (declared, never read): executeAgentTaskUseCase and telemetryService —
  * removed with this slice rather than moved.
+ *
+ * SLICE 8 (the track's final cleanup, D-13): the shell's writerless
+ * diagnosticBanner / isDegraded / degradedReason UiState fields and the
+ * dismissDiagnosticBanner() no-op were REMOVED — a rendering surface with
+ * no writer is dead display state (GAP-23 family), not a latent feature.
+ * Degradation display lives in the features that own real degradation
+ * sources (Studio's execution banner, the workflow report, the durable
+ * execution rows).
  */
 class MainViewModel(
     // Phase 2 — workspace runtime service for multi-workspace support
@@ -154,10 +161,5 @@ class MainViewModel(
     /** Clears the shell's honest error channel (after the global snackbar). */
     fun clearErrorMessage() {
         _uiState.update { it.copy(errorMessage = null) }
-    }
-
-    /** Dismisses the transient diagnostic banner shown in the app shell. */
-    fun dismissDiagnosticBanner() {
-        _uiState.update { it.copy(diagnosticBanner = null) }
     }
 }
