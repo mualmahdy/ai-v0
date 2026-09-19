@@ -1,5 +1,6 @@
 package com.example.presentation.ui.screens.studio
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -33,12 +34,15 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.RateReview
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.TravelExplore
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -68,6 +72,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -201,13 +206,20 @@ fun StudioScreen(
                 )
             }
 
-            // ---- Runtime policy controls (decision-engine inputs) ----
+            // ---- Advanced session controls (progressive disclosure —
+            // UI Design Closure D-12: the transcript is the core; the
+            // decision-engine inputs (network/autonomy policies + the live
+            // token budget) collapse behind one affordance and stay
+            // one tap away) ----
             item {
-                PolicyControlBar(
+                AdvancedSessionControls(
                     networkPolicy = studioState.networkPolicy,
                     autonomyPolicy = state.autonomyPolicy,
                     onNetworkPolicy = studioViewModel::setNetworkPolicy,
-                    onAutonomyPolicy = onAutonomyPolicy
+                    onAutonomyPolicy = onAutonomyPolicy,
+                    consumedTokens = studioState.currentTokensConsumed,
+                    remainingBudget = studioState.remainingBudget,
+                    totalSession = studioState.sessionTotalTokens
                 )
             }
 
@@ -241,15 +253,6 @@ fun StudioScreen(
                         item { ActiveAgentCard(agent) }
                     }
                 }
-            }
-
-            // ---- Token budget (live, honest) ----
-            item {
-                TokenBudgetGauge(
-                    consumedTokens = studioState.currentTokensConsumed,
-                    remainingBudget = studioState.remainingBudget,
-                    totalSession = studioState.sessionTotalTokens
-                )
             }
 
             // ---- Session transcript ----
@@ -402,36 +405,101 @@ private fun ConnectLlmBanner(onNavigate: () -> Unit) {
 }
 
 @Composable
-private fun PolicyControlBar(
+private fun AdvancedSessionControls(
     networkPolicy: NetworkPolicy,
     autonomyPolicy: AutonomyPolicy,
     onNetworkPolicy: (NetworkPolicy) -> Unit,
-    onAutonomyPolicy: (AutonomyPolicy) -> Unit
+    onAutonomyPolicy: (AutonomyPolicy) -> Unit,
+    consumedTokens: Int,
+    remainingBudget: Int,
+    totalSession: Int
 ) {
-    Row(
+    // UI Design Closure (D-12): collapsed by default — the chat-first
+    // contract. The controls are NOT removed (the package forbids deleting
+    // capabilities): they are one tap away, with the state visible in the
+    // collapsed header's summary.
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 16.dp, vertical = 2.dp)
+            .testTag("studio_advanced_controls"),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        )
     ) {
-        PolicyDropdown(
-            icon = Icons.Default.Language,
-            label = "الشبكة: ${networkPolicy.displayName.substringBefore(" (")}",
-            options = NetworkPolicy.entries.map { it.displayName to it },
-            selected = networkPolicy,
-            onSelect = onNetworkPolicy,
-            modifier = Modifier.weight(1f),
-            tag = "policy_network"
-        )
-        PolicyDropdown(
-            icon = Icons.Default.Security,
-            label = "الاستقلالية: ${autonomyPolicy.displayName.substringBefore(" (")}",
-            options = AutonomyPolicy.entries.map { it.displayName to it },
-            selected = autonomyPolicy,
-            onSelect = onAutonomyPolicy,
-            modifier = Modifier.weight(1f),
-            tag = "policy_autonomy"
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .testTag("btn_toggle_advanced_controls"),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Tune,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(com.example.R.string.studio_advanced_controls),
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = stringResource(com.example.R.string.studio_advanced_controls_hint),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Icon(
+                imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                contentDescription = if (expanded) {
+                    stringResource(com.example.R.string.studio_advanced_collapse)
+                } else {
+                    stringResource(com.example.R.string.studio_advanced_expand)
+                },
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        AnimatedVisibility(visible = expanded) {
+            Column {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PolicyDropdown(
+                        icon = Icons.Default.Language,
+                        label = "الشبكة: ${networkPolicy.displayName.substringBefore(" (")}",
+                        options = NetworkPolicy.entries.map { it.displayName to it },
+                        selected = networkPolicy,
+                        onSelect = onNetworkPolicy,
+                        modifier = Modifier.weight(1f),
+                        tag = "policy_network"
+                    )
+                    PolicyDropdown(
+                        icon = Icons.Default.Security,
+                        label = "الاستقلالية: ${autonomyPolicy.displayName.substringBefore(" (")}",
+                        options = AutonomyPolicy.entries.map { it.displayName to it },
+                        selected = autonomyPolicy,
+                        onSelect = onAutonomyPolicy,
+                        modifier = Modifier.weight(1f),
+                        tag = "policy_autonomy"
+                    )
+                }
+                TokenBudgetGauge(
+                    consumedTokens = consumedTokens,
+                    remainingBudget = remainingBudget,
+                    totalSession = totalSession
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+        }
     }
 }
 
