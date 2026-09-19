@@ -131,9 +131,18 @@ class ProjectsViewModelTest {
         )
     }
 
-    /** The documented await-the-SPECIFIC-terminal-signal helper. */
+    /**
+     * The documented await-the-SPECIFIC-terminal-signal helper.
+     *
+     * TEST-side determinism (the slice-6 documented load-flakiness family):
+     * 30s instead of the 15s default — under the FULL-suite --rerun-tasks
+     * load (850 tests) a Room emission can lag past a shorter window (the
+     * one observed full-run drop of the create test; isolated and targeted
+     * reruns green, the ProvidersViewModelTest 5s precedents documented the
+     * same profile).
+     */
     private fun awaitUntil(
-        timeoutMs: Long = 15_000L,
+        timeoutMs: Long = 30_000L,
         intervalMs: Long = 25L,
         condition: () -> Boolean
     ) {
