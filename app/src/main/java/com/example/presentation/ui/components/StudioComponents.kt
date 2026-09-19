@@ -49,6 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.domain.core.events.ExecutionEvent
+import com.example.ui.theme.LocalExtendedColors
 
 @Composable
 fun DiagnosticBanner(
@@ -57,6 +58,12 @@ fun DiagnosticBanner(
     modifier: Modifier = Modifier,
     isDegraded: Boolean = true
 ) {
+    // UI Design Closure (D-09): screen-reader-visible copy is Arabic-only —
+    // the old English "Diagnostic Alert" contentDescription was user-visible
+    // jargon under the package's Arabic-first contract.
+    val alertDescription = androidx.compose.ui.res.stringResource(
+        com.example.R.string.component_diagnostic_alert
+    )
     Surface(
         modifier = modifier
             .fillMaxWidth()
@@ -72,7 +79,7 @@ fun DiagnosticBanner(
         ) {
             Icon(
                 imageVector = if (isDegraded) Icons.Default.WarningAmber else Icons.Default.ErrorOutline,
-                contentDescription = "Diagnostic Alert",
+                contentDescription = alertDescription,
                 tint = if (isDegraded) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onErrorContainer,
                 modifier = Modifier.size(24.dp)
             )
@@ -101,6 +108,12 @@ fun TokenBudgetGauge(
     totalSession: Int,
     modifier: Modifier = Modifier
 ) {
+    // UI Design Closure (D-09): Arabic-only user-visible copy — the old
+    // "Token Usage" contentDescription, "Tkn" unit and the English
+    // "(Token Budget)" suffix were user-visible jargon.
+    val tokenUsageDescription = androidx.compose.ui.res.stringResource(
+        com.example.R.string.component_token_usage
+    )
     Card(
         modifier = modifier
             .fillMaxWidth()
@@ -128,7 +141,7 @@ fun TokenBudgetGauge(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Bolt,
-                        contentDescription = "Token Usage",
+                        contentDescription = tokenUsageDescription,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(18.dp)
                     )
@@ -136,7 +149,9 @@ fun TokenBudgetGauge(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = "ميزانية الرموز (Token Budget)",
+                        text = androidx.compose.ui.res.stringResource(
+                            com.example.R.string.component_token_budget
+                        ),
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -150,7 +165,10 @@ fun TokenBudgetGauge(
 
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    text = "$consumedTokens Tkn",
+                    text = androidx.compose.ui.res.stringResource(
+                        com.example.R.string.component_tokens_unit,
+                        consumedTokens
+                    ),
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
@@ -171,6 +189,10 @@ fun ExecutionEventTimelineItem(
     event: ExecutionEvent,
     modifier: Modifier = Modifier
 ) {
+    // UI Design Closure (D-11): the timeline's success/telemetry accents
+    // read the SEMANTIC tokens (LocalExtendedColors) instead of hardcoded
+    // hex colors — the feature component no longer stabs color values.
+    val extended = LocalExtendedColors.current
     val (icon: ImageVector, iconTint: Color, title: String, subtitle: String) = when (event) {
         is ExecutionEvent.DecisionMade -> {
             Quadruple(
@@ -191,7 +213,7 @@ fun ExecutionEventTimelineItem(
         is ExecutionEvent.ActionCompleted -> {
             Quadruple(
                 Icons.Default.CheckCircle,
-                Color(0xFF2E7D32),
+                extended.success,
                 "نجاح تنفيذ: ${event.action.type.displayName}",
                 event.outputSummary.take(60)
             )
@@ -215,8 +237,8 @@ fun ExecutionEventTimelineItem(
         is ExecutionEvent.ObservationRecorded -> {
             Quadruple(
                 Icons.Default.CheckCircle,
-                Color(0xFF00897B),
-                "تغذية راجعة للمحرك (Observation)",
+                extended.telemetry,
+                "تغذية راجعة للمحرك",
                 "زمن: ${event.observation.actualLatencyMs}ms | توكنز: ${event.observation.tokensConsumed} | عدم يقين: ${"%.2f".format(event.updatedUncertainty)}"
             )
         }
@@ -239,7 +261,7 @@ fun ExecutionEventTimelineItem(
         is ExecutionEvent.ToolResult -> {
             Quadruple(
                 Icons.Default.CheckCircle,
-                Color(0xFF2E7D32),
+                extended.success,
                 "نتيجة الأداة: ${event.toolName}",
                 when (event.outcome) {
                     is com.example.domain.core.Outcome.Success -> "تمت بنجاح: ${event.outcome.value.take(40)}"
@@ -259,7 +281,7 @@ fun ExecutionEventTimelineItem(
         is ExecutionEvent.Completed -> {
             Quadruple(
                 Icons.Default.CheckCircle,
-                Color(0xFF1B5E20),
+                extended.successStrong,
                 "اكتملت المهمة",
                 "في ${event.totalDurationMs}ms"
             )

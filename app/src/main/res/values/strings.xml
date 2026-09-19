@@ -1,4 +1,154 @@
 <resources>
     <string name="app_name">AI-V0 Ultimate</string>
-</resources>
 
+    <!-- ================================================================
+         UI Design Closure — resource-backed strings for every NEW or
+         REWRITTEN screen (the D-12 standing rule: new screens adopt
+         resources from day one; Arabic-first, no second language).
+         ================================================================ -->
+
+    <!-- Navigation shell (bottom bar + adaptive rail share one taxonomy) -->
+    <string name="nav_home">الرئيسية</string>
+    <string name="nav_chat">الدردشة</string>
+    <string name="nav_projects">المشاريع</string>
+    <string name="nav_activity">النشاط</string>
+    <string name="nav_more">المزيد</string>
+    <string name="nav_open">فتح %1$s</string>
+    <string name="topbar_workspace_fallback">مساحة العمل الذكية</string>
+    <string name="topbar_project_subtitle">المشروع: %1$s</string>
+    <string name="topbar_no_project">لا مشروع نشط</string>
+    <string name="topbar_switch_workspace">تبديل مساحة العمل</string>
+    <string name="topbar_settings">الإعدادات</string>
+    <string name="topbar_active_intelligence">ذكاء نشط ×%1$d</string>
+    <string name="topbar_no_active_intelligence">لا ذكاء نشط</string>
+    <string name="topbar_enabled_resources">%1$d مورد مفعّل</string>
+
+    <!-- Home — the work center -->
+    <string name="home_title">مركز العمل</string>
+    <string name="home_welcome">العمل ضمن %1$s</string>
+    <string name="home_current_project">المشروع الحالي</string>
+    <string name="home_current_project_value">%1$s</string>
+    <string name="home_no_project">لا مشروع نشط في هذه المساحة — افتح المشاريع لإنشاء مشروع أو اختيار واحد.</string>
+    <string name="home_new_session_title">محادثة جديدة</string>
+    <string name="home_new_session_hint">ابدأ جلسة دردشة جديدة ضمن المشروع الحالي، مع النموذج والوكيل والسياق النشط.</string>
+    <string name="home_new_session_cta">بدء المحادثة</string>
+    <string name="home_resume_last">استئناف آخر جلسة</string>
+    <string name="home_resume_unavailable">لا جلسات سابقة للاستئناف</string>
+    <string name="home_recent_sessions">جلسات حديثة</string>
+    <string name="home_recent_sessions_empty">لا جلسات بعد في هذا المشروع — ابدأ أول محادثة.</string>
+    <string name="home_open_session">فتح الجلسة «%1$s»</string>
+    <string name="home_turns_count">%1$d دورات</string>
+    <string name="home_projects_section">المشاريع</string>
+    <string name="home_projects_hint">إنشاء مشروع جديد أو التبديل بين مشاريع هذه المساحة.</string>
+    <string name="home_projects_cta">إدارة المشاريع</string>
+    <string name="home_current_project_sessions">%1$d جلسة مسجّلة</string>
+    <string name="home_quick_access">وصول سريع</string>
+    <string name="home_explorer_cta">المستكشف</string>
+    <string name="home_more_cta">المزيد</string>
+
+    <!-- Projects — the real project management surface -->
+    <string name="projects_title">المشاريع</string>
+    <string name="projects_subtitle">مشاريع مساحة العمل النشطة — إنشاء وفتح وتبديل وإدارة</string>
+    <string name="projects_current_header">المشروع الحالي</string>
+    <string name="projects_none_current">لا مشروع نشط — اختر مشروعًا من القائمة أو أنشئ مشروعًا جديدًا.</string>
+    <string name="projects_list_header">مشاريع المساحة</string>
+    <string name="projects_list_empty_title">لا مشاريع نشطة</string>
+    <string name="projects_list_empty_hint">أنشئ أول مشروع لهذه المساحة ليبدأ العمل ضمن نطاقه المعزول.</string>
+    <string name="projects_create">مشروع جديد</string>
+    <string name="projects_create_title">إنشاء مشروع جديد</string>
+    <string name="projects_create_name_label">اسم المشروع</string>
+    <string name="projects_create_name_support">يجب أن يكون الاسم فريدًا داخل مساحة العمل.</string>
+    <string name="projects_create_desc_label">الوصف (اختياري)</string>
+    <string name="projects_create_body">يُنشأ المشروع بحالة «نشط» مع مجلد sandbox خاص به، ويصبح المشروع النشط للمساحة فورًا.</string>
+    <string name="projects_create_confirm">إنشاء</string>
+    <string name="projects_cancel">إلغاء</string>
+    <string name="projects_open">فتح المشروع</string>
+    <string name="projects_active_badge">نشط</string>
+    <string name="projects_opening">جارٍ فتح المشروع…</string>
+    <string name="projects_sessions_count">%1$d جلسة</string>
+    <string name="projects_created_at">أُنشئ: %1$s</string>
+    <string name="projects_updated_at">آخر تحديث: %1$s</string>
+    <string name="projects_rename">إعادة تسمية</string>
+    <string name="projects_rename_title">إعادة تسمية المشروع</string>
+    <string name="projects_rename_confirm">حفظ</string>
+    <string name="projects_archive">أرشفة</string>
+    <string name="projects_archive_title">أرشفة المشروع</string>
+    <string name="projects_archive_body">سيُخفى المشروع «%1$s» من قوائم الاختيار مع بقاء بياناته كاملة، ويمكن استرجاعه لاحقًا. المتابعة؟</string>
+    <string name="projects_archive_confirm">أرشفة</string>
+    <string name="projects_trash">إلى المهملات</string>
+    <string name="projects_trash_title">نقل المشروع إلى المهملات</string>
+    <string name="projects_trash_body">سيُنقل المشروع «%1$s» إلى المهملات (حذف استرجاعي). إن كان هو المشروع النشط فسيُفكّ ارتباطه. المتابعة؟</string>
+    <string name="projects_trash_confirm">نقل للمهملات</string>
+    <string name="projects_error_name_required">اسم المشروع مطلوب.</string>
+    <string name="projects_scoped_note">كل مشروع يعزل جلساته وملفاته ومعرفته ضمن نطاقه؛ التبديل يحفظ اختيارك في مساحة العمل.</string>
+
+    <!-- More — the three-group capability center -->
+    <string name="more_title">المزيد</string>
+    <string name="more_stats_providers">%1$d مزوّد مسجّل</string>
+    <string name="more_stats_enabled">%1$d مورد مفعّل</string>
+    <string name="more_stats_registered">%1$d مورد مُسجّل</string>
+    <string name="more_group_workspace">مساحة العمل</string>
+    <string name="more_group_workspace_hint">كائنات المساحة ومحتواها وخططها</string>
+    <string name="more_group_intelligence">الذكاء</string>
+    <string name="more_group_intelligence_hint">المزودون ومحرك القرار والرادار</string>
+    <string name="more_group_governance">الحوكمة والنظام</string>
+    <string name="more_group_governance_hint">المرصد والملحقات وإعدادات النظام</string>
+    <string name="more_explorer_title">مستكشف مساحة العمل</string>
+    <string name="more_explorer_desc">كل الكائنات في مكان واحد: وكلاء، نماذج، موارد، أدوات، معرفة، ملفات، خطط وجلسات</string>
+    <string name="more_knowledge_title">قاعدة المعرفة</string>
+    <string name="more_knowledge_desc">قاعدة معرفة RAG مع محرك دلالي محلي وذاكرة طويلة الأمد</string>
+    <string name="more_files_title">ملفات المساحة</string>
+    <string name="more_files_desc">استعراض ملفات الـ sandbox وقراءتها ضمن نطاق المشروع</string>
+    <string name="more_tasks_title">المهام وخطط العمل</string>
+    <string name="more_tasks_desc">بناء وتنفيذ خطط DAG متعددة الخطوات مع تبعيات حقيقية</string>
+    <string name="more_providers_title">المزوّدون والنماذج</string>
+    <string name="more_providers_desc">ربط وإدارة مزودي LLM/البحث/التضمين، اكتشاف النماذج، والتحقق الحي</string>
+    <string name="more_decision_title">ذكاء القرار</string>
+    <string name="more_decision_desc">محرك القرار القائم على الحالات والتعلم المعزّز — اختيار الأفعال والأدوات</string>
+    <string name="more_radar_title">رادار التطور</string>
+    <string name="more_radar_desc">مسح تقنيات، ومرشّحات تطوير القدرات عبر دورة حياة مُحكمة</string>
+    <string name="more_governance_title">مرصد الحوكمة والاستدامة</string>
+    <string name="more_governance_desc">حالة القدرات المشتقة من الأدلة + الميزانية والتكلفة وحدود المعدل</string>
+    <string name="more_extensions_title">الملحقات والمهارات</string>
+    <string name="more_extensions_desc">خوادم MCP، تنفيذ المهارات، والربط مع التكاملات الخارجية</string>
+    <string name="more_settings_title">الإعدادات</string>
+    <string name="more_settings_desc">سياسات الشبكة والاستقلالية، إدارة مساحات العمل، النموذج الدلالي</string>
+
+    <!-- Settings — the 12-category organization -->
+    <string name="settings_title">الإعدادات</string>
+    <string name="settings_cat_account">الحساب</string>
+    <string name="settings_cat_account_honest">التطبيق محلي بالكامل ولا يستخدم حساب مستخدم — لا يوجد ما يُضبط هنا حاليًا.</string>
+    <string name="settings_cat_privacy">الخصوصية والأمان</string>
+    <string name="settings_cat_privacy_body">الشاشة محمية (FLAG_SECURE) فلا تظهر المحادثات والاعتمادات في لقطات الشاشة وقائمة التطبيقات الحديثة، وكل عمليات الشبكة تمر ببوابات خروج مُحكمة.</string>
+    <string name="settings_cat_appearance">المظهر</string>
+    <string name="settings_cat_appearance_body">يتبع التطبيق سمة النظام (فاتح/داكن) تلقائيًا بلوحة «مساحة عمل سبرانية» واحدة.</string>
+    <string name="settings_cat_language">اللغة وإمكانية الوصول</string>
+    <string name="settings_cat_language_body">العربية هي لغة الواجهة الوحيدة، واتجاه الواجهة مثبت من اليمين إلى اليسار. عناصر الواجهة تحمل أوصافًا لقارئ الشاشة بالعربية.</string>
+    <string name="settings_cat_chat_ai">الدردشة والذكاء الاصطناعي</string>
+    <string name="settings_cat_workspace">مساحة العمل</string>
+    <string name="settings_cat_network">الشبكة</string>
+    <string name="settings_cat_budget">الميزانية والاستخدام</string>
+    <string name="settings_cat_budget_body">استهلاك الرموز والتكلفة وحدود المعدل تُدار من مرصد الحوكمة — افتحه لمتابعة القيود الحقيقية.</string>
+    <string name="settings_cat_budget_open">فتح مرصد الحوكمة</string>
+    <string name="settings_cat_providers">المزوّدون</string>
+    <string name="settings_cat_providers_body">لربط مزوّد LLM جديد أو إدارة الموارد المفعّلة، انتقل إلى مركز المزودين.</string>
+    <string name="settings_cat_providers_open">فتح مركز المزودين</string>
+    <string name="settings_cat_tools">الأدوات والملحقات</string>
+    <string name="settings_cat_tools_body">خوادم MCP والمهارات والإضافات والتكاملات تُدار من مركز الملحقات.</string>
+    <string name="settings_cat_tools_open">فتح مركز الملحقات</string>
+    <string name="settings_cat_data">البيانات (استيراد وتصدير)</string>
+    <string name="settings_cat_data_honest">كل البيانات محفوظة محليًا في قاعدة Room وملفات الـ sandbox الخاصة بكل مشروع. حزم الاستيراد/التصدير مدعومة في الطبقة الخلفية (حزم المشاريع) دون واجهة استخدام بعد.</string>
+    <string name="settings_cat_about">حول التطبيق</string>
+
+    <!-- Studio — progressive disclosure of advanced controls -->
+    <string name="studio_advanced_controls">أدوات متقدمة</string>
+    <string name="studio_advanced_controls_hint">سياسة الشبكة والاستقلالية وميزانية الرموز للجلسة</string>
+    <string name="studio_advanced_expand">إظهار الأدوات المتقدمة</string>
+    <string name="studio_advanced_collapse">إخفاء الأدوات المتقدمة</string>
+
+    <!-- Shared component strings (Arabic-only, screen-reader visible) -->
+    <string name="component_diagnostic_alert">تنبيه</string>
+    <string name="component_token_usage">استهلاك الرموز</string>
+    <string name="component_tokens_unit">%1$d رمز</string>
+    <string name="component_token_budget">ميزانية الرموز</string>
+</resources>
