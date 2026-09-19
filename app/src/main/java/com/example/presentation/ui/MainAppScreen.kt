@@ -76,6 +76,7 @@ import com.example.presentation.ui.components.DiagnosticBanner
 import com.example.presentation.ui.navigation.WorkspaceRoutes
 import com.example.presentation.ui.screens.activity.UnifiedActivityFeedScreen
 import com.example.presentation.ui.screens.dashboard.DashboardScreen
+import com.example.presentation.ui.screens.home.HomeScreen
 import com.example.presentation.ui.screens.decision.DecisionScreen
 import com.example.presentation.ui.screens.extensions.ExtensionsScreen
 import com.example.presentation.ui.screens.files.FilesScreen
@@ -331,11 +332,25 @@ fun MainAppScreen(
                     .testTag("main_bottom_nav")
             ) {
                 BottomDestination(
+                    selected = currentRoute == WorkspaceRoutes.HOME,
+                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.HOME) },
+                    icon = Icons.Default.Psychology,
+                    label = "الرئيسية",
+                    tag = "nav_tab_home"
+                )
+                BottomDestination(
                     selected = currentRoute == WorkspaceRoutes.STUDIO,
                     onClick = { navController.navigateToTopLevel(WorkspaceRoutes.STUDIO) },
                     icon = Icons.Default.Psychology,
-                    label = "الاستوديو",
-                    tag = "nav_tab_studio"
+                    label = "الدردشة",
+                    tag = "nav_tab_chat"
+                )
+                BottomDestination(
+                    selected = currentRoute == WorkspaceRoutes.PROJECTS,
+                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.PROJECTS) },
+                    icon = Icons.Default.Folder,
+                    label = "المشاريع",
+                    tag = "nav_tab_projects"
                 )
                 BottomDestination(
                     selected = currentRoute == WorkspaceRoutes.ACTIVITY,
@@ -343,20 +358,6 @@ fun MainAppScreen(
                     icon = Icons.Default.NotificationsActive,
                     label = "النشاط",
                     tag = "nav_tab_activity"
-                )
-                BottomDestination(
-                    selected = currentRoute == WorkspaceRoutes.KNOWLEDGE,
-                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.KNOWLEDGE) },
-                    icon = Icons.Default.MenuBook,
-                    label = "المعرفة",
-                    tag = "nav_tab_knowledge"
-                )
-                BottomDestination(
-                    selected = currentRoute == WorkspaceRoutes.FILES,
-                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.FILES) },
-                    icon = Icons.Default.Folder,
-                    label = "الملفات",
-                    tag = "nav_tab_files"
                 )
                 BottomDestination(
                     selected = currentRoute == WorkspaceRoutes.MORE,
@@ -545,9 +546,16 @@ private fun WorkspaceNavHost(
     }
     NavHost(
         navController = navController,
-        startDestination = WorkspaceRoutes.STUDIO,
+        startDestination = WorkspaceRoutes.HOME,
         modifier = modifier
     ) {
+        composable(WorkspaceRoutes.HOME) {
+            HomeScreen(
+                uiState = viewModel.uiState.collectAsState().value,
+                onNavigate = navigate,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
         composable(WorkspaceRoutes.STUDIO) {
             StudioScreen(
                 viewModel = viewModel,
@@ -573,6 +581,14 @@ private fun WorkspaceNavHost(
                 // workspace-scoped audit window).
                 viewModel = activityViewModel,
                 onNavigate = navigate,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+        composable(WorkspaceRoutes.PROJECTS) {
+            TasksScreen(
+                agentsViewModel = agentsViewModel,
+                tasksViewModel = tasksViewModel,
+                workflowsViewModel = workflowsViewModel,
                 modifier = Modifier.fillMaxSize()
             )
         }

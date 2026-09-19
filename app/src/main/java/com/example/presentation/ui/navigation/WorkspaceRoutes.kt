@@ -10,7 +10,9 @@ package com.example.presentation.ui.navigation
  * a real backend capability surface — nothing is decorative.
  */
 object WorkspaceRoutes {
+    const val HOME = "home"
     const val STUDIO = "studio"
+    const val PROJECTS = "projects"
     const val ACTIVITY = "activity"
     const val KNOWLEDGE = "knowledge"
     const val FILES = "files"
@@ -27,7 +29,7 @@ object WorkspaceRoutes {
     /** UNIFIED OBJECT EXPLORER (report gap: discoverability). */
     const val EXPLORER = "explorer"
 
-    val topLevel: List<String> = listOf(STUDIO, ACTIVITY, KNOWLEDGE, FILES, MORE)
+    val topLevel: List<String> = listOf(HOME, STUDIO, PROJECTS, ACTIVITY, MORE)
 
     fun isTopLevel(route: String?): Boolean = topLevel.contains(route)
 }
