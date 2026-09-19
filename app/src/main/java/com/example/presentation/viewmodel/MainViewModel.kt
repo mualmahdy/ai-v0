@@ -22,12 +22,17 @@ import kotlinx.coroutines.launch
  *
  *  - the REPAIR ORDER §3A bootstrap state machine gate (phase label +
  *    failure message + retry) that MainAppScreen renders full-screen;
- *  - the workspace-scoped DISPLAY mirrors (activeProject +
- *    autonomyPolicy) synced from the authoritative WorkspaceRuntimeService
- *    on workspace switches;
+ *  - the workspace-scoped autonomy-policy DISPLAY mirror synced from the
+ *    authoritative WorkspaceRuntimeService on workspace switches;
  *  - the shell's own transient error channel (the global snackbar);
  *  - the active-workspace / all-workspaces projections the shell's top
  *    bar composes on.
+ *
+ * (UI Design Closure, phase B — D-02) the shell's old activeProject mirror
+ * was WORKSPACE data relabeled as a project; the REAL active-project
+ * mirror now lives in the projects feature ViewModel (ProjectsViewModel),
+ * and the shell no longer holds any project display state — the D-13
+ * precedent applied to a readerless field.
  *
  * (ADR-6 slice 1) the workspace management mutations + the files feature
  * → SettingsViewModel / FilesViewModel. (slice 2) the conversation
@@ -114,10 +119,12 @@ class MainViewModel(
 
     /**
      * Phase 2 — Observes the active workspace and reacts to workspace
-     * switches: updates the shell's DISPLAY mirrors (activeProject + the
-     * persisted autonomy-policy column). The feature re-scopes (RAG index,
-     * library listings, governance observatory, the activity feed …) live
-     * in their own feature ViewModels.
+     * switches: updates the shell's autonomy-policy DISPLAY mirror (the
+     * persisted column). The feature re-scopes (RAG index, library
+     * listings, governance observatory, the activity feed, the projects
+     * list and the REAL current-project mirror …) live in their own
+     * feature ViewModels — the projects feature owns the project mirror
+     * since UI Design Closure phase B (D-02).
      */
     private fun observeWorkspace() {
         viewModelScope.launch {
@@ -126,19 +133,6 @@ class MainViewModel(
             runCatching {
                 workspaceRuntimeService.activeWorkspace.collect { workspace ->
                     if (workspace != null) {
-                        _uiState.update {
-                            it.copy(
-                                activeProject = com.example.domain.core.storage.ProjectMetadata(
-                                    // P0-04: honest project binding — 0 = no
-                                    // project bound yet (never a silent 1L).
-                                    id = workspace.activeProjectId.takeIf { id -> id > 0 } ?: 0L,
-                                    name = workspace.name,
-                                    description = workspace.description,
-                                    isDefault = workspace.id == "default",
-                                    createdAtTimestampMs = workspace.createdAtTimestampMs
-                                )
-                            )
-                        }
                         // AUTONOMY DISPLAY SYNC (ADR-6 slice 1): the policy
                         // mutations live in SettingsViewModel (routed to the
                         // AUTHORITATIVE service). This collector mirrors the

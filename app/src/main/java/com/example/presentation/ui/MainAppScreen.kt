@@ -41,6 +41,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -62,7 +64,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -74,6 +78,8 @@ import androidx.navigation.compose.rememberNavController
 import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.presentation.ui.components.DiagnosticBanner
 import com.example.presentation.ui.navigation.WorkspaceRoutes
+import com.example.presentation.ui.navigation.navWidthClassForWidthDp
+import com.example.presentation.ui.navigation.topLevelDestinations
 import com.example.presentation.ui.screens.activity.UnifiedActivityFeedScreen
 import com.example.presentation.ui.screens.dashboard.DashboardScreen
 import com.example.presentation.ui.screens.home.HomeScreen
@@ -82,6 +88,7 @@ import com.example.presentation.ui.screens.extensions.ExtensionsScreen
 import com.example.presentation.ui.screens.files.FilesScreen
 import com.example.presentation.ui.screens.governance.GovernanceScreen
 import com.example.presentation.ui.screens.knowledge.KnowledgeScreen
+import com.example.presentation.ui.screens.projects.ProjectsScreen
 import com.example.presentation.ui.screens.radar.RadarScreen
 import com.example.presentation.ui.screens.settings.SettingsScreen
 import com.example.presentation.ui.screens.studio.StudioScreen
@@ -90,21 +97,29 @@ import com.example.presentation.viewmodel.MainViewModel
 
 /**
  * ============================================================================
- * MainAppScreen — the REAL smart-workspace shell (UI revamp)
+ * MainAppScreen — the REAL smart-workspace shell (UI revamp + Design
+ * Closure phases B/C)
  * ============================================================================
  *
- * Rebuilt on a real navigation architecture (androidx.navigation NavHost
- * with a back stack, state restoration and single-top destinations) instead
- * of the previous flat tab-swap:
+ * A real navigation architecture (androidx.navigation NavHost with a back
+ * stack, state restoration and single-top destinations):
  *
- *   - TopAppBar: workspace SWITCHER (multi-workspace is a real backend
- *     capability: WorkspaceRuntimeService) + live intelligence status chip.
- *   - Bottom NavigationBar: 5 context-centric primary destinations
- *     (Studio / unified Activity / Knowledge / Files / More).
- *   - "More": a full dashboard screen (not a modal sheet) that routes to the
- *     secondary capability surfaces (Providers, Tasks & Workflows, Decision
- *     Intelligence, Radar, Governance, Extensions, Settings).
- *   - Global diagnostic banner + snackbar error surfaces in ONE place.
+ *   - TopAppBar: the HONEST context hierarchy — the active WORKSPACE name
+ *     as the title, the active PROJECT as the subtitle (from the projects
+ *     feature VM — never workspace data relabeled as a project), the
+ *     workspace SWITCHER (WorkspaceRuntimeService) and the live
+ *     intelligence status chip;
+ *   - Adaptive navigation (M3 window size classes): compact widths get the
+ *     bottom NavigationBar; medium/expanded widths get a side
+ *     NavigationRail — both composed from the ONE topLevelDestinations
+ *     taxonomy (unique icons per destination);
+ *   - Bottom destinations: الرئيسية (real work center) / الدردشة /
+ *     المشاريع (the real projects surface) / النشاط / المزيد;
+ *   - "المزيد": the three-group capability center (Workspace /
+ *     Intelligence / Governance & System) routing to every secondary
+ *     surface;
+ *   - Global diagnostic banner + snackbar error surfaces in ONE place,
+ *     each fed from its owning feature's own channel.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -152,6 +167,12 @@ fun MainAppScreen(
     // feed) — owned here; the activity screen composes on it (it collects
     // the studio bus's Started stake itself).
     activityViewModel: com.example.presentation.viewmodel.ActivityViewModel,
+    // UI Design Closure (phase B): the PROJECTS feature ViewModel — the real
+    // project-management surface (list / current binding / create / switch /
+    // lifecycle). The shell's TopBar subtitle and the Home work center read
+    // its display state (owner-VM composition — the same pattern as every
+    // other feature seam in this shell).
+    projectsViewModel: com.example.presentation.viewmodel.ProjectsViewModel,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -185,6 +206,11 @@ fun MainAppScreen(
     // error channel to surface.)
     val agentsState by agentsViewModel.state.collectAsState()
     val extensionsState by extensionsViewModel.state.collectAsState()
+    // UI Design Closure (phase B): the projects feature's display state —
+    // the HONEST current-project mirror (the real project row behind the
+    // activeProjectId binding) that the TopBar subtitle and the Home work
+    // center compose on.
+    val projectsState by projectsViewModel.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val navController = rememberNavController()
     var createWorkspaceOpen by rememberSaveable { mutableStateOf(false) }
@@ -307,6 +333,14 @@ fun MainAppScreen(
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
 
+    // Adaptive shell (M3 window size classes — canonical 600/840dp
+    // breakpoints): compact keeps the bottom NavigationBar; medium and
+    // expanded get a side NavigationRail so the content keeps its height
+    // on tablets, unfoldeds and landscape.
+    val configuration = LocalConfiguration.current
+    val widthClass = navWidthClassForWidthDp(configuration.screenWidthDp)
+    val isCompact = widthClass == com.example.presentation.ui.navigation.NavWidthClass.COMPACT
+
     Scaffold(
         modifier = modifier
             .fillMaxSize()
@@ -314,8 +348,15 @@ fun MainAppScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             WorkspaceTopBar(
-                workspaceName = activeWorkspace?.name ?: state.activeProject?.name ?: "مساحة العمل الذكية",
-                workspaceSubtitle = state.activeProject?.name ?: "AI Studio V0",
+                // UI Design Closure (D-02): the HONEST hierarchy — the
+                // workspace name as the title, the REAL active project (the
+                // projects feature's binding mirror) as the subtitle. Never
+                // workspace data relabeled as a project.
+                workspaceName = activeWorkspace?.name
+                    ?: stringResource(com.example.R.string.topbar_workspace_fallback),
+                projectSubtitle = projectsState.currentProject?.name
+                    ?.let { stringResource(com.example.R.string.topbar_project_subtitle, it) }
+                    ?: stringResource(com.example.R.string.topbar_no_project),
                 activeLlmCount = activeLlmCount,
                 activeResourceCount = activeResourceCount,
                 allWorkspaces = allWorkspaces.map { it.name to it.id },
@@ -326,55 +367,55 @@ fun MainAppScreen(
             )
         },
         bottomBar = {
-            NavigationBar(
-                modifier = Modifier
-                    .windowInsetsPadding(WindowInsets.navigationBars)
-                    .testTag("main_bottom_nav")
-            ) {
-                BottomDestination(
-                    selected = currentRoute == WorkspaceRoutes.HOME,
-                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.HOME) },
-                    icon = Icons.Default.Psychology,
-                    label = "الرئيسية",
-                    tag = "nav_tab_home"
-                )
-                BottomDestination(
-                    selected = currentRoute == WorkspaceRoutes.STUDIO,
-                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.STUDIO) },
-                    icon = Icons.Default.Psychology,
-                    label = "الدردشة",
-                    tag = "nav_tab_chat"
-                )
-                BottomDestination(
-                    selected = currentRoute == WorkspaceRoutes.PROJECTS,
-                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.PROJECTS) },
-                    icon = Icons.Default.Folder,
-                    label = "المشاريع",
-                    tag = "nav_tab_projects"
-                )
-                BottomDestination(
-                    selected = currentRoute == WorkspaceRoutes.ACTIVITY,
-                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.ACTIVITY) },
-                    icon = Icons.Default.NotificationsActive,
-                    label = "النشاط",
-                    tag = "nav_tab_activity"
-                )
-                BottomDestination(
-                    selected = currentRoute == WorkspaceRoutes.MORE,
-                    onClick = { navController.navigateToTopLevel(WorkspaceRoutes.MORE) },
-                    icon = Icons.Default.MoreHoriz,
-                    label = "المزيد",
-                    tag = "nav_tab_more"
-                )
+            if (isCompact) {
+                NavigationBar(
+                    modifier = Modifier
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                        .testTag("main_bottom_nav")
+                ) {
+                    topLevelDestinations.forEach { destination ->
+                        BottomDestination(
+                            selected = currentRoute == destination.route,
+                            onClick = { navController.navigateToTopLevel(destination.route) },
+                            icon = destination.icon,
+                            label = stringResource(destination.labelRes),
+                            tag = destination.tag
+                        )
+                    }
+                }
             }
         }
     ) { innerPadding ->
-        Box(
+        Row(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
+            if (!isCompact) {
+                NavigationRail(
+                    modifier = Modifier
+                        .windowInsetsPadding(WindowInsets.navigationBars)
+                        .testTag("main_nav_rail"),
+                    containerColor = MaterialTheme.colorScheme.surface
+                ) {
+                    topLevelDestinations.forEach { destination ->
+                        NavigationRailItem(
+                            selected = currentRoute == destination.route,
+                            onClick = { navController.navigateToTopLevel(destination.route) },
+                            icon = {
+                                Icon(
+                                    destination.icon,
+                                    contentDescription = stringResource(destination.labelRes)
+                                )
+                            },
+                            label = { Text(stringResource(destination.labelRes)) },
+                            modifier = Modifier.testTag(destination.tag)
+                        )
+                    }
+                }
+            }
+            Box(modifier = Modifier.weight(1f)) {
+                Column(modifier = Modifier.fillMaxSize()) {
                 // ADR-6 SLICE 8 (D-13): the shell's own diagnostic-banner
                 // block was REMOVED — its UiState channel had no writer
                 // since the slice-2 extraction (a rendering surface that
@@ -422,8 +463,12 @@ fun MainAppScreen(
                     agentsViewModel = agentsViewModel,
                     extensionsViewModel = extensionsViewModel,
                     activityViewModel = activityViewModel,
+                    // UI Design Closure (phase B): the projects feature VM —
+                    // the HOME work center + PROJECTS screen compose on it.
+                    projectsViewModel = projectsViewModel,
                     modifier = Modifier.weight(1f)
                 )
+                }
             }
         }
     }
@@ -539,10 +584,27 @@ private fun WorkspaceNavHost(
     agentsViewModel: com.example.presentation.viewmodel.AgentsViewModel,
     extensionsViewModel: com.example.presentation.viewmodel.ExtensionsViewModel,
     activityViewModel: com.example.presentation.viewmodel.ActivityViewModel,
+    // UI Design Closure (phase B): the projects feature VM — the HOME
+    // work center and the PROJECTS surface compose on it.
+    projectsViewModel: com.example.presentation.viewmodel.ProjectsViewModel,
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
-        navController.navigate(route) { launchSingleTop = true }
+        // UI Design Closure (navigation semantics): SECONDARY destinations
+        // get their own back-stack hierarchy — popUpTo the start destination
+        // (saving the popped top-level state) instead of stacking on top of
+        // the hub. Stacking them above the hub poisoned the bottom bar's
+        // restoreState contract: after More → Explorer, tapping «المزيد»
+        // popped-and-RESTORED the saved stack whose top was the SECONDARY
+        // destination, so the tab appeared selected while the content never
+        // moved (a silent navigation no-op — caught by the shell's
+        // reachability suite). With this hierarchy, every top-level tab
+        // restores exactly its own state, and back from any secondary
+        // surface returns to the start destination.
+        navController.navigate(route) {
+            popUpTo(navController.graph.startDestinationId) { saveState = true }
+            launchSingleTop = true
+        }
     }
     NavHost(
         navController = navController,
@@ -550,8 +612,28 @@ private fun WorkspaceNavHost(
         modifier = modifier
     ) {
         composable(WorkspaceRoutes.HOME) {
+            // UI Design Closure (phase B — D-05): the real WORK CENTER. Every
+            // displayed value is evidence-derived: the workspace + the REAL
+            // active project (projects feature), the project-scoped session
+            // registry (sessions feature), and the studio callbacks for
+            // new/resumed sessions (owner-VM composition throughout).
             HomeScreen(
-                uiState = viewModel.uiState.collectAsState().value,
+                workspaceName = viewModel.activeWorkspace.collectAsState().value?.name
+                    ?: stringResource(com.example.R.string.topbar_workspace_fallback),
+                currentProjectName = projectsViewModel.state.collectAsState().value.currentProject?.name,
+                recentSessions = sessionsViewModel.state.collectAsState().value.sessions,
+                onNewSession = {
+                    // StateFlow.value is a plain read — usable in the
+                    // non-composable click context.
+                    studioViewModel.startNewSession(
+                        agent = agentsViewModel.state.value.activeAgent
+                    )
+                    navigate(WorkspaceRoutes.STUDIO)
+                },
+                onOpenSession = { sessionId ->
+                    studioViewModel.openSession(sessionId)
+                    navigate(WorkspaceRoutes.STUDIO)
+                },
                 onNavigate = navigate,
                 modifier = Modifier.fillMaxSize()
             )
@@ -584,11 +666,13 @@ private fun WorkspaceNavHost(
                 modifier = Modifier.fillMaxSize()
             )
         }
+        // UI Design Closure (phase B — D-01): the PROJECTS destination now
+        // opens the REAL projects surface (the feature VM owns the project
+        // lifecycle) — the regression this route opening the Tasks board is
+        // pinned by NavigationShellTest (a silent revert fails the suite).
         composable(WorkspaceRoutes.PROJECTS) {
-            TasksScreen(
-                agentsViewModel = agentsViewModel,
-                tasksViewModel = tasksViewModel,
-                workflowsViewModel = workflowsViewModel,
+            ProjectsScreen(
+                viewModel = projectsViewModel,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -710,8 +794,10 @@ private fun WorkspaceNavHost(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun WorkspaceTopBar(
+    /** The active WORKSPACE name (the hierarchy's root — the switcher target). */
     workspaceName: String,
-    workspaceSubtitle: String,
+    /** The REAL active project subtitle (from the projects feature — D-02). */
+    projectSubtitle: String,
     activeLlmCount: Int,
     activeResourceCount: Int,
     allWorkspaces: List<Pair<String, String>>,
@@ -761,7 +847,7 @@ private fun WorkspaceTopBar(
                         )
                     }
                     Text(
-                        text = workspaceSubtitle,
+                        text = projectSubtitle,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -820,9 +906,13 @@ private fun WorkspaceTopBar(
         },
         actions = {
             StatusChip(
-                label = if (activeLlmCount > 0) "ذكاء نشط ×$activeLlmCount" else "لا ذكاء نشط",
+                label = if (activeLlmCount > 0) {
+                    stringResource(com.example.R.string.topbar_active_intelligence, activeLlmCount)
+                } else {
+                    stringResource(com.example.R.string.topbar_no_active_intelligence)
+                },
                 isActive = activeLlmCount > 0,
-                detail = "$activeResourceCount مورد مفعّل"
+                detail = stringResource(com.example.R.string.topbar_enabled_resources, activeResourceCount)
             )
             IconButton(
                 onClick = onOpenSettings,

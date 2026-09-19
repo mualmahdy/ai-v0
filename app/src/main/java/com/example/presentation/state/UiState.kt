@@ -1,6 +1,5 @@
 package com.example.presentation.state
 
-import com.example.domain.core.storage.ProjectMetadata
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.workflow.ExecutionMode
 
@@ -83,7 +82,16 @@ data class ExecutionStepItem(
  * (Phase 4 follow-up commit will add the screen).
  */
 data class UiState(
-    val activeProject: ProjectMetadata? = null,
+    // ACTIVE-PROJECT MIRROR — REMOVED (UI Design Closure, phase B — D-02):
+    // the old field was WORKSPACE data relabeled as a project (name = the
+    // workspace's name), which fed the TopBar's conflated title/subtitle.
+    // The REAL active-project mirror (the project row behind the
+    // activeProjectId binding) now lives in ProjectsViewModel — the
+    // projects feature's own state — and the TopBar subtitle / Home work
+    // center compose on it (owner-VM composition). Nothing in the shell
+    // reads this field anymore, so per the D-13 precedent (writerless /
+    // readerless display state is dead state, not a latent feature) it is
+    // DELETED rather than left unwired.
     // AGENT CATALOG — REMOVED (ADR-6 slice 7, Design Closure 2026
     // UI-redesign track): availableAgents / activeAgent now live in
     // AgentsViewModel's own AgentsUiState (the durable-registry authority

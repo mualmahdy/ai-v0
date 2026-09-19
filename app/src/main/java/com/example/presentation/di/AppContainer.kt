@@ -2242,6 +2242,29 @@ class SessionsViewModelFactory(
 }
 
 /**
+ * UI Design Closure (phase B — D-01): factory for the PROJECTS feature
+ * ViewModel — the real project-management surface (active-projects list,
+ * the honest current-project binding mirror, create/switch/rename/archive/
+ * trash), composed on the AUTHORITATIVE services exactly as production
+ * wires them.
+ */
+class ProjectsViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.ProjectsViewModel::class.java)) {
+            return com.example.presentation.viewmodel.ProjectsViewModel(
+                projectRuntimeService = appContainer.projectRuntimeService,
+                workspaceRuntimeService = appContainer.workspaceRuntimeService,
+                conversationSessionService = appContainer.conversationSessionService
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
  * ADR-6 slice 3 (Design Closure 2026 UI-redesign track) — factory for the
  * KNOWLEDGE feature ViewModel: the RAG knowledge base, the local semantic
  * engine (owner of the previously-shared readiness state), and the

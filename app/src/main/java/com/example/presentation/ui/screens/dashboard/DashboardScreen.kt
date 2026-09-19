@@ -19,11 +19,14 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Verified
@@ -40,36 +43,53 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.R
 import com.example.presentation.ui.navigation.WorkspaceRoutes
 import com.example.presentation.viewmodel.MainViewModel
+import com.example.presentation.viewmodel.ProvidersViewModel
 
 /**
  * ============================================================================
- * DashboardScreen — "المزيد": a REAL secondary-sections hub
+ * DashboardScreen — "المزيد": the three-group capability center (UI Design
+ * Closure, phase C — defect D-06)
  * ============================================================================
  *
- * Replaces the old ModalBottomSheet with a full dashboard: live system
- * status (evidence-derived) + a grid of the workspace's capability surfaces,
- * each routing to a real backend subsystem. No dead entries.
+ * The flat eight-card grid becomes the package's taxonomy — every entry
+ * routes to a REAL backend surface (no dead entries, capabilities preserved):
+ *
+ *  - مساحة العمل (Workspace): Explorer / Knowledge / Files / Tasks & Workflows
+ *  - الذكاء (Intelligence): Providers / Decision / Radar
+ *  - الحوكمة والنظام (Governance & System): Governance / Extensions / Settings
+ *
+ * The agents capability deliberately has no card here: it has no dedicated
+ * route — its surfaces are the Studio picker and the Explorer's agents row
+ * (an honest entry would be a dead link; documented as DEFERRED in the
+ * closure record instead of faked).
+ *
+ * The live system-status row stays evidence-derived from the providers
+ * feature VM (its owner) — registered providers / enabled resources /
+ * registered resources, never fabricated numbers.
  */
 @Composable
 fun DashboardScreen(
     viewModel: MainViewModel,
     // ADR-6 slice 5: the provider stats (registered providers, enabled /
     // registered resources) read the providers feature VM — their owner.
-    providersViewModel: com.example.presentation.viewmodel.ProvidersViewModel,
+    providersViewModel: ProvidersViewModel,
     onNavigate: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val state by viewModel.uiState.collectAsState()
     val providersState by providersViewModel.state.collectAsState()
 
-    val activeResourceCount = providersState.materializedResources.count { it.lifecycleState.name == "ENABLED" }
+    val activeResourceCount = providersState.materializedResources.count {
+        it.lifecycleState.name == "ENABLED"
+    }
 
     Column(modifier = modifier.testTag("dashboard_screen")) {
-        // ---- Live system status ----
+        // ---- Live system status (evidence-derived) ----
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -78,95 +98,26 @@ fun DashboardScreen(
         ) {
             DashboardStat(
                 icon = Icons.Default.Dns,
-                value = "${providersState.generalizedProviders.size}",
-                label = "مزوّد مسجّل",
+                value = stringResource(R.string.more_stats_providers, providersState.generalizedProviders.size),
                 tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                tag = "more_stat_providers"
             )
             DashboardStat(
                 icon = Icons.Default.Verified,
-                value = "$activeResourceCount",
-                label = "مورد مفعّل",
+                value = stringResource(R.string.more_stats_enabled, activeResourceCount),
                 tint = MaterialTheme.colorScheme.tertiary,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                tag = "more_stat_enabled"
             )
-            // ADR-7 fate: the always-zero "اقتراح استباقي" stat was removed
-            // with its dead engine (WorkspaceContextEngine) — a permanently
-            // empty counter is a fabricated capability, not a metric.
             DashboardStat(
                 icon = Icons.Default.AutoAwesome,
-                value = "${providersState.materializedResources.size}",
-                label = "مورد مُسجّل",
+                value = stringResource(R.string.more_stats_registered, providersState.materializedResources.size),
                 tint = MaterialTheme.colorScheme.secondary,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                tag = "more_stat_registered"
             )
         }
-
-        Text(
-            text = "أسطح القدرات",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-        )
-
-        val sections = listOf(
-            DashboardEntry(
-                route = WorkspaceRoutes.EXPLORER,
-                icon = Icons.Default.Explore,
-                title = "مستكشف مساحة العمل",
-                description = "كل الكائنات في مكان واحد: وكلاء، نماذج، موارد، أدوات، معرفة، ملفات، خطط وجلسات",
-                tag = "more_tab_explorer"
-            ),
-            DashboardEntry(
-                route = WorkspaceRoutes.PROVIDERS,
-                icon = Icons.Default.Dns,
-                title = "المزوّدون والنماذج",
-                description = "ربط وإدارة مزودي LLM/البحث/التضمين، اكتشاف النماذج، والتحقق الحي",
-                tag = "more_tab_providers"
-            ),
-            DashboardEntry(
-                route = WorkspaceRoutes.TASKS,
-                icon = Icons.Default.AccountTree,
-                title = "المهام وخطط العمل",
-                description = "بناء وتنفيذ خطط DAG متعددة الخطوات مع تبعيات حقيقية",
-                tag = "more_tab_tasks"
-            ),
-            DashboardEntry(
-                route = WorkspaceRoutes.DECISION,
-                icon = Icons.Default.AutoAwesome,
-                title = "ذكاء القرار (CBR-MDP)",
-                description = "محرك القرار القائم على الحالات والتعلم المعزّز — اختيار الأفعال والأدوات",
-                tag = "more_tab_decision"
-            ),
-            DashboardEntry(
-                route = WorkspaceRoutes.RADAR,
-                icon = Icons.Default.Radar,
-                title = "رادار التطور",
-                description = "مسح تقنيات، ومرشّحات تطوير القدرات عبر دورة حياة مُحكمة",
-                tag = "more_tab_radar"
-            ),
-            DashboardEntry(
-                route = WorkspaceRoutes.GOVERNANCE,
-                icon = Icons.Default.Verified,
-                title = "مرصد الحوكمة والاستدامة",
-                description = "حالة القدرات المشتقة من الأدلة + الميزانية والتكلفة وحدود المعدل",
-                tag = "more_tab_governance"
-            ),
-            DashboardEntry(
-                route = WorkspaceRoutes.EXTENSIONS,
-                icon = Icons.Default.Extension,
-                title = "الملحقات والمهارات",
-                description = "خوادم MCP، تنفيذ المهارات، والربط مع التكاملات الخارجية",
-                tag = "more_tab_extensions"
-            ),
-            DashboardEntry(
-                route = WorkspaceRoutes.SETTINGS,
-                icon = Icons.Default.Settings,
-                title = "الإعدادات",
-                description = "سياسات الشبكة والاستقلالية، إدارة مساحات العمل، النموذج الدلالي",
-                tag = "more_tab_settings"
-            )
-        )
 
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
@@ -177,7 +128,64 @@ fun DashboardScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxSize()
         ) {
-            items(sections, key = { it.route }) { entry ->
+            // ---- Group 1: Workspace ----
+            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) {
+                GroupHeader(
+                    icon = Icons.Default.FolderOpen,
+                    title = stringResource(R.string.more_group_workspace),
+                    hint = stringResource(R.string.more_group_workspace_hint),
+                    tag = "more_group_workspace"
+                )
+            }
+            items(
+                listOf(
+                    DashboardEntry(WorkspaceRoutes.EXPLORER, Icons.Default.Explore, R.string.more_explorer_title, R.string.more_explorer_desc, "more_tab_explorer"),
+                    DashboardEntry(WorkspaceRoutes.KNOWLEDGE, Icons.Default.MenuBook, R.string.more_knowledge_title, R.string.more_knowledge_desc, "more_tab_knowledge"),
+                    DashboardEntry(WorkspaceRoutes.FILES, Icons.AutoMirrored.Filled.InsertDriveFile, R.string.more_files_title, R.string.more_files_desc, "more_tab_files"),
+                    DashboardEntry(WorkspaceRoutes.TASKS, Icons.Default.AccountTree, R.string.more_tasks_title, R.string.more_tasks_desc, "more_tab_tasks")
+                ),
+                key = { it.route }
+            ) { entry ->
+                SectionCard(entry = entry, onClick = { onNavigate(entry.route) })
+            }
+
+            // ---- Group 2: Intelligence ----
+            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) {
+                GroupHeader(
+                    icon = Icons.Default.AutoAwesome,
+                    title = stringResource(R.string.more_group_intelligence),
+                    hint = stringResource(R.string.more_group_intelligence_hint),
+                    tag = "more_group_intelligence"
+                )
+            }
+            items(
+                listOf(
+                    DashboardEntry(WorkspaceRoutes.PROVIDERS, Icons.Default.Dns, R.string.more_providers_title, R.string.more_providers_desc, "more_tab_providers"),
+                    DashboardEntry(WorkspaceRoutes.DECISION, Icons.Default.AutoAwesome, R.string.more_decision_title, R.string.more_decision_desc, "more_tab_decision"),
+                    DashboardEntry(WorkspaceRoutes.RADAR, Icons.Default.Radar, R.string.more_radar_title, R.string.more_radar_desc, "more_tab_radar")
+                ),
+                key = { it.route }
+            ) { entry ->
+                SectionCard(entry = entry, onClick = { onNavigate(entry.route) })
+            }
+
+            // ---- Group 3: Governance & System ----
+            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) {
+                GroupHeader(
+                    icon = Icons.Default.Verified,
+                    title = stringResource(R.string.more_group_governance),
+                    hint = stringResource(R.string.more_group_governance_hint),
+                    tag = "more_group_governance"
+                )
+            }
+            items(
+                listOf(
+                    DashboardEntry(WorkspaceRoutes.GOVERNANCE, Icons.Default.Verified, R.string.more_governance_title, R.string.more_governance_desc, "more_tab_governance"),
+                    DashboardEntry(WorkspaceRoutes.EXTENSIONS, Icons.Default.Extension, R.string.more_extensions_title, R.string.more_extensions_desc, "more_tab_extensions"),
+                    DashboardEntry(WorkspaceRoutes.SETTINGS, Icons.Default.Settings, R.string.more_settings_title, R.string.more_settings_desc, "more_tab_settings")
+                ),
+                key = { it.route }
+            ) { entry ->
                 SectionCard(entry = entry, onClick = { onNavigate(entry.route) })
             }
         }
@@ -187,21 +195,57 @@ fun DashboardScreen(
 private data class DashboardEntry(
     val route: String,
     val icon: ImageVector,
-    val title: String,
-    val description: String,
+    val titleRes: Int,
+    val descriptionRes: Int,
     val tag: String
 )
+
+@Composable
+private fun GroupHeader(
+    icon: ImageVector,
+    title: String,
+    hint: String,
+    tag: String
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .testTag(tag),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Column {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = hint,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
 
 @Composable
 private fun DashboardStat(
     icon: ImageVector,
     value: String,
-    label: String,
     tint: androidx.compose.ui.graphics.Color,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    tag: String
 ) {
     Card(
-        modifier = modifier,
+        modifier = modifier.testTag(tag),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
@@ -223,14 +267,9 @@ private fun DashboardStat(
             Column {
                 Text(
                     text = value,
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     color = tint
-                )
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
@@ -270,13 +309,13 @@ private fun SectionCard(entry: DashboardEntry, onClick: () -> Unit) {
             }
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = entry.title,
+                text = stringResource(entry.titleRes),
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = entry.description,
+                text = stringResource(entry.descriptionRes),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

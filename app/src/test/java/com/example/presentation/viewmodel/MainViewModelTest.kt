@@ -50,10 +50,10 @@ import java.io.File
  *    failure message mirror, the gate clearing through the SAME flow when the
  *    state machine recovers, and retryBootstrap idempotence on the REAL
  *    orchestrator;
- *  - the workspace-scoped DISPLAY mirrors: activeProject (the default
- *    workspace + its transactionally-bound sandbox project — P0-04: a real
- *    owned id, never a silent shared one) and autonomyPolicy following the
- *    persisted column across a workspace re-scope;
+ *  - the workspace-scoped autonomy DISPLAY mirror (the activeProject
+ *    shell mirror was REMOVED with phase B — D-02: workspace data
+ *    relabeled as a project; its P0-04 pin transferred to the projects
+ *    feature) following the persisted column across a re-scope;
  *  - the shell's honest error channel (the R-5 regression: an init-path
  *    collector failure SURFACES instead of crashing the app) and its
  *    dismissal.
@@ -225,22 +225,12 @@ class MainViewModelTest {
     }
 
     // ------------------------------------------------------------------
-    // The workspace-scoped DISPLAY mirrors
+    // The workspace-scoped autonomy DISPLAY mirror
+    // (UI Design Closure phase B: the old activeProject pin transferred
+    // WITH the ownership to ProjectsViewModelTest — the new owner of the
+    // real project mirror. P0-04 stays pinned there: the default workspace
+    // lands with its OWNED sandbox project, a real id > 0.)
     // ------------------------------------------------------------------
-
-    @Test
-    fun `the workspace mirror lands the default workspace with its owned sandbox project`() {
-        newRealStack()
-        awaitUntil { viewModel.uiState.value.bootstrapPhase == "READY" }
-        awaitUntil { viewModel.uiState.value.activeProject != null }
-
-        val meta = viewModel.uiState.value.activeProject!!
-        assertEquals("مساحة العمل الافتراضية", meta.name)
-        // P0-04: the transactionally-bound SANDBOX project — a real owned
-        // id, never the legacy silent shared "project 1" fallback.
-        assertTrue("expected an owned sandbox project id > 0, got ${meta.id}", meta.id > 0L)
-        assertTrue(meta.isDefault)
-    }
 
     @Test
     fun `the autonomy display mirror follows the persisted column across a re-scope`() {
@@ -271,7 +261,7 @@ class MainViewModelTest {
         // collector re-read the column for the first workspace.
         val second = runBlocking { service.createWorkspace("مساحة ثانية للقشرة", "اختبار") }
         runBlocking { assertTrue(service.switchWorkspace(second.id)) }
-        awaitUntil { viewModel.uiState.value.activeProject?.name == "مساحة ثانية للقشرة" }
+        awaitUntil { viewModel.activeWorkspace.value?.name == "مساحة ثانية للقشرة" }
         runBlocking { assertTrue(service.switchWorkspace(firstId)) }
 
         awaitUntil { viewModel.uiState.value.autonomyPolicy == AutonomyPolicy.AUTONOMOUS }

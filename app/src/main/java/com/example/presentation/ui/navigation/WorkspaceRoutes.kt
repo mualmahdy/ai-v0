@@ -5,9 +5,15 @@ package com.example.presentation.ui.navigation
  * WorkspaceRoutes — the real navigation graph of the smart workspace
  * ============================================================================
  *
- * Five context-centric primary destinations (bottom bar) plus secondary
- * sections reachable from the "المزيد" dashboard. Every destination maps to
- * a real backend capability surface — nothing is decorative.
+ * Five context-centric primary destinations (the bottom NavigationBar on
+ * compact widths / the side NavigationRail on medium+ widths — composed
+ * from the ONE topLevelDestinations taxonomy): home / chat(studio) /
+ * projects / activity / more.
+ *
+ * Secondary sections are reachable from the "المزيد" capability center's
+ * three groups (Workspace / Intelligence / Governance & System). Every
+ * destination maps to a real backend capability surface — nothing is
+ * decorative.
  */
 object WorkspaceRoutes {
     const val HOME = "home"

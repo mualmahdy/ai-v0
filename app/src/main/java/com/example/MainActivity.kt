@@ -22,6 +22,7 @@ import com.example.presentation.di.GovernanceViewModelFactory
 import com.example.presentation.di.KnowledgeViewModelFactory
 import com.example.presentation.di.MainViewModelFactory
 import com.example.presentation.di.ProvidersViewModelFactory
+import com.example.presentation.di.ProjectsViewModelFactory
 import com.example.presentation.di.RadarViewModelFactory
 import com.example.presentation.di.DecisionViewModelFactory
 import com.example.presentation.di.SessionsViewModelFactory
@@ -38,6 +39,7 @@ import com.example.presentation.viewmodel.GovernanceViewModel
 import com.example.presentation.viewmodel.KnowledgeViewModel
 import com.example.presentation.viewmodel.MainViewModel
 import com.example.presentation.viewmodel.ProvidersViewModel
+import com.example.presentation.viewmodel.ProjectsViewModel
 import com.example.presentation.viewmodel.RadarViewModel
 import com.example.presentation.viewmodel.DecisionViewModel
 import com.example.presentation.viewmodel.WorkflowsViewModel
@@ -167,6 +169,15 @@ class MainActivity : ComponentActivity() {
         ActivityViewModelFactory(appContainer, studioSignalBus)
     }
 
+    // UI Design Closure (phase B — D-01): the PROJECTS feature ViewModel —
+    // the real project-management surface (the active-projects list, the
+    // honest current-project binding mirror, create/switch/rename/archive/
+    // trash through the AUTHORITATIVE services). Follows the same ADR-6
+    // freeze rule as every feature VM above.
+    private val projectsViewModel: ProjectsViewModel by viewModels {
+        ProjectsViewModelFactory(appContainer)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -206,7 +217,8 @@ class MainActivity : ComponentActivity() {
                             workflowsViewModel = workflowsViewModel,
                             agentsViewModel = agentsViewModel,
                             extensionsViewModel = extensionsViewModel,
-                            activityViewModel = activityViewModel
+                            activityViewModel = activityViewModel,
+                            projectsViewModel = projectsViewModel
                         )
                     }
                 }
