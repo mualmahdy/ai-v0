@@ -25,6 +25,7 @@ import com.example.presentation.di.ProvidersViewModelFactory
 import com.example.presentation.di.ProjectsViewModelFactory
 import com.example.presentation.di.RadarViewModelFactory
 import com.example.presentation.di.DecisionViewModelFactory
+import com.example.presentation.di.ChatCapabilitiesViewModelFactory
 import com.example.presentation.di.SessionsViewModelFactory
 import com.example.presentation.di.SettingsViewModelFactory
 import com.example.presentation.di.StudioViewModelFactory
@@ -46,6 +47,7 @@ import com.example.presentation.viewmodel.WorkflowsViewModel
 import com.example.presentation.viewmodel.SessionsViewModel
 import com.example.presentation.viewmodel.SettingsViewModel
 import com.example.presentation.viewmodel.StudioSignal
+import com.example.presentation.viewmodel.ChatCapabilitiesViewModel
 import com.example.presentation.viewmodel.StudioViewModel
 import com.example.presentation.viewmodel.TasksViewModel
 import com.example.ui.theme.MyApplicationTheme
@@ -89,6 +91,13 @@ class MainActivity : ComponentActivity() {
 
     private val studioViewModel: StudioViewModel by viewModels {
         StudioViewModelFactory(appContainer, studioSignalBus)
+    }
+
+    // CHAT CAPABILITIES (Task 2): the chat feature's capability layer —
+    // availability catalog, attachment drafts (SAF→sandbox→artifact), and
+    // the governed tool/skill/MCP/search/knowledge invocation state.
+    private val chatCapabilitiesViewModel: ChatCapabilitiesViewModel by viewModels {
+        ChatCapabilitiesViewModelFactory(appContainer)
     }
 
     private val sessionsViewModel: SessionsViewModel by viewModels {
@@ -208,6 +217,7 @@ class MainActivity : ComponentActivity() {
                             filesViewModel = filesViewModel,
                             settingsViewModel = settingsViewModel,
                             studioViewModel = studioViewModel,
+                            chatCapabilitiesViewModel = chatCapabilitiesViewModel,
                             sessionsViewModel = sessionsViewModel,
                             knowledgeViewModel = knowledgeViewModel,
                             governanceViewModel = governanceViewModel,

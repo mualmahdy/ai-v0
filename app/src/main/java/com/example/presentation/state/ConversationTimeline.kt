@@ -34,10 +34,15 @@ sealed interface ChatEntry {
      * One USER message. Appended to the timeline IMMEDIATELY when a send is
      * accepted (P0-C: the user's message never waits for the execution to
      * complete — it must not look like it vanished while the engine thinks).
+     *
+     * CHAT CAPABILITIES (Task 2 §5): a user message can carry ATTACHMENT
+     * references (picked through SAF, imported through the real transfer
+     * path, persisted with the durable turn — §16).
      */
     data class User(
         override val id: String,
-        val text: String
+        val text: String,
+        val attachments: List<ChatEntryAttachment> = emptyList()
     ) : ChatEntry
 
     /**
@@ -46,6 +51,10 @@ sealed interface ChatEntry {
      * the live-stream block is cleared when this entry lands).
      * The footer fields (tokens / duration / events) are the execution
      * summary the old standalone "LiveExecutionCard" used to duplicate.
+     *
+     * CHAT CAPABILITIES (Task 2 §11): when the execution used search, the
+     * entry carries the REAL citation chains collected from the kernel's
+     * ActionCompleted observations — rendered as a collapsible sources block.
      */
     data class Assistant(
         override val id: String,
@@ -57,9 +66,105 @@ sealed interface ChatEntry {
         val tokensConsumed: Int = 0,
         val durationMs: Long = 0L,
         val eventCount: Int = 0,
-        val isDegraded: Boolean = false
+        val isDegraded: Boolean = false,
+        val sources: List<ChatSourceRef> = emptyList(),
+        val artifacts: List<ChatArtifactRef> = emptyList()
+    ) : ChatEntry
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §9–§12): one STRUCTURED capability result
+     * block in the message stream — the outcome of a user-invoked tool,
+     * skill, MCP tool, search-intelligence run, or knowledge retrieval. The
+     * conversation stays a conversation (§15: visually distinct, never a
+     * dashboard) — this is the block the user reads instead of raw
+     * orchestration output.
+     */
+    data class CapabilityResult(
+        override val id: String,
+        val kind: CapabilityKind,
+        /** The concrete thing that ran (tool/skill/server name, or the query). */
+        val title: String,
+        /** One-line human outcome ("تم"، "فشل: …"، "اكتمل بنمط تراجعي…"). */
+        val summary: String,
+        /** Optional longer content (tool output, ranked results…) — markdown. */
+        val detail: String? = null,
+        val sources: List<ChatSourceRef> = emptyList(),
+        val artifacts: List<ChatArtifactRef> = emptyList(),
+        val isSuccessful: Boolean = true,
+        val isDegraded: Boolean = false,
+        val degradedMessage: String? = null,
+        val timestampMs: Long = 0L
+    ) : ChatEntry
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §13 — MANDATORY): the INLINE human-approval
+     * block tied to the execution that needs consent. The approval itself is
+     * the REAL HumanApprovalGate backend (the same authority the governance
+     * screen uses); this entry only mirrors its state into the conversation
+     * — with the real description, the requested action, and the decision
+     * buttons while PENDING. No bypass: Approve/Reject go through the gate.
+     */
+    data class ApprovalBlock(
+        override val id: String,
+        val approvalId: String,
+        val executionId: String,
+        val toolName: String,
+        val riskLevel: String,
+        val description: String,
+        val requestedAction: String,
+        val justification: String,
+        val state: ApprovalBlockState = ApprovalBlockState.PENDING
     ) : ChatEntry
 }
+
+/** The capability families a [ChatEntry.CapabilityResult] can come from. */
+enum class CapabilityKind {
+    TOOL,
+    SKILL,
+    MCP,
+    SEARCH,
+    KNOWLEDGE_RETRIEVAL
+}
+
+/** The user-facing lifecycle of one inline approval block. */
+enum class ApprovalBlockState {
+    PENDING,
+    APPROVED,
+    REJECTED,
+    EXPIRED
+}
+
+/**
+ * One attachment reference on a user message (the presentation twin of the
+ * durable domain [com.example.domain.core.session.TurnAttachment] — kept
+ * separate so presentation models never leak into persistence).
+ */
+data class ChatEntryAttachment(
+    val id: String,
+    val name: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val storageUri: String,
+    val artifactId: String? = null
+)
+
+/** One citation/source reference (search intelligence, knowledge retrieval). */
+data class ChatSourceRef(
+    val title: String,
+    val url: String? = null,
+    val providerId: String? = null,
+    val confidenceScore: Float? = null
+)
+
+/** One artifact card reference rendered inside the conversation (§15). */
+data class ChatArtifactRef(
+    val artifactId: String,
+    val name: String,
+    val type: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val storageUri: String
+)
 
 /**
  * The user-facing execution lifecycle phases, projected STRICTLY from the
@@ -146,7 +251,11 @@ object ExecutionLifecycleProjection {
 
             is ExecutionEvent.ActionStarted -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
-                phaseDetail = "خطوة ${event.stepIndex + 1}"
+                // CHAT CAPABILITIES (Task 2 §14): the label comes from the
+                // REAL decision action the kernel started ("استعلام شبكي
+                // موثوق", "تنفيذ أداة برمجية مباشرة", "استرجاع المعرفة
+                // والوثائق (RAG)"…) — actual events, no chain-of-thought.
+                phaseDetail = event.action.type.displayName.take(48)
             )
 
             is ExecutionEvent.ActionCompleted -> next = current.copy(

@@ -2,6 +2,8 @@ package com.example.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.application.attachment.ChatAttachmentCoordinator
+import com.example.application.governed.HumanApprovalGate
 import com.example.application.registry.ComponentRegistry
 import com.example.application.session.ConversationSessionService
 import com.example.application.usecases.ExecuteAgentTaskUseCase
@@ -12,7 +14,9 @@ import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.ConversationSessionId
+import com.example.domain.core.session.TurnAttachment
 import com.example.domain.core.task.AutonomyPolicy
+import com.example.presentation.state.ApprovalBlockState
 import com.example.presentation.state.ChatEntry
 import com.example.presentation.state.ExecutionLifecycleProjection
 import com.example.presentation.state.ExecutionPhase
@@ -81,7 +85,28 @@ class StudioViewModel(
     /** App context for the foreground execution shell (null in JVM tests). */
     private val appContext: android.content.Context? = null,
     /** Outbound signal bus: cross-feature projections of this feature. */
-    private val signalBus: StudioSignalBus
+    private val signalBus: StudioSignalBus,
+    /**
+     * CHAT CAPABILITIES (Task 2 §13): the REAL human-approval authority —
+     * the same gate the governance surface resolves consent through. Null in
+     * compositions without the governed backend (JVM unit tests may pass a
+     * real gate over the in-memory store when they assert the flow).
+     */
+    private val humanApprovalGate: HumanApprovalGate? = null,
+    /**
+     * CHAT CAPABILITIES (Task 2 §5/§6): attachment grounding digest builder
+     * (SAF → sandbox → turn reference chain owner is the capability VM; this
+     * ViewModel only CONSUMES built references + digest at send time).
+     */
+    private val attachmentCoordinator: ChatAttachmentCoordinator? = null,
+    /** The device-user identity that resolves approvals (governance convention). */
+    private val localPrincipalId: String = "local-device-user",
+    /**
+     * CHAT CAPABILITIES (Task 2 §13): "السماح دائماً" — the standing-grant
+     * authority (the SAME service the governance surface grants through).
+     * Null ⇒ the affordance reports itself unavailable, honestly.
+     */
+    private val permissionGrantService: com.example.application.security.PermissionGrantService? = null
 ) : ViewModel() {
 
     /** The conversation feature's own slice of UI state (was 18 fields of UiState). */
@@ -327,7 +352,13 @@ class StudioViewModel(
     ): List<ChatEntry> {
         val agentName = turn.agentName ?: sessionAgentName ?: "المساعد"
         return listOf(
-            ChatEntry.User(id = "u_${turn.id}", text = turn.prompt),
+            ChatEntry.User(
+                id = "u_${turn.id}",
+                text = turn.prompt,
+                // CHAT CAPABILITIES (Task 2 §16): reopened sessions re-render
+                // their attachment chips from the durable references.
+                attachments = turn.attachments.map { it.toEntryAttachment() }
+            ),
             ChatEntry.Assistant(
                 id = "a_${turn.id}",
                 text = turn.answer,
@@ -341,6 +372,17 @@ class StudioViewModel(
             )
         )
     }
+
+    /** Durable reference → its presentation twin. */
+    private fun TurnAttachment.toEntryAttachment() =
+        com.example.presentation.state.ChatEntryAttachment(
+            id = id,
+            name = name,
+            mimeType = mimeType,
+            sizeBytes = sizeBytes,
+            storageUri = storageUri,
+            artifactId = artifactId
+        )
 
     /**
      * SESSIONS FEATURE → studio-side effect of a deleted session: clears
@@ -433,7 +475,8 @@ class StudioViewModel(
         tokensConsumed: Int,
         durationMs: Long,
         isSuccessful: Boolean,
-        eventCount: Int
+        eventCount: Int,
+        attachments: List<TurnAttachment> = emptyList()
     ) {
         val id = sessionId ?: return
         viewModelScope.launch {
@@ -448,7 +491,8 @@ class StudioViewModel(
                     tokensConsumed = tokensConsumed,
                     durationMs = durationMs,
                     isSuccessful = isSuccessful,
-                    eventCount = eventCount
+                    eventCount = eventCount,
+                    attachments = attachments
                 )
                 // First-turn titling: the default title becomes the prompt.
                 val session = conversationSessionService.getSessionWithTurns(id)?.session
@@ -539,11 +583,20 @@ class StudioViewModel(
      * update, so no intermediate frame can show a cleared composer without
      * the sent message, and no path writes the old text back while the
      * execution runs.
+     *
+     * CHAT CAPABILITIES (Task 2 §5/§6): [attachments] are the durable
+     * references built by the capability layer (SAF-picked, sandbox-imported,
+     * artifact-registered). Text-like attachments ride the LLM request as a
+     * bounded evidence digest; the USER MESSAGE displays clean text + chips.
      */
-    fun executePrompt(agent: AgentDefinition?) {
+    fun executePrompt(
+        agent: AgentDefinition?,
+        attachments: List<TurnAttachment> = emptyList()
+    ): Boolean {
         val current = _state.value
         val prompt = current.promptInput.trim()
-        if (prompt.isEmpty() || current.isExecuting) return
+        if (current.isExecuting) return false
+        if (prompt.isEmpty() && attachments.isEmpty()) return false
 
         // ------------------------------------------------------------------
         // QUICK CHAT vs AGENT MODE (report gap: "Quick Chat missing — the
@@ -561,11 +614,36 @@ class StudioViewModel(
                 _state.update {
                     it.copy(errorMessage = "وضع الوكيل يتطلب اختيار وكيلاً من الكتالوج أولاً — أو بدّل إلى «محادثة سريعة».")
                 }
-                return
+                return false
             }
         }
 
-        executeText(prompt, resolvedAgent, appendUserEntry = true)
+        // The attachment grounding digest is built BEFORE the send is
+        // accepted (bounded sandbox reads) so the atomic user-message update
+        // is never delayed by IO, and a failed read degrades to "no digest"
+        // rather than losing the send.
+        viewModelScope.launch {
+            val digest = if (attachments.isEmpty()) {
+                ""
+            } else {
+                val workspaceId = runCatching {
+                    workspaceRuntimeService.activeWorkspaceIdOrNull()
+                }.getOrNull()
+                runCatching {
+                    attachmentCoordinator?.buildGroundingDigest(workspaceId ?: "", attachments)
+                }.getOrNull() ?: ""
+            }
+            executeText(
+                prompt = prompt,
+                resolvedAgent = resolvedAgent,
+                appendUserEntry = true,
+                attachments = attachments,
+                groundingDigest = digest
+            )
+        }
+        // Synchronous acceptance — the screen clears ITS OWN draft state
+        // (the capability layer's chips) only when the send was really taken.
+        return true
     }
 
     /**
@@ -573,12 +651,16 @@ class StudioViewModel(
      * ("Regenerate" on an assistant message / "Retry" on a failed result).
      * The user message is NOT duplicated — the existing entry anchors the
      * new execution; only the lifecycle block and the new result follow it.
+     *
+     * CHAT CAPABILITIES (Task 2 §17): regeneration is NON-DESTRUCTIVE — the
+     * previous result stays in the transcript (append-only history); the new
+     * execution re-rides the SAME user message including its attachments.
      */
     fun regenerateLast(agent: AgentDefinition?) {
         val current = _state.value
         if (current.isExecuting) return
-        val lastUserText = current.timeline.lastOrNull { it is ChatEntry.User }
-            ?.let { (it as ChatEntry.User).text } ?: return
+        val lastUser = current.timeline.lastOrNull { it is ChatEntry.User } as? ChatEntry.User
+            ?: return
 
         val resolvedAgent: AgentDefinition = when (current.chatMode) {
             ChatMode.QUICK_CHAT -> resolveQuickChatAgent()
@@ -590,18 +672,56 @@ class StudioViewModel(
             }
         }
 
-        executeText(lastUserText, resolvedAgent, appendUserEntry = false)
+        val attachments = lastUser.attachments.map { it.toTurnAttachment() }
+        viewModelScope.launch {
+            val digest = if (attachments.isEmpty()) {
+                ""
+            } else {
+                val workspaceId = runCatching {
+                    workspaceRuntimeService.activeWorkspaceIdOrNull()
+                }.getOrNull()
+                runCatching {
+                    attachmentCoordinator?.buildGroundingDigest(workspaceId ?: "", attachments)
+                }.getOrNull() ?: ""
+            }
+            executeText(
+                prompt = lastUser.text,
+                resolvedAgent = resolvedAgent,
+                appendUserEntry = false,
+                attachments = attachments,
+                groundingDigest = digest
+            )
+        }
     }
+
+    /** Presentation attachment → the durable reference it mirrors. */
+    private fun com.example.presentation.state.ChatEntryAttachment.toTurnAttachment() =
+        TurnAttachment(
+            id = id,
+            name = name,
+            mimeType = mimeType,
+            sizeBytes = sizeBytes,
+            storageUri = storageUri,
+            artifactId = artifactId
+        )
 
     /**
      * The shared execution core used by both [executePrompt] (fresh prompt,
      * draft cleared, user entry appended) and [regenerateLast] (existing
      * user entry anchors the conversation).
+     *
+     * CHAT CAPABILITIES (Task 2):
+     *  - [attachments] ride the user entry as chips and persist with the
+     *    durable turn (§16); [groundingDigest] is the bounded evidence block
+     *    appended to the LLM-side prompt (§6) — the DISPLAYED text stays the
+     *    user's own words, unmodified.
      */
     private fun executeText(
         prompt: String,
         resolvedAgent: AgentDefinition,
-        appendUserEntry: Boolean
+        appendUserEntry: Boolean,
+        attachments: List<TurnAttachment> = emptyList(),
+        groundingDigest: String = ""
     ) {
         val current = _state.value
 
@@ -633,17 +753,40 @@ class StudioViewModel(
         // ------------------------------------------------------------------
         val selectedModelId = current.selectedModelResourceId
 
+        // CHAT CAPABILITIES (Task 2 §6): the LLM-side prompt is the user's
+        // text plus the clearly-marked attachment evidence (when present).
+        // The USER MESSAGE itself and the durable turn keep the clean text.
+        val effectivePrompt = if (groundingDigest.isBlank()) {
+            prompt
+        } else {
+            "$prompt\n\n$groundingDigest"
+        }
+
         val executionTaskId = java.util.UUID.randomUUID().toString()
         val sentAtMs = System.currentTimeMillis()
         val userEntryId = "user_$executionTaskId"
 
         // ONE atomic update: draft cleared (P0-B), user message visible
-        // (P0-C), live execution opened, previous lifecycle/stream closed.
+        // (P0-C) with its attachment chips, live execution opened, previous
+        // lifecycle/stream closed.
         _state.update {
             it.copy(
                 promptInput = if (appendUserEntry) "" else it.promptInput,
                 timeline = if (appendUserEntry) {
-                    it.timeline + ChatEntry.User(id = userEntryId, text = prompt)
+                    it.timeline + ChatEntry.User(
+                        id = userEntryId,
+                        text = prompt,
+                        attachments = attachments.map { attachment ->
+                            com.example.presentation.state.ChatEntryAttachment(
+                                id = attachment.id,
+                                name = attachment.name,
+                                mimeType = attachment.mimeType,
+                                sizeBytes = attachment.sizeBytes,
+                                storageUri = attachment.storageUri,
+                                artifactId = attachment.artifactId
+                            )
+                        }
+                    )
                 } else {
                     it.timeline
                 },
@@ -695,6 +838,10 @@ class StudioViewModel(
             // collision-free id (the millisecond-based ids could collide
             // and crash LazyColumn keys).
             var terminalSeq = 0
+            // CHAT CAPABILITIES (Task 2 §11): the REAL citation chains the
+            // execution collected (search intelligence) — projected onto the
+            // assistant entry as collapsible sources at completion time.
+            val collectedSources = mutableListOf<com.example.presentation.state.ChatSourceRef>()
             try {
                 sessionId = ensureActiveSession(
                     mode = current.chatMode,
@@ -709,7 +856,7 @@ class StudioViewModel(
                 val netAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: false
                 executeAgentTaskUseCase(
                     agent = resolvedAgent,
-                    prompt = prompt,
+                    prompt = effectivePrompt,
                     taskId = executionTaskId,
                     history = history,
                     assignedModelId = selectedModelId,
@@ -746,6 +893,25 @@ class StudioViewModel(
                             ExecutionLifecycleProjection.apply(it, event)
                         }
                         when (event) {
+                            is ExecutionEvent.ActionCompleted -> {
+                                // CHAT CAPABILITIES (Task 2 §11): harvest the
+                                // REAL citation chains a search action carried
+                                // in its observation — they become the
+                                // assistant entry's collapsible sources.
+                                (event.observation.outputData["searchCitations"] as? List<*>)
+                                    ?.forEach { chain ->
+                                        (chain as? com.example.domain.core.search.intelligence.CitationChain)
+                                            ?.let {
+                                                collectedSources += com.example.presentation.state.ChatSourceRef(
+                                                    title = it.itemTitle,
+                                                    url = it.itemUrl,
+                                                    providerId = it.providerId,
+                                                    confidenceScore = it.confidenceScore
+                                                )
+                                            }
+                                    }
+                                state.copy(executionLog = updatedLogs, liveExecution = updatedLive)
+                            }
                             is ExecutionEvent.DecisionMade -> {
                                 state.copy(executionLog = updatedLogs, liveExecution = updatedLive)
                             }
@@ -790,7 +956,10 @@ class StudioViewModel(
                                     tokensConsumed = state.currentTokensConsumed,
                                     durationMs = System.currentTimeMillis() - turnStartedAt,
                                     isSuccessful = true,
-                                    eventCount = updatedLogs.size
+                                    eventCount = updatedLogs.size,
+                                    // CHAT CAPABILITIES (Task 2 §16): the turn's
+                                    // attachment references persist with it.
+                                    attachments = attachments
                                 )
                                 // P0-D: the finished text has EXACTLY ONE
                                 // display path — the assistant entry. The
@@ -812,7 +981,10 @@ class StudioViewModel(
                                         tokensConsumed = state.currentTokensConsumed,
                                         durationMs = System.currentTimeMillis() - sentAtMs,
                                         eventCount = updatedLogs.size,
-                                        isDegraded = event.isDegraded
+                                        isDegraded = event.isDegraded,
+                                        // §11: the real search citations collected
+                                        // during this execution ride the entry.
+                                        sources = collectedSources.toList()
                                     ),
                                     studioSession = appendStudioTurn(
                                         state = state,
@@ -839,8 +1011,21 @@ class StudioViewModel(
                                     tokensConsumed = state.currentTokensConsumed,
                                     durationMs = System.currentTimeMillis() - turnStartedAt,
                                     isSuccessful = false,
-                                    eventCount = updatedLogs.size
+                                    eventCount = updatedLogs.size,
+                                    attachments = attachments
                                 )
+                                // CHAT CAPABILITIES (Task 2 §13 — MANDATORY):
+                                // an approval-blocked execution surfaces its
+                                // REAL consent request INLINE in the
+                                // conversation (the gate is the authority; the
+                                // request row is already persisted pending).
+                                println("DIAG error event code=${event.failureCode} exec=\$executionTaskId")
+                                if (event.failureCode == APPROVAL_REQUIRED_CODE) {
+                                    // The event's OWN executionId — the same id the
+                                    // gate keyed the persisted pending request to
+                                    // (the kernel mints it; the host key is not it).
+                                    requestApprovalBlock(executionId = event.executionId)
+                                }
                                 state.copy(
                                     isExecuting = false,
                                     errorMessage = event.message,
@@ -930,8 +1115,230 @@ class StudioViewModel(
         _state.update { it.copy(diagnosticBanner = null) }
     }
 
+    // ------------------------------------------------------------------
+    // CHAT CAPABILITIES (Task 2): capability results + inline approvals
+    // ------------------------------------------------------------------
+
+    /**
+     * Appends one STRUCTURED capability result block to the conversation
+     * (tool / skill / MCP / search / knowledge retrieval — §9–§12). The
+     * invocations live in the capabilities feature; the TIMELINE stays
+     * single-owner — blocks land here in conversation order.
+     */
+    fun appendCapabilityResult(entry: ChatEntry.CapabilityResult) {
+        _state.update { it.copy(timeline = it.timeline + entry) }
+    }
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §13): surfaces the REAL pending approval of
+     * [executionId] as an inline block in the conversation (idempotent — a
+     * block for the same approval never duplicates).
+     */
+    private fun requestApprovalBlock(executionId: String) {
+        val gate = humanApprovalGate ?: return
+        viewModelScope.launch {
+            val pending = runCatching { gate.pendingApprovals() }.getOrDefault(emptyList())
+                .firstOrNull { it.executionId == executionId } ?: return@launch
+            _state.update { state ->
+                val exists = state.timeline.any {
+                    it is ChatEntry.ApprovalBlock && it.approvalId == pending.approvalId
+                }
+                if (exists) {
+                    state
+                } else {
+                    state.copy(
+                        timeline = state.timeline + ChatEntry.ApprovalBlock(
+                            id = "apv_${pending.approvalId}",
+                            approvalId = pending.approvalId,
+                            executionId = pending.executionId,
+                            toolName = pending.toolName,
+                            riskLevel = pending.riskLevel,
+                            description = pending.prompt,
+                            requestedAction = "تنفيذ الأداة «${pending.toolName}»",
+                            justification = pending.justification
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §13): approves through the REAL
+     * HumanApprovalGate — the same authorization path the governance
+     * surface uses (no chat-side bypass exists).
+     */
+    fun approveApproval(approvalId: String) {
+        val gate = humanApprovalGate ?: return
+        viewModelScope.launch {
+            runCatching { gate.approve(approvalId, localPrincipalId) }
+                .onSuccess { resolution ->
+                    // The gate is idempotent: an already-resolved request
+                    // returns ITS OWN resolution — the block mirrors THAT,
+                    // never a flipped decision.
+                    val resolvedState = when (resolution) {
+                        com.example.domain.core.security.governance.ApprovalResolution.APPROVED ->
+                            ApprovalBlockState.APPROVED
+                        com.example.domain.core.security.governance.ApprovalResolution.EXPIRED ->
+                            ApprovalBlockState.EXPIRED
+                        com.example.domain.core.security.governance.ApprovalResolution.REJECTED ->
+                            ApprovalBlockState.REJECTED // already rejected — stays
+                        else -> ApprovalBlockState.APPROVED
+                    }
+                    updateApprovalBlock(approvalId, resolvedState)
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(errorMessage = "تعذر تسجيل الموافقة: ${e.localizedMessage}")
+                    }
+                }
+        }
+    }
+
+    /** CHAT CAPABILITIES (Task 2 §13): rejects through the REAL gate. */
+    fun rejectApproval(approvalId: String) {
+        val gate = humanApprovalGate ?: return
+        viewModelScope.launch {
+            runCatching { gate.reject(approvalId, localPrincipalId) }
+                .onSuccess { resolution ->
+                    // Idempotent mirror: an already-APPROVED request returns
+                    // APPROVED — the block keeps the real decision.
+                    val resolvedState = when (resolution) {
+                        com.example.domain.core.security.governance.ApprovalResolution.REJECTED ->
+                            ApprovalBlockState.REJECTED
+                        com.example.domain.core.security.governance.ApprovalResolution.APPROVED ->
+                            ApprovalBlockState.APPROVED // already approved — stays
+                        else -> ApprovalBlockState.REJECTED
+                    }
+                    updateApprovalBlock(approvalId, resolvedState)
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(errorMessage = "تعذر تسجيل الرفض: ${e.localizedMessage}")
+                    }
+                }
+        }
+    }
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §13): "السماح دائماً لهذه الأداة" — a
+     * standing EXECUTE grant for the tool (recorded consent: future
+     * admissions of this tool pass without a new request) plus resolving
+     * the CURRENT pending request — the exact same path
+     * GovernanceViewModel.grantAlwaysForApproval uses (one authority).
+     */
+    fun grantAlwaysForApproval(approvalId: String) {
+        val gate = humanApprovalGate ?: return
+        val grants = permissionGrantService
+        viewModelScope.launch {
+            if (grants == null) {
+                _state.update {
+                    it.copy(errorMessage = "خدمة منح الأذونات غير متاحة في هذا التكوين.")
+                }
+                return@launch
+            }
+            runCatching {
+                val pending = runCatching { gate.pendingApprovals() }.getOrDefault(emptyList())
+                    .firstOrNull { it.approvalId == approvalId }
+                if (pending != null) {
+                    grants.grant(
+                        principalType = com.example.domain.core.security.governance.PrincipalType.USER,
+                        principalId = localPrincipalId,
+                        // GLOBAL grant (workspaceId = null): standing consent for
+                        // the tool across the single-user device profile.
+                        resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
+                        resourceId = pending.toolName,
+                        permission = com.example.domain.core.security.governance.Permission.EXECUTE,
+                        grantedBy = localPrincipalId
+                    )
+                    gate.approve(approvalId, localPrincipalId)
+                }
+            }.onSuccess {
+                updateApprovalBlock(approvalId, ApprovalBlockState.APPROVED)
+                _state.update {
+                    it.copy(diagnosticBanner = "تم السماح دائماً بهذه الأداة (منح EXECUTE دائم).")
+                }
+            }.onFailure { e ->
+                _state.update {
+                    it.copy(errorMessage = "تعذر تسجيل المنح الدائم: ${e.localizedMessage}")
+                }
+            }
+        }
+    }
+
+    private fun updateApprovalBlock(approvalId: String, blockState: ApprovalBlockState) {
+        _state.update { state ->
+            state.copy(
+                timeline = state.timeline.map { entry ->
+                    if (entry is ChatEntry.ApprovalBlock && entry.approvalId == approvalId) {
+                        entry.copy(state = blockState)
+                    } else {
+                        entry
+                    }
+                }
+            )
+        }
+    }
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §13): retry-after-approval — re-executes the
+     * message that was blocked by consent. History stays append-only (the new
+     * result is a NEW entry; the old ones remain). The consent itself was
+     * resolved through the REAL gate; a future admission of the same tool
+     * still passes the same authorization boundary honestly — with "السماح
+     * دائماً" (a standing EXECUTE grant) it passes WITHOUT a new request.
+     */
+    fun retryAfterApproval(agent: AgentDefinition?) {
+        val current = _state.value
+        if (current.isExecuting) return
+        val approvedBlock = current.timeline.lastOrNull {
+            it is ChatEntry.ApprovalBlock &&
+                it.state == ApprovalBlockState.APPROVED
+        } as? ChatEntry.ApprovalBlock ?: run {
+            _state.update {
+                it.copy(errorMessage = "لا توجد موافقة قابلة لإعادة المحاولة — وافق على طلب أولاً.")
+            }
+            return
+        }
+        val blockedUser = current.timeline
+            .takeWhile { it.id != approvedBlock.id }
+            .lastOrNull { it is ChatEntry.User } as? ChatEntry.User ?: return
+
+        val resolvedAgent: AgentDefinition = when (current.chatMode) {
+            ChatMode.QUICK_CHAT -> resolveQuickChatAgent()
+            ChatMode.AGENT -> agent ?: run {
+                _state.update {
+                    it.copy(errorMessage = "وضع الوكيل يتطلب اختيار وكيلاً من الكتالوج أولاً — أو بدّل إلى «محادثة سريعة».")
+                }
+                return
+            }
+        }
+
+        val attachments = blockedUser.attachments.map { it.toTurnAttachment() }
+        viewModelScope.launch {
+            val digest = if (attachments.isEmpty()) "" else {
+                val workspaceId = runCatching {
+                    workspaceRuntimeService.activeWorkspaceIdOrNull()
+                }.getOrNull()
+                runCatching {
+                    attachmentCoordinator?.buildGroundingDigest(workspaceId ?: "", attachments)
+                }.getOrNull() ?: ""
+            }
+            executeText(
+                prompt = blockedUser.text,
+                resolvedAgent = resolvedAgent,
+                appendUserEntry = false,
+                attachments = attachments,
+                groundingDigest = digest
+            )
+        }
+    }
+
     companion object {
         /** Conversation history replay window (LLM messages per turn). */
         const val CONVERSATION_HISTORY_WINDOW = 8
+
+        /** The kernel's honest failure code for a consent-blocked execution. */
+        const val APPROVAL_REQUIRED_CODE = "HUMAN_APPROVAL_REQUIRED"
     }
 }

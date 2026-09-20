@@ -21,6 +21,7 @@ import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.ConversationSessionId
 import com.example.domain.core.workspace.Workspace
+import com.example.presentation.state.ChatEntry
 import com.example.domain.ports.llm.LlmProviderPort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -94,9 +95,38 @@ class StudioViewModelTest {
     /** Requests captured from the (local) mock LLM port. */
     private val capturedRequests = mutableListOf<LlmRequest>()
 
+    /** The execution ids the mock provider's stream() saw (Task 2 §13). */
+    private val capturedExecutionIds = mutableListOf<String>()
+
     /** Scripted failure switch for the mock provider's stream. */
     @Volatile
     private var streamFails: Boolean = false
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §13): when true, the mock stream persists a
+     * REAL pending approval for THIS executionId in the shared gate, then
+     * emits the honest HUMAN_APPROVAL_REQUIRED error — exactly the shape the
+     * governed kernel produces for a consent-blocked tool.
+     */
+    @Volatile
+    private var approvalScenario: Boolean = false
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §11): when true, the mock stream emits a
+     * REAL ActionCompleted carrying search citation chains before the
+     * answer — the shape the search intelligence pipeline produces.
+     */
+    @Volatile
+    private var citationsScenario: Boolean = false
+
+    /** The REAL human-approval store + gate shared by the mock and the ViewModel. */
+    private val approvalStore = com.example.infrastructure.governed.InMemoryHumanApprovalStore()
+    private val gate = com.example.application.governed.HumanApprovalGate(approvalStore)
+
+    /** The in-memory permission-grant store for the standing-consent path. */
+    private val grantDao = FakePermissionGrantDaoForVm()
+
+    private val approvalToolName = "tool_test_consent"
 
     /**
      * CHAT WORKSPACE (Task 1): when non-null, the mock stream emits ONE
@@ -169,9 +199,57 @@ class StudioViewModelTest {
 
             override fun stream(request: LlmRequest, executionId: String): Flow<ExecutionEvent> = flow {
                 capturedRequests += request
+                capturedExecutionIds += executionId
                 if (streamFails) {
                     emit(ExecutionEvent.Error(executionId, "MOCK_FAILURE", "فشل مزود الاختبار"))
+                } else if (approvalScenario) {
+                    // Persist the REAL pending request for THIS execution
+                    // (the exact AdmissionControlService stage-9 shape).
+                    gate.requestApproval(
+                        executionId = executionId,
+                        toolName = approvalToolName,
+                        riskLevel = "HIGH",
+                        prompt = "طلب موافقة اختباري",
+                        justification = "سياسة الحوكمة تتطلب موافقة صريحة"
+                    )
+                    emit(
+                        ExecutionEvent.Error(
+                            executionId,
+                            "HUMAN_APPROVAL_REQUIRED",
+                            "تنفيذ '$approvalToolName' يتطلب موافقة بشرية (طلب موافقة: apr_x)."
+                        )
+                    )
                 } else {
+                    if (citationsScenario) {
+                        emit(
+                            ExecutionEvent.ActionCompleted(
+                                executionId = executionId,
+                                action = com.example.domain.core.decision.DecisionAction(
+                                    type = com.example.domain.core.decision.DecisionActionType.SEARCH
+                                ),
+                                outputSummary = "تم البحث",
+                                observation = com.example.domain.core.decision.EnvironmentObservation(
+                                    action = com.example.domain.core.decision.DecisionAction(
+                                        type = com.example.domain.core.decision.DecisionActionType.SEARCH
+                                    ),
+                                    isSuccess = true,
+                                    actualLatencyMs = 10,
+                                    outputData = mapOf(
+                                        "searchCitations" to listOf(
+                                            com.example.domain.core.search.intelligence.CitationChain(
+                                                originalQuery = "ابحث واشرح",
+                                                subQueryText = "ابحث واشرح",
+                                                providerId = "mock_studio_provider",
+                                                itemUrl = "https://example.com/citation",
+                                                itemTitle = "مرجع الاختبار",
+                                                confidenceScore = 0.9f
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    }
                     emit(ExecutionEvent.ContentChunk(executionId, "الجواب ", sequenceIndex = 0))
                     // Direct await: a cancel during the window propagates as
                     // CancellationException (the honest cancellation path).
@@ -220,7 +298,15 @@ class StudioViewModelTest {
             conversationSessionService = sessionService,
             networkMonitorProvider = null, // fail-closed offline — local mock resource still routes
             appContext = null,
-            signalBus = signalBus
+            signalBus = signalBus,
+            // CHAT CAPABILITIES (Task 2 §13): the REAL gate (the same
+            // authority the governance surface resolves consent through) +
+            // the REAL standing-grant service over the in-memory fake DAO.
+            humanApprovalGate = gate,
+            permissionGrantService = com.example.application.security.PermissionGrantService(
+                permissionGrantDao = grantDao,
+                telemetryPort = NoopTelemetryForVm
+            )
         )
     }
 
@@ -867,6 +953,287 @@ class StudioViewModelTest {
     }
 
     // ------------------------------------------------------------------
+    // CHAT CAPABILITIES (Task 2) — attachments, approvals, capability blocks
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `send with attachments stages them on the user entry and persists them with the turn`() {
+        val attachment = com.example.domain.core.session.TurnAttachment(
+            id = "attm_test_1",
+            name = "ملاحظات.txt",
+            mimeType = "text/plain",
+            sizeBytes = 12L,
+            storageUri = "attachments/ملاحظات.txt",
+            artifactId = "art_test_1"
+        )
+        viewModel.updatePromptInput("لخص هذا الملف")
+        val accepted = viewModel.executePrompt(agent = null, attachments = listOf(attachment))
+
+        assertTrue(accepted)
+        awaitExecutionSettled()
+
+        val timeline = viewModel.state.value.timeline
+        val user = timeline.first { it is ChatEntry.User } as ChatEntry.User
+        assertEquals("لخص هذا الملف", user.text)
+        // §5: the chips ride the user message.
+        assertEquals(listOf("ملاحظات.txt"), user.attachments.map { it.name })
+
+        // §6: the clean user text is what the conversation shows; the LLM
+        // request carries the user's text (the digest builder is not wired in
+        // this composition — an honest empty digest).
+        assertTrue(capturedRequests.isNotEmpty())
+        assertTrue(
+            "the LLM prompt contains the user's own words",
+            capturedRequests.last().messages.last().content.contains("لخص هذا الملف")
+        )
+
+        // §16/§7: the durable turn KEEPS the attachment references.
+        val persisted = repository.appendedTurns.last()
+        assertEquals(listOf(attachment), persisted.attachments)
+    }
+
+    @Test
+    fun `reopening a session restores the attachment chips from the durable references`() {
+        val attachment = com.example.domain.core.session.TurnAttachment(
+            id = "attm_test_2",
+            name = "تقرير.md",
+            mimeType = "text/markdown",
+            sizeBytes = 30L,
+            storageUri = "attachments/تقرير.md",
+            artifactId = "art_test_2"
+        )
+        viewModel.updatePromptInput("اقرأ التقرير")
+        viewModel.executePrompt(agent = null, attachments = listOf(attachment))
+        awaitExecutionSettled()
+        val sessionId = viewModel.state.value.activeSessionId!!
+
+        // REOPEN: a fresh load path (same service — the process-death stand-in).
+        viewModel.openSession(sessionId)
+        awaitUntil {
+            viewModel.state.value.timeline
+                .any { it is ChatEntry.User && it.attachments.isNotEmpty() }
+        }
+        val restored = viewModel.state.value.timeline
+            .first { it is ChatEntry.User && it.attachments.isNotEmpty() } as ChatEntry.User
+        assertEquals("تقرير.md", restored.attachments.single().name)
+        assertEquals("art_test_2", restored.attachments.single().artifactId)
+    }
+
+    @Test
+    fun `a structured capability result lands in the conversation order`() {
+        runPrompt("سؤال أول")
+        awaitExecutionSettled()
+
+        viewModel.appendCapabilityResult(
+            ChatEntry.CapabilityResult(
+                id = "cap_test_1",
+                kind = com.example.presentation.state.CapabilityKind.TOOL,
+                title = "tool_test_echo",
+                summary = "تم التنفيذ بنجاح.",
+                detail = "نتيجة الأداة",
+                isSuccessful = true
+            )
+        )
+
+        val timeline = viewModel.state.value.timeline
+        val block = timeline.last { it is ChatEntry.CapabilityResult } as ChatEntry.CapabilityResult
+        assertEquals("نتيجة الأداة", block.detail)
+        // The conversation keeps its message entries around the block.
+        assertTrue(timeline.count { it is ChatEntry.User } >= 1)
+        assertTrue(timeline.count { it is ChatEntry.Assistant } >= 1)
+    }
+
+    @Test
+    fun `search citations collected during the execution ride the assistant entry as sources`() {
+        citationsScenario = true
+        viewModel.updatePromptInput("ابحث واشرح")
+        viewModel.executePrompt(agent = null)
+        awaitExecutionSettled()
+
+        val assistant = viewModel.state.value.timeline
+            .last { it is ChatEntry.Assistant } as ChatEntry.Assistant
+        assertTrue(assistant.sources.isNotEmpty())
+        assertTrue(assistant.sources.any { it.url == "https://example.com/citation" })
+    }
+
+    // ------------------------------------------------------------------
+    // CHAT CAPABILITIES (Task 2 §13) — the inline human approval loop
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `an approval-blocked execution surfaces its REAL pending request inline`() {
+        runApprovalScenarioPrompt()
+
+        awaitUntil {
+            viewModel.state.value.timeline.any { it is ChatEntry.ApprovalBlock }
+        }
+        val block = viewModel.state.value.timeline
+            .first { it is ChatEntry.ApprovalBlock } as ChatEntry.ApprovalBlock
+        assertEquals(approvalToolName, block.toolName)
+        assertEquals("HIGH", block.riskLevel)
+        assertEquals(
+            com.example.presentation.state.ApprovalBlockState.PENDING,
+            block.state
+        )
+        // The REAL gate holds the persisted pending request.
+        assertEquals(
+            com.example.domain.core.security.governance.ApprovalResolution.PENDING,
+            runBlocking { approvalStore.find(block.approvalId) }!!.resolution
+        )
+    }
+
+    @Test
+    fun `approving resolves through the REAL gate and updates the block state`() {
+        runApprovalScenarioPrompt()
+        awaitUntil { viewModel.state.value.timeline.any { it is ChatEntry.ApprovalBlock } }
+        val block = viewModel.state.value.timeline
+            .first { it is ChatEntry.ApprovalBlock } as ChatEntry.ApprovalBlock
+
+        viewModel.approveApproval(block.approvalId)
+        awaitUntil {
+            viewModel.state.value.timeline
+                .filterIsInstance<ChatEntry.ApprovalBlock>()
+                .any { it.state == com.example.presentation.state.ApprovalBlockState.APPROVED }
+        }
+        assertEquals(
+            com.example.domain.core.security.governance.ApprovalResolution.APPROVED,
+            runBlocking { approvalStore.find(block.approvalId) }!!.resolution
+        )
+    }
+
+    @Test
+    fun `rejecting resolves through the REAL gate and updates the block state`() {
+        runApprovalScenarioPrompt()
+        awaitUntil { viewModel.state.value.timeline.any { it is ChatEntry.ApprovalBlock } }
+        val block = viewModel.state.value.timeline
+            .first { it is ChatEntry.ApprovalBlock } as ChatEntry.ApprovalBlock
+
+        viewModel.rejectApproval(block.approvalId)
+        awaitUntil {
+            viewModel.state.value.timeline
+                .filterIsInstance<ChatEntry.ApprovalBlock>()
+                .any { it.state == com.example.presentation.state.ApprovalBlockState.REJECTED }
+        }
+        assertEquals(
+            com.example.domain.core.security.governance.ApprovalResolution.REJECTED,
+            runBlocking { approvalStore.find(block.approvalId) }!!.resolution
+        )
+    }
+
+    @Test
+    fun `approval state transitions are idempotent (already-resolved stays)`() {
+        runApprovalScenarioPrompt()
+        awaitUntil { viewModel.state.value.timeline.any { it is ChatEntry.ApprovalBlock } }
+        val block = viewModel.state.value.timeline
+            .first { it is ChatEntry.ApprovalBlock } as ChatEntry.ApprovalBlock
+
+        viewModel.approveApproval(block.approvalId)
+        awaitUntil {
+            viewModel.state.value.timeline
+                .filterIsInstance<ChatEntry.ApprovalBlock>()
+                .any { it.state == com.example.presentation.state.ApprovalBlockState.APPROVED }
+        }
+        // A late reject CANNOT flip an already-approved request.
+        viewModel.rejectApproval(block.approvalId)
+        Thread.sleep(200)
+        assertEquals(
+            com.example.domain.core.security.governance.ApprovalResolution.APPROVED,
+            runBlocking { approvalStore.find(block.approvalId) }!!.resolution
+        )
+        assertEquals(
+            com.example.presentation.state.ApprovalBlockState.APPROVED,
+            (viewModel.state.value.timeline
+                .first { it is ChatEntry.ApprovalBlock } as ChatEntry.ApprovalBlock).state
+        )
+    }
+
+    @Test
+    fun `retry after approval re-executes the message with append-only history`() {
+        runApprovalScenarioPrompt()
+        awaitUntil { viewModel.state.value.timeline.any { it is ChatEntry.ApprovalBlock } }
+        val block = viewModel.state.value.timeline
+            .first { it is ChatEntry.ApprovalBlock } as ChatEntry.ApprovalBlock
+        val firstExecutionId = capturedExecutionIds.last()
+        assertEquals(block.executionId, firstExecutionId)
+
+        viewModel.approveApproval(block.approvalId)
+        awaitUntil {
+            viewModel.state.value.timeline
+                .filterIsInstance<ChatEntry.ApprovalBlock>()
+                .any { it.state == com.example.presentation.state.ApprovalBlockState.APPROVED }
+        }
+
+        val resultsBefore = viewModel.state.value.timeline.count { it is ChatEntry.Assistant }
+        viewModel.retryAfterApproval(agent = null)
+        awaitUntil { capturedExecutionIds.size >= 2 }
+        awaitExecutionSettled()
+
+        // §13: the retry really re-executed (a fresh kernel execution — the
+        // kernel mints its own id, so the ids differ; nothing faked).
+        assertEquals(firstExecutionId, capturedExecutionIds.first())
+        assertTrue(capturedExecutionIds.drop(1).none { it == firstExecutionId })
+        // The history stays append-only: NEW result entries landed, nothing removed.
+        assertTrue(
+            viewModel.state.value.timeline.count { it is ChatEntry.Assistant } > resultsBefore
+        )
+        assertTrue(
+            viewModel.state.value.timeline.count { it is ChatEntry.User } == 1
+        )
+    }
+
+    @Test
+    fun `grant always resolves the approval AND records the standing EXECUTE grant`() {
+        runApprovalScenarioPrompt()
+        awaitUntil { viewModel.state.value.timeline.any { it is ChatEntry.ApprovalBlock } }
+        val block = viewModel.state.value.timeline
+            .first { it is ChatEntry.ApprovalBlock } as ChatEntry.ApprovalBlock
+
+        viewModel.grantAlwaysForApproval(block.approvalId)
+        awaitUntil {
+            viewModel.state.value.timeline
+                .filterIsInstance<ChatEntry.ApprovalBlock>()
+                .any { it.state == com.example.presentation.state.ApprovalBlockState.APPROVED }
+        }
+
+        // The gate resolved the request.
+        assertEquals(
+            com.example.domain.core.security.governance.ApprovalResolution.APPROVED,
+            runBlocking { approvalStore.find(block.approvalId) }!!.resolution
+        )
+        // The REAL standing grant was recorded (the closeable consent path —
+        // future admissions of this tool pass without a new request).
+        val grant = runBlocking {
+            grantDao.lookupScoped(
+                principalType = "USER",
+                principalId = "local-device-user",
+                resourceType = "TOOL",
+                resourceId = approvalToolName,
+                permission = "EXECUTE",
+                workspaceId = null
+            )
+        }
+        assertNotNull(grant)
+        assertEquals(approvalToolName, grant!!.resourceId)
+    }
+
+    @Test
+    fun `retry without an approval refuses honestly`() {
+        runApprovalScenarioPrompt()
+        awaitUntil { viewModel.state.value.timeline.any { it is ChatEntry.ApprovalBlock } }
+
+        viewModel.retryAfterApproval(agent = null)
+        Thread.sleep(200)
+        assertNotNull(viewModel.state.value.errorMessage)
+        assertTrue(viewModel.state.value.errorMessage!!.contains("وافق"))
+    }
+
+    /** Drives one approval-blocked execution (the scripted mock scenario). */
+    private fun runApprovalScenarioPrompt() {
+        approvalScenario = true
+        runPrompt("نفّذ الأداة الحساسة")
+    }
+
+    // ------------------------------------------------------------------
     // Housekeeping
     // ------------------------------------------------------------------
 
@@ -876,4 +1243,59 @@ class StudioViewModelTest {
             sessionService.observeSessions(activeWorkspace.id).first()
         } ?: emptyList()
     }
+}
+
+/** In-memory permission-grant DAO (the fake the service contract expects). */
+class FakePermissionGrantDaoForVm : com.example.infrastructure.persistence.dao.PermissionGrantDao {
+    private val rows = mutableListOf<com.example.infrastructure.persistence.entities.PermissionGrantEntity>()
+    private var nextId = 1L
+
+    override suspend fun forPrincipal(principalType: String, principalId: String) =
+        rows.filter { it.principalType == principalType && it.principalId == principalId }
+
+    override suspend fun lookupScoped(
+        principalType: String,
+        principalId: String,
+        resourceType: String,
+        resourceId: String,
+        permission: String,
+        workspaceId: String?
+    ): com.example.infrastructure.persistence.entities.PermissionGrantEntity? = rows.firstOrNull {
+        it.principalType == principalType && it.principalId == principalId &&
+            it.resourceType == resourceType && it.resourceId == resourceId &&
+            it.permission == permission && (it.workspaceId == null || it.workspaceId == workspaceId)
+    }
+
+    override suspend fun lookup(
+        principalType: String,
+        principalId: String,
+        resourceType: String,
+        resourceId: String,
+        permission: String
+    ): com.example.infrastructure.persistence.entities.PermissionGrantEntity? =
+        lookupScoped(principalType, principalId, resourceType, resourceId, permission, null)
+
+    override suspend fun upsert(grant: com.example.infrastructure.persistence.entities.PermissionGrantEntity): Long {
+        val id = nextId++
+        rows += grant.copy(id = id)
+        return id
+    }
+
+    override suspend fun revoke(id: Long) {
+        rows.removeAll { it.id == id }
+    }
+}
+
+/** No-op telemetry port (audit writes land nowhere — the grants are the assertion). */
+object NoopTelemetryForVm : com.example.domain.ports.observability.TelemetryPort {
+    override suspend fun record(sample: com.example.domain.core.observability.MetricSample) {}
+    override suspend fun recordBatch(samples: List<com.example.domain.core.observability.MetricSample>) {}
+    override suspend fun recordAudit(event: com.example.domain.core.observability.AuditEvent): Long = 0L
+    override suspend fun recordTraceNode(node: com.example.domain.core.observability.ExecutionTraceNode) {}
+    override fun snapshots() = kotlinx.coroutines.flow.flowOf(emptyList<com.example.domain.core.observability.MetricSnapshot>())
+    override fun dimensionSummaries() = kotlinx.coroutines.flow.flowOf(emptyList<com.example.domain.core.observability.DimensionSummary>())
+    override fun auditEvents(limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<com.example.domain.core.observability.AuditEvent>())
+    override fun traceForExecution(executionId: String) = kotlinx.coroutines.flow.flowOf(emptyList<com.example.domain.core.observability.ExecutionTraceNode>())
+    override fun recentTraceNodes(limit: Int) = kotlinx.coroutines.flow.flowOf(emptyList<com.example.domain.core.observability.ExecutionTraceNode>())
+    override suspend fun snapshotByType(type: com.example.domain.core.observability.MetricType) = emptyList<com.example.domain.core.observability.MetricSnapshot>()
 }

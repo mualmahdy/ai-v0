@@ -5,6 +5,7 @@ import com.example.domain.core.session.ConversationSession
 import com.example.domain.core.session.ConversationSessionId
 import com.example.domain.core.session.ConversationSessionWithTurns
 import com.example.domain.core.session.ConversationTurn
+import com.example.domain.core.session.TurnAttachment
 import com.example.domain.ports.session.ConversationSessionRepositoryPort
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
@@ -135,7 +136,9 @@ suspend fun getSession(
         durationMs: Long,
         isSuccessful: Boolean,
         eventCount: Int,
-        workspaceId: String? = null
+        workspaceId: String? = null,
+        /** CHAT CAPABILITIES (Task 2 §16): attachment references persisted with the turn. */
+        attachments: List<TurnAttachment> = emptyList()
     ): ConversationTurn? {
         val authorizedWorkspaceId = workspaceId ?: workspaceIdProvider()
         val turn = ConversationTurn(
@@ -150,7 +153,8 @@ suspend fun getSession(
             durationMs = durationMs,
             isSuccessful = isSuccessful,
             eventCount = eventCount,
-            createdAtEpochMs = System.currentTimeMillis()
+            createdAtEpochMs = System.currentTimeMillis(),
+            attachments = attachments
         )
         val written = repository.appendTurnForWorkspace(turn, authorizedWorkspaceId)
         return if (written) turn else null

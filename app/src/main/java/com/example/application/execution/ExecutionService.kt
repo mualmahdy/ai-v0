@@ -2362,12 +2362,56 @@ class ExecutionService(
      */
     var delegationExecutor: (suspend (AgentDefinition, com.example.domain.core.task.TaskDefinition) -> Outcome<String, String>)? = null
 
+    /**
+     * CHAT CAPABILITIES (Task 2 §9/§10): USER-INITIATED capability
+     * invocation — the SAME governed tool path the kernel uses for
+     * model-initiated calls (adapter resolution → argument parsing → the
+     * canonical authorization boundary incl. admission/approval → execution
+     * → the ToolResult event shape). Skills execute through it too (they are
+     * registered ToolPorts), and so do HEALTHY-server MCP tools (their
+     * registered adapter names "<server>__<tool>"). No parallel ungoverned
+     * path is created — [actionType] keeps the audit trail honest about WHO
+     * initiated the call (USER_TOOL_CALL vs MODEL_TOOL_CALL).
+     */
+    suspend fun executeStandaloneTool(
+        executionId: String,
+        toolName: String,
+        argumentsJson: String,
+        agent: AgentDefinition,
+        isMcp: Boolean = false,
+        /**
+         * The WORKSPACE binding the invocation runs in (the caller's ACTIVE
+         * workspace — the same authority the orchestrator pins for its own
+         * executions). The scope element makes the admission pipeline's
+         * workspace-stage validation see the REAL workspace instead of
+         * refusing a chat-invoked tool with WORKSPACE_SCOPE_REQUIRED.
+         */
+        workspaceId: String? = null
+    ): ExecutionEvent.ToolResult = kotlinx.coroutines.withContext(
+        com.example.domain.core.execution.ExecutionScope(
+            executionId = executionId,
+            workspaceId = workspaceId ?: "unattributed"
+        )
+    ) {
+        handleToolExecution(
+            executionId = executionId,
+            callId = "user_${UUID.randomUUID().toString().take(8)}",
+            toolName = toolName,
+            argumentsJson = argumentsJson,
+            agent = agent,
+            actionType = "USER_TOOL_CALL",
+            isMcp = isMcp
+        )
+    }
+
     private suspend fun handleToolExecution(
         executionId: String,
         callId: String,
         toolName: String,
         argumentsJson: String,
-        agent: AgentDefinition
+        agent: AgentDefinition,
+        actionType: String = "MODEL_TOOL_CALL",
+        isMcp: Boolean = false
     ): ExecutionEvent.ToolResult {
         // For inline tool calls during LLM streaming, we resolve by tool name
         // via the resolver (the ResourceId for in-app tools is the lowercased
@@ -2429,13 +2473,15 @@ class ExecutionService(
         // permission grants — ONE path for every model-initiated tool call.
         // GAP-02 part 2: self-admitting tools skip this boundary's consent
         // chain — their OWN internal pipeline is the single gate.
+        // CHAT CAPABILITIES (Task 2): user-initiated invocations share THIS
+        // boundary (actionType distinguishes USER_TOOL_CALL in the audit).
         when (val auth = authorizeToolExecution(
             agent = agent,
             toolName = toolName,
             arguments = parsedArguments,
-            actionType = "MODEL_TOOL_CALL",
+            actionType = actionType,
             executionId = executionId,
-            isMcp = false,
+            isMcp = isMcp,
             selfGoverning = tool is com.example.domain.ports.tools.SelfAdmittingTool
         )) {
             is ToolAuthorization.Denied -> {

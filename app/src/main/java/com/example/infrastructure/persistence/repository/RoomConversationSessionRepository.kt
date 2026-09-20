@@ -6,6 +6,7 @@ import com.example.domain.core.session.ConversationSessionId
 import com.example.domain.core.session.ConversationSessionWithTurns
 import com.example.domain.core.session.ConversationTurn
 import com.example.domain.ports.session.ConversationSessionRepositoryPort
+import com.example.infrastructure.persistence.TurnAttachmentJsonCodec
 import com.example.infrastructure.persistence.dao.ConversationSessionDao
 import com.example.infrastructure.persistence.dao.ConversationTurnDao
 import com.example.infrastructure.persistence.entities.ConversationSessionEntity
@@ -118,7 +119,10 @@ class RoomConversationSessionRepository(
             durationMs = turn.durationMs,
             isSuccessful = turn.isSuccessful,
             eventCount = turn.eventCount,
-            createdAtEpochMs = turn.createdAtEpochMs
+            createdAtEpochMs = turn.createdAtEpochMs,
+            // CHAT CAPABILITIES (Task 2 §16): attachment references persist
+            // WITH the turn — they survive session reopen (DB v18).
+            attachmentsJson = TurnAttachmentJsonCodec.encode(turn.attachments)
         )
         // Durable-turn write + session-aggregate bump in ONE Room
         // transaction: the session counters can never drift from the
@@ -221,7 +225,10 @@ class RoomConversationSessionRepository(
             durationMs = durationMs,
             isSuccessful = isSuccessful,
             eventCount = eventCount,
-            createdAtEpochMs = createdAtEpochMs
+            createdAtEpochMs = createdAtEpochMs,
+            // CHAT CAPABILITIES (Task 2 §16): references round-trip (legacy
+            // rows decode as an honest empty list).
+            attachments = TurnAttachmentJsonCodec.decode(attachmentsJson)
         )
     }
 }

@@ -46,10 +46,26 @@ class ConversationTimelineTest {
     }
 
     @Test
-    fun `ActionStarted projects to EXECUTING with the step detail`() {
+    fun `ActionStarted projects to EXECUTING with the real action label`() {
         val next = ExecutionLifecycleProjection.apply(base, actionStarted(stepIndex = 2))
         assertEquals(ExecutionPhase.EXECUTING, next.phase)
-        assertEquals("خطوة 3", next.phaseDetail)
+        // CHAT CAPABILITIES (Task 2 §14): the detail is the REAL decision
+        // action's display name ("استعلام شبكي موثوق" for SEARCH, …) —
+        // actual events, never chain-of-thought.
+        val search = ExecutionLifecycleProjection.apply(
+            base,
+            ExecutionEvent.ActionStarted(
+                executionId = "exec",
+                action = com.example.domain.core.decision.DecisionAction(
+                    type = com.example.domain.core.decision.DecisionActionType.SEARCH
+                ),
+                stepIndex = 0
+            )
+        )
+        assertEquals(
+            com.example.domain.core.decision.DecisionActionType.SEARCH.displayName,
+            search.phaseDetail
+        )
     }
 
     @Test

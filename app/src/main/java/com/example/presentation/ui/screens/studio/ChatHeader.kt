@@ -60,7 +60,12 @@ fun ChatHeader(
     onOpenContext: () -> Unit,
     onOpenSettings: () -> Unit,
     onNewSession: () -> Unit,
-    onOpenSessions: () -> Unit,
+    /**
+     * §19 (Task 2): the sessions browse button exists ONLY at compact width
+     * (medium+ show the sessions PANE — the same control is never duplicated).
+     * Null = the button is not composed at all.
+     */
+    onOpenSessions: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -94,12 +99,14 @@ fun ChatHeader(
                     )
                 }
             }
-            IconButton(onClick = onOpenSessions, modifier = Modifier.testTag("btn_open_sessions")) {
-                Icon(
-                    Icons.Default.AccountTree,
-                    contentDescription = "تصفح الجلسات الدائمة",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            onOpenSessions?.let { openSessions ->
+                IconButton(onClick = openSessions, modifier = Modifier.testTag("btn_open_sessions")) {
+                    Icon(
+                        Icons.Default.AccountTree,
+                        contentDescription = "تصفح الجلسات الدائمة",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             IconButton(onClick = onNewSession, modifier = Modifier.testTag("btn_new_session")) {
                 Icon(

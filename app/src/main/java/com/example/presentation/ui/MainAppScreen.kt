@@ -131,6 +131,10 @@ fun MainAppScreen(
     filesViewModel: com.example.presentation.viewmodel.FilesViewModel,
     settingsViewModel: com.example.presentation.viewmodel.SettingsViewModel,
     studioViewModel: com.example.presentation.viewmodel.StudioViewModel,
+    // CHAT CAPABILITIES (Task 2): the chat feature's capability layer VM —
+    // the availability catalog, attachment drafts, and the governed
+    // tool/skill/MCP/search/knowledge invocation state.
+    chatCapabilitiesViewModel: com.example.presentation.viewmodel.ChatCapabilitiesViewModel,
     sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
     // ADR-6 slice 3: the KNOWLEDGE feature ViewModel (RAG base + semantic
     // engine + memory browser) — owned here, passed to the screens that
@@ -482,6 +486,7 @@ fun MainAppScreen(
                     filesViewModel = filesViewModel,
                     settingsViewModel = settingsViewModel,
                     studioViewModel = studioViewModel,
+                    chatCapabilitiesViewModel = chatCapabilitiesViewModel,
                     sessionsViewModel = sessionsViewModel,
                     knowledgeViewModel = knowledgeViewModel,
                     governanceViewModel = governanceViewModel,
@@ -594,6 +599,8 @@ private fun WorkspaceNavHost(
     filesViewModel: com.example.presentation.viewmodel.FilesViewModel,
     settingsViewModel: com.example.presentation.viewmodel.SettingsViewModel,
     studioViewModel: com.example.presentation.viewmodel.StudioViewModel,
+    // CHAT CAPABILITIES (Task 2): the chat feature's capability layer VM.
+    chatCapabilitiesViewModel: com.example.presentation.viewmodel.ChatCapabilitiesViewModel,
     sessionsViewModel: com.example.presentation.viewmodel.SessionsViewModel,
     radarViewModel: com.example.presentation.viewmodel.RadarViewModel,
     decisionViewModel: com.example.presentation.viewmodel.DecisionViewModel,
@@ -671,6 +678,10 @@ private fun WorkspaceNavHost(
             StudioScreen(
                 viewModel = viewModel,
                 studioViewModel = studioViewModel,
+                // CHAT CAPABILITIES (Task 2): the capability layer VM — the
+                // availability catalog, attachment drafts, and the governed
+                // tool/skill/MCP/search/knowledge invocation state.
+                chatCapabilitiesViewModel = chatCapabilitiesViewModel,
                 sessionsViewModel = sessionsViewModel,
                 // ADR-6 slice 5: the model picker + the connect-LLM gate read
                 // the providers feature VM — the resource owner.

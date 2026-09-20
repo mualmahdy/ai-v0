@@ -73,7 +73,14 @@ data class ConversationTurnEntity(
     val isSuccessful: Boolean = true,
     @ColumnInfo(defaultValue = "0")
     val eventCount: Int = 0,
-    val createdAtEpochMs: Long
+    val createdAtEpochMs: Long,
+    /**
+     * CHAT CAPABILITIES (Task 2 §16, DB v18): the durable attachment
+     * references of this turn, serialized by [com.example.infrastructure.
+     * persistence.TurnAttachmentJsonCodec]. Empty/legacy rows are "[]".
+     */
+    @ColumnInfo(defaultValue = "[]")
+    val attachmentsJson: String = "[]"
 )
 
 /**

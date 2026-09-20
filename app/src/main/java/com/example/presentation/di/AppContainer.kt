@@ -247,6 +247,31 @@ class AppContainer(context: Context) {
         )
     }
 
+    /**
+     * CHAT CAPABILITIES (Task 2 §5): the PRODUCTION ContentPort — the
+     * declared SAF/ContentResolver seam (display name/size queries + stream
+     * opens + the document-tree→zip folder bridge).
+     */
+    val androidContentPort: com.example.infrastructure.content.AndroidContentPort by lazy {
+        com.example.infrastructure.content.AndroidContentPort(appContext)
+    }
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §5/§6): the chat attachment coordinator —
+     * SAF → (real transfer path) sandbox → (real artifact registration) →
+     * durable turn reference → bounded LLM grounding digest.
+     */
+    val chatAttachmentCoordinator: com.example.application.attachment.ChatAttachmentCoordinator by lazy {
+        com.example.application.attachment.ChatAttachmentCoordinator(
+            fileTransferService = fileTransferService,
+            artifactService = artifactService,
+            workspaceRuntimeService = workspaceRuntimeService,
+            fileStore = sandboxFileStore,
+            contentPort = androidContentPort,
+            folderZipSource = { treeUri -> androidContentPort.openTreeAsZipStream(treeUri) }
+        )
+    }
+
     /** §10-§12 — versioned portable project packages + clone/move. */
     val projectPackageService: com.example.application.transfer.ProjectPackageService by lazy {
         com.example.application.transfer.ProjectPackageService(
@@ -2213,7 +2238,43 @@ class StudioViewModelFactory(
                 conversationSessionService = appContainer.conversationSessionService,
                 networkMonitorProvider = appContainer.networkMonitor,
                 appContext = appContainer.appContext,
-                signalBus = studioSignalBus
+                signalBus = studioSignalBus,
+                // CHAT CAPABILITIES (Task 2 §13): the REAL consent authority +
+                // the attachment grounding digest builder + the standing-grant
+                // service ("السماح دائماً" — the same authority governance uses).
+                humanApprovalGate = appContainer.humanApprovalGate,
+                attachmentCoordinator = appContainer.chatAttachmentCoordinator,
+                localPrincipalId = appContainer.localPrincipalId,
+                permissionGrantService = appContainer.permissionGrantService
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * CHAT CAPABILITIES (Task 2 §3–§12): factory for the chat feature's
+ * CAPABILITY layer ViewModel — the availability catalog, the attachment
+ * drafts (SAF→sandbox→artifact chain), and the capability invocations (the
+ * governed tool path, the real search/RAG pipelines). Composed exactly as
+ * production wires the services; nothing duplicated from other owners.
+ */
+class ChatCapabilitiesViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.ChatCapabilitiesViewModel::class.java)) {
+            return com.example.presentation.viewmodel.ChatCapabilitiesViewModel(
+                extensionManager = appContainer.extensionManager,
+                componentRegistry = appContainer.componentRegistry,
+                searchIntelligenceService = appContainer.searchIntelligenceService,
+                ragPipelineService = appContainer.ragPipelineService,
+                attachmentCoordinator = appContainer.chatAttachmentCoordinator,
+                workspaceRuntimeService = appContainer.workspaceRuntimeService,
+                executionService = appContainer.executionService,
+                capabilityRadarService = appContainer.capabilityRadarService,
+                networkMonitorProvider = appContainer.networkMonitor
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

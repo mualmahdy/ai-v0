@@ -61,6 +61,36 @@ data class ConversationSession(
     val projectId: Long? = null
 )
 
+/**
+ * CHAT CAPABILITIES (Task 2 §16) — one durable attachment reference on a
+ * conversation turn. The reference is the MINIMAL correct linkage: the bytes
+ * live in the project sandbox ([storageUri], imported through the real
+ * FileTransferService staging/atomic-promotion path), the artifacts table
+ * row ([artifactId], registered through the real ArtifactService) carries
+ * the type/scope/audit truth, and the message-level metadata (name, mime,
+ * size) is what the conversation surface needs to re-render the chip after
+ * a session is reopened — WITHOUT re-reading the file.
+ */
+data class TurnAttachment(
+    /** Stable id, unique within the turn ("attm_…"). */
+    val id: String,
+    /** User-visible display name (from SAF/ContentResolver). */
+    val name: String,
+    /** MIME type as reported at pick time. */
+    val mimeType: String,
+    /** Size in bytes as reported/imported. */
+    val sizeBytes: Long,
+    /** Sandbox-relative storage URI (project sandbox — never an absolute path). */
+    val storageUri: String,
+    /** The artifacts-table row registered for this attachment, when it exists. */
+    val artifactId: String? = null,
+    /**
+     * Honest provenance: how this attachment entered the conversation
+     * ("SAF_FILE", "SAF_FOLDER_ZIP"…) — shown in diagnostics, not to regular users.
+     */
+    val provenance: String = "SAF_FILE"
+)
+
 /** One durable conversational turn (the real executed outcome). */
 data class ConversationTurn(
     val id: String,
@@ -74,7 +104,9 @@ data class ConversationTurn(
     val durationMs: Long = 0L,
     val isSuccessful: Boolean = true,
     val eventCount: Int = 0,
-    val createdAtEpochMs: Long = 0L
+    val createdAtEpochMs: Long = 0L,
+    /** CHAT CAPABILITIES (Task 2 §16): attachment references survive with the turn. */
+    val attachments: List<TurnAttachment> = emptyList()
 )
 
 /** A session with its full turn history (for reopening / resuming). */

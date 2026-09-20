@@ -237,10 +237,11 @@ class MigrationChainValidationTest {
         val db = room.openHelper.writableDatabase // <-- the real upgrade happens here
 
         try {
-            // Version converged to 17 (v16→v17 drops the three dead GAP-08 tables).
+            // Version converged to 18 (v16→v17 drops the three dead GAP-08
+            // tables; v17→v18 adds chat_turns.attachmentsJson — Task 2 §16).
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(17, c.getInt(0))
+                assertEquals(18, c.getInt(0))
             }
 
             // Room accepted the migrated schema: it wrote its identity hash.
@@ -324,7 +325,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(17, c.getInt(0))
+                assertEquals(18, c.getInt(0))
             }
             // Validation accepted → identity hash written.
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
@@ -372,7 +373,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(17, c.getInt(0))
+                assertEquals(18, c.getInt(0))
             }
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
                 assertTrue(c.moveToFirst())

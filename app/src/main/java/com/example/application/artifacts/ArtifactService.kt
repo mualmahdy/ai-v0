@@ -53,6 +53,13 @@ class ArtifactService(
     /**
      * Registers a file (or folder) living in a project sandbox as a
      * first-class artifact. Deduplicated by id.
+     *
+     * CHAT CAPABILITIES (Task 2 §5/§15): [forceType] lets a caller that KNOWS
+     * what the resource is (the chat attachment coordinator registers a
+     * picked file as [ArtifactType.ATTACHMENT]) keep the REAL type instead of
+     * the inferred FILE/FOLDER — no invented states, the caller must pass a
+     * type the artifact actually is. Null (default) keeps the existing
+     * inference for every existing caller.
      */
     suspend fun registerFileArtifact(
         workspaceId: String,
@@ -61,7 +68,8 @@ class ArtifactService(
         name: String = relativePath.substringAfterLast('/'),
         mimeType: String = guessMime(name),
         ownerId: String? = null,
-        indexingState: ArtifactIndexingState = ArtifactIndexingState.NOT_INDEXED
+        indexingState: ArtifactIndexingState = ArtifactIndexingState.NOT_INDEXED,
+        forceType: ArtifactType? = null
     ): ArtifactDescriptor = withContext(Dispatchers.IO) {
         val root = fileStore.projectRoot(projectId)
         val stat = fileStore.stat(root, relativePath)
@@ -71,7 +79,7 @@ class ArtifactService(
             id = id,
             workspaceId = workspaceId,
             projectId = projectId,
-            type = if (stat.isDirectory) ArtifactType.FOLDER.name else ArtifactType.FILE.name,
+            type = forceType?.name ?: if (stat.isDirectory) ArtifactType.FOLDER.name else ArtifactType.FILE.name,
             name = name,
             mimeType = mimeType,
             sizeBytes = stat.sizeBytes,

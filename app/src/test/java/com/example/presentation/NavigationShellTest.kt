@@ -20,6 +20,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.presentation.di.ActivityViewModelFactory
 import com.example.presentation.di.AgentsViewModelFactory
 import com.example.presentation.di.AppContainer
+import com.example.presentation.di.ChatCapabilitiesViewModelFactory
 import com.example.presentation.di.DecisionViewModelFactory
 import com.example.presentation.di.ExtensionsViewModelFactory
 import com.example.presentation.di.FilesViewModelFactory
@@ -41,6 +42,7 @@ import com.example.presentation.ui.navigation.navWidthClassForWidthDp
 import com.example.presentation.ui.navigation.topLevelDestinations
 import com.example.presentation.viewmodel.ActivityViewModel
 import com.example.presentation.viewmodel.AgentsViewModel
+import com.example.presentation.viewmodel.ChatCapabilitiesViewModel
 import com.example.presentation.viewmodel.DecisionViewModel
 import com.example.presentation.viewmodel.ExtensionsViewModel
 import com.example.presentation.viewmodel.FilesViewModel
@@ -160,6 +162,7 @@ class NavigationShellTest {
         val files = vm<FilesViewModel>(FilesViewModelFactory(appContainer))
         val settings = vm<SettingsViewModel>(SettingsViewModelFactory(appContainer))
         val studio = vm<StudioViewModel>(StudioViewModelFactory(appContainer, studioSignalBus))
+        val chatCaps = vm<ChatCapabilitiesViewModel>(ChatCapabilitiesViewModelFactory(appContainer))
         val sessions = vm<SessionsViewModel>(SessionsViewModelFactory(appContainer))
         val knowledge = vm<KnowledgeViewModel>(KnowledgeViewModelFactory(appContainer))
         val governance = vm<GovernanceViewModel>(GovernanceViewModelFactory(appContainer, studioSignalBus))
@@ -181,6 +184,7 @@ class NavigationShellTest {
                         filesViewModel = files,
                         settingsViewModel = settings,
                         studioViewModel = studio,
+                        chatCapabilitiesViewModel = chatCaps,
                         sessionsViewModel = sessions,
                         knowledgeViewModel = knowledge,
                         governanceViewModel = governance,

@@ -286,7 +286,7 @@ abstract class AppDatabase : RoomDatabase() {
          * database had already reached v17 — a stale honesty violation. UI
          * surfaces read this constant instead of a literal).
          */
-        const val SCHEMA_VERSION = 17
+        const val SCHEMA_VERSION = 18
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -1792,6 +1792,21 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * CHAT CAPABILITIES (Task 2 §16, DB v18): conversation turns gain a
+         * durable ATTACHMENT-REFERENCES column. Pure additive ALTER — every
+         * existing row (and every historical upgrade path v1..v17) converges on
+         * the same honest `attachmentsJson = '[]'` ("no attachments"), and no
+         * text/turn data is touched.
+         */
+        private val MIGRATION_17_TO_18: Migration = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE chat_turns ADD COLUMN attachmentsJson TEXT NOT NULL DEFAULT '[]'"
+                )
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1811,6 +1826,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_14_TO_15,
             MIGRATION_15_TO_16,
             MIGRATION_16_TO_17,
+            MIGRATION_17_TO_18,
         )
 
         fun getInstance(context: Context): AppDatabase {
