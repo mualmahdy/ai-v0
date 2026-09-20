@@ -143,8 +143,6 @@
     <!-- Studio — progressive disclosure of advanced controls -->
     <string name="studio_advanced_controls">أدوات متقدمة</string>
     <string name="studio_advanced_controls_hint">سياسة الشبكة والاستقلالية وميزانية الرموز للجلسة</string>
-    <string name="studio_advanced_expand">إظهار الأدوات المتقدمة</string>
-    <string name="studio_advanced_collapse">إخفاء الأدوات المتقدمة</string>
 
     <!-- Shared component strings (Arabic-only, screen-reader visible) -->
     <string name="component_diagnostic_alert">تنبيه</string>

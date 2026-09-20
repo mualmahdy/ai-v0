@@ -8,10 +8,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -64,6 +65,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -341,6 +343,24 @@ fun MainAppScreen(
     val widthClass = navWidthClassForWidthDp(configuration.screenWidthDp)
     val isCompact = widthClass == com.example.presentation.ui.navigation.NavWidthClass.COMPACT
 
+    // ------------------------------------------------------------------
+    // IME / INSETS (Chat Workspace Task 1 §4A):
+    // ONE clear inset chain, no accumulation:
+    //   - statusBars: consumed once at the Scaffold modifier (below);
+    //   - navigationBars: owned by the bottom NavigationBar itself;
+    //   - ime: owned ONLY by the chat composer (the single element that
+    //     must hug the keyboard).
+    // While the IME is visible the bottom NavigationBar is HIDDEN (the
+    // keyboard occupies its region — keeping it would leave a bar-height
+    // gap between the composer and the keyboard) and the content insets
+    // are consumed for descendants so the composer's imePadding lands
+    // EXACTLY at the keyboard's top edge — no double padding, no
+    // keyboard-sized blank after send. Portrait and landscape share the
+    // math (insets are edge-based, not orientation-based).
+    // ------------------------------------------------------------------
+    val density = LocalDensity.current
+    val isImeVisible = WindowInsets.ime.getBottom(density) > 0
+
     Scaffold(
         modifier = modifier
             .fillMaxSize()
@@ -367,7 +387,10 @@ fun MainAppScreen(
             )
         },
         bottomBar = {
-            if (isCompact) {
+            // §4A: while the IME is visible the bar yields its region to
+            // the keyboard — the composer then hugs the keyboard exactly,
+            // instead of floating a bar-height gap above it.
+            if (isCompact && !isImeVisible) {
                 NavigationBar(
                     modifier = Modifier
                         .windowInsetsPadding(WindowInsets.navigationBars)
@@ -390,6 +413,12 @@ fun MainAppScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                // §4A: the consumed-insets recipe — descendants that pad by
+                // insets (the Studio composer's imePadding) deduct what this
+                // padding already applied, so the composer lands exactly at
+                // the keyboard's top edge instead of above
+                // (keyboard + navigation bar).
+                .consumeWindowInsets(innerPadding)
         ) {
             if (!isCompact) {
                 NavigationRail(
@@ -649,11 +678,17 @@ private fun WorkspaceNavHost(
                 // ADR-6 slice 7: the agent catalog (picker + builder +
                 // delete) composes on the agents feature VM — its owner.
                 agentsViewModel = agentsViewModel,
+                // Chat Workspace Task 1: the honest current-project mirror
+                // (D-02) — the compact chat header shows the project the
+                // conversation is bound to.
+                projectsViewModel = projectsViewModel,
                 onNavigate = navigate,
                 // ADR-6 slice 1: the autonomy mutation routes to the SETTINGS
                 // feature ViewModel (authoritative service routing).
                 onAutonomyPolicy = settingsViewModel::setAutonomyPolicy,
-                modifier = Modifier.fillMaxSize().imePadding()
+                // §4A: NO route-level imePadding — the composer owns the
+                // single IME inset source of this screen.
+                modifier = Modifier.fillMaxSize()
             )
         }
         composable(WorkspaceRoutes.ACTIVITY) {

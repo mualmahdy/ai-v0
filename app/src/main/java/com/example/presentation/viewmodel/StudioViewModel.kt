@@ -13,7 +13,10 @@ import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.ConversationSessionId
 import com.example.domain.core.task.AutonomyPolicy
-import com.example.domain.core.task.TaskConstraints
+import com.example.presentation.state.ChatEntry
+import com.example.presentation.state.ExecutionLifecycleProjection
+import com.example.presentation.state.ExecutionPhase
+import com.example.presentation.state.LiveExecutionState
 import com.example.presentation.state.StudioTurn
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,7 +28,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 /**
  * ============================================================================
  * StudioViewModel — the STUDIO conversation runtime ViewModel (ADR-6 slice
- * 2, Design Closure 2026 UI-redesign track)
+ * 2, Design Closure 2026 UI-redesign track; Chat Workspace Task 1)
  * ============================================================================
  *
  * GAP-19/21 (ADR-6 "تفكيك تدريجي متزامن"): the conversation runtime — the
@@ -38,8 +41,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
  *    live stream + execution log, the token gauges, the session network
  *    policy, and this feature's own error/banner channels. Nothing here
  *    is shared with other features — the shared DISPLAY mirrors
- *    (decision case-base, activity trace) stay in MainViewModel and are
- *    fed through the [StudioSignal] bus.
+ *    (decision case-base, activity trace) stay in their owner feature
+ *    ViewModels and are fed through the [StudioSignal] bus.
  *  - BEHAVIOR: prompt execution via [ExecuteAgentTaskUseCase] on the
  *    governed execution kernel (ExecutionHost, workspace-attributed),
  *    durable-session ensure/persist (survives process death), model
@@ -48,6 +51,16 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
  *    catalog is shared state (Tasks/Explorer read it); the screen reads
  *    the selection from the shared state and passes the resolved agent
  *    into [executePrompt] / [startNewSession] as a parameter.
+ *
+ * CHAT WORKSPACE (Task 1) state model on top of the above:
+ *  - [StudioUiState.timeline] — the conversation-first message stream
+ *    ([ChatEntry.User] appears IMMEDIATELY on send; [ChatEntry.Assistant]
+ *    is the SINGLE display path of a finished result);
+ *  - [StudioUiState.liveExecution] — the honest execution-lifecycle
+ *    projection of the REAL kernel events (see
+ *    [ExecutionLifecycleProjection]); no raw log is user-facing;
+ *  - session-integrity semantics: a mode change is a semantic session
+ *    boundary; "reset view" never claims durable deletion.
  *
  * Honesty contract (carried over verbatim from the MainViewModel code it
  * replaces): AGENT mode without a selection fails with an actionable
@@ -80,6 +93,10 @@ class StudioViewModel(
         // Session transcript (Studio as a real conversation console).
         val studioSession: List<StudioTurn> = emptyList(),
         val sessionTurnStartMs: Long = 0L,
+        // CHAT WORKSPACE (Task 1): the conversation-first message stream +
+        // the live execution lifecycle block attached to the last user turn.
+        val timeline: List<ChatEntry> = emptyList(),
+        val liveExecution: LiveExecutionState? = null,
         // DURABLE SESSIONS + QUICK CHAT + MODEL PICKER (report gap-closure):
         // the conversation mode, the active durable session id, and the
         // user-facing exact model selection.
@@ -110,27 +127,85 @@ class StudioViewModel(
     }
 
     /**
+     * MESSAGE ACTION (Task 1 §10): loads a past user message's text into the
+     * composer as an editable draft (re-send as a new message). The original
+     * message is NOT mutated — history stays append-only.
+     */
+    fun editUserMessage(text: String) {
+        _state.update { it.copy(promptInput = text) }
+    }
+
+    /**
      * Sets the conversation mode: QUICK_CHAT (agent-independent, binds to the
      * selected model) or AGENT (canonical agent catalog).
+     *
+     * SESSION INTEGRITY (Task 1 §8): a mode change is a SEMANTIC SESSION
+     * BOUNDARY — the durable session row records exactly ONE mode, so the
+     * old binding is released (the session stays durable and browsable) and
+     * the visible timeline resets. The next send ensures a NEW session with
+     * the new mode; the visible transcript always matches the durable
+     * session it belongs to. Switching mid-execution is refused honestly
+     * (the running turn belongs to its own session).
      */
     fun setChatMode(mode: ChatMode) {
-        _state.update { it.copy(chatMode = mode) }
+        val current = _state.value
+        if (current.chatMode == mode) return
+        if (current.isExecuting) {
+            _state.update {
+                it.copy(errorMessage = "لا يمكن تبديل وضع المحادثة أثناء تنفيذ جارٍ — ألغِ التنفيذ أو انتظر اكتماله.")
+            }
+            return
+        }
+        if (current.activeSessionId == null && current.timeline.isEmpty()) {
+            _state.update { it.copy(chatMode = mode) }
+            return
+        }
+        _state.update {
+            it.copy(
+                chatMode = mode,
+                activeSessionId = null,
+                timeline = emptyList(),
+                studioSession = emptyList(),
+                streamText = "",
+                executionLog = emptyList(),
+                liveExecution = null,
+                sessionTurnStartMs = 0L
+            )
+        }
     }
 
     /**
      * Sets the SESSION network policy — an execution-time input of THIS
      * conversation. The change is also published on the signal bus so the
      * decision preview and the governance snapshot re-derive with the new
-     * policy (they keep display mirrors in MainViewModel).
+     * policy (they keep display mirrors in their owner ViewModels).
      */
     fun setNetworkPolicy(policy: NetworkPolicy) {
         _state.update { it.copy(networkPolicy = policy) }
         viewModelScope.launch { signalBus.emit(StudioSignal.NetworkPolicyChanged(policy)) }
     }
 
-    /** Clears the in-memory Studio conversation transcript (session only). */
-    fun clearStudioSession() {
-        _state.update { it.copy(studioSession = emptyList()) }
+    /**
+     * SESSION INTEGRITY (Task 1 §8): resets the IN-MEMORY conversation view
+     * and releases the durable-session binding — WITHOUT claiming any
+     * durable deletion. The old session row (and its turns) remain fully
+     * intact and browsable in the session browser; the next sent message
+     * starts a NEW durable session. This replaces the old
+     * `clearStudioSession()` whose UI copy ("تفريغ سجل الجلسة") implied a
+     * permanent deletion that never happened.
+     */
+    fun resetTranscriptView() {
+        _state.update {
+            it.copy(
+                activeSessionId = null,
+                timeline = emptyList(),
+                studioSession = emptyList(),
+                streamText = "",
+                executionLog = emptyList(),
+                liveExecution = null,
+                sessionTurnStartMs = 0L
+            )
+        }
     }
 
     /**
@@ -180,8 +255,10 @@ class StudioViewModel(
                     it.copy(
                         activeSessionId = session.id.value,
                         studioSession = emptyList(),
+                        timeline = emptyList(),
                         executionLog = emptyList(),
-                        streamText = ""
+                        streamText = "",
+                        liveExecution = null
                     )
                 }
             }.onFailure { failure ->
@@ -224,8 +301,12 @@ class StudioViewModel(
                                 modelResourceId = turn.modelResourceId
                             )
                         },
+                        timeline = loaded.turns.flatMap { turn ->
+                            buildTimelineFromTurn(turn, loaded.session.agentName)
+                        },
                         executionLog = emptyList(),
                         streamText = "",
+                        liveExecution = null,
                         isExecuting = false
                     )
                 }
@@ -236,13 +317,47 @@ class StudioViewModel(
     }
 
     /**
+     * One durable turn → the two timeline entries it represents (the user
+     * message + the assistant result). Failed turns keep their assistant
+     * entry (it carries the retry affordance).
+     */
+    private fun buildTimelineFromTurn(
+        turn: com.example.domain.core.session.ConversationTurn,
+        sessionAgentName: String?
+    ): List<ChatEntry> {
+        val agentName = turn.agentName ?: sessionAgentName ?: "المساعد"
+        return listOf(
+            ChatEntry.User(id = "u_${turn.id}", text = turn.prompt),
+            ChatEntry.Assistant(
+                id = "a_${turn.id}",
+                text = turn.answer,
+                agentName = agentName,
+                agentRole = turn.agentRole ?: "",
+                isSuccessful = turn.isSuccessful,
+                modelResourceId = turn.modelResourceId,
+                tokensConsumed = turn.tokensConsumed,
+                durationMs = turn.durationMs,
+                eventCount = turn.eventCount
+            )
+        )
+    }
+
+    /**
      * SESSIONS FEATURE → studio-side effect of a deleted session: clears
      * THIS conversation's binding + transcript when the deleted session was
      * the active one (the deletion itself is owned by SessionsViewModel).
      */
     fun onSessionDeleted(sessionId: String) {
         if (_state.value.activeSessionId == sessionId) {
-            _state.update { it.copy(activeSessionId = null, studioSession = emptyList()) }
+            _state.update {
+                it.copy(
+                    activeSessionId = null,
+                    studioSession = emptyList(),
+                    timeline = emptyList(),
+                    streamText = "",
+                    liveExecution = null
+                )
+            }
         }
     }
 
@@ -359,10 +474,11 @@ class StudioViewModel(
         agentRole: String,
         answer: String,
         isSuccessful: Boolean,
-        modelResourceId: String? = null
+        modelResourceId: String? = null,
+        turnId: String
     ): List<StudioTurn> {
         val turn = StudioTurn(
-            id = "turn_${System.currentTimeMillis()}",
+            id = turnId,
             prompt = prompt,
             agentName = agentName,
             agentRole = agentRole,
@@ -383,24 +499,46 @@ class StudioViewModel(
      * cancel never actually cancelled the workflow job (it runs in its own
      * scope), so resetting its flag while the workflow continued was a
      * display lie — each feature now resets only its own flag.
+     *
+     * CHAT WORKSPACE (Task 1): the cancelled execution stays visible as a
+     * CANCELLED lifecycle block (with its partial stream, if any) attached to
+     * the user message that started it — cancelled work leaves an honest
+     * trace, and is never persisted as a durable turn (the kernel never
+     * emitted a terminal result for it).
      */
     fun cancelExecution() {
-        currentExecutionTaskId?.let { com.example.application.execution.ExecutionHost.cancel(it) }
-        currentExecutionTaskId = null
-        appContext?.let {
-            com.example.application.execution.AgentExecutionForegroundService.stop(it)
-        }
+        val taskId = currentExecutionTaskId
+        // ORDER MATTERS (the race the full-suite load exposed): the state
+        // must reach its terminal CANCELLED shape BEFORE the job is killed —
+        // the collector's finally-block defensive check reads the phase, and
+        // a cancel-first ordering lets it clear the block between the job's
+        // death and this update (the block vanished instead of staying as
+        // the cancelled trace).
         _state.update {
             it.copy(
                 isExecuting = false,
+                liveExecution = it.liveExecution?.copy(phase = ExecutionPhase.CANCELLED),
                 diagnosticBanner = "تم إلغاء العملية بواسطة المستخدم."
             )
+        }
+        if (taskId != null) {
+            currentExecutionTaskId = null
+            com.example.application.execution.ExecutionHost.cancel(taskId)
+        }
+        appContext?.let {
+            com.example.application.execution.AgentExecutionForegroundService.stop(it)
         }
     }
 
     /**
      * Executes the current prompt. [agent] is the shared-catalog selection
      * resolved by the screen (null is only honest in QUICK_CHAT mode).
+     *
+     * P0-B/P0-C (Chat Workspace Task 1): on acceptance the draft is cleared
+     * and the USER MESSAGE becomes visible IMMEDIATELY — one atomic state
+     * update, so no intermediate frame can show a cleared composer without
+     * the sent message, and no path writes the old text back while the
+     * execution runs.
      */
     fun executePrompt(agent: AgentDefinition?) {
         val current = _state.value
@@ -414,7 +552,8 @@ class StudioViewModel(
         // quick-chat agent + the user-selected model — the user never has to
         // pick an agent. AGENT mode keeps the canonical agent binding (and
         // fails HONESTLY with an actionable message instead of a silent
-        // no-op return).
+        // no-op return). Validated BEFORE any timeline mutation so a gated
+        // send never leaves a phantom user message.
         // ------------------------------------------------------------------
         val resolvedAgent: AgentDefinition = when (current.chatMode) {
             ChatMode.QUICK_CHAT -> resolveQuickChatAgent()
@@ -425,6 +564,46 @@ class StudioViewModel(
                 return
             }
         }
+
+        executeText(prompt, resolvedAgent, appendUserEntry = true)
+    }
+
+    /**
+     * MESSAGE ACTION (Task 1 §10): re-executes the LAST user message
+     * ("Regenerate" on an assistant message / "Retry" on a failed result).
+     * The user message is NOT duplicated — the existing entry anchors the
+     * new execution; only the lifecycle block and the new result follow it.
+     */
+    fun regenerateLast(agent: AgentDefinition?) {
+        val current = _state.value
+        if (current.isExecuting) return
+        val lastUserText = current.timeline.lastOrNull { it is ChatEntry.User }
+            ?.let { (it as ChatEntry.User).text } ?: return
+
+        val resolvedAgent: AgentDefinition = when (current.chatMode) {
+            ChatMode.QUICK_CHAT -> resolveQuickChatAgent()
+            ChatMode.AGENT -> agent ?: run {
+                _state.update {
+                    it.copy(errorMessage = "وضع الوكيل يتطلب اختيار وكيلاً من الكتالوج أولاً — أو بدّل إلى «محادثة سريعة».")
+                }
+                return
+            }
+        }
+
+        executeText(lastUserText, resolvedAgent, appendUserEntry = false)
+    }
+
+    /**
+     * The shared execution core used by both [executePrompt] (fresh prompt,
+     * draft cleared, user entry appended) and [regenerateLast] (existing
+     * user entry anchors the conversation).
+     */
+    private fun executeText(
+        prompt: String,
+        resolvedAgent: AgentDefinition,
+        appendUserEntry: Boolean
+    ) {
+        val current = _state.value
 
         // ------------------------------------------------------------------
         // CONVERSATION HISTORY (report gap: "Resume conversation / unified
@@ -454,12 +633,29 @@ class StudioViewModel(
         // ------------------------------------------------------------------
         val selectedModelId = current.selectedModelResourceId
 
+        val executionTaskId = java.util.UUID.randomUUID().toString()
+        val sentAtMs = System.currentTimeMillis()
+        val userEntryId = "user_$executionTaskId"
+
+        // ONE atomic update: draft cleared (P0-B), user message visible
+        // (P0-C), live execution opened, previous lifecycle/stream closed.
         _state.update {
             it.copy(
+                promptInput = if (appendUserEntry) "" else it.promptInput,
+                timeline = if (appendUserEntry) {
+                    it.timeline + ChatEntry.User(id = userEntryId, text = prompt)
+                } else {
+                    it.timeline
+                },
                 isExecuting = true,
                 streamText = "",
                 executionLog = emptyList(),
-                sessionTurnStartMs = System.currentTimeMillis(),
+                liveExecution = LiveExecutionState(
+                    executionId = executionTaskId,
+                    phase = ExecutionPhase.QUEUED,
+                    startedAtMs = sentAtMs
+                ),
+                sessionTurnStartMs = sentAtMs,
                 isDegraded = false,
                 degradedReason = null,
                 diagnosticBanner = null,
@@ -474,7 +670,6 @@ class StudioViewModel(
         // GAP-CLOSURE P0-01: the execution is keyed by its taskId — launching
         // a second task no longer cancels the first, and cancel() targets
         // exactly THIS execution.
-        val executionTaskId = java.util.UUID.randomUUID().toString()
         currentExecutionTaskId = executionTaskId
         // P1-08 hardening: the selected agent IS the executing agent —
         // idempotent registration into the runtime registry.
@@ -494,6 +689,12 @@ class StudioViewModel(
         val executionWorkspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull()
         com.example.application.execution.ExecutionHost.launch(executionTaskId, executionWorkspaceId) {
             var sessionId: ConversationSessionId? = null
+            // Terminal-sequence counter: one execution can emit MULTIPLE
+            // terminal events (the documented provider-error → fallback
+            // quirk) — each lands as its own assistant entry with a stable,
+            // collision-free id (the millisecond-based ids could collide
+            // and crash LazyColumn keys).
+            var terminalSeq = 0
             try {
                 sessionId = ensureActiveSession(
                     mode = current.chatMode,
@@ -541,17 +742,21 @@ class StudioViewModel(
                     }
                     _state.update { state ->
                         val updatedLogs = state.executionLog + event
+                        val updatedLive = state.liveExecution?.let {
+                            ExecutionLifecycleProjection.apply(it, event)
+                        }
                         when (event) {
                             is ExecutionEvent.DecisionMade -> {
-                                state.copy(executionLog = updatedLogs)
+                                state.copy(executionLog = updatedLogs, liveExecution = updatedLive)
                             }
                             is ExecutionEvent.ObservationRecorded -> {
-                                state.copy(executionLog = updatedLogs)
+                                state.copy(executionLog = updatedLogs, liveExecution = updatedLive)
                             }
                             is ExecutionEvent.ContentChunk -> {
                                 state.copy(
                                     streamText = state.streamText + event.deltaText,
-                                    executionLog = updatedLogs
+                                    executionLog = updatedLogs,
+                                    liveExecution = updatedLive
                                 )
                             }
                             is ExecutionEvent.Degraded -> {
@@ -559,7 +764,8 @@ class StudioViewModel(
                                     isDegraded = true,
                                     degradedReason = event.reason,
                                     diagnosticBanner = event.message,
-                                    executionLog = updatedLogs
+                                    executionLog = updatedLogs,
+                                    liveExecution = updatedLive
                                 )
                             }
                             is ExecutionEvent.UsageBudgetUpdate -> {
@@ -567,66 +773,115 @@ class StudioViewModel(
                                     currentTokensConsumed = event.promptTokens + event.completionTokens,
                                     sessionTotalTokens = event.totalSessionTokens,
                                     remainingBudget = event.remainingBudgetTokens,
-                                    executionLog = updatedLogs
+                                    executionLog = updatedLogs,
+                                    liveExecution = updatedLive
                                 )
                             }
                             is ExecutionEvent.Completed -> {
+                                terminalSeq++
+                                val answer = if (event.finalText.isNotBlank()) event.finalText else state.streamText
                                 persistTurnDurably(
                                     sessionId = sessionId,
                                     prompt = prompt,
-                                    answer = event.finalText.ifBlank { _state.value.streamText },
+                                    answer = answer,
                                     agentName = resolvedAgent.identity.name,
                                     agentRole = resolvedAgent.identity.role.displayName,
                                     modelResourceId = selectedModelId,
-                                    tokensConsumed = _state.value.currentTokensConsumed,
+                                    tokensConsumed = state.currentTokensConsumed,
                                     durationMs = System.currentTimeMillis() - turnStartedAt,
                                     isSuccessful = true,
-                                    eventCount = _state.value.executionLog.size
+                                    eventCount = updatedLogs.size
                                 )
+                                // P0-D: the finished text has EXACTLY ONE
+                                // display path — the assistant entry. The
+                                // stream text and the live block collapse;
+                                // their numbers survive as the entry's
+                                // execution summary.
                                 state.copy(
                                     isExecuting = false,
-                                    streamText = if (event.finalText.isNotBlank()) event.finalText else state.streamText,
+                                    streamText = "",
+                                    liveExecution = null,
                                     executionLog = updatedLogs,
+                                    timeline = state.timeline + ChatEntry.Assistant(
+                                        id = "asst_${executionTaskId}_$terminalSeq",
+                                        text = answer,
+                                        agentName = resolvedAgent.identity.name,
+                                        agentRole = resolvedAgent.identity.role.displayName,
+                                        isSuccessful = true,
+                                        modelResourceId = selectedModelId,
+                                        tokensConsumed = state.currentTokensConsumed,
+                                        durationMs = System.currentTimeMillis() - sentAtMs,
+                                        eventCount = updatedLogs.size,
+                                        isDegraded = event.isDegraded
+                                    ),
                                     studioSession = appendStudioTurn(
                                         state = state,
                                         prompt = prompt,
                                         agentName = resolvedAgent.identity.name,
                                         agentRole = resolvedAgent.identity.role.displayName,
-                                        answer = if (event.finalText.isNotBlank()) event.finalText else state.streamText,
+                                        answer = answer,
                                         isSuccessful = true,
-                                        modelResourceId = selectedModelId
+                                        modelResourceId = selectedModelId,
+                                        turnId = "turn_${executionTaskId}_$terminalSeq"
                                     )
                                 )
                             }
                             is ExecutionEvent.Error -> {
+                                terminalSeq++
+                                val answer = state.streamText.ifBlank { event.message }
                                 persistTurnDurably(
                                     sessionId = sessionId,
                                     prompt = prompt,
-                                    answer = state.streamText.ifBlank { event.message },
+                                    answer = answer,
                                     agentName = resolvedAgent.identity.name,
                                     agentRole = resolvedAgent.identity.role.displayName,
                                     modelResourceId = selectedModelId,
-                                    tokensConsumed = _state.value.currentTokensConsumed,
+                                    tokensConsumed = state.currentTokensConsumed,
                                     durationMs = System.currentTimeMillis() - turnStartedAt,
                                     isSuccessful = false,
-                                    eventCount = _state.value.executionLog.size
+                                    eventCount = updatedLogs.size
                                 )
                                 state.copy(
                                     isExecuting = false,
                                     errorMessage = event.message,
                                     executionLog = updatedLogs,
+                                    liveExecution = null,
+                                    streamText = "",
+                                    timeline = state.timeline + ChatEntry.Assistant(
+                                        id = "asst_${executionTaskId}_$terminalSeq",
+                                        text = answer,
+                                        agentName = resolvedAgent.identity.name,
+                                        agentRole = resolvedAgent.identity.role.displayName,
+                                        isSuccessful = false,
+                                        modelResourceId = selectedModelId,
+                                        tokensConsumed = state.currentTokensConsumed,
+                                        durationMs = System.currentTimeMillis() - sentAtMs,
+                                        eventCount = updatedLogs.size
+                                    ),
                                     studioSession = appendStudioTurn(
                                         state = state,
                                         prompt = prompt,
                                         agentName = resolvedAgent.identity.name,
                                         agentRole = resolvedAgent.identity.role.displayName,
-                                        answer = state.streamText.ifBlank { event.message },
+                                        answer = answer,
                                         isSuccessful = false,
-                                        modelResourceId = selectedModelId
+                                        modelResourceId = selectedModelId,
+                                        turnId = "turn_${executionTaskId}_$terminalSeq"
                                     )
                                 )
                             }
-                            else -> state.copy(executionLog = updatedLogs)
+                            is ExecutionEvent.Cancelled -> {
+                                // System-side cancellation event: the
+                                // lifecycle block stays visible with its
+                                // partial stream (the user message keeps its
+                                // context); no durable turn is fabricated.
+                                state.copy(
+                                    isExecuting = false,
+                                    executionLog = updatedLogs,
+                                    liveExecution = updatedLive
+                                )
+                            }
+                            else -> state.copy(executionLog = updatedLogs, liveExecution = updatedLive)
                         }
                     }
                 }
@@ -638,7 +893,25 @@ class StudioViewModel(
                     )
                 }
             } finally {
+                // DEFENSIVE HONESTY: if this execution is still shown as
+                // live WITHOUT a terminal event ever arriving (an unexpected
+                // kernel gap), free the composer instead of leaving a
+                // permanently-cancel-only UI — and say so honestly.
                 if (currentExecutionTaskId == executionTaskId) currentExecutionTaskId = null
+                _state.update { state ->
+                    val stillLive = state.liveExecution?.executionId == executionTaskId &&
+                        state.liveExecution?.phase != ExecutionPhase.CANCELLED
+                    if (stillLive) {
+                        state.copy(
+                            isExecuting = false,
+                            liveExecution = null,
+                            diagnosticBanner = state.diagnosticBanner
+                                ?: "انتهى التنفيذ دون إشارة ختامية — راجع النتيجة المعروضة."
+                        )
+                    } else {
+                        state
+                    }
+                }
             }
         }
 

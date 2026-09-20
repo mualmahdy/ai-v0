@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -96,6 +97,14 @@ class StudioViewModelTest {
     /** Scripted failure switch for the mock provider's stream. */
     @Volatile
     private var streamFails: Boolean = false
+
+    /**
+     * CHAT WORKSPACE (Task 1): when non-null, the mock stream emits ONE
+     * chunk then AWAITS the gate before the terminal events — a
+     * controllable mid-stream window for the cancel test.
+     */
+    @Volatile
+    private var streamGate: CompletableDeferred<Unit>? = null
 
     @Before
     fun setUp() = runBlocking {
@@ -164,6 +173,9 @@ class StudioViewModelTest {
                     emit(ExecutionEvent.Error(executionId, "MOCK_FAILURE", "فشل مزود الاختبار"))
                 } else {
                     emit(ExecutionEvent.ContentChunk(executionId, "الجواب ", sequenceIndex = 0))
+                    // Direct await: a cancel during the window propagates as
+                    // CancellationException (the honest cancellation path).
+                    streamGate?.let { gate -> gate.await() }
                     emit(ExecutionEvent.ContentChunk(executionId, "الكامل", sequenceIndex = 1))
                     emit(
                         ExecutionEvent.UsageBudgetUpdate(
@@ -484,11 +496,11 @@ class StudioViewModelTest {
         awaitExecutionSettled()
         val sessionId = viewModel.state.value.activeSessionId!!
 
-        viewModel.selectModel(resourceId = "res:mock:svc:llm:offering", displayName = "النموذج المختار")
+        viewModel.selectModel(resourceId = "mock_studio_provider", displayName = "النموذج المختار")
 
-        assertEquals("res:mock:svc:llm:offering", viewModel.state.value.selectedModelResourceId)
+        assertEquals("mock_studio_provider", viewModel.state.value.selectedModelResourceId)
         val session = runBlocking { repository.getSession(ConversationSessionId(sessionId)) }!!
-        assertEquals("res:mock:svc:llm:offering", session.modelResourceId)
+        assertEquals("mock_studio_provider", session.modelResourceId)
         assertEquals("النموذج المختار", session.modelDisplayName)
     }
 
@@ -496,9 +508,9 @@ class StudioViewModelTest {
     fun `selectModel without an active session updates the display only (no repository write)`() {
         val upsertsBefore = repository.upsertCount
 
-        viewModel.selectModel(resourceId = "res:mock:svc:llm:offering", displayName = "النموذج")
+        viewModel.selectModel(resourceId = "mock_studio_provider", displayName = "النموذج")
 
-        assertEquals("res:mock:svc:llm:offering", viewModel.state.value.selectedModelResourceId)
+        assertEquals("mock_studio_provider", viewModel.state.value.selectedModelResourceId)
         assertEquals(upsertsBefore, repository.upsertCount)
     }
 
@@ -598,6 +610,260 @@ class StudioViewModelTest {
         val state = viewModel.state.value
         assertFalse(state.isExecuting)
         assertEquals("تم إلغاء العملية بواسطة المستخدم.", state.diagnosticBanner)
+    }
+
+    // ------------------------------------------------------------------
+    // CHAT WORKSPACE (Task 1) — the conversation-first contract
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `send clears the prompt input IMMEDIATELY and keeps it cleared during execution`() {
+        val gate = CompletableDeferred<Unit>()
+        streamGate = gate
+
+        runPrompt("سؤال أثناء البث")
+        // P0-B: the draft is cleared in the SAME update that launches — no
+        // intermediate frame can keep the old text, and nothing writes it back.
+        assertEquals("", viewModel.state.value.promptInput)
+
+        awaitUntil { viewModel.state.value.streamText.isNotBlank() }
+        // Still cleared while the execution streams (no race).
+        assertEquals("", viewModel.state.value.promptInput)
+
+        gate.complete(Unit)
+        awaitExecutionSettled()
+        assertEquals("", viewModel.state.value.promptInput)
+        streamGate = null
+    }
+
+    @Test
+    fun `the user message becomes visible IMMEDIATELY (before any result)`() {
+        val gate = CompletableDeferred<Unit>()
+        streamGate = gate
+
+        runPrompt("سؤالي الفوري")
+        // P0-C: the user entry is in the timeline at send time — no waiting
+        // for the terminal event.
+        val timelineNow = viewModel.state.value.timeline
+        assertEquals(1, timelineNow.size)
+        val userEntry = timelineNow.single() as com.example.presentation.state.ChatEntry.User
+        assertEquals("سؤالي الفوري", userEntry.text)
+        // The live execution block is attached to it.
+        assertNotNull(viewModel.state.value.liveExecution)
+
+        gate.complete(Unit)
+        awaitExecutionSettled()
+        streamGate = null
+    }
+
+    @Test
+    fun `the final streamed result appears exactly ONCE (no duplicate live card)`() {
+        runPrompt("سؤال عنصر واحد")
+        awaitExecutionSettled()
+
+        val state = viewModel.state.value
+        // The assistant entry is the SINGLE display path of the result text.
+        val matching = state.timeline.filterIsInstance<com.example.presentation.state.ChatEntry.Assistant>()
+            .filter { it.text.contains("الجواب الكامل") }
+        assertEquals(1, matching.size)
+        // P0-D: the stream text and the live block are collapsed.
+        assertEquals("", state.streamText)
+        assertNull(state.liveExecution)
+        // The timeline and the durable transcript stay 1:1.
+        assertEquals(
+            "Every durable turn is exactly one user entry + one assistant entry",
+            state.studioSession.size * 2,
+            state.timeline.size
+        )
+    }
+
+    @Test
+    fun `no stale stream text remains after a FAILED execution either`() {
+        streamFails = true
+        runPrompt("سؤال فاشل")
+        awaitExecutionSettled()
+        streamFails = false
+
+        val state = viewModel.state.value
+        assertEquals("", state.streamText)
+        assertNull(state.liveExecution)
+        assertTrue(
+            state.timeline.filterIsInstance<com.example.presentation.state.ChatEntry.Assistant>()
+                .isNotEmpty()
+        )
+    }
+
+    @Test
+    fun `the execution lifecycle reaches a terminal state and collapses`() {
+        receivedSignals.clear()
+        runPrompt("دورة كاملة")
+        awaitExecutionSettled()
+
+        val state = viewModel.state.value
+        assertFalse(state.isExecuting)
+        assertNull(state.liveExecution)
+        assertEquals("", state.streamText)
+    }
+
+    @Test
+    fun `regenerate re-executes the last prompt WITHOUT duplicating the user message`() {
+        runPrompt("السؤال الأصلي")
+        awaitExecutionSettled()
+        val userMessagesAfterFirst = viewModel.state.value.timeline
+            .filterIsInstance<com.example.presentation.state.ChatEntry.User>()
+
+        viewModel.regenerateLast(agent = null)
+        awaitExecutionSettled()
+
+        val state = viewModel.state.value
+        val userMessages = state.timeline.filterIsInstance<com.example.presentation.state.ChatEntry.User>()
+        assertEquals("The user message is NOT duplicated by regenerate", userMessagesAfterFirst.size, userMessages.size)
+        assertEquals("السؤال الأصلي", userMessages.single().text)
+        // TWO assistant results exist (the original + the regeneration).
+        assertEquals(2, state.timeline.filterIsInstance<com.example.presentation.state.ChatEntry.Assistant>().size)
+        assertEquals(2, state.studioSession.size)
+    }
+
+    @Test
+    fun `editing a user message loads its text into the composer draft`() {
+        runPrompt("رسالة قابلة للتحرير")
+        awaitExecutionSettled()
+
+        viewModel.editUserMessage("رسالة قابلة للتحرير")
+
+        assertEquals("رسالة قابلة للتحرير", viewModel.state.value.promptInput)
+    }
+
+    @Test
+    fun `cancel during streaming keeps the partial text in the CANCELLED lifecycle block`() {
+        val gate = CompletableDeferred<Unit>()
+        streamGate = gate
+
+        runPrompt("سؤال طويل البث")
+        awaitUntil { viewModel.state.value.streamText.isNotBlank() }
+
+        viewModel.cancelExecution()
+
+        val state = viewModel.state.value
+        assertFalse(state.isExecuting)
+        val live = state.liveExecution
+        assertNotNull("The cancelled execution stays visible as its lifecycle block", live)
+        assertEquals(com.example.presentation.state.ExecutionPhase.CANCELLED, live!!.phase)
+        assertTrue("The partial stream text is retained inside the block", state.streamText.isNotBlank())
+        // No durable turn was fabricated for the cancelled execution.
+        assertEquals(0, repository.appendedTurns.size)
+
+        // The window is released; the cancelled pipeline writes nothing more.
+        gate.complete(Unit)
+        Thread.sleep(600)
+        assertEquals(com.example.presentation.state.ExecutionPhase.CANCELLED, viewModel.state.value.liveExecution?.phase)
+        assertEquals(0, repository.appendedTurns.size)
+        streamGate = null
+    }
+
+    @Test
+    fun `a mode change is a SEMANTIC session boundary (no old session with the new mode)`() {
+        runPrompt("دورة الوضع السريع")
+        awaitExecutionSettled()
+        val quickSessionId = viewModel.state.value.activeSessionId
+        assertNotNull(quickSessionId)
+        assertEquals(1, viewModel.state.value.studioSession.size)
+
+        viewModel.setChatMode(ChatMode.AGENT)
+
+        val state = viewModel.state.value
+        assertEquals(ChatMode.AGENT, state.chatMode)
+        // The binding is RELEASED: the next send ensures a NEW session.
+        assertNull(state.activeSessionId)
+        assertTrue(state.timeline.isEmpty())
+        assertTrue(state.studioSession.isEmpty())
+        // The OLD durable session is untouched and browsable.
+        val oldSession = runBlocking { repository.getSession(ConversationSessionId(quickSessionId!!)) }
+        assertNotNull(oldSession)
+        assertEquals(1, oldSession!!.turnCount)
+        assertEquals(ChatMode.QUICK_CHAT, oldSession.mode)
+    }
+
+    @Test
+    fun `a mode change is REFUSED honestly while an execution is running`() {
+        val gate = CompletableDeferred<Unit>()
+        streamGate = gate
+        runPrompt("تنفيذ جارٍ")
+        awaitUntil { viewModel.state.value.liveExecution != null }
+
+        viewModel.setChatMode(ChatMode.AGENT)
+
+        assertEquals(ChatMode.QUICK_CHAT, viewModel.state.value.chatMode)
+        assertNotNull(viewModel.state.value.errorMessage)
+
+        gate.complete(Unit)
+        awaitExecutionSettled()
+        streamGate = null
+    }
+
+    @Test
+    fun `the selected model binds onto the session CREATED by the next send`() {
+        viewModel.selectModel(resourceId = "mock_studio_provider", displayName = "النموذج المختار")
+        runPrompt("رسالة مع نموذج مثبت")
+        awaitExecutionSettled()
+
+        val sessionId = viewModel.state.value.activeSessionId!!
+        val session = runBlocking { repository.getSession(ConversationSessionId(sessionId)) }!!
+        assertEquals("mock_studio_provider", session.modelResourceId)
+        // The assistant entry carries the binding too (state/UI consistency).
+        val assistant = viewModel.state.value.timeline
+            .filterIsInstance<com.example.presentation.state.ChatEntry.Assistant>().single()
+        assertEquals("mock_studio_provider", assistant.modelResourceId)
+    }
+
+    @Test
+    fun `openSession restores the MODE and the MODEL binding alongside the transcript`() {
+        val agent = com.example.application.agent.CanonicalAgentCatalog.defaults
+            .first { it.identity.id.value == "agent_general" }
+        viewModel.setChatMode(ChatMode.AGENT)
+        viewModel.selectModel(resourceId = "mock_studio_provider", displayName = "النموذج المختار")
+        viewModel.updatePromptInput("سؤال وضع الوكيل")
+        viewModel.executePrompt(agent = agent)
+        awaitExecutionSettled()
+        val sessionId = viewModel.state.value.activeSessionId!!
+        assertEquals(ChatMode.AGENT, runBlocking { repository.getSession(ConversationSessionId(sessionId)) }!!.mode)
+
+        // Simulate process death: a FRESH ViewModel over the same repository.
+        val fresh = StudioViewModel(
+            executeAgentTaskUseCase = executeAgentTaskUseCase,
+            componentRegistry = registry,
+            workspaceRuntimeService = workspaceService,
+            conversationSessionService = sessionService,
+            signalBus = signalBus
+        )
+        fresh.setChatMode(ChatMode.QUICK_CHAT)
+        fresh.openSession(sessionId)
+        awaitUntil { fresh.state.value.timeline.isNotEmpty() }
+
+        val restored = fresh.state.value
+        assertEquals(ChatMode.AGENT, restored.chatMode)
+        assertEquals("mock_studio_provider", restored.selectedModelResourceId)
+        // The timeline restores BOTH sides of every durable turn.
+        assertEquals(restored.studioSession.size * 2, restored.timeline.size)
+    }
+
+    @Test
+    fun `resetTranscriptView resets the VIEW without touching durable storage`() {
+        runPrompt("دورة قبل إعادة التعيين")
+        awaitExecutionSettled()
+        val sessionId = viewModel.state.value.activeSessionId!!
+        assertEquals(1, viewModel.state.value.studioSession.size)
+
+        viewModel.resetTranscriptView()
+
+        val state = viewModel.state.value
+        assertTrue(state.timeline.isEmpty())
+        assertTrue(state.studioSession.isEmpty())
+        assertNull(state.activeSessionId)
+        // The durable session REMAINS (the UI never claimed a deletion).
+        val session = runBlocking { repository.getSession(ConversationSessionId(sessionId)) }
+        assertNotNull(session)
+        assertEquals(1, session!!.turnCount)
     }
 
     // ------------------------------------------------------------------
