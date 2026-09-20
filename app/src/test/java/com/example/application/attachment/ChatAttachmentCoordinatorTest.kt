@@ -207,14 +207,16 @@ class ChatAttachmentCoordinatorTest {
         contentFiles["content://saf/data.txt"] = "data.txt" to "سطر بيانات مهم".toByteArray()
         val text = coordinator.importFileAttachment("content://saf/data.txt", "text/plain")
 
-        val digest = coordinator.buildGroundingDigest(
+        val outcome = coordinator.buildGroundingDigest(
             workspaceService.activeWorkspaceIdOrNull()!!,
             listOf(text)
         )
 
-        assertTrue(digest.contains("<user_attachment name=\"data.txt\""))
-        assertTrue(digest.contains("سطر بيانات مهم"))
-        assertTrue(digest.contains("</user_attachment>"))
+        // FUNCTIONAL CLOSURE (§14): a fully-read attachment is NOT a failure.
+        assertTrue(outcome.failures.isEmpty())
+        assertTrue(outcome.digest.contains("<user_attachment name=\"data.txt\""))
+        assertTrue(outcome.digest.contains("سطر بيانات مهم"))
+        assertTrue(outcome.digest.contains("</user_attachment>"))
     }
 
     @Test
@@ -224,14 +226,17 @@ class ChatAttachmentCoordinatorTest {
         val image = coordinator.importFileAttachment("content://saf/photo.png", "image/png")
 
         assertFalse(coordinator.isTextGroundable(image))
-        val digest = coordinator.buildGroundingDigest(
+        val outcome = coordinator.buildGroundingDigest(
             workspaceService.activeWorkspaceIdOrNull()!!,
             listOf(image)
         )
         // The honest non-textual note rides the digest instead of fake content.
-        assertTrue(digest.contains("لا يمكن تحليل محتواه في هذا الإصدار"))
+        assertTrue(outcome.digest.contains("لا يمكن تحليل محتواه في هذا الإصدار"))
         // The binary bytes never leak into the text digest.
-        assertFalse(digest.contains(String(imageBytes, Charsets.ISO_8859_1)))
+        assertFalse(outcome.digest.contains(String(imageBytes, Charsets.ISO_8859_1)))
+        // A non-text attachment is not a grounding failure (Vision is PLANNED,
+        // its absence is documented — not an error).
+        assertTrue(outcome.failures.isEmpty())
     }
 
     @Test
@@ -259,5 +264,140 @@ class ChatAttachmentCoordinatorTest {
 
         assertTrue(failure is ChatAttachmentCoordinator.AttachmentImportException)
         assertTrue(failure!!.message!!.contains("يتطلب مشروعاً نشطاً"))
+    }
+
+    // ------------------------------------------------------------------
+    // FUNCTIONAL CLOSURE (Phase 1 §13): draft-removal cleanup — no orphaned
+    // storage/artifacts behind a removed draft.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `removing a draft deletes BOTH the artifact row and the sandbox file`() = runBlocking {
+        contentFiles["content://saf/temp.txt"] = "temp.txt" to "بيانات مؤقتة".toByteArray()
+        val draft = coordinator.importFileAttachment("content://saf/temp.txt", "text/plain")
+        val projectId = workspaceService.activeProjectIdOrNull()!!
+        val artifactId = draft.artifactId!!
+        assertNotNull(artifactService.forProject(projectId).firstOrNull { it.id == artifactId })
+        assertTrue(
+            fileStore.stat(fileStore.projectRoot(projectId), draft.storageUri).exists
+        )
+
+        val removed = coordinator.deleteImportedAttachment(draft)
+
+        assertTrue(removed)
+        // The artifact row is GONE (the audit truth went with the draft).
+        assertTrue(
+            artifactService.forProject(projectId).none { it.id == artifactId }
+        )
+        // The sandbox copy is GONE too (no orphaned file).
+        assertFalse(
+            fileStore.stat(fileStore.projectRoot(projectId), draft.storageUri).exists
+        )
+    }
+
+    @Test
+    fun `removing a draft whose artifact row vanished deletes the file directly`() = runBlocking {
+        contentFiles["content://saf/stray.txt"] = "stray.txt" to "ملف بلا سجل".toByteArray()
+        val draft = coordinator.importFileAttachment("content://saf/stray.txt", "text/plain")
+        val projectId = workspaceService.activeProjectIdOrNull()!!
+        // Simulate the artifact row disappearing (a crashed cleanup halfway).
+        artifactService.delete(
+            com.example.domain.core.context.ResourceScope.Project(
+                workspaceService.activeWorkspaceIdOrNull()!!,
+                projectId
+            ),
+            draft.artifactId!!
+        )
+
+        // The direct-file fallback still cleans the copy (idempotent + honest).
+        val removed = coordinator.deleteImportedAttachment(draft)
+        assertTrue(removed)
+        assertFalse(
+            fileStore.stat(fileStore.projectRoot(projectId), draft.storageUri).exists
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // FUNCTIONAL CLOSURE (Phase 1 §14): grounding failures are REPORTED —
+    // never silently converted into "no evidence".
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `a broken text-attachment reference is an honest grounding failure`() = runBlocking {
+        contentFiles["content://saf/broken.txt"] = "broken.txt" to "محتوى".toByteArray()
+        val draft = coordinator.importFileAttachment("content://saf/broken.txt", "text/plain")
+        // The sandbox file disappears (broken reference).
+        fileStore.delete(
+            fileStore.projectRoot(workspaceService.activeProjectIdOrNull()!!),
+            draft.storageUri
+        )
+
+        val outcome = coordinator.buildGroundingDigest(
+            workspaceService.activeWorkspaceIdOrNull()!!,
+            listOf(draft)
+        )
+
+        assertTrue(outcome.isFailed)
+        assertTrue(outcome.failures.single().contains("broken.txt"))
+        assertTrue(outcome.failures.single().contains("غير موجود"))
+    }
+
+    @Test
+    fun `grounding without an active project reports every text attachment as failed`() = runBlocking {
+        contentFiles["content://saf/noproj.txt"] = "noproj.txt" to "محتوى".toByteArray()
+        val draft = coordinator.importFileAttachment("content://saf/noproj.txt", "text/plain")
+        workspaceService.setActiveProject(0L)
+
+        val outcome = coordinator.buildGroundingDigest(
+            workspaceService.activeWorkspaceIdOrNull()!!,
+            listOf(draft)
+        )
+
+        assertTrue(outcome.isFailed)
+        assertTrue(outcome.failures.single().contains("لا يوجد مشروع نشط"))
+    }
+
+    // ------------------------------------------------------------------
+    // FUNCTIONAL CLOSURE (Phase 1 §16): TRUE bounded reads — a huge file is
+    // never fully materialized for a digest.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `the grounding read is BOUNDED for a huge file (memory safety)`() = runBlocking {
+        // ~2.6 MB of text — far beyond any digest budget (max 8k chars/attachment).
+        val hugeText = buildString {
+            repeat(130_000) { append("بيانات اختبار الحدود ٢٠ حرفاً\n") }
+        }
+        contentFiles["content://saf/huge.log"] = "huge.log" to hugeText.toByteArray()
+        val draft = coordinator.importFileAttachment("content://saf/huge.log", "text/plain")
+
+        val outcome = coordinator.buildGroundingDigest(
+            workspaceService.activeWorkspaceIdOrNull()!!,
+            listOf(draft)
+        )
+
+        assertTrue(outcome.failures.isEmpty())
+        // The digest is bounded well below the file's full content…
+        assertTrue(outcome.digest.length < 12_000)
+        // …yet it still carries the honest truncated marker.
+        assertTrue(outcome.digest.contains("truncated=\"true\""))
+    }
+
+    @Test
+    fun `readBounded never pulls more than the byte budget from disk`() {
+        val projectId = workspaceService.activeProjectIdOrNull()!!
+        val root = fileStore.projectRoot(projectId)
+        val huge = ByteArray(5 * 1024 * 1024) { 'x'.code.toByte() } // 5 MB
+        fileStore.write(root, "attachments/huge_raw.bin", huge)
+
+        val budget = 100_000L
+        val bounded = fileStore.readBounded(root, "attachments/huge_raw.bin", budget)
+
+        assertEquals(budget.toInt(), bounded.bytes.size)
+        assertTrue(bounded.truncated)
+        // And a full read is SMALLER than the file — proving early termination.
+        val smaller = fileStore.readBounded(root, "attachments/huge_raw.bin", 10L)
+        assertEquals(10, smaller.bytes.size)
+        assertTrue(smaller.truncated)
     }
 }

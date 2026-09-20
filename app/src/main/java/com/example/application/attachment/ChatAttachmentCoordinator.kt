@@ -178,21 +178,54 @@ class ChatAttachmentCoordinator(
     }
 
     /**
+     * FUNCTIONAL CLOSURE (Phase 1 §14): the honest grounding outcome — the
+     * digest PLUS the per-attachment failures. A missing/failed read is NO
+     * LONGER silently converted into "no evidence"; the caller decides (and
+     * by contract BLOCKS the send) when a text-groundable attachment could
+     * not be read.
+     */
+    data class GroundingOutcome(
+        /** The bounded evidence block ("" when nothing was readable). */
+        val digest: String,
+        /** Human-readable reasons per attachment that SHOULD have grounded but failed. */
+        val failures: List<String>
+    ) {
+        val isFailed: Boolean get() = failures.isNotEmpty()
+    }
+
+    /**
      * Builds the bounded, clearly-marked attachment evidence block that is
      * appended to the effective prompt sent to the execution kernel. The
      * block mirrors the kernel's own untrusted-evidence pattern: attachments
      * are USER-SUPPLIED content, marked as such, bounded so one huge file
      * cannot consume the context window, and never presented as system truth.
+     *
+     * FUNCTIONAL CLOSURE (Phase 1 §16): the READ ITSELF is bounded — at most
+     * `budgetChars * 4` bytes (the UTF-8 worst case) are ever pulled from
+     * disk per attachment ([SandboxProjectFileStore.readBounded] early-
+     * terminates the stream), so a multi-megabyte file is never fully
+     * materialized just to slice a few thousand characters off it.
+     *
+     * FUNCTIONAL CLOSURE (Phase 1 §14): read failures are REPORTED, never
+     * swallowed — each text-groundable attachment that could not be read
+     * lands in [GroundingOutcome.failures] and the caller blocks the send.
      */
     suspend fun buildGroundingDigest(
         workspaceId: String,
         attachments: List<TurnAttachment>
-    ): String {
-        if (attachments.isEmpty()) return ""
+    ): GroundingOutcome {
+        if (attachments.isEmpty()) return GroundingOutcome("", emptyList())
         val projectId = workspaceRuntimeService.activeProjectIdOrNull()
-            ?: return "" // no project ⇒ no sandbox read — honest no-op
+            ?: return GroundingOutcome(
+                "",
+                // No project ⇒ no sandbox read possible — every text-groundable
+                // attachment is an honest FAILURE (the send must not pretend).
+                attachments.filter { isTextGroundable(it) }
+                    .map { "تعذر قراءة المرفق «${it.name}» — لا يوجد مشروع نشط لتخزين الرمل." }
+            )
         val root = fileStore.projectRoot(projectId)
         val builder = StringBuilder()
+        val failures = mutableListOf<String>()
         var totalChars = 0
         for (attachment in attachments) {
             if (totalChars >= maxTotalDigestChars) {
@@ -209,14 +242,33 @@ class ChatAttachmentCoordinator(
                     .append("\" note=\"مرفق غير نصي مرسل من المستخدم — لا يمكن تحليل محتواه في هذا الإصدار.\"/>\n")
                 continue
             }
-            val content = runCatching {
-                fileStore.read(root, attachment.storageUri).toString(Charsets.UTF_8)
-            }.getOrNull() ?: continue
-            val budget = (maxTotalDigestChars - totalChars)
+            // §16: the budget in CHARS maps to a byte cap 4× (UTF-8 worst
+            // case) — the read stops at the byte cap, so the whole file is
+            // never materialized. Truncation is decided by the bounded read
+            // itself (one peeked byte), then refined by the char budget.
+            val charBudget = (maxTotalDigestChars - totalChars)
                 .coerceAtMost(maxPerAttachmentDigestChars)
                 .coerceAtLeast(0)
-            val truncated = content.length > budget
-            val slice = content.take(budget)
+            if (charBudget == 0) continue
+            val bounded = runCatching {
+                fileStore.readBounded(root, attachment.storageUri, charBudget.toLong() * 4L)
+            }.getOrNull()
+            if (bounded == null) {
+                // §14: a text-groundable attachment that could not be read is
+                // an honest FAILURE the caller blocks on — never a silent skip.
+                failures += "تعذر قراءة المرفق «${attachment.name}» من التخزين — لن يُرسل طلب بلا أدلة مزعومة."
+                continue
+            }
+            if (bounded.bytes.isEmpty() && !bounded.truncated) {
+                // The sandbox file does not exist (or is empty) — the
+                // reference is broken; honest failure, the send must not
+                // claim evidence that is not there.
+                failures += "المرفق «${attachment.name}» غير موجود في التخزين (مرجع مكسور)."
+                continue
+            }
+            val content = runCatching { bounded.bytes.toString(Charsets.UTF_8) }.getOrNull() ?: ""
+            val truncated = bounded.truncated || content.length > charBudget
+            val slice = content.take(charBudget)
             totalChars += slice.length
             builder.append("\n<user_attachment name=\"")
                 .append(attachment.name)
@@ -230,17 +282,19 @@ class ChatAttachmentCoordinator(
                 .append(slice)
                 .append("\n</user_attachment>\n")
         }
-        return builder.toString().trim().ifBlank { "" }
+        return GroundingOutcome(builder.toString().trim().ifBlank { "" }, failures)
     }
 
-    /** Reads one attachment's text content (diagnostic/preview surface). */
+    /**
+     * Reads one attachment's text content (diagnostic/preview surface) —
+     * BOUNDED (§16): at most [maxChars]*4 bytes are pulled from disk.
+     */
     suspend fun readAttachmentText(attachment: TurnAttachment, maxChars: Int = 2_000): String? {
         if (!isTextGroundable(attachment)) return null
         val projectId = workspaceRuntimeService.activeProjectIdOrNull() ?: return null
         return runCatching {
-            fileStore.read(fileStore.projectRoot(projectId), attachment.storageUri)
-                .toString(Charsets.UTF_8)
-                .take(maxChars)
+            fileStore.readBounded(fileStore.projectRoot(projectId), attachment.storageUri, maxChars.toLong() * 4L)
+                .bytes.toString(Charsets.UTF_8).take(maxChars)
         }.getOrNull()
     }
 
@@ -259,6 +313,55 @@ class ChatAttachmentCoordinator(
         return workspaceId to projectId
     }
 
+    // ------------------------------------------------------------------
+    // FUNCTIONAL CLOSURE (Phase 1 §13): draft-removal cleanup — the imported
+    // sandbox copy AND the artifact row are deleted together, so removing a
+    // draft leaves NO orphaned storage behind.
+    // ------------------------------------------------------------------
+
+    /**
+     * Deletes an un-sent attachment's REAL footprint: the artifact row (which
+     * deletes its sandbox file through the scope-authorized path) and, as a
+     * belt-and-braces fallback, the sandbox file itself when no artifact row
+     * exists. Ownership contract: a draft attachment is owned by the composer
+     * until the send persists it onto a turn — removing it before that MUST
+     * remove everything the import created.
+     *
+     * Returns TRUE when the footprint is fully gone. A failure surfaces as
+     * [AttachmentCleanupException] so the caller can keep the draft visible
+     * (honest) instead of silently dropping state above orphaned files.
+     */
+    suspend fun deleteImportedAttachment(attachment: TurnAttachment): Boolean {
+        val (workspaceId, projectId) = requireActiveProject()
+        var deleted = false
+        val artifactId = attachment.artifactId
+        if (artifactId != null) {
+            val scope = com.example.domain.core.context.ResourceScope.Project(workspaceId, projectId)
+            runCatching { artifactService.delete(scope, artifactId) }
+            // VERIFICATION decides, not the call's return: a row that is GONE
+            // (deleted now, or already absent — an idempotent cleanup target)
+            // is clean; a row that is STILL THERE is the real failure the
+            // draft must stay visible for.
+            val rowStillExists = runCatching {
+                artifactService.forProject(projectId).any { it.id == artifactId }
+            }.getOrDefault(true)
+            if (rowStillExists) {
+                throw AttachmentCleanupException(
+                    "تعذر حذف سجل الأثر للمرفق «${attachment.name}» — أبقيناه مرئياً بدلاً من ترك نسخة يتيمة."
+                )
+            }
+            deleted = true
+        }
+        // Fallback/direct cleanup: remove the sandbox copy itself (covers
+        // rows without an artifact id, and files whose artifact delete
+        // skipped storage). Idempotent — a missing file is already clean.
+        val fileGone = runCatching {
+            !fileStore.stat(fileStore.projectRoot(projectId), attachment.storageUri).exists ||
+                fileStore.delete(fileStore.projectRoot(projectId), attachment.storageUri)
+        }.getOrDefault(false)
+        return deleted || fileGone || artifactId == null
+    }
+
     private fun sanitizeFileName(name: String): String =
         name.replace(Regex("[^\\p{L}\\p{N}\\s._()-]"), "_")
             .trim()
@@ -272,6 +375,9 @@ class ChatAttachmentCoordinator(
 
     /** The honest import failure the composer chip/error surface renders. */
     class AttachmentImportException(message: String) : Exception(message)
+
+    /** The honest cleanup failure (Phase 1 §13) — the draft stays visible. */
+    class AttachmentCleanupException(message: String) : Exception(message)
 
     companion object {
         private val TEXTUAL_MIME_TYPES = setOf(

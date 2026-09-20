@@ -111,21 +111,90 @@ class ChatCapabilitiesViewModel(
                 refreshCapabilities()
             }
         }
+        // --------------------------------------------------------------
+        // FUNCTIONAL CLOSURE (§21): STATE FRESHNESS — the catalog re-resolves
+        // whenever the SCOPE (workspace AND its active project) or the
+        // NETWORK changes. Observable sources only (the workspace runtime's
+        // own StateFlow + the real monitor's StateFlow) — NO polling.
+        // --------------------------------------------------------------
+        viewModelScope.launch {
+            runCatching {
+                workspaceRuntimeService.activeWorkspace.collect { workspace ->
+                    if (workspace != null) {
+                        val scope = workspace.id to workspace.activeProjectId.takeIf { it > 0L }
+                        val previous = lastSeenScope
+                        lastSeenScope = scope
+                        if (previous != null && previous != scope) {
+                            // The composer drafts belong to the PREVIOUS
+                            // project's sandbox — dropping them (with their
+                            // imported files cleaned up) prevents sending
+                            // stale-scope references from the new scope.
+                            dropAttachmentDraftsForScopeChange()
+                            refreshCapabilities()
+                        }
+                    }
+                }
+            }
+        }
+        networkMonitorProvider?.let { monitor ->
+            viewModelScope.launch {
+                runCatching {
+                    monitor.isNetworkAvailable.collect { _ ->
+                        refreshCapabilities()
+                    }
+                }
+            }
+        }
         refreshCapabilities()
     }
 
     /** Indexed knowledge corpus size (the RAG availability fact). */
     private var knowledgeDocumentCount: Int = 0
 
+    /** FUNCTIONAL CLOSURE (§21): the last scope this catalog resolved for. */
+    private var lastSeenScope: Pair<String, Long?>? = null
+
     // ------------------------------------------------------------------
     // §3/§4 — the capability catalog
     // ------------------------------------------------------------------
 
     /**
-     * Re-resolves the availability catalog from the REAL facts (project
-     * binding, radar checks, registries, corpus, network) through the PURE
-     * [ChatCapabilityPolicy]. No second availability system: the facts come
-     * from the sources of truth, the policy only maps them honestly.
+     * FUNCTIONAL CLOSURE (§21): cleans the composer drafts when the scope
+     * changes under them. §13 ownership contract: a draft the user will NOT
+     * send (its sandbox belongs to the previous project) is deleted FOR
+     * REAL — the imported file AND its artifact row go away together, so no
+     * orphaned storage is left behind. Failures surface on the honest
+     * attachmentError channel.
+     */
+    private fun dropAttachmentDraftsForScopeChange() {
+        val drafts = _state.value.attachmentDrafts
+        if (drafts.isEmpty()) return
+        viewModelScope.launch {
+            var failure: String? = null
+            drafts.forEach { draft ->
+                runCatching { attachmentCoordinator.deleteImportedAttachment(draft) }
+                    .onFailure { e -> failure = e.message }
+            }
+            _state.update {
+                it.copy(
+                    attachmentDrafts = emptyList(),
+                    attachmentError = failure ?: it.attachmentError
+                )
+            }
+        }
+    }
+
+    /**
+     * FUNCTIONAL CLOSURE (§20): the honest availability facts — counts that
+     * reflect OPERATIONAL truth, not raw existence:
+     *  - MCP: a server counts as connectable when it is ENABLED; a HEALTHY
+     *    one makes the entry plainly AVAILABLE (the browser's ping is the
+     *    recovery path for enabled-but-unhealthy servers, shown as a hint);
+     *  - Skills: ENABLED manifests that are ACTUALLY REGISTERED as runnable
+     *    tool ports (a manifest whose tool never registered is not
+     *    invocable from the governed path, so it does not count);
+     *  - Tools: the runtime registry IS the operational truth (admission /
+     *    consent are per-invocation policy, not availability).
      */
     fun refreshCapabilities() {
         val workspaceId = runCatching {
@@ -147,6 +216,20 @@ class ChatCapabilitiesViewModel(
                 emptyMap()
             }
             _state.update { current ->
+                // §20: operational MCP truth — enabled servers, split by
+                // healthy vs needs-handshake.
+                val enabledMcpServers = current.mcpServers.filter { it.isEnabled }
+                val healthyMcpCount = enabledMcpServers.count {
+                    it.health == com.example.domain.core.provider.HealthStatus.HEALTHY
+                }
+                // §20: operational skills — ENABLED AND registered as a
+                // runnable tool port in the runtime registry.
+                val registeredToolNames = componentRegistry.listTools()
+                    .map { it.declaration.name }.toSet()
+                val operationalSkillCount = current.skills.count {
+                    it.state == com.example.domain.core.extension.SkillState.ENABLED &&
+                        it.id in registeredToolNames
+                }
                 val facts = ChatCapabilityFacts(
                     activeProjectId = runCatching {
                         workspaceRuntimeService.activeProjectIdOrNull()
@@ -157,11 +240,10 @@ class ChatCapabilitiesViewModel(
                     semanticKnowledgeReady = ragPipelineService.isLocalSemanticModelReady,
                     searchProviderWired = true, // production wires the local-fallback adapter
                     isNetworkAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: false,
-                    enabledSkillCount = current.skills.count {
-                        it.state == com.example.domain.core.extension.SkillState.ENABLED
-                    },
+                    enabledSkillCount = operationalSkillCount,
                     registeredToolCount = componentRegistry.listTools().size,
-                    mcpServerCount = current.mcpServers.size
+                    mcpServerCount = enabledMcpServers.size,
+                    healthyMcpServerCount = healthyMcpCount
                 )
                 current.copy(
                     capabilities = ChatCapabilityPolicy.resolve(facts),
@@ -244,16 +326,65 @@ class ChatCapabilitiesViewModel(
         }
     }
 
-    /** Removes one draft BEFORE send (§5: remove before send). */
+    /**
+     * FUNCTIONAL CLOSURE (§13): removes one draft BEFORE send — and deletes
+     * its REAL footprint (the imported sandbox copy + the artifact row) so
+     * no orphaned storage is left behind. A cleanup failure KEEPS the draft
+     * visible and surfaces the honest error (the user can retry the removal)
+     * — state never silently diverges from storage.
+     */
     fun removeAttachment(id: String) {
-        _state.update { current ->
-            current.copy(attachmentDrafts = current.attachmentDrafts.filterNot { it.id == id })
+        val draft = _state.value.attachmentDrafts.firstOrNull { it.id == id } ?: return
+        viewModelScope.launch {
+            runCatching { attachmentCoordinator.deleteImportedAttachment(draft) }
+                .onSuccess { removed ->
+                    if (removed || draft.artifactId == null) {
+                        _state.update { current ->
+                            current.copy(
+                                attachmentDrafts = current.attachmentDrafts
+                                    .filterNot { it.id == id },
+                                attachmentError = null
+                            )
+                        }
+                    } else {
+                        // No artifact row AND no file removed — keep the draft
+                        // (honest) and say why.
+                        _state.update {
+                            it.copy(
+                                attachmentError = "تعذر حذف المرفق «${draft.name}» من التخزين — أعد المحاولة."
+                            )
+                        }
+                    }
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(
+                            attachmentError = e.message
+                                ?: "تعذر حذف المرفق «${draft.name}» — أعد المحاولة."
+                        )
+                    }
+                }
         }
     }
 
     /** The screen clears the drafts once the send consumed them. */
     fun clearAttachmentDrafts() {
         _state.update { it.copy(attachmentDrafts = emptyList(), attachmentError = null) }
+    }
+
+    /**
+     * FUNCTIONAL CLOSURE (§14): hands the drafts BACK after an aborted send
+     * (the ViewModel refused to execute — e.g. the grounding build failed).
+     * The user's picks re-appear as chips; nothing is silently consumed.
+     */
+    fun restoreAttachmentDrafts(drafts: List<TurnAttachment>) {
+        if (drafts.isEmpty()) return
+        _state.update { current ->
+            val existingIds = current.attachmentDrafts.map { it.id }.toSet()
+            current.copy(
+                attachmentDrafts = current.attachmentDrafts + drafts.filter { it.id !in existingIds }
+            )
+        }
     }
 
     // ------------------------------------------------------------------

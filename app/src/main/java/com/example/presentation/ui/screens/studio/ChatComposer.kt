@@ -67,7 +67,12 @@ fun ChatComposer(
     /** Task-2: remove one attachment BEFORE send (§5). */
     onRemoveAttachment: (String) -> Unit = {},
     /** Task-2: honest import-in-progress marker (§5 progress state). */
-    isImportingAttachment: Boolean = false
+    isImportingAttachment: Boolean = false,
+    /**
+     * FUNCTIONAL CLOSURE (§14): the attachment layer's honest error channel
+     * (import failures, cleanup failures) — VISIBLE here, never swallowed.
+     */
+    attachmentError: String? = null
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -151,6 +156,36 @@ fun ChatComposer(
                 }
             }
 
+            // ---- FUNCTIONAL CLOSURE (§14): the attachment error line — an
+            // import/cleanup failure is shown to the user the moment it
+            // happens (it used to be set in state and never rendered).
+            if (attachmentError != null) {
+                Text(
+                    text = attachmentError,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 4.dp)
+                        .testTag("attachment_error_line")
+                )
+            }
+
+            // ---- FUNCTIONAL CLOSURE (§15): the attachment-only hint — the
+            // send stays visibly blocked WITH the honest reason (Vision is not
+            // operational in this version), never a mystery disabled button.
+            if (attachmentDrafts.isNotEmpty() && value.isBlank() && !isExecuting) {
+                Text(
+                    text = "أضف نصاً يوضح المطلوب مع المرفقات — تحليل الصور (Vision) غير مفعّل في هذا الإصدار.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 4.dp)
+                        .testTag("attachment_only_hint")
+                )
+            }
+
             Row(verticalAlignment = Alignment.Bottom) {
                 // The capability entry point (Task 2 §3 — "+" opens the
                 // categorized menu; progressive disclosure, not a giant list).
@@ -202,7 +237,11 @@ fun ChatComposer(
                     }
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                val canSend = (value.isNotBlank() || attachmentDrafts.isNotEmpty()) && !isExecuting
+                // FUNCTIONAL CLOSURE (§15): attachment-ONLY sends are refused —
+                // Vision is not operational, so "chips without a question" is
+                // a meaningless request. The send button requires TEXT; the
+                // ViewModel enforces the same rule (defense in depth).
+                val canSend = value.isNotBlank() && !isExecuting
                 if (isExecuting) {
                     Surface(
                         onClick = onCancel,

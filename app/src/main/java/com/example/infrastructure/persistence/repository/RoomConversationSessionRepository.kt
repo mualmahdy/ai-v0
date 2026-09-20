@@ -7,6 +7,7 @@ import com.example.domain.core.session.ConversationSessionWithTurns
 import com.example.domain.core.session.ConversationTurn
 import com.example.domain.ports.session.ConversationSessionRepositoryPort
 import com.example.infrastructure.persistence.TurnAttachmentJsonCodec
+import com.example.infrastructure.persistence.TurnSourceJsonCodec
 import com.example.infrastructure.persistence.dao.ConversationSessionDao
 import com.example.infrastructure.persistence.dao.ConversationTurnDao
 import com.example.infrastructure.persistence.entities.ConversationSessionEntity
@@ -25,7 +26,9 @@ import kotlinx.coroutines.flow.map
 class RoomConversationSessionRepository(
     private val database: RoomDatabase,
     private val sessionDao: ConversationSessionDao,
-    private val turnDao: ConversationTurnDao
+    private val turnDao: ConversationTurnDao,
+    /** FUNCTIONAL CLOSURE (Phase 1 §9, DB v19): the timeline-events store. */
+    private val timelineEventDao: com.example.infrastructure.persistence.dao.ChatTimelineEventDao? = null
 ) : ConversationSessionRepositoryPort {
 
     override fun observeSessions(workspaceId: String): Flow<List<ConversationSession>> {
@@ -72,7 +75,11 @@ class RoomConversationSessionRepository(
     ): ConversationSessionWithTurns? {
         val session = sessionDao.byIdAndWorkspace(id.value, workspaceId)?.toDomain() ?: return null
         val turns = turnDao.forSessionOnce(id.value).map { it.toDomain() }
-        return ConversationSessionWithTurns(session = session, turns = turns)
+        // FUNCTIONAL CLOSURE (Phase 1 §9): the durable capability-result and
+        // approval blocks ride along — the caller rebuilds the exact
+        // conversation the user saw (merged by timestamp).
+        val events = timelineEventDao?.forSessionOnce(id.value)?.map { it.toDomain() } ?: emptyList()
+        return ConversationSessionWithTurns(session = session, turns = turns, timelineEvents = events)
     }
 
     override suspend fun upsertSession(session: ConversationSession) {
@@ -122,7 +129,10 @@ class RoomConversationSessionRepository(
             createdAtEpochMs = turn.createdAtEpochMs,
             // CHAT CAPABILITIES (Task 2 §16): attachment references persist
             // WITH the turn — they survive session reopen (DB v18).
-            attachmentsJson = TurnAttachmentJsonCodec.encode(turn.attachments)
+            attachmentsJson = TurnAttachmentJsonCodec.encode(turn.attachments),
+            // FUNCTIONAL CLOSURE (Phase 1 §9): citation chains persist with
+            // the turn (DB v19).
+            sourcesJson = TurnSourceJsonCodec.encode(turn.sources)
         )
         // Durable-turn write + session-aggregate bump in ONE Room
         // transaction: the session counters can never drift from the
@@ -151,6 +161,10 @@ class RoomConversationSessionRepository(
         // orphaned turn rows above a deleted session forever.
         database.withTransaction {
             turnDao.deleteForSession(existing.sessionId)
+            // FUNCTIONAL CLOSURE (Phase 1 §9): the session's timeline events
+            // cascade with its turns — no orphaned blocks above a deleted
+            // session (same transaction as the row delete).
+            timelineEventDao?.deleteForSession(existing.sessionId)
             sessionDao.deleteForWorkspace(existing.sessionId, workspaceId)
         }
         return true
@@ -182,6 +196,67 @@ class RoomConversationSessionRepository(
             title = title,
             now = System.currentTimeMillis()
         ) > 0
+    }
+
+    // ------------------------------------------------------------------
+    // FUNCTIONAL CLOSURE (Phase 1 §9): durable conversational timeline events
+    // ------------------------------------------------------------------
+
+    override suspend fun appendTimelineEventForWorkspace(
+        event: com.example.domain.core.session.ConversationTimelineEvent,
+        workspaceId: String
+    ): Boolean {
+        val dao = timelineEventDao ?: return false
+        // WORKSPACE AUTHORIZATION: an event can only be appended to a session
+        // owned by the authorized workspace — the same boundary turns honor.
+        val owner = sessionDao.byIdAndWorkspace(event.sessionId.value, workspaceId) ?: return false
+        dao.insert(
+            com.example.infrastructure.persistence.entities.ChatTimelineEventEntity(
+                eventId = event.id,
+                sessionId = owner.sessionId,
+                kind = event.kind.name,
+                capabilityKind = event.capabilityKind,
+                title = event.title,
+                summary = event.summary,
+                detail = event.detail,
+                sourcesJson = TurnSourceJsonCodec.encode(event.sources),
+                isSuccessful = event.isSuccessful,
+                isDegraded = event.isDegraded,
+                degradedMessage = event.degradedMessage,
+                createdAtEpochMs = event.createdAtEpochMs,
+                approvalId = event.approvalId,
+                executionId = event.executionId,
+                toolName = event.toolName,
+                riskLevel = event.riskLevel,
+                justification = event.justification,
+                approvalState = event.approvalState
+            )
+        )
+        return true
+    }
+
+    override suspend fun timelineEventsForSession(
+        sessionId: ConversationSessionId
+    ): List<com.example.domain.core.session.ConversationTimelineEvent> {
+        return timelineEventDao?.forSessionOnce(sessionId.value)?.map { it.toDomain() } ?: emptyList()
+    }
+
+    override suspend fun updateTimelineEventApprovalStateForWorkspace(
+        sessionId: ConversationSessionId,
+        approvalId: String,
+        state: String,
+        workspaceId: String
+    ): Boolean {
+        val dao = timelineEventDao ?: return false
+        // WORKSPACE AUTHORIZATION: the state mirror only updates for a session
+        // owned by the authorized workspace.
+        val owner = sessionDao.byIdAndWorkspace(sessionId.value, workspaceId) ?: return false
+        dao.updateApprovalState(
+            approvalId = approvalId,
+            state = state,
+            isSuccessful = state != "REJECTED"
+        )
+        return true
     }
 
     // ------------------------------------------------------------------
@@ -228,7 +303,36 @@ class RoomConversationSessionRepository(
             createdAtEpochMs = createdAtEpochMs,
             // CHAT CAPABILITIES (Task 2 §16): references round-trip (legacy
             // rows decode as an honest empty list).
-            attachments = TurnAttachmentJsonCodec.decode(attachmentsJson)
+            attachments = TurnAttachmentJsonCodec.decode(attachmentsJson),
+            // FUNCTIONAL CLOSURE (Phase 1 §9): citation chains round-trip
+            // (legacy rows decode as an honest empty list).
+            sources = TurnSourceJsonCodec.decode(sourcesJson)
+        )
+    }
+
+    private fun com.example.infrastructure.persistence.entities.ChatTimelineEventEntity.toDomain():
+            com.example.domain.core.session.ConversationTimelineEvent {
+        return com.example.domain.core.session.ConversationTimelineEvent(
+            id = eventId,
+            sessionId = ConversationSessionId(sessionId),
+            kind = runCatching {
+                com.example.domain.core.session.TimelineEventKind.valueOf(kind)
+            }.getOrDefault(com.example.domain.core.session.TimelineEventKind.CAPABILITY_RESULT),
+            capabilityKind = capabilityKind,
+            title = title,
+            summary = summary,
+            detail = detail,
+            sources = TurnSourceJsonCodec.decode(sourcesJson),
+            isSuccessful = isSuccessful,
+            isDegraded = isDegraded,
+            degradedMessage = degradedMessage,
+            createdAtEpochMs = createdAtEpochMs,
+            approvalId = approvalId,
+            executionId = executionId,
+            toolName = toolName,
+            riskLevel = riskLevel,
+            justification = justification,
+            approvalState = approvalState
         )
     }
 }

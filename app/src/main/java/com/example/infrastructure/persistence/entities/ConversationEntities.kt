@@ -80,7 +80,60 @@ data class ConversationTurnEntity(
      * persistence.TurnAttachmentJsonCodec]. Empty/legacy rows are "[]".
      */
     @ColumnInfo(defaultValue = "[]")
-    val attachmentsJson: String = "[]"
+    val attachmentsJson: String = "[]",
+    /**
+     * FUNCTIONAL CLOSURE (Phase 1 §9, DB v19): the durable citation chains
+     * the execution collected (search intelligence), serialized by the
+     * timeline-codec. Empty/legacy rows are "[]" — the turn simply had no
+     * sources.
+     */
+    @ColumnInfo(defaultValue = "[]")
+    val sourcesJson: String = "[]"
+)
+
+/**
+ * ============================================================================
+ * CONVERSATIONAL TIMELINE EVENTS — DB v19 (FUNCTIONAL CLOSURE Phase 1 §9/§10)
+ * ============================================================================
+ *
+ * One row per CAPABILITY RESULT or APPROVAL BLOCK the user saw inside the
+ * conversation. These blocks are conversation history, not telemetry: without
+ * this table they vanished on every session reopen (the runtime-only defect
+ * this phase closes). Rows are session-scoped, timestamp-ordered, and merged
+ * with the session's turns by [createdAtEpochMs] when the session is reopened.
+ *
+ * The two sub-shares share one table because they share one lifecycle (seen
+ * in the conversation → durable until the session is deleted); approval-only
+ * columns are NULL for capability results and vice versa.
+ */
+@Entity(
+    tableName = "chat_timeline_events",
+    indices = [Index("sessionId"), Index(value = ["sessionId", "createdAtEpochMs"])]
+)
+data class ChatTimelineEventEntity(
+    @PrimaryKey val eventId: String,
+    val sessionId: String,
+    /** TimelineEventKind.name — CAPABILITY_RESULT / APPROVAL_BLOCK. */
+    val kind: String,
+    /** CapabilityKind.name for capability results; NULL for approvals. */
+    val capabilityKind: String? = null,
+    val title: String = "",
+    val summary: String = "",
+    val detail: String? = null,
+    /** Serialized TurnSourceRef list (citations of a search run). */
+    val sourcesJson: String = "[]",
+    val isSuccessful: Boolean = true,
+    val isDegraded: Boolean = false,
+    val degradedMessage: String? = null,
+    val createdAtEpochMs: Long,
+    // ---- Approval shape (NULL for capability results) ----
+    val approvalId: String? = null,
+    val executionId: String? = null,
+    val toolName: String? = null,
+    val riskLevel: String? = null,
+    val justification: String? = null,
+    /** ApprovalBlockState.name — updated on every resolution so reopen is honest. */
+    val approvalState: String? = null
 )
 
 /**

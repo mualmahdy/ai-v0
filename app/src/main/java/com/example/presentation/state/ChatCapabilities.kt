@@ -80,12 +80,32 @@ data class ChatCapabilityFacts(
     val searchProviderWired: Boolean = true,
     /** Current session network policy (drives the degraded hint). */
     val isNetworkAvailable: Boolean = true,
-    /** ENABLED skills in the extension registry. */
+    /**
+     * FUNCTIONAL CLOSURE (§20): OPERATIONAL skills — ENABLED manifests that
+     * are ACTUALLY REGISTERED as runnable tool ports. A manifest whose tool
+     * never registered is not invocable through the governed path, so it does
+     * not count toward availability.
+     */
     val enabledSkillCount: Int = 0,
-    /** Tools registered in the runtime registry. */
+    /**
+     * Tools registered in the runtime registry — the registry IS the
+     * operational truth for tools (admission/consent are per-invocation
+     * policy, not availability).
+     */
     val registeredToolCount: Int = 0,
-    /** MCP server descriptors (any health — the browser shows per-server state). */
-    val mcpServerCount: Int = 0
+    /**
+     * FUNCTIONAL CLOSURE (§20): ENABLED MCP servers only (a disabled server is
+     * not connectable — its existence says nothing about availability).
+     */
+    val mcpServerCount: Int = 0,
+    /**
+     * FUNCTIONAL CLOSURE (§20): of the ENABLED servers, how many are HEALTHY
+     * (handshake-complete, tools registered). A healthy server is plainly
+     * available; an enabled-but-unhealthy one is reachable only through the
+     * browser's ping (shown as a degraded hint — the recovery path, not a
+     * silent "available").
+     */
+    val healthyMcpServerCount: Int = 0
 )
 
 object ChatCapabilityPolicy {
@@ -179,13 +199,16 @@ object ChatCapabilityPolicy {
             category = ChatCapabilityCategory.INTELLIGENCE,
             title = "المهارات",
             subtitle = "تشغيل مهارة مثبتة وعرض نتيجتها في المحادثة",
+            // FUNCTIONAL CLOSURE (§20): the fact is the OPERATIONAL count —
+            // ENABLED manifests actually registered as runnable tool ports
+            // (the caller computes it from the real registry).
             status = if (facts.enabledSkillCount > 0) {
                 ChatCapabilityStatus.AVAILABLE
             } else {
                 ChatCapabilityStatus.UNAVAILABLE
             },
             reason = if (facts.enabledSkillCount == 0) {
-                "غير متاح حالياً — لا توجد مهارات مفعّلة"
+                "غير متاح حالياً — لا توجد مهارات مفعّلة قابلة للتنفيذ"
             } else null
         ),
         ChatCapabilityItem(
@@ -207,14 +230,24 @@ object ChatCapabilityPolicy {
             category = ChatCapabilityCategory.INTELLIGENCE,
             title = "خوادم MCP",
             subtitle = "استدعاء أدوات الخوادم المتصلة (بروتوكول MCP)",
-            status = if (facts.mcpServerCount > 0) {
+            // FUNCTIONAL CLOSURE (§20): operational truth — the existence of
+            // servers says NOTHING about availability. ONLY a healthy+enabled
+            // server (handshake-complete, tools registered) makes the entry
+            // available; anything less is UNAVAILABLE with the REAL reason.
+            // (The handshake/recovery path lives on the EXTENSIONS screen —
+            // never blocked by this entry being honestly unavailable.)
+            status = if (facts.healthyMcpServerCount > 0) {
                 ChatCapabilityStatus.AVAILABLE
             } else {
                 ChatCapabilityStatus.UNAVAILABLE
             },
-            reason = if (facts.mcpServerCount == 0) {
-                "غير متاح حالياً — لا توجد خوادم MCP مسجلة"
-            } else null
+            reason = when {
+                facts.mcpServerCount == 0 ->
+                    "غير متاح حالياً — لا توجد خوادم MCP مفعّلة"
+                facts.healthyMcpServerCount == 0 ->
+                    "لا يوجد خادم متصل (سليم ومفعّل) — أنجز المصافحة من شاشة «الإضافات» ثم أعد المحاولة"
+                else -> null
+            }
         )
     )
 

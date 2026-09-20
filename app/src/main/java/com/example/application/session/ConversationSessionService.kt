@@ -4,6 +4,7 @@ import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.ConversationSession
 import com.example.domain.core.session.ConversationSessionId
 import com.example.domain.core.session.ConversationSessionWithTurns
+import com.example.domain.core.session.ConversationTimelineEvent
 import com.example.domain.core.session.ConversationTurn
 import com.example.domain.core.session.TurnAttachment
 import com.example.domain.ports.session.ConversationSessionRepositoryPort
@@ -60,16 +61,33 @@ class ConversationSessionService(
         repository.observeTurns(sessionId)
 
 /**
- * Full session + turns (for resume / reopen) — WORKSPACE-AUTHORIZED
- * (defect family 1 repair): the session is loaded only when it belongs to
- * the given workspace; another workspace's session is indistinguishable
- * from nonexistent (an authorization boundary, not a data leak).
+ * Full session + turns + timeline events (for resume / reopen) — WORKSPACE-
+ * AUTHORIZED (defect family 1 repair): the session is loaded only when it
+ * belongs to the given workspace; another workspace's session is
+ * indistinguishable from nonexistent (an authorization boundary, not a data
+ * leak).
+ *
+ * FUNCTIONAL CLOSURE (Phase 1 §1): [expectedProjectId] adds the PROJECT-SCOPE
+ * authorization the workspace check alone lacks. The access policy mirrors
+ * the session browser's list scoping (GAP-14): a workspace-shared session
+ * (projectId = null) is reachable from any project of its workspace, while a
+ * project-private session is reachable ONLY while its own project is the
+ * active one — a sibling project's session is refused honestly. `null` =
+ * no project bound (the workspace-shared scope).
  */
 suspend fun getSessionWithTurns(
     sessionId: ConversationSessionId,
-    workspaceId: String? = null
-): ConversationSessionWithTurns? =
-    repository.getSessionWithTurnsForWorkspace(sessionId, workspaceId ?: workspaceIdProvider())
+    workspaceId: String? = null,
+    expectedProjectId: Long? = null
+): ConversationSessionWithTurns? {
+    val authorizedWorkspaceId = workspaceId ?: workspaceIdProvider()
+    val loaded = repository.getSessionWithTurnsForWorkspace(sessionId, authorizedWorkspaceId)
+        ?: return null
+    val sessionProject = loaded.session.projectId
+    val accessible = sessionProject == null || sessionProject == expectedProjectId
+    if (!accessible) return null
+    return loaded
+}
 
 /**
  * WORKSPACE-AUTHORIZED session lookup — see [getSessionWithTurns].
@@ -81,15 +99,15 @@ suspend fun getSession(
     repository.getSessionForWorkspace(sessionId, workspaceId ?: workspaceIdProvider())
 
     /**
-     * Creates a new durable session bound to the ACTIVE workspace.
-     * QUICK_CHAT sessions are agent-independent; AGENT sessions record the
-     * canonical agent they are bound to.
+     * Creates a new durable session bound to the ACTIVE workspace (or the
+     * explicitly-passed [workspaceId] — FUNCTIONAL CLOSURE §2: an execution
+     * pins its OWN workspace at launch, so a mid-run switch can never place
+     * the new session into the wrong workspace). QUICK_CHAT sessions are
+     * agent-independent; AGENT sessions record the canonical agent they are
+     * bound to.
      *
      * GAP-14 (Design Closure 2026): `projectId` scopes the session to a
      * project from creation (NULL = workspace-scoped shared session).
-     * Previously the id was structurally dropped by the mapper, so
-     * project-private sessions could never exist and the purge cascade was
-     * a latent no-op.
      */
     suspend fun createSession(
         mode: ChatMode,
@@ -98,12 +116,13 @@ suspend fun getSession(
         modelResourceId: String? = null,
         modelDisplayName: String? = null,
         title: String = defaultTitle(),
-        projectId: Long? = null
+        projectId: Long? = null,
+        workspaceId: String? = null
     ): ConversationSession {
         val now = System.currentTimeMillis()
         val session = ConversationSession(
             id = ConversationSessionId("sess_${UUID.randomUUID().toString().take(12)}"),
-            workspaceId = workspaceIdProvider(),
+            workspaceId = workspaceId ?: workspaceIdProvider(),
             title = title,
             mode = mode,
             agentId = agentId,
@@ -138,7 +157,9 @@ suspend fun getSession(
         eventCount: Int,
         workspaceId: String? = null,
         /** CHAT CAPABILITIES (Task 2 §16): attachment references persisted with the turn. */
-        attachments: List<TurnAttachment> = emptyList()
+        attachments: List<TurnAttachment> = emptyList(),
+        /** FUNCTIONAL CLOSURE (Phase 1 §9): citation chains persisted with the turn. */
+        sources: List<com.example.domain.core.session.TurnSourceRef> = emptyList()
     ): ConversationTurn? {
         val authorizedWorkspaceId = workspaceId ?: workspaceIdProvider()
         val turn = ConversationTurn(
@@ -154,7 +175,8 @@ suspend fun getSession(
             isSuccessful = isSuccessful,
             eventCount = eventCount,
             createdAtEpochMs = System.currentTimeMillis(),
-            attachments = attachments
+            attachments = attachments,
+            sources = sources
         )
         val written = repository.appendTurnForWorkspace(turn, authorizedWorkspaceId)
         return if (written) turn else null
@@ -217,6 +239,44 @@ suspend fun getSession(
             session.copy(agentId = agentId, agentName = agentName, lastActiveAtEpochMs = System.currentTimeMillis())
         )
     }
+
+    // ------------------------------------------------------------------
+    // FUNCTIONAL CLOSURE (Phase 1 §9/§10): durable conversational timeline
+    // events — capability results and approval blocks are conversation
+    // history and MUST survive a session reopen.
+    // ------------------------------------------------------------------
+
+    /**
+     * Appends one conversational timeline event (capability result /
+     * approval block) to the session — WORKSPACE-AUTHORIZED (the same
+     * boundary turns honor). Failures return false honestly (the caller
+     * surfaces them — never a silent loss).
+     */
+    suspend fun appendTimelineEvent(
+        event: ConversationTimelineEvent,
+        workspaceId: String? = null
+    ): Boolean =
+        repository.appendTimelineEventForWorkspace(event, workspaceId ?: workspaceIdProvider())
+
+    /** Oldest-first timeline events of one session. */
+    suspend fun timelineEventsForSession(
+        sessionId: ConversationSessionId
+    ): List<ConversationTimelineEvent> =
+        repository.timelineEventsForSession(sessionId)
+
+    /**
+     * Mirrors a REAL gate decision onto the persisted approval block —
+     * WORKSPACE-AUTHORIZED. Returns whether the mirror applied.
+     */
+    suspend fun updateTimelineEventApprovalState(
+        sessionId: ConversationSessionId,
+        approvalId: String,
+        state: String,
+        workspaceId: String? = null
+    ): Boolean =
+        repository.updateTimelineEventApprovalStateForWorkspace(
+            sessionId, approvalId, state, workspaceId ?: workspaceIdProvider()
+        )
 
     companion object {
         /**

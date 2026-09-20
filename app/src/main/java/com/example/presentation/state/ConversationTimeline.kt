@@ -78,6 +78,12 @@ sealed interface ChatEntry {
      * conversation stays a conversation (§15: visually distinct, never a
      * dashboard) — this is the block the user reads instead of raw
      * orchestration output.
+     *
+     * FUNCTIONAL CLOSURE (Phase 1 §22): the block's lifecycle starts as
+     * PENDING ([isPending]) the moment the user runs the capability (the
+     * sheet closes, the conversation keeps the trace), then resolves with
+     * the real outcome. PENDING is runtime-only — only the RESOLVED outcome
+     * is durable conversation history.
      */
     data class CapabilityResult(
         override val id: String,
@@ -93,7 +99,9 @@ sealed interface ChatEntry {
         val isSuccessful: Boolean = true,
         val isDegraded: Boolean = false,
         val degradedMessage: String? = null,
-        val timestampMs: Long = 0L
+        val timestampMs: Long = 0L,
+        /** FUNCTIONAL CLOSURE (§22): true while the invocation is running. */
+        val isPending: Boolean = false
     ) : ChatEntry
 
     /**
@@ -198,9 +206,13 @@ enum class ExecutionPhase {
 }
 
 /**
- * The LIVE execution state attached to the LAST user message in the timeline.
- * Present from send until the terminal event lands; a CANCELLED execution
- * stays visible (with its partial stream) until the next send/session action.
+ * The LIVE execution state attached to the user message that STARTED it
+ * (FUNCTIONAL CLOSURE §8/§11: [originUserEntryId] anchors the block to its
+ * originating user entry — the timeline renders it EXACTLY there instead
+ * of always at the end, so capability results that land during/after the
+ * execution keep their true chronology). Present from send until the
+ * terminal event lands; a CANCELLED execution stays visible (with its
+ * partial stream) until the next send/session action.
  */
 data class LiveExecutionState(
     /** The ExecutionHost task key this block belongs to (internal guard). */
@@ -212,7 +224,9 @@ data class LiveExecutionState(
     val actionCount: Int = 0,
     val toolCount: Int = 0,
     val isDegraded: Boolean = false,
-    val degradedMessage: String? = null
+    val degradedMessage: String? = null,
+    /** FUNCTIONAL CLOSURE (§8/§11): the user entry this execution answers. */
+    val originUserEntryId: String? = null
 )
 
 /**

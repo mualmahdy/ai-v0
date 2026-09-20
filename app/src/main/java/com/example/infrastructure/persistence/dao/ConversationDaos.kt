@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 
+import com.example.infrastructure.persistence.entities.ChatTimelineEventEntity
 import com.example.infrastructure.persistence.entities.ConversationSessionEntity
 import com.example.infrastructure.persistence.entities.ConversationTurnEntity
 import com.example.infrastructure.persistence.entities.WorkflowDefinitionEntity
@@ -112,6 +113,39 @@ interface ConversationTurnDao {
 
     @Query("DELETE FROM chat_turns WHERE sessionId = :sessionId")
     suspend fun deleteForSession(sessionId: String)
+}
+
+/**
+ * ============================================================================
+ * CONVERSATIONAL TIMELINE EVENTS DAO — DB v19 (FUNCTIONAL CLOSURE Phase 1 §9)
+ * ============================================================================
+ */
+@Dao
+interface ChatTimelineEventDao {
+
+    /** Oldest-first timeline events of one session (merged with turns on reopen). */
+    @Query("SELECT * FROM chat_timeline_events WHERE sessionId = :sessionId ORDER BY createdAtEpochMs ASC")
+    suspend fun forSessionOnce(sessionId: String): List<ChatTimelineEventEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(event: ChatTimelineEventEntity)
+
+    /**
+     * Approval-state transition (the conversation-visible mirror of the REAL
+     * gate decision) — keyed by the approval's own id.
+     */
+    @Query(
+        "UPDATE chat_timeline_events SET approvalState = :state, isSuccessful = :isSuccessful " +
+                "WHERE approvalId = :approvalId"
+    )
+    suspend fun updateApprovalState(approvalId: String, state: String, isSuccessful: Boolean)
+
+    @Query("DELETE FROM chat_timeline_events WHERE sessionId = :sessionId")
+    suspend fun deleteForSession(sessionId: String)
+
+    /** Existence check for the idempotent append (no duplicate blocks). */
+    @Query("SELECT COUNT(*) FROM chat_timeline_events WHERE eventId = :eventId")
+    suspend fun countById(eventId: String): Int
 }
 
 /**

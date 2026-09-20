@@ -134,4 +134,41 @@ interface ConversationSessionRepositoryPort {
         workspaceId: String,
         title: String
     ): Boolean
+
+    // ------------------------------------------------------------------
+    // FUNCTIONAL CLOSURE (Phase 1 §9/§10): durable conversational timeline
+    // events (capability results + approval blocks). Defaults are the honest
+    // "not persisted by this implementation" contract so in-memory test fakes
+    // keep compiling; the Room implementation persists for real.
+    // ------------------------------------------------------------------
+
+    /**
+     * WORKSPACE-AUTHORIZED append of one conversational timeline event
+     * (capability result / approval block) — writes ONLY when the session
+     * belongs to [workspaceId]; returns whether the row was written.
+     */
+    suspend fun appendTimelineEventForWorkspace(
+        event: com.example.domain.core.session.ConversationTimelineEvent,
+        workspaceId: String
+    ): Boolean = false
+
+    /**
+     * Oldest-first timeline events of one session (workspace-authorized: the
+     * caller loads the session first and only then asks for its events).
+     */
+    suspend fun timelineEventsForSession(
+        sessionId: ConversationSessionId
+    ): List<com.example.domain.core.session.ConversationTimelineEvent> = emptyList()
+
+    /**
+     * WORKSPACE-AUTHORIZED approval-state transition of a persisted approval
+     * block (the conversation-visible mirror of the REAL gate decision).
+     * Returns whether a row was updated.
+     */
+    suspend fun updateTimelineEventApprovalStateForWorkspace(
+        sessionId: ConversationSessionId,
+        approvalId: String,
+        state: String,
+        workspaceId: String
+    ): Boolean = false
 }

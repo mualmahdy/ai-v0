@@ -113,9 +113,14 @@ fun ProviderServiceManagerScreen(viewModel: ProvidersViewModel) {
     val downCount = state.materializedResources.count {
         it.healthStatus == HealthStatus.UNAVAILABLE
     }
+    // FUNCTIONAL CLOSURE (§5): the operational truth of "an LLM is usable":
+    // lifecycle ENABLED **or** ACTIVE (checking only ENABLED missed resources
+    // the runtime promoted to ACTIVE) AND health not UNAVAILABLE.
     val hasActiveLlm = state.materializedResources.any {
         it.resourceType == com.example.domain.core.resource.ResourceType.LLM &&
-            it.lifecycleState == ResourceLifecycleState.ENABLED
+            (it.lifecycleState == ResourceLifecycleState.ENABLED ||
+                it.lifecycleState == ResourceLifecycleState.ACTIVE) &&
+            it.healthStatus != HealthStatus.UNAVAILABLE
     }
 
     LazyColumn(

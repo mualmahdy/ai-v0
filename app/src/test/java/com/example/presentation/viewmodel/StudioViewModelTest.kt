@@ -798,7 +798,12 @@ class StudioViewModelTest {
         val userMessagesAfterFirst = viewModel.state.value.timeline
             .filterIsInstance<com.example.presentation.state.ChatEntry.User>()
 
-        viewModel.regenerateLast(agent = null)
+        // FUNCTIONAL CLOSURE (§6): the action targets the SPECIFIC assistant
+        // entry being regenerated (by id), never "the last user message".
+        val assistantEntryId = viewModel.state.value.timeline
+            .filterIsInstance<com.example.presentation.state.ChatEntry.Assistant>()
+            .last().id
+        viewModel.regenerateFromAssistant(assistantEntryId = assistantEntryId, agent = null)
         awaitExecutionSettled()
 
         val state = viewModel.state.value
@@ -1164,6 +1169,10 @@ class StudioViewModelTest {
         }
 
         val resultsBefore = viewModel.state.value.timeline.count { it is ChatEntry.Assistant }
+        // FUNCTIONAL CLOSURE (§8): the consent was RESOLVED — the retry runs
+        // with the approval scenario OFF, exactly like the granted-consent
+        // production path (no second fake consent request).
+        approvalScenario = false
         viewModel.retryAfterApproval(agent = null)
         awaitUntil { capturedExecutionIds.size >= 2 }
         awaitExecutionSettled()

@@ -102,6 +102,11 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
     var deleteCount = 0
     val appendedTurns = mutableListOf<ConversationTurn>()
 
+    /** FUNCTIONAL CLOSURE (Phase 1 §9): durable timeline-event storage. */
+    val timelineEvents = mutableListOf<com.example.domain.core.session.ConversationTimelineEvent>()
+    var appendTimelineEventCount = 0
+    var updateTimelineEventStateCount = 0
+
     fun seed(session: ConversationSession) {
         sessionsFlow.value = sessionsFlow.value + session
     }
@@ -132,7 +137,9 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
         val session = getSessionForWorkspace(id, workspaceId) ?: return null
         return ConversationSessionWithTurns(
             session = session,
-            turns = turns.filter { it.sessionId == id }
+            turns = turns.filter { it.sessionId == id },
+            timelineEvents = timelineEvents.filter { it.sessionId == id }
+                .sortedBy { it.createdAtEpochMs }
         )
     }
 
@@ -187,6 +194,41 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
     ): Boolean {
         val session = getSessionForWorkspace(id, workspaceId) ?: return false
         upsertSession(session.copy(title = title))
+        return true
+    }
+
+    // FUNCTIONAL CLOSURE (Phase 1 §9): timeline-event persistence in the fake.
+    override suspend fun appendTimelineEventForWorkspace(
+        event: com.example.domain.core.session.ConversationTimelineEvent,
+        workspaceId: String
+    ): Boolean {
+        val session = getSessionForWorkspace(event.sessionId, workspaceId) ?: return false
+        appendTimelineEventCount++
+        timelineEvents.removeAll { it.id == event.id }
+        timelineEvents += event
+        return true
+    }
+
+    override suspend fun timelineEventsForSession(
+        sessionId: ConversationSessionId
+    ): List<com.example.domain.core.session.ConversationTimelineEvent> =
+        timelineEvents.filter { it.sessionId == sessionId }.sortedBy { it.createdAtEpochMs }
+
+    override suspend fun updateTimelineEventApprovalStateForWorkspace(
+        sessionId: ConversationSessionId,
+        approvalId: String,
+        state: String,
+        workspaceId: String
+    ): Boolean {
+        if (getSessionForWorkspace(sessionId, workspaceId) == null) return false
+        updateTimelineEventStateCount++
+        timelineEvents.replaceAll { event ->
+            if (event.approvalId == approvalId) {
+                event.copy(approvalState = state, isSuccessful = state != "REJECTED")
+            } else {
+                event
+            }
+        }
         return true
     }
 }

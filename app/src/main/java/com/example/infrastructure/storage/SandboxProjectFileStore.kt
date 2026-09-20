@@ -98,6 +98,47 @@ class SandboxProjectFileStore(
         return target.readBytes()
     }
 
+    /**
+     * FUNCTIONAL CLOSURE (Phase 1 §16): TRUE BOUNDED READ — at most [maxBytes]
+     * are ever pulled from disk (the stream is consumed with an early-
+     * terminating loop, so a multi-megabyte attachment can NEVER be fully
+     * materialized just to have a few-thousand-character digest sliced off
+     * it afterwards). Returns the bytes actually read plus whether the source
+     * had more (the honest truncation flag — decided by peeking ONE byte past
+     * the budget, never by loading the rest).
+     */
+    fun readBounded(root: File, relativePath: String, maxBytes: Long): BoundedRead {
+        require(maxBytes >= 0) { "maxBytes must be >= 0" }
+        val target = resolveContained(root, relativePath)
+        if (!target.isFile) return BoundedRead(ByteArray(0), truncated = false)
+        FileInputStream(target).use { input ->
+            val out = java.io.ByteArrayOutputStream(
+                minOf(maxBytes, 1L shl 20).coerceAtLeast(16L).toInt()
+            )
+            val buffer = ByteArray(minOf(maxBytes, 64L * 1024L).coerceAtLeast(1L).toInt())
+            var total = 0L
+            while (total < maxBytes) {
+                val wanted = minOf(buffer.size.toLong(), maxBytes - total).toInt()
+                if (wanted <= 0) break
+                val read = input.read(buffer, 0, wanted)
+                if (read < 0) break
+                out.write(buffer, 0, read)
+                total += read
+            }
+            // The honest truncation flag: does the source have ANYTHING past
+            // the budget we just consumed? One peeked byte decides it.
+            val truncated = input.read() >= 0
+            return BoundedRead(out.toByteArray(), truncated = truncated)
+        }
+    }
+
+    /** The result of a bounded read: the bytes read + the honest truncation flag. */
+    data class BoundedRead(val bytes: ByteArray, val truncated: Boolean) {
+        override fun equals(other: Any?): Boolean =
+            other is BoundedRead && bytes.contentEquals(other.bytes) && truncated == other.truncated
+        override fun hashCode(): Int = 31 * bytes.contentHashCode() + truncated.hashCode()
+    }
+
     fun write(root: File, relativePath: String, content: ByteArray) {
         val target = resolveContained(root, relativePath)
         target.parentFile?.mkdirs()

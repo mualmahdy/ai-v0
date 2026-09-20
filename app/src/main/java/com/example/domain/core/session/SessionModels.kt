@@ -106,11 +106,86 @@ data class ConversationTurn(
     val eventCount: Int = 0,
     val createdAtEpochMs: Long = 0L,
     /** CHAT CAPABILITIES (Task 2 §16): attachment references survive with the turn. */
-    val attachments: List<TurnAttachment> = emptyList()
+    val attachments: List<TurnAttachment> = emptyList(),
+    /**
+     * FUNCTIONAL CLOSURE (Phase 1 §9): the REAL citation chains the execution
+     * collected (search intelligence) — persisted WITH the turn so a reopened
+     * session re-renders its sources instead of losing them.
+     */
+    val sources: List<TurnSourceRef> = emptyList()
 )
 
-/** A session with its full turn history (for reopening / resuming). */
+/**
+ * FUNCTIONAL CLOSURE (Phase 1 §9): one durable citation/source reference on a
+ * turn (the domain twin of the runtime-harvested search citations). Kept
+ * minimal — the fields the conversation surface renders.
+ */
+data class TurnSourceRef(
+    val title: String,
+    val url: String? = null,
+    val providerId: String? = null,
+    val confidenceScore: Float? = null
+)
+
+/**
+ * FUNCTIONAL CLOSURE (Phase 1 §9/§10): one durable CONVERSATIONAL TIMELINE
+ * EVENT — a capability result block (tool / skill / MCP / search / knowledge
+ * retrieval) or an inline approval block that the user saw inside the
+ * conversation. These are conversation history (not transient telemetry):
+ * they MUST survive a session reopen, so they are persisted in their own
+ * session-scoped, timestamp-ordered store (`chat_timeline_events`, DB v19)
+ * and merged with the turns by [createdAtEpochMs] when the session is
+ * reopened.
+ *
+ * PENDING capability invocations are deliberately NOT persisted — only the
+ * RESOLVED outcome is conversational history (the transient pending block is
+ * a runtime affordance of the live conversation).
+ */
+data class ConversationTimelineEvent(
+    /** Stable identity (same id the runtime block carried). */
+    val id: String,
+    val sessionId: ConversationSessionId,
+    /** CAPABILITY_RESULT or APPROVAL_BLOCK (which sub-shape is populated). */
+    val kind: TimelineEventKind,
+    /** For CAPABILITY_RESULT: which capability family produced it. */
+    val capabilityKind: String? = null,
+    /** The concrete thing that ran (tool/skill/server name, or the query). */
+    val title: String = "",
+    /** One-line human outcome. For APPROVAL_BLOCK: the requested action. */
+    val summary: String = "",
+    /** Optional longer content. For APPROVAL_BLOCK: the request description. */
+    val detail: String? = null,
+    /** CAPABILITY_RESULT: the real citation chains (search). */
+    val sources: List<TurnSourceRef> = emptyList(),
+    val isSuccessful: Boolean = true,
+    val isDegraded: Boolean = false,
+    val degradedMessage: String? = null,
+    val createdAtEpochMs: Long = 0L,
+    // ---- APPROVAL_BLOCK shape (null for capability results) ----
+    val approvalId: String? = null,
+    /** The kernel execution id the gate keyed the request to. */
+    val executionId: String? = null,
+    val toolName: String? = null,
+    val riskLevel: String? = null,
+    val justification: String? = null,
+    /** PENDING / APPROVED / REJECTED / EXPIRED — updated on each resolution. */
+    val approvalState: String? = null
+)
+
+enum class TimelineEventKind {
+    CAPABILITY_RESULT,
+    APPROVAL_BLOCK
+}
+
+/** A session with its full turn history AND its timeline events (for reopening). */
 data class ConversationSessionWithTurns(
     val session: ConversationSession,
-    val turns: List<ConversationTurn>
+    val turns: List<ConversationTurn>,
+    /**
+     * FUNCTIONAL CLOSURE (Phase 1 §9): the durable capability-result and
+     * approval blocks of this session (timestamp-ordered) — merged with the
+     * turns by createdAtEpochMs to rebuild the exact conversation the user
+     * saw before the reopen.
+     */
+    val timelineEvents: List<ConversationTimelineEvent> = emptyList()
 )

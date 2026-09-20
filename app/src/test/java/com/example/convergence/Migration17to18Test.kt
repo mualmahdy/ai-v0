@@ -150,8 +150,10 @@ class Migration17to18Test {
     }
 
     @Test
-    fun `the schema version is 18 and the migration is registered in the chain`() {
-        assertEquals(18, AppDatabase.SCHEMA_VERSION)
+    fun `the schema version is current and the migration is registered in the chain`() {
+        // FUNCTIONAL CLOSURE (Phase 1 §9): the version moved on to 19 — this
+        // test pins the 17→18 STEP's registration, not the tip.
+        assertEquals(19, AppDatabase.SCHEMA_VERSION)
         val allField = AppDatabase::class.java.getDeclaredField("ALL_MIGRATIONS")
         allField.isAccessible = true
         val migrations = allField.get(null) as Array<androidx.room.migration.Migration>
@@ -162,7 +164,7 @@ class Migration17to18Test {
         // The chain is CONTINUOUS from v1 — an upgrade never crashes with
         // "migration not found".
         val ranges = migrations.map { it.startVersion to it.endVersion }
-        (1 until 18).forEach { version ->
+        (1 until 19).forEach { version ->
             assertTrue("missing migration step $version→${version + 1}", ranges.contains(version to version + 1))
         }
     }

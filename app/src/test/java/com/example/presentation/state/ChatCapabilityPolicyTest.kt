@@ -59,6 +59,9 @@ class ChatCapabilityPolicyTest {
                     enabledSkillCount = 2,
                     registeredToolCount = 4,
                     mcpServerCount = 3,
+                    // FUNCTIONAL CLOSURE (§20): a fully provisioned workspace
+                    // has healthy (handshake-complete) MCP servers.
+                    healthyMcpServerCount = 3,
                     searchProviderWired = true,
                     isNetworkAvailable = true
                 )

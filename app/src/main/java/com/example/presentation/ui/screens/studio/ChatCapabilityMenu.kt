@@ -2,6 +2,7 @@
 
 package com.example.presentation.ui.screens.studio
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,9 +17,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Folder
@@ -29,12 +32,16 @@ import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -48,21 +55,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.example.domain.core.extension.McpServerDescriptor
 import com.example.domain.core.extension.SkillManifest
 import com.example.domain.core.provider.HealthStatus
 import com.example.domain.core.tools.ToolDeclaration
+import com.example.domain.core.tools.ToolParameter
 import com.example.presentation.state.CapabilityKind
 import com.example.presentation.state.ChatCapabilityCategory
 import com.example.presentation.state.ChatCapabilityItem
 import com.example.presentation.state.ChatCapabilityKey
 import com.example.presentation.state.ChatCapabilityStatus
+import com.example.presentation.state.ChatInvocationCodec
 
 /**
  * ============================================================================
  * ChatCapabilityMenu — the composer "+" entry point (CHAT CAPABILITIES Task
- * 2 §3/§4)
+ * 2 §3/§4; FUNCTIONAL CLOSURE Phase 1 §17/§18/§19)
  * ============================================================================
  *
  * A CATEGORIZED, progressive-disclosure sheet — never a giant flat list:
@@ -75,8 +85,17 @@ import com.example.presentation.state.ChatCapabilityStatus
  * Unavailable rows stay VISIBLE but faded with the REAL reason; Planned rows
  * (only genuinely planned capabilities like Vision) show "قريباً" — never a
  * "قريباً" for a temporary provider/network/dependency problem.
+ *
+ * FUNCTIONAL CLOSURE (Phase 1): every run form produces a VALIDATED, TYPED
+ * payload through the pure [ChatInvocationCodec] BEFORE anything is invoked:
+ *  - §17 skills: defaults are visible AND ride the payload; optional blanks
+ *    are omitted;
+ *  - §18 tools: enum → selection, boolean → switch, number → numeric
+ *    validation, object/array → validated JSON, required → validation,
+ *    optional → omission;
+ *  - §19 MCP: malformed JSON is a VISIBLE error that blocks the invoke —
+ *    never a silent conversion to empty arguments.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatCapabilityMenu(
     capabilities: List<ChatCapabilityItem>,
@@ -302,17 +321,21 @@ fun ChatKnowledgeSheet(
 }
 
 /**
- * §8 — the SKILL browser: the REAL extension-registry manifests (never a
- * duplicate catalog), availability from the real skill state, and execution
- * through the governed tool path with a manifest-derived parameter form.
+ * §8 — the SKILL browser (FUNCTIONAL CLOSURE §17): the REAL extension-registry
+ * manifests (never a duplicate catalog), availability from the real skill
+ * state, and execution through the governed tool path. The run form's payload
+ * is built by the pure [ChatInvocationCodec.buildSkillArguments] — the
+ * manifest's DEFAULT values are visible in the fields AND ride the payload
+ * (a default the user did not override is still sent); an optional parameter
+ * with no value is OMITTED (never a fake empty string). Validation errors are
+ * INLINE and block the run.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatSkillBrowserSheet(
     skills: List<SkillManifest>,
     isInvoking: Boolean,
     onDismiss: () -> Unit,
-    onRunSkill: (SkillManifest, Map<String, String>) -> Unit
+    onRunSkill: (SkillManifest, String) -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("skills_sheet")) {
         Column(
@@ -349,10 +372,13 @@ fun ChatSkillBrowserSheet(
 private fun SkillRunCard(
     skill: SkillManifest,
     isInvoking: Boolean,
-    onRun: (SkillManifest, Map<String, String>) -> Unit
+    onRun: (SkillManifest, String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
     val parameterValues = remember { mutableStateMapOf<String, String>() }
+    // FUNCTIONAL CLOSURE (§17): the inline validation error — visible, and
+    // it BLOCKS the run (the payload never leaves with a violation).
+    var validationError by remember { mutableStateOf<String?>(null) }
     val enabled = skill.state == com.example.domain.core.extension.SkillState.ENABLED
     Surface(
         onClick = { if (enabled) expanded = !expanded },
@@ -389,22 +415,41 @@ private fun SkillRunCard(
                 skill.parameters.forEach { parameter ->
                     OutlinedTextField(
                         value = parameterValues[parameter.name] ?: parameter.defaultValue ?: "",
-                        onValueChange = { parameterValues[parameter.name] = it },
+                        onValueChange = {
+                            parameterValues[parameter.name] = it
+                            validationError = null
+                        },
                         label = { Text(parameter.label) },
                         placeholder = parameter.description?.let { { Text(it) } },
                         minLines = if (parameter.isMultiline) 3 else 1,
-                        isError = parameter.isRequired && (parameterValues[parameter.name]
-                            ?: parameter.defaultValue ?: "").isBlank(),
+                        isError = validationError != null && parameter.isRequired &&
+                            (parameterValues[parameter.name] ?: parameter.defaultValue ?: "").isBlank(),
                         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
                             .testTag("skill_param_${parameter.name}")
                     )
                 }
+                validationError?.let { error ->
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("skill_validation_error")
+                    )
+                }
                 Row {
                     TextButton(
-                        onClick = { onRun(skill, parameterValues.toMap()) },
-                        enabled = !isInvoking && skill.parameters
-                            .filter { it.isRequired }
-                            .all { (parameterValues[it.name] ?: it.defaultValue ?: "").isNotBlank() },
+                        onClick = {
+                            when (val outcome = ChatInvocationCodec.buildSkillArguments(
+                                skill.parameters,
+                                parameterValues.toMap()
+                            )) {
+                                is ChatInvocationCodec.BuildOutcome.Ok ->
+                                    onRun(skill, outcome.argumentsJson)
+                                is ChatInvocationCodec.BuildOutcome.Invalid ->
+                                    validationError = outcome.reason
+                            }
+                        },
+                        enabled = !isInvoking,
                         modifier = Modifier.testTag("btn_run_skill_${skill.id}")
                     ) {
                         Text("تشغيل المهارة")
@@ -416,17 +461,20 @@ private fun SkillRunCard(
 }
 
 /**
- * §9 — the TOOL browser: the REAL runtime-registry declarations, and a
- * declaration-derived parameter form (the name+description are the tool's
- * own — no invented metadata).
+ * §9 — the TOOL browser (FUNCTIONAL CLOSURE §18): the REAL runtime-registry
+ * declarations with a DECLARATION-DERIVED TYPED form — enum → selection,
+ * boolean → switch, number → numeric validation, object/array → validated
+ * JSON, required → validation, optional → omission. The payload is built by
+ * the pure [ChatInvocationCodec.buildToolArguments] and carries REAL types
+ * (numbers as numbers, booleans as booleans) — the UI never lets a payload
+ * that violates the declaration reach the backend.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatToolBrowserSheet(
     tools: List<ToolDeclaration>,
     isInvoking: Boolean,
     onDismiss: () -> Unit,
-    onRunTool: (ToolDeclaration, Map<String, String>) -> Unit
+    onRunTool: (ToolDeclaration, String) -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("tools_sheet")) {
         Column(
@@ -463,10 +511,13 @@ fun ChatToolBrowserSheet(
 private fun ToolRunCard(
     tool: ToolDeclaration,
     isInvoking: Boolean,
-    onRun: (ToolDeclaration, Map<String, String>) -> Unit
+    onRun: (ToolDeclaration, String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
     val parameterValues = remember { mutableStateMapOf<String, String>() }
+    // FUNCTIONAL CLOSURE (§18): the inline validation error — visible, and
+    // it BLOCKS the run.
+    var validationError by remember { mutableStateOf<String?>(null) }
     Surface(
         onClick = { expanded = !expanded },
         shape = RoundedCornerShape(14.dp),
@@ -486,21 +537,40 @@ private fun ToolRunCard(
             if (expanded) {
                 Spacer(modifier = Modifier.height(8.dp))
                 tool.parameters.forEach { parameter ->
-                    OutlinedTextField(
+                    TypedParameterField(
+                        parameter = parameter,
                         value = parameterValues[parameter.name] ?: "",
-                        onValueChange = { parameterValues[parameter.name] = it },
-                        label = { Text(parameter.name) },
-                        placeholder = parameter.description.takeIf { it.isNotBlank() }?.let { { Text(it) } },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
-                            .testTag("tool_param_${parameter.name}")
+                        onValueChange = {
+                            parameterValues[parameter.name] = it
+                            validationError = null
+                        },
+                        isError = validationError != null &&
+                            parameter.isRequired &&
+                            (parameterValues[parameter.name] ?: "").isBlank()
+                    )
+                }
+                validationError?.let { error ->
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("tool_validation_error")
                     )
                 }
                 Row {
                     TextButton(
-                        onClick = { onRun(tool, parameterValues.toMap()) },
-                        enabled = !isInvoking && tool.parameters
-                            .filter { it.isRequired }
-                            .all { (parameterValues[it.name] ?: "").isNotBlank() },
+                        onClick = {
+                            when (val outcome = ChatInvocationCodec.buildToolArguments(
+                                tool,
+                                parameterValues.toMap()
+                            )) {
+                                is ChatInvocationCodec.BuildOutcome.Ok ->
+                                    onRun(tool, outcome.argumentsJson)
+                                is ChatInvocationCodec.BuildOutcome.Invalid ->
+                                    validationError = outcome.reason
+                            }
+                        },
+                        enabled = !isInvoking,
                         modifier = Modifier.testTag("btn_run_tool_${tool.name}")
                     ) {
                         Text("تنفيذ الأداة")
@@ -512,13 +582,156 @@ private fun ToolRunCard(
 }
 
 /**
+ * FUNCTIONAL CLOSURE (§18): the TYPED control a parameter's declaration
+ * demands — never a plain text field for everything:
+ *  - enum (declared values) → a dropdown SELECTION;
+ *  - boolean → a switch;
+ *  - number → a numeric keyboard + numeric validation;
+ *  - object/array → a multiline JSON field (validated by the codec at run);
+ *  - string → a text field. Required-ness shows as a "（مطلوب）" marker.
+ */
+@Composable
+private fun TypedParameterField(
+    parameter: ToolParameter,
+    value: String,
+    onValueChange: (String) -> Unit,
+    isError: Boolean
+) {
+    val type = parameter.type.lowercase().trim()
+    val requiredMarker = if (parameter.isRequired) " (مطلوب)" else " (اختياري)"
+    val label = parameter.name + requiredMarker
+
+    when {
+        // §18: enum → SELECTION (no free-typing a value outside the set).
+        parameter.enumValues.isNotEmpty() -> {
+            var expanded by remember { mutableStateOf(false) }
+            val selected = parameter.enumValues.firstOrNull { it == value }
+            ExposedDropdownMenuBox(
+                expanded = expanded,
+                onExpandedChange = { expanded = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 3.dp)
+                    .testTag("tool_param_${parameter.name}")
+            ) {
+                OutlinedTextField(
+                    value = selected ?: "",
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text(label) },
+                    placeholder = parameter.description.takeIf { it.isNotBlank() }?.let { { Text(it) } },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                    isError = isError,
+                    modifier = Modifier.menuAnchor()
+                )
+                ExposedDropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false }
+                ) {
+                    parameter.enumValues.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option) },
+                            onClick = {
+                                onValueChange(option)
+                                expanded = false
+                            },
+                            modifier = Modifier.testTag("tool_param_option_${parameter.name}_$option")
+                        )
+                    }
+                }
+            }
+        }
+        // §18: boolean → a BOOLEAN control (switch), tri-state absent — the
+        // user's explicit true/false; blank optional stays omitted.
+        type == "boolean" -> {
+            val checked = value.toBooleanStrictOrNull()
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 3.dp)
+                    .testTag("tool_param_${parameter.name}")
+            ) {
+                Switch(
+                    checked = checked == true,
+                    onCheckedChange = { onValueChange(if (it) "true" else "false") },
+                    modifier = Modifier.testTag("tool_param_switch_${parameter.name}")
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(label, style = MaterialTheme.typography.bodyMedium)
+                    parameter.description.takeIf { it.isNotBlank() }?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+        // §18: number → NUMERIC input (numeric keyboard + the codec's
+        // numeric validation at run).
+        type == "number" -> {
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                label = { Text(label) },
+                placeholder = parameter.description.takeIf { it.isNotBlank() }?.let { { Text(it) } },
+                isError = isError,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 3.dp)
+                    .testTag("tool_param_${parameter.name}")
+            )
+        }
+        // §18: object/array → structured JSON input (multiline; the codec
+        // validates the syntax before anything is invoked).
+        type == "object" || type == "array" -> {
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                label = { Text("$label — ${if (type == "object") "كائن JSON" else "مصفوفة JSON"}") },
+                placeholder = { Text(if (type == "object") """{"key": "value"}""" else """["a", "b"]""") },
+                isError = isError,
+                minLines = 2,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 3.dp)
+                    .testTag("tool_param_${parameter.name}")
+            )
+        }
+        // string (and any undeclared type stays a string — the declaration
+        // is the truth).
+        else -> {
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                label = { Text(label) },
+                placeholder = parameter.description.takeIf { it.isNotBlank() }?.let { { Text(it) } },
+                isError = isError,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 3.dp)
+                    .testTag("tool_param_${parameter.name}")
+            )
+        }
+    }
+}
+
+/**
  * §10 — the MCP browser: REAL discovery state (a server's tools appear only
  * after a successful handshake — the HEALTHY-only registration rule),
  * per-server ping (the existing discovery path), and tool invocation through
  * the governed boundary. No new MCP client — the sheet only surfaces the
  * existing abstractions.
+ *
+ * FUNCTIONAL CLOSURE (§19): the raw JSON arguments field is VALIDATED by the
+ * pure [ChatInvocationCodec.parseMcpArgumentsJson] — malformed input shows a
+ * VISIBLE error and BLOCKS the invoke; it can never be silently converted
+ * into valid-empty arguments.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatMcpBrowserSheet(
     servers: List<McpServerDescriptor>,
@@ -526,7 +739,7 @@ fun ChatMcpBrowserSheet(
     isInvoking: Boolean,
     onDismiss: () -> Unit,
     onPing: (String) -> Unit,
-    onRunTool: (McpServerDescriptor, String, Map<String, String>) -> Unit
+    onRunTool: (McpServerDescriptor, String, String) -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("mcp_sheet")) {
         Column(
@@ -571,7 +784,7 @@ private fun McpServerCard(
     isDiscovering: Boolean,
     isInvoking: Boolean,
     onPing: (String) -> Unit,
-    onRunTool: (McpServerDescriptor, String, Map<String, String>) -> Unit
+    onRunTool: (McpServerDescriptor, String, String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
     val healthy = server.health == HealthStatus.HEALTHY && server.isEnabled
@@ -626,6 +839,9 @@ private fun McpServerCard(
                 Spacer(modifier = Modifier.height(6.dp))
                 server.exposedTools.forEach { mcpTool ->
                     var argsJson by remember { mutableStateOf("") }
+                    // FUNCTIONAL CLOSURE (§19): the visible validation error —
+                    // malformed JSON BLOCKS the invoke.
+                    var argsError by remember { mutableStateOf<String?>(null) }
                     Column(modifier = Modifier.padding(vertical = 4.dp)) {
                         Text(
                             mcpTool.name,
@@ -642,14 +858,35 @@ private fun McpServerCard(
                         }
                         OutlinedTextField(
                             value = argsJson,
-                            onValueChange = { argsJson = it },
-                            placeholder = { Text("وسائط JSON (اختياري)") },
+                            onValueChange = {
+                                argsJson = it
+                                argsError = null
+                            },
+                            placeholder = { Text("""وسائط JSON (اختياري) — مثال: {"query": "…"}""") },
+                            isError = argsError != null,
                             modifier = Modifier.fillMaxWidth().testTag("mcp_args_${mcpTool.name}")
                         )
+                        argsError?.let { error ->
+                            Text(
+                                text = error,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.testTag("mcp_args_error_${mcpTool.name}")
+                            )
+                        }
                         TextButton(
                             onClick = {
-                                val args = parseJsonArgs(argsJson)
-                                onRunTool(server, mcpTool.name, args)
+                                when (val outcome = ChatInvocationCodec.parseMcpArgumentsJson(argsJson)) {
+                                    is ChatInvocationCodec.McpArgsOutcome.Empty ->
+                                        onRunTool(server, mcpTool.name, "{}")
+                                    is ChatInvocationCodec.McpArgsOutcome.Ok ->
+                                        onRunTool(server, mcpTool.name, outcome.rawJson)
+                                    is ChatInvocationCodec.McpArgsOutcome.Malformed ->
+                                        // §19: NEVER invoke with silently-emptied
+                                        // arguments — the error is visible and
+                                        // the invoke stays blocked.
+                                        argsError = outcome.reason
+                                }
                             },
                             enabled = !isInvoking,
                             modifier = Modifier.testTag("btn_run_mcp_${mcpTool.name}")
@@ -660,18 +897,5 @@ private fun McpServerCard(
                 }
             }
         }
-    }
-}
-
-/** Best-effort JSON object → string map (empty on malformed input — honest). */
-private fun parseJsonArgs(raw: String): Map<String, String> {
-    if (raw.isBlank()) return emptyMap()
-    return try {
-        val obj = org.json.JSONObject(raw)
-        val map = mutableMapOf<String, String>()
-        obj.keys().forEach { key -> map[key] = obj.optString(key) }
-        map
-    } catch (_: Exception) {
-        emptyMap()
     }
 }

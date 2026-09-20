@@ -259,6 +259,49 @@ class ChatCapabilitiesViewModelTest {
     // ------------------------------------------------------------------
 
     @Test
+    fun `a scope change drops the stale drafts and re-resolves the catalog (§21 freshness)`() = runBlocking {
+        awaitUntil { viewModel.state.value.capabilities.isNotEmpty() }
+
+        // Stage a draft in the CURRENT project's sandbox.
+        contentFiles["content://saf/stale.txt"] = "stale.txt" to "بيانات قديمة".toByteArray()
+        viewModel.pickFiles(listOf("content://saf/stale.txt"), listOf("text/plain"))
+        awaitUntil { viewModel.state.value.attachmentDrafts.size == 1 }
+        awaitUntil { !viewModel.state.value.isImportingAttachment }
+        val draft = viewModel.state.value.attachmentDrafts.single()
+        assertNotNull(draft.artifactId)
+
+        // Switch the active project under the composer (the workspace runtime's
+        // OWN flow — the collector must fire, not a UI callback).
+        val daoField = WorkspaceRuntimeService::class.java.getDeclaredField("projectDao")
+        daoField.isAccessible = true
+        val dao = daoField.get(workspaceService) as FakeProjectDaoForVm
+        val entity = com.example.infrastructure.persistence.entities.ProjectEntity(
+            name = "مشروع آخر",
+            description = "",
+            rootPath = "",
+            createdAtEpochMs = System.currentTimeMillis(),
+            updatedAtEpochMs = System.currentTimeMillis(),
+            workspaceId = workspaceService.activeWorkspaceIdOrNull()!!
+        )
+        dao.stored[777L] = entity.copy(id = 777L)
+        workspaceService.setActiveProject(777L)
+
+        // §21: the drafts are GONE (they belong to the previous project's
+        // sandbox — their imported files went with them, §13).
+        awaitUntil { viewModel.state.value.attachmentDrafts.isEmpty() }
+        // The catalog re-resolved under the new scope (the same availability,
+        // re-derived — not a stale snapshot).
+        awaitUntil { viewModel.state.value.capabilities.isNotEmpty() }
+        val attachFile = viewModel.state.value.capabilities
+            .first { it.key == ChatCapabilityKey.ATTACH_FILE }
+        assertEquals(
+            "the new project is active => attach is still available (fresh facts)",
+            ChatCapabilityStatus.AVAILABLE,
+            attachFile.status
+        )
+    }
+
+    @Test
     fun `picked files stage as drafts and can be removed before send`() = runBlocking {
         contentFiles["content://saf/a.txt"] = "a.txt" to "محتوى أ".toByteArray()
         contentFiles["content://saf/b.md"] = "b.md" to "محتوى ب".toByteArray()
@@ -275,6 +318,10 @@ class ChatCapabilitiesViewModelTest {
         assertTrue(drafts.all { it.artifactId != null })
 
         viewModel.removeAttachment(drafts.first().id)
+        // FUNCTIONAL CLOSURE (§13): removal is now a REAL cleanup (artifact row
+        // + sandbox file) — asynchronous by nature, so wait for the draft to
+        // actually leave the composer state.
+        awaitUntil { viewModel.state.value.attachmentDrafts.size == 1 }
         assertEquals(listOf("b.md"), viewModel.state.value.attachmentDrafts.map { it.name })
 
         viewModel.clearAttachmentDrafts()

@@ -1691,7 +1691,10 @@ class AppContainer(context: Context) {
             repository = com.example.infrastructure.persistence.repository.RoomConversationSessionRepository(
                 database = database,
                 sessionDao = database.conversationSessionDao(),
-                turnDao = database.conversationTurnDao()
+                turnDao = database.conversationTurnDao(),
+                // FUNCTIONAL CLOSURE (Phase 1 §9, DB v19): the durable
+                // capability-result / approval-block store.
+                timelineEventDao = database.chatTimelineEventDao()
             ),
             workspaceIdProvider = { workspaceRuntimeService.requireActiveWorkspaceId() }
         )

@@ -98,15 +98,15 @@ fun ConversationTimeline(
     emptyContent: @Composable () -> Unit,
     onCopy: (String) -> Unit,
     onEdit: (String) -> Unit,
-    onRegenerate: () -> Unit,
-    onRetry: () -> Unit,
+    onRegenerate: (String) -> Unit,
+    onRetry: (String) -> Unit,
     modifier: Modifier = Modifier,
     /** §13: approve/reject the inline approval through the real gate. */
     onApprove: (String) -> Unit = {},
     onReject: (String) -> Unit = {},
     /** §13: retry the approved execution under its own id. */
     onRetryAfterApproval: () -> Unit = {},
-    /** §13: "allow always" — the standing EXECUTE grant path. */
+    /** §13: "allow always" — the standing EXECUTE grant path (§12: confirmed). */
     onGrantAlways: (String) -> Unit = {}
 ) {
     val listState = rememberLazyListState()
@@ -117,6 +117,22 @@ fun ConversationTimeline(
     var isFollowing by remember { mutableStateOf(true) }
     var hasNewContent by remember { mutableStateOf(false) }
     var pendingSendScroll by remember { mutableStateOf(false) }
+
+    // ---- FUNCTIONAL CLOSURE (§8/§11): the CHRONOLOGY-CORRECT render order.
+    // The live execution block belongs EXACTLY AFTER its ORIGINATING user
+    // entry (the anchor), not "always at the end" — capability results and
+    // approval blocks that land during/after the execution keep their true
+    // conversation order.
+    val anchorIndex = liveExecution?.originUserEntryId
+        ?.let { anchorId -> timeline.indexOfFirst { it.id == anchorId } }
+        ?: -1
+    val liveBlockIndex = when {
+        liveExecution == null -> -1
+        anchorIndex >= 0 -> anchorIndex + 1
+        else -> timeline.size
+    }
+    val entriesBeforeLive = if (liveBlockIndex >= 0) timeline.take(liveBlockIndex) else timeline
+    val entriesAfterLive = if (liveBlockIndex >= 0) timeline.drop(liveBlockIndex) else emptyList()
 
     // The list content the policy reacts to: entries + the live block.
     val showLiveBlock = liveExecution != null
@@ -177,34 +193,18 @@ fun ConversationTimeline(
             if (timeline.isEmpty() && liveExecution == null) {
                 item(key = "empty_state") { emptyContent() }
             } else {
-                items(timeline, key = { it.id }) { entry ->
-                    when (entry) {
-                        is ChatEntry.User -> UserMessage(
-                            entry = entry,
-                            onCopy = { onCopy(entry.text) },
-                            onEdit = { onEdit(entry.text) }
-                        )
-
-                        is ChatEntry.Assistant -> AssistantMessage(
-                            entry = entry,
-                            onCopy = { onCopy(entry.text) },
-                            onRegenerate = onRegenerate,
-                            onRetry = onRetry
-                        )
-
-                        is ChatEntry.CapabilityResult -> CapabilityResultMessage(
-                            entry = entry,
-                            onCopy = { onCopy(entry.detail ?: entry.summary) }
-                        )
-
-                        is ChatEntry.ApprovalBlock -> ApprovalBlockMessage(
-                            entry = entry,
-                            onApprove = onApprove,
-                            onReject = onReject,
-                            onRetryAfterApproval = onRetryAfterApproval,
-                            onGrantAlways = onGrantAlways
-                        )
-                    }
+                items(entriesBeforeLive, key = { it.id }) { entry ->
+                    RenderTimelineEntry(
+                        entry = entry,
+                        onCopy = onCopy,
+                        onEdit = onEdit,
+                        onRegenerate = onRegenerate,
+                        onRetry = onRetry,
+                        onApprove = onApprove,
+                        onReject = onReject,
+                        onRetryAfterApproval = onRetryAfterApproval,
+                        onGrantAlways = onGrantAlways
+                    )
                 }
 
                 if (showLiveBlock) {
@@ -215,6 +215,20 @@ fun ConversationTimeline(
                             onCopyStream = { clipboard.setText(AnnotatedString(streamText)) }
                         )
                     }
+                }
+
+                items(entriesAfterLive, key = { it.id }) { entry ->
+                    RenderTimelineEntry(
+                        entry = entry,
+                        onCopy = onCopy,
+                        onEdit = onEdit,
+                        onRegenerate = onRegenerate,
+                        onRetry = onRetry,
+                        onApprove = onApprove,
+                        onReject = onReject,
+                        onRetryAfterApproval = onRetryAfterApproval,
+                        onGrantAlways = onGrantAlways
+                    )
                 }
             }
         }
@@ -260,6 +274,50 @@ fun ConversationTimeline(
                 }
             }
         }
+    }
+}
+
+/** FUNCTIONAL CLOSURE: the single dispatch for every timeline entry. */
+@Composable
+private fun RenderTimelineEntry(
+    entry: ChatEntry,
+    onCopy: (String) -> Unit,
+    onEdit: (String) -> Unit,
+    onRegenerate: (String) -> Unit,
+    onRetry: (String) -> Unit,
+    onApprove: (String) -> Unit,
+    onReject: (String) -> Unit,
+    onRetryAfterApproval: () -> Unit,
+    onGrantAlways: (String) -> Unit
+) {
+    when (entry) {
+        is ChatEntry.User -> UserMessage(
+            entry = entry,
+            onCopy = { onCopy(entry.text) },
+            onEdit = { onEdit(entry.text) }
+        )
+
+        is ChatEntry.Assistant -> AssistantMessage(
+            entry = entry,
+            onCopy = { onCopy(entry.text) },
+            // FUNCTIONAL CLOSURE (§6): the action carries the ENTRY ID — the
+            // targeted message is regenerated/retried, never "the last one".
+            onRegenerate = { onRegenerate(entry.id) },
+            onRetry = { onRetry(entry.id) }
+        )
+
+        is ChatEntry.CapabilityResult -> CapabilityResultMessage(
+            entry = entry,
+            onCopy = { onCopy(entry.detail ?: entry.summary) }
+        )
+
+        is ChatEntry.ApprovalBlock -> ApprovalBlockMessage(
+            entry = entry,
+            onApprove = onApprove,
+            onReject = onReject,
+            onRetryAfterApproval = onRetryAfterApproval,
+            onGrantAlways = onGrantAlways
+        )
     }
 }
 
@@ -340,10 +398,14 @@ private fun UserMessage(
                 onClick = onCopy,
                 tag = "btn_copy_user_${entry.id}"
             )
+            // FUNCTIONAL CLOSURE (§7 — honest semantics): the original
+            // message is NEVER mutated. The action stages the text in the
+            // composer for a RE-SEND as a NEW message — the label says
+            // exactly that (no misleading "edit in place" impression).
             MessageAction(
-                label = "تحرير",
+                label = "تعديل وإعادة الإرسال",
                 icon = Icons.Default.Edit,
-                contentDescription = "تحرير نص الرسالة في حقل الإدخال",
+                contentDescription = "تحرير نص الرسالة في حقل الإدخال ثم إرساله كرسالة جديدة (الأصل لا يتغير)",
                 onClick = onEdit,
                 tag = "btn_edit_user_${entry.id}"
             )
@@ -547,6 +609,7 @@ private fun CapabilityResultMessage(
     Surface(
         shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
         color = when {
+            entry.isPending -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
             failed -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
             entry.isDegraded -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
             else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
@@ -575,10 +638,20 @@ private fun CapabilityResultMessage(
                     else MaterialTheme.colorScheme.primary
                 )
                 Spacer(modifier = Modifier.weight(1f))
-                if (entry.isDegraded) {
-                    StatusPill(text = "نمط تراجعي", color = MaterialTheme.colorScheme.tertiary)
-                } else if (!failed) {
-                    StatusPill(text = "تم", color = MaterialTheme.colorScheme.primary)
+                when {
+                    // FUNCTIONAL CLOSURE (§22): the PENDING state is visible
+                    // with a live progress marker — the user always knows the
+                    // invocation is still running (the sheet already closed).
+                    entry.isPending -> {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp).testTag("pending_marker_${entry.id}"),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        StatusPill(text = "قيد التنفيذ", color = MaterialTheme.colorScheme.primary)
+                    }
+                    entry.isDegraded -> StatusPill(text = "نمط تراجعي", color = MaterialTheme.colorScheme.tertiary)
+                    !failed -> StatusPill(text = "تم", color = MaterialTheme.colorScheme.primary)
                 }
             }
 
@@ -689,6 +762,10 @@ private fun ApprovalBlockMessage(
     onGrantAlways: (String) -> Unit = {}
 ) {
     val pending = entry.state == ApprovalBlockState.PENDING
+    // FUNCTIONAL CLOSURE (§12): "allow always" grants a STANDING permission —
+    // the user confirms the REAL scope before it is recorded (it is NOT a
+    // one-time approval, and the UI may no longer imply that it is).
+    var confirmGrantAlways by remember { mutableStateOf(false) }
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = when (entry.state) {
@@ -778,13 +855,20 @@ private fun ApprovalBlockMessage(
                         }
                     }
                     // The standing-consent affordance (recorded EXECUTE grant
-                    // — the same path the governance surface offers).
+                    // — the same path the governance surface offers). §12: the
+                    // button OPENS THE SCOPE CONFIRMATION, it never grants
+                    // silently.
                     TextButton(
-                        onClick = { onGrantAlways(entry.approvalId) },
+                        onClick = { confirmGrantAlways = true },
                         modifier = Modifier.testTag("btn_grant_always_${entry.approvalId}")
                     ) {
                         Text("السماح دائماً لهذه الأداة")
                     }
+                    Text(
+                        text = "السماح دائماً = منح صلاحية تنفيذ دائمة لهذه الأداة على مستوى الجهاز (كل الجلسات) — وليس موافقة لهذا الطلب فقط.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 ApprovalBlockState.APPROVED -> {
                     Spacer(modifier = Modifier.height(6.dp))
@@ -800,6 +884,37 @@ private fun ApprovalBlockMessage(
                 else -> Unit
             }
         }
+    }
+
+    // §12: the standing-grant scope confirmation — the REAL contract in
+    // plain words, an explicit confirm, and an explicit cancel.
+    if (confirmGrantAlways) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmGrantAlways = false },
+            title = { Text("السماح دائماً بهذه الأداة؟") },
+            text = {
+                Text(
+                    "سيُسجَّل منح EXECUTE دائم للأداة «${entry.toolName}» على مستوى الجهاز " +
+                            "(كل الجلسات والمساحات)، ولن يُطلب موافقتك مجدداً على استدعاءاتها. " +
+                            "هذا ليس موافقة على الطلب الحالي فقط — يمكنك سحب المنح لاحقاً من شاشة الحوكمة."
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        confirmGrantAlways = false
+                        onGrantAlways(entry.approvalId)
+                    },
+                    modifier = Modifier.testTag("btn_confirm_grant_always_${entry.approvalId}")
+                ) { Text("السماح دائماً") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = { confirmGrantAlways = false },
+                    modifier = Modifier.testTag("btn_cancel_grant_always_${entry.approvalId}")
+                ) { Text("إلغاء") }
+            }
+        )
     }
 }
 

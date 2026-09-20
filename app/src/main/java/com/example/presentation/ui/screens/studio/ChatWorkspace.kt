@@ -101,7 +101,7 @@ fun ChatWorkspace(
     onPromptInput: (String) -> Unit,
     onSend: () -> Unit,
     onCancelExecution: () -> Unit,
-    onRegenerate: () -> Unit,
+    onRegenerate: (String) -> Unit,
     onEditMessage: (String) -> Unit,
     onResetView: () -> Unit,
     onNewSession: () -> Unit,
@@ -122,12 +122,17 @@ fun ChatWorkspace(
     onRemoveAttachment: (String) -> Unit,
     onInvokeSearch: (String) -> Unit,
     onInvokeKnowledge: (String) -> Unit,
-    onInvokeTool: (toolName: String, argumentsJson: String, isMcp: Boolean) -> Unit,
+    /**
+     * FUNCTIONAL CLOSURE (§22): the invoked capability family rides the
+     * callback so the conversation can open its PENDING block with the
+     * honest kind before the result arrives.
+     */
+    onInvokeTool: (toolName: String, argumentsJson: String, kind: com.example.presentation.state.CapabilityKind) -> Unit,
     onPingMcp: (String) -> Unit,
     onApprove: (String) -> Unit,
     onReject: (String) -> Unit,
     onRetryAfterApproval: () -> Unit,
-    /** §13: "allow always" — the standing EXECUTE grant path. */
+    /** §13: "allow always" — the standing EXECUTE grant path (§12: confirmed). */
     onGrantAlways: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -169,8 +174,15 @@ fun ChatWorkspace(
         if (uri != null) onPickFolder(uri.toString())
     }
 
+    // FUNCTIONAL CLOSURE (§5): the operational truth of "an LLM is usable":
+    // lifecycle ENABLED **or** ACTIVE (the runtime promotes healthy resources
+    // to ACTIVE — checking only ENABLED missed them) AND health not UNAVAILABLE
+    // (an enabled-but-down resource is NOT operational).
     val hasActiveLlm = llmResources.any {
-        it.resourceType == ResourceType.LLM && it.lifecycleState == ResourceLifecycleState.ENABLED
+        it.resourceType == ResourceType.LLM &&
+            (it.lifecycleState == ResourceLifecycleState.ENABLED ||
+                it.lifecycleState == ResourceLifecycleState.ACTIVE) &&
+            it.healthStatus != com.example.domain.core.provider.HealthStatus.UNAVAILABLE
     }
 
     // §19: the adaptive shell — sessions pane (medium+), chat, context pane
@@ -269,7 +281,10 @@ fun ChatWorkspace(
                 },
                 attachmentDrafts = capabilityState.attachmentDrafts,
                 onRemoveAttachment = onRemoveAttachment,
-                isImportingAttachment = capabilityState.isImportingAttachment
+                isImportingAttachment = capabilityState.isImportingAttachment,
+                // FUNCTIONAL CLOSURE (§14): the attachment layer's honest
+                // error channel — VISIBLE in the composer, never swallowed.
+                attachmentError = capabilityState.attachmentError
             )
         }
 
@@ -394,12 +409,11 @@ fun ChatWorkspace(
             skills = capabilityState.skills,
             isInvoking = capabilityState.isInvoking,
             onDismiss = { skillsSheetOpen = false },
-            onRunSkill = { skill, parameters ->
+            onRunSkill = { skill, argumentsJson ->
                 skillsSheetOpen = false
-                val argsJson = org.json.JSONObject().apply {
-                    parameters.forEach { (k, v) -> put(k, v) }
-                }.toString()
-                onInvokeTool(skill.id, argsJson, false)
+                // §17: the card already built the VALIDATED payload (defaults
+                // merged, optionals omitted) — it rides as-is.
+                onInvokeTool(skill.id, argumentsJson, com.example.presentation.state.CapabilityKind.SKILL)
             }
         )
     }
@@ -409,12 +423,10 @@ fun ChatWorkspace(
             tools = capabilityState.tools,
             isInvoking = capabilityState.isInvoking,
             onDismiss = { toolsSheetOpen = false },
-            onRunTool = { tool, parameters ->
+            onRunTool = { tool, argumentsJson ->
                 toolsSheetOpen = false
-                val argsJson = org.json.JSONObject().apply {
-                    parameters.forEach { (k, v) -> put(k, v) }
-                }.toString()
-                onInvokeTool(tool.name, argsJson, false)
+                // §18: the card's typed+validated payload rides as-is.
+                onInvokeTool(tool.name, argumentsJson, com.example.presentation.state.CapabilityKind.TOOL)
             }
         )
     }
@@ -426,14 +438,15 @@ fun ChatWorkspace(
             isInvoking = capabilityState.isInvoking,
             onDismiss = { mcpSheetOpen = false },
             onPing = onPingMcp,
-            onRunTool = { server, toolName, arguments ->
+            onRunTool = { server, toolName, argumentsJson ->
                 mcpSheetOpen = false
-                val argsJson = org.json.JSONObject().apply {
-                    arguments.forEach { (k, v) -> put(k, v) }
-                }.toString()
                 // The registered MCP tool name is "<server>__<tool>" (the
                 // HEALTHY-only registration contract).
-                onInvokeTool("${server.id}__$toolName", argsJson, true)
+                onInvokeTool(
+                    "${server.id}__$toolName",
+                    argumentsJson,
+                    com.example.presentation.state.CapabilityKind.MCP
+                )
             }
         )
     }

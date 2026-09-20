@@ -173,6 +173,9 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         // library + full-fidelity durable agents
         com.example.infrastructure.persistence.entities.ConversationSessionEntity::class,
         com.example.infrastructure.persistence.entities.ConversationTurnEntity::class,
+        // FUNCTIONAL CLOSURE (Phase 1 §9, v19) — durable conversational timeline
+        // events: capability results + approval blocks survive session reopen.
+        com.example.infrastructure.persistence.entities.ChatTimelineEventEntity::class,
         com.example.infrastructure.persistence.entities.WorkflowDefinitionEntity::class,
         // v15 — DURABLE human approval requests (audit 2026 §17) + explicit
         // workspace identity on tasks / execution logs / trace nodes (P1-7/P1-10)
@@ -266,6 +269,9 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun conversationSessionDao(): com.example.infrastructure.persistence.dao.ConversationSessionDao
     abstract fun conversationTurnDao(): com.example.infrastructure.persistence.dao.ConversationTurnDao
 
+    // FUNCTIONAL CLOSURE (Phase 1 §9, v19) — durable timeline events
+    abstract fun chatTimelineEventDao(): com.example.infrastructure.persistence.dao.ChatTimelineEventDao
+
     // v13 — user-authored workflow library (report gap: workflow assets)
     abstract fun workflowDefinitionDao(): com.example.infrastructure.persistence.dao.WorkflowDefinitionDao
 
@@ -286,7 +292,7 @@ abstract class AppDatabase : RoomDatabase() {
          * database had already reached v17 — a stale honesty violation. UI
          * surfaces read this constant instead of a literal).
          */
-        const val SCHEMA_VERSION = 18
+        const val SCHEMA_VERSION = 19
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -1807,6 +1813,54 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * FUNCTIONAL CLOSURE (Phase 1 §9/§10, DB v19): turns gain their
+         * durable CITATION references (`sourcesJson`), and a NEW table
+         * `chat_timeline_events` persists the capability-result and approval
+         * blocks the user saw in the conversation (they previously vanished
+         * on every session reopen). Pure additive DDL — no existing row is
+         * touched; the new column defaults to the honest "[]" (no sources)
+         * and the new table starts empty.
+         */
+        private val MIGRATION_18_TO_19: Migration = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE chat_turns ADD COLUMN sourcesJson TEXT NOT NULL DEFAULT '[]'"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `chat_timeline_events` (" +
+                            "`eventId` TEXT NOT NULL, " +
+                            "`sessionId` TEXT NOT NULL, " +
+                            "`kind` TEXT NOT NULL, " +
+                            "`capabilityKind` TEXT, " +
+                            "`title` TEXT NOT NULL, " +
+                            "`summary` TEXT NOT NULL, " +
+                            "`detail` TEXT, " +
+                            "`sourcesJson` TEXT NOT NULL, " +
+                            "`isSuccessful` INTEGER NOT NULL, " +
+                            "`isDegraded` INTEGER NOT NULL, " +
+                            "`degradedMessage` TEXT, " +
+                            "`createdAtEpochMs` INTEGER NOT NULL, " +
+                            "`approvalId` TEXT, " +
+                            "`executionId` TEXT, " +
+                            "`toolName` TEXT, " +
+                            "`riskLevel` TEXT, " +
+                            "`justification` TEXT, " +
+                            "`approvalState` TEXT, " +
+                            "PRIMARY KEY(`eventId`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_chat_timeline_events_sessionId` " +
+                            "ON `chat_timeline_events` (`sessionId`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                            "`index_chat_timeline_events_sessionId_createdAtEpochMs` " +
+                            "ON `chat_timeline_events` (`sessionId`, `createdAtEpochMs`)"
+                )
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1827,6 +1881,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_15_TO_16,
             MIGRATION_16_TO_17,
             MIGRATION_17_TO_18,
+            MIGRATION_18_TO_19,
         )
 
         fun getInstance(context: Context): AppDatabase {

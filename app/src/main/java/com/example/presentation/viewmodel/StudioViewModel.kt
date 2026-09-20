@@ -14,7 +14,10 @@ import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.ConversationSessionId
+import com.example.domain.core.session.ConversationTimelineEvent
+import com.example.domain.core.session.TimelineEventKind
 import com.example.domain.core.session.TurnAttachment
+import com.example.domain.core.session.TurnSourceRef
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.presentation.state.ApprovalBlockState
 import com.example.presentation.state.ChatEntry
@@ -32,7 +35,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 /**
  * ============================================================================
  * StudioViewModel — the STUDIO conversation runtime ViewModel (ADR-6 slice
- * 2, Design Closure 2026 UI-redesign track; Chat Workspace Task 1)
+ * 2, Design Closure 2026 UI-redesign track; Chat Workspace Task 1 + Task 2 +
+ * FUNCTIONAL CLOSURE Phase 1)
  * ============================================================================
  *
  * GAP-19/21 (ADR-6 "تفكيك تدريجي متزامن"): the conversation runtime — the
@@ -54,7 +58,11 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
  *  - CROSS-FEATURE SEAM: the AGENT binding is NOT owned here — the agent
  *    catalog is shared state (Tasks/Explorer read it); the screen reads
  *    the selection from the shared state and passes the resolved agent
- *    into [executePrompt] / [startNewSession] as a parameter.
+ *    into [executePrompt] / [startNewSession] as a parameter. On
+ *    [openSession] the session's OWN agent is exposed as
+ *    [StudioUiState.restoredAgentId] — the screen routes it into the
+ *    agent catalog owner (FUNCTIONAL CLOSURE §4: the ACTUAL agent is
+ *    restored into the state responsible for it, not just a display name).
  *
  * CHAT WORKSPACE (Task 1) state model on top of the above:
  *  - [StudioUiState.timeline] — the conversation-first message stream
@@ -65,6 +73,36 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
  *    [ExecutionLifecycleProjection]); no raw log is user-facing;
  *  - session-integrity semantics: a mode change is a semantic session
  *    boundary; "reset view" never claims durable deletion.
+ *
+ * FUNCTIONAL CLOSURE (Phase 1) semantics owned here:
+ *  - §1 SCOPE ISOLATION: a workspace/project switch releases the session
+ *    binding and CLEARS the transcript (Project A's transcript can never
+ *    stay visible while the UI shows Project B). A running execution is
+ *    DETACHED, not killed: it keeps its pinned persistence context.
+ *  - §2 EXECUTION-PINNED CONTEXT: the workspace/project the execution
+ *    started in are captured AT SEND TIME and used for session
+ *    creation/turn persistence — a mid-execution scope switch can never
+ *    save the turn into the wrong workspace or lose it entirely.
+ *  - §3 SESSION SEMANTICS: [ensureActiveSession] reuses a session only
+ *    when it is still compatible (scope + mode); an AGENT change UPDATES
+ *    the session's agent binding explicitly (documented boundary, via the
+ *    session service) — Agent B never executes silently inside a session
+ *    bound to Agent A.
+ *  - §5 MODEL HONESTY: the assistant entry records the model the DECISION
+ *    LAYER ACTUALLY SELECTED (harvested from the real SELECT_MODEL
+ *    decision event), falling back to the user's pin — a fallback never
+ *    masquerades as the pinned model.
+ *  - §6 ACTION TARGETING: Regenerate/Retry target the SPECIFIC message
+ *    (by entry id), not "the last user message".
+ *  - §8 EXECUTION LIFECYCLE: a consent-blocked execution (HUMAN_
+ *    APPROVAL_REQUIRED) surfaces as an AWAITING_APPROVAL lifecycle + an
+ *    inline approval block — NEVER as a failed assistant entry.
+ *  - §9/§10/§11 CAPABILITY PERSISTENCE + CHRONOLOGY: capability results
+ *    and approval blocks are durable (timeline-events store) and the
+ *    reopened timeline is rebuilt by TIMESTAMP (turns and events merged).
+ *  - §22 CAPABILITY LIFECYCLE: a direct invocation first lands as a
+ *    PENDING block, then resolves — the user never loses track of what
+ *    ran, whether it is pending, and what the result was.
  *
  * Honesty contract (carried over verbatim from the MainViewModel code it
  * replaces): AGENT mode without a selection fails with an actionable
@@ -129,6 +167,13 @@ class StudioViewModel(
         val activeSessionId: String? = null,
         val selectedModelResourceId: String? = null,
         val selectedModelDisplayName: String? = null,
+        /**
+         * FUNCTIONAL CLOSURE (§4): the agent a reopened session is bound to —
+         * the SCREEN routes it into the agent-catalog owner's selection so
+         * the ACTUAL agent executes continuations (not just a display name).
+         * Null = nothing to restore.
+         */
+        val restoredAgentId: String? = null,
         val isDegraded: Boolean = false,
         val degradedReason: DegradedReason? = null,
         val diagnosticBanner: String? = null,
@@ -145,6 +190,89 @@ class StudioViewModel(
     /** Gap-closure P0-01: the ExecutionHost key of the task launched by the Studio screen. */
     private var currentExecutionTaskId: String? = null
 
+    /**
+     * FUNCTIONAL CLOSURE (§1/§2): the last (workspace, project) scope this
+     * conversation was bound to. A change observed on the runtime service
+     * releases the session binding and clears the transcript — the stale
+     * transcript defect (Project A's messages visible while Project B is
+     * active) becomes impossible.
+     */
+    private var lastSeenScope: Pair<String, Long?>? = null
+
+    init {
+        // --------------------------------------------------------------
+        // FUNCTIONAL CLOSURE (§1): the scope-change sentinel. Collecting the
+        // workspace runtime's OWN state (not a UI callback) means the chat
+        // reacts even while its screen sits in the back stack.
+        // --------------------------------------------------------------
+        viewModelScope.launch {
+            runCatching {
+                workspaceRuntimeService.activeWorkspace.collect { workspace ->
+                    if (workspace == null) return@collect
+                    val scope = workspace.id to workspace.activeProjectId.takeIf { it > 0L }
+                    val previous = lastSeenScope
+                    lastSeenScope = scope
+                    if (previous != null && previous != scope) {
+                        onScopeChanged(previous, scope)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * FUNCTIONAL CLOSURE (§1): the scope (workspace and/or project) changed
+     * under this conversation. The VIEW is released (binding + transcript +
+     * live state) — the durable sessions stay intact and browsable in their
+     * own scope. A running execution is DETACHED: it keeps its pinned
+     * persistence context (§2), completes under ExecutionHost, and its turn
+     * lands in ITS session — it just no longer mutates this view.
+     */
+    private fun onScopeChanged(previous: Pair<String, Long?>, current: Pair<String, Long?>) {
+        val workspaceChanged = previous.first != current.first
+        val projectChanged = previous.second != current.second
+        val wasExecuting = _state.value.isExecuting
+        detachRunningExecution(
+            banner = buildString {
+                if (workspaceChanged) append("تمت تبديل مساحة العمل.")
+                if (workspaceChanged && projectChanged) append(" ")
+                if (projectChanged) append("تمت تبديل المشروع النشط.")
+                if (wasExecuting) {
+                    append(" فُصل العرض عن التنفيذ الجاري — سيُحفظ في جلسته الأصلية عند اكتماله.")
+                }
+                append(" بدأت محادثة جديدة ضمن النطاق الحالي.")
+            }
+        )
+        _state.update {
+            it.copy(
+                activeSessionId = null,
+                timeline = emptyList(),
+                studioSession = emptyList(),
+                streamText = "",
+                executionLog = emptyList(),
+                liveExecution = null,
+                sessionTurnStartMs = 0L,
+                restoredAgentId = null
+            )
+        }
+    }
+
+    /**
+     * FUNCTIONAL CLOSURE (§1/§2): detaches the view from a running execution
+     * WITHOUT killing it — the execution's persistence is pinned (§2), so it
+     * completes and lands in its own session; this view simply stops
+     * mirroring it (the composer is freed honestly).
+     */
+    private fun detachRunningExecution(banner: String?) {
+        currentExecutionTaskId = null
+        _state.update {
+            it.copy(
+                isExecuting = false,
+                diagnosticBanner = banner ?: it.diagnosticBanner
+            )
+        }
+    }
+
     // --- Prompt & session input surfaces ---
 
     fun updatePromptInput(input: String) {
@@ -152,9 +280,12 @@ class StudioViewModel(
     }
 
     /**
-     * MESSAGE ACTION (Task 1 §10): loads a past user message's text into the
-     * composer as an editable draft (re-send as a new message). The original
-     * message is NOT mutated — history stays append-only.
+     * MESSAGE ACTION (Task 1 §10 / FUNCTIONAL CLOSURE §7 — honest semantics):
+     * loads a past user message's text into the composer as an editable
+     * draft. The original message is NOT mutated — history stays
+     * append-only, and the send creates a NEW message ("edit and re-send",
+     * exactly what the UI affordance now says — never a claim that the
+     * original was edited in place).
      */
     fun editUserMessage(text: String) {
         _state.update { it.copy(promptInput = text) }
@@ -194,7 +325,8 @@ class StudioViewModel(
                 streamText = "",
                 executionLog = emptyList(),
                 liveExecution = null,
-                sessionTurnStartMs = 0L
+                sessionTurnStartMs = 0L,
+                restoredAgentId = null
             )
         }
     }
@@ -228,13 +360,14 @@ class StudioViewModel(
                 streamText = "",
                 executionLog = emptyList(),
                 liveExecution = null,
-                sessionTurnStartMs = 0L
+                sessionTurnStartMs = 0L,
+                restoredAgentId = null
             )
         }
     }
 
     /**
-     * USER-FACING MODEL PICKER (report gap): selects the exact LLM resource
+     * User-FACING MODEL PICKER (report gap): selects the exact LLM resource
      * the conversation binds to. `resourceId == null` → the runtime decision
      * layer picks (previous behaviour). The choice is persisted onto the
      * active durable session (exact runtime binding survives restarts).
@@ -260,8 +393,13 @@ class StudioViewModel(
      * workspace + current mode/model) and clears the transcript. The agent
      * binding is passed by the screen (the catalog selection is shared
      * state — ADR-6 slice 2 seam).
+     *
+     * FUNCTIONAL CLOSURE (§1): any execution still running for the previous
+     * binding is DETACHED (not killed) — its pinned persistence (§2) is
+     * untouched, but it can no longer mutate this fresh view.
      */
     fun startNewSession(agent: AgentDefinition?) {
+        detachRunningExecution(banner = null)
         viewModelScope.launch {
             runCatching {
                 val current = _state.value
@@ -283,7 +421,8 @@ class StudioViewModel(
                         timeline = emptyList(),
                         executionLog = emptyList(),
                         streamText = "",
-                        liveExecution = null
+                        liveExecution = null,
+                        restoredAgentId = null
                     )
                 }
             }.onFailure { failure ->
@@ -295,23 +434,54 @@ class StudioViewModel(
     /**
      * SESSION BROWSER → REOPEN (report gaps: "Session retrieval after
      * restart" + "Resume conversation"): loads a durable session with its
-     * full turn history into the Studio transcript, restores the session's
-     * mode / model binding, and continues the conversation with the loaded
-     * turns as LLM history. (The browser sheet itself is SessionsViewModel
-     * state — the screen closes it.)
+     * full turn history INTO the Studio transcript, restores the session's
+     * mode / model / AGENT binding, and continues the conversation with the
+     * loaded turns as LLM history. (The browser sheet itself is
+     * SessionsViewModel state — the screen closes it.)
+     *
+     * FUNCTIONAL CLOSURE (§1): the open is authorized against workspace AND
+     * the ACTIVE PROJECT scope — a sibling project's private session is
+     * refused with the honest reason (it is indistinguishable from
+     * nonexistent to this scope, mirroring the repository's workspace
+     * boundary). §4: the session's agent is exposed as
+     * [StudioUiState.restoredAgentId] for the screen to route into the
+     * agent-catalog owner. §9/§11: the timeline is REBUILT from turns AND
+     * the durable capability/approval events, merged by timestamp — the
+     * conversation the user reopens is the conversation they saw.
      */
     fun openSession(sessionId: String) {
         viewModelScope.launch {
             runCatching {
-                val loaded = conversationSessionService.getSessionWithTurns(
-                    ConversationSessionId(sessionId)
+                val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
+                val activeProjectId = workspaceRuntimeService.activeProjectIdOrNull()
+                // Distinguish "does not exist in this workspace" from
+                // "belongs to a sibling project" — both honest, both scoped.
+                val session = conversationSessionService.getSession(
+                    ConversationSessionId(sessionId),
+                    workspaceId
                 ) ?: return@launch
+                val sessionProject = session.projectId
+                if (sessionProject != null && sessionProject != activeProjectId) {
+                    _state.update {
+                        it.copy(
+                            errorMessage = "هذه الجلسة تخص مشروعاً آخر — بدّل إلى مشروعها لفتحها (عزل المشروعات)."
+                        )
+                    }
+                    return@launch
+                }
+                val loaded = conversationSessionService.getSessionWithTurns(
+                    ConversationSessionId(sessionId),
+                    workspaceId,
+                    expectedProjectId = activeProjectId
+                ) ?: return@launch
+                detachRunningExecution(banner = null)
                 _state.update { state ->
                     state.copy(
                         activeSessionId = loaded.session.id.value,
                         chatMode = loaded.session.mode,
                         selectedModelResourceId = loaded.session.modelResourceId,
                         selectedModelDisplayName = loaded.session.modelDisplayName,
+                        restoredAgentId = loaded.session.agentId,
                         studioSession = loaded.turns.map { turn ->
                             StudioTurn(
                                 id = turn.id,
@@ -326,9 +496,7 @@ class StudioViewModel(
                                 modelResourceId = turn.modelResourceId
                             )
                         },
-                        timeline = loaded.turns.flatMap { turn ->
-                            buildTimelineFromTurn(turn, loaded.session.agentName)
-                        },
+                        timeline = rebuildTimeline(loaded.turns, loaded.timelineEvents),
                         executionLog = emptyList(),
                         streamText = "",
                         liveExecution = null,
@@ -340,6 +508,86 @@ class StudioViewModel(
             }
         }
     }
+
+    /**
+     * FUNCTIONAL CLOSURE (§9/§11): rebuilds the reopened timeline by
+     * TIMESTAMP — every durable turn expands to its user + assistant entries
+     * and every timeline event to its capability/approval block, then all
+     * are merged on [com.example.domain.core.session.ConversationTurn.
+     * createdAtEpochMs] / event timestamp (turns win ties: they are the
+     * conversation's backbone). Chronology is derived from when things
+     * actually happened, never from a fixed placement rule.
+     */
+    private fun rebuildTimeline(
+        turns: List<com.example.domain.core.session.ConversationTurn>,
+        events: List<ConversationTimelineEvent>
+    ): List<ChatEntry> {
+        data class MergeItem(val ts: Long, val order: Int, val entries: List<ChatEntry>)
+
+        val items = mutableListOf<MergeItem>()
+        for (turn in turns) {
+            items += MergeItem(
+                ts = turn.createdAtEpochMs,
+                order = 0,
+                entries = buildTimelineFromTurn(turn, null)
+            )
+        }
+        for (event in events) {
+            val entry = event.toChatEntry() ?: continue
+            items += MergeItem(
+                ts = event.createdAtEpochMs,
+                order = 1,
+                entries = listOf(entry)
+            )
+        }
+        return items.sortedWith(compareBy({ it.ts }, { it.order }))
+            .flatMap { it.entries }
+    }
+
+    /** One durable timeline event → its presentation twin (null when unknowable). */
+    private fun ConversationTimelineEvent.toChatEntry(): ChatEntry? {
+        return when (kind) {
+            TimelineEventKind.CAPABILITY_RESULT -> {
+                val capabilityKind = runCatching {
+                    com.example.presentation.state.CapabilityKind.valueOf(capabilityKind ?: "TOOL")
+                }.getOrNull() ?: return null
+                ChatEntry.CapabilityResult(
+                    id = id,
+                    kind = capabilityKind,
+                    title = title,
+                    summary = summary,
+                    detail = detail,
+                    sources = sources.map { it.toChatSourceRef() },
+                    isSuccessful = isSuccessful,
+                    isDegraded = isDegraded,
+                    degradedMessage = degradedMessage,
+                    timestampMs = createdAtEpochMs
+                )
+            }
+            TimelineEventKind.APPROVAL_BLOCK -> ChatEntry.ApprovalBlock(
+                id = id,
+                approvalId = approvalId ?: return null,
+                executionId = executionId ?: "",
+                toolName = toolName ?: "",
+                riskLevel = riskLevel ?: "",
+                description = detail ?: "",
+                requestedAction = title,
+                justification = justification ?: "",
+                state = runCatching {
+                    ApprovalBlockState.valueOf(approvalState ?: "PENDING")
+                }.getOrDefault(ApprovalBlockState.PENDING)
+            )
+        }
+    }
+
+    /** Durable source reference → its presentation twin. */
+    private fun TurnSourceRef.toChatSourceRef() =
+        com.example.presentation.state.ChatSourceRef(
+            title = title,
+            url = url,
+            providerId = providerId,
+            confidenceScore = confidenceScore
+        )
 
     /**
      * One durable turn → the two timeline entries it represents (the user
@@ -368,7 +616,10 @@ class StudioViewModel(
                 modelResourceId = turn.modelResourceId,
                 tokensConsumed = turn.tokensConsumed,
                 durationMs = turn.durationMs,
-                eventCount = turn.eventCount
+                eventCount = turn.eventCount,
+                // FUNCTIONAL CLOSURE (§9): the turn's durable citations
+                // re-render as the collapsible sources block.
+                sources = turn.sources.map { it.toChatSourceRef() }
             )
         )
     }
@@ -397,7 +648,8 @@ class StudioViewModel(
                     studioSession = emptyList(),
                     timeline = emptyList(),
                     streamText = "",
-                    liveExecution = null
+                    liveExecution = null,
+                    restoredAgentId = null
                 )
             }
         }
@@ -429,23 +681,70 @@ class StudioViewModel(
 
     /**
      * Ensures the ACTIVE durable session exists (creating it bound to the
-     * current workspace / mode / agent / model on first use), then sets it
-     * active. First-turn titling policy: the session is renamed to the
-     * prompt when it still carries the default title.
+     * EXECUTION-PINNED workspace/project — §2 — and the current mode/model on
+     * first use), then sets it active.
+     *
+     * FUNCTIONAL CLOSURE (§3): an existing session is reused ONLY when it is
+     * still COMPATIBLE with what is being executed:
+     *  - scope: the session belongs to the pinned workspace and its project
+     *    matches the pinned project (a shared null-project session is
+     *    usable from any project — its documented semantics);
+     *  - mode: the session's recorded mode equals the executing mode;
+     *  - agent (AGENT mode): when the conversation moved to a DIFFERENT
+     *    agent, the session's binding is UPDATED EXPLICITLY through the
+     *    session service (the documented boundary this architecture chose
+     *    instead of silently executing Agent B inside Agent A's session —
+     *    the durable row always names the agent that really executes).
+     * Incompatible sessions are released (they stay durable and browsable)
+     * and a NEW session is created for this execution.
      */
     private suspend fun ensureActiveSession(
         mode: ChatMode,
         agent: AgentDefinition,
         modelResourceId: String?,
-        modelDisplayName: String?
+        modelDisplayName: String?,
+        pinnedWorkspaceId: String?,
+        pinnedProjectId: Long?,
+        executionTaskId: String
     ): ConversationSessionId? {
         return runCatching {
             val existingId = _state.value.activeSessionId
             if (existingId != null) {
                 val existing = conversationSessionService.getSessionWithTurns(
-                    ConversationSessionId(existingId)
+                    ConversationSessionId(existingId),
+                    pinnedWorkspaceId,
+                    // §1/§2: the reuse check runs under the EXECUTION-PINNED
+                    // project scope (a session of another project's scope is
+                    // indistinguishable from nonexistent — the same boundary
+                    // the browser honors).
+                    expectedProjectId = pinnedProjectId
                 )?.session
-                if (existing != null) return existing.id
+                if (existing != null) {
+                    val scopeCompatible =
+                        existing.projectId == null || existing.projectId == pinnedProjectId
+                    val modeCompatible = existing.mode == mode
+                    if (scopeCompatible && modeCompatible) {
+                        if (mode == ChatMode.AGENT &&
+                            existing.agentId != agent.identity.id.value
+                        ) {
+                            // §3: EXPLICIT binding update — the durable row
+                            // names the agent that really executes now.
+                            conversationSessionService.setSessionAgent(
+                                sessionId = existing.id,
+                                agentId = agent.identity.id.value,
+                                agentName = agent.identity.name,
+                                workspaceId = pinnedWorkspaceId
+                            )
+                        }
+                        return existing.id
+                    }
+                    // Incompatible → release the binding (the session stays
+                    // durable + browsable in its own scope) and create a new
+                    // one for THIS execution.
+                    if (currentExecutionTaskId == executionTaskId) {
+                        _state.update { it.copy(activeSessionId = null) }
+                    }
+                }
             }
             val session = conversationSessionService.createSession(
                 mode = mode,
@@ -453,17 +752,25 @@ class StudioViewModel(
                 agentName = if (mode == ChatMode.AGENT) agent.identity.name else null,
                 modelResourceId = modelResourceId,
                 modelDisplayName = modelDisplayName,
-                // GAP-14: bind to the active project (null = shared session).
-                projectId = workspaceRuntimeService.activeProjectIdOrNull()
+                // GAP-14: bind to the pinned project (null = shared session).
+                projectId = pinnedProjectId,
+                // FUNCTIONAL CLOSURE (§2): the pinned workspace — NOT the
+                // current provider (a mid-execution switch must not hijack
+                // the new session into another workspace).
+                workspaceId = pinnedWorkspaceId
             )
-            _state.update { it.copy(activeSessionId = session.id.value) }
+            if (currentExecutionTaskId == executionTaskId) {
+                _state.update { it.copy(activeSessionId = session.id.value) }
+            }
             session.id
         }.getOrNull()
     }
 
     /**
-     * Persists one finished turn to the durable session (fire-and-forget —
-     * failures surface as an honest diagnostic banner, never swallowed).
+     * Persists one finished turn to the durable session — with the
+     * EXECUTION-PINNED workspace (§2: a mid-execution workspace switch can
+     * neither lose the turn nor write it into the wrong workspace).
+     * Fire-and-forget with an honest diagnostic banner on failure.
      */
     private fun persistTurnDurably(
         sessionId: ConversationSessionId?,
@@ -476,7 +783,10 @@ class StudioViewModel(
         durationMs: Long,
         isSuccessful: Boolean,
         eventCount: Int,
-        attachments: List<TurnAttachment> = emptyList()
+        attachments: List<TurnAttachment> = emptyList(),
+        sources: List<TurnSourceRef> = emptyList(),
+        pinnedWorkspaceId: String? = null,
+        pinnedProjectId: Long? = null
     ) {
         val id = sessionId ?: return
         viewModelScope.launch {
@@ -492,10 +802,21 @@ class StudioViewModel(
                     durationMs = durationMs,
                     isSuccessful = isSuccessful,
                     eventCount = eventCount,
-                    attachments = attachments
+                    // FUNCTIONAL CLOSURE (§2): the execution's OWN workspace —
+                    // the workspace-authorized write targets it even after a
+                    // mid-execution switch.
+                    workspaceId = pinnedWorkspaceId,
+                    attachments = attachments,
+                    sources = sources
                 )
                 // First-turn titling: the default title becomes the prompt.
-                val session = conversationSessionService.getSessionWithTurns(id)?.session
+                // §1/§2: the read is project-scope-authorized under the
+                // execution's OWN pinned project.
+                val session = conversationSessionService.getSessionWithTurns(
+                    id,
+                    pinnedWorkspaceId,
+                    expectedProjectId = pinnedProjectId
+                )?.session
                 if (session != null && session.title == ConversationSessionService.DEFAULT_TITLE) {
                     conversationSessionService.titleFromPrompt(id, prompt)
                 }
@@ -588,15 +909,38 @@ class StudioViewModel(
      * references built by the capability layer (SAF-picked, sandbox-imported,
      * artifact-registered). Text-like attachments ride the LLM request as a
      * bounded evidence digest; the USER MESSAGE displays clean text + chips.
+     *
+     * FUNCTIONAL CLOSURE (§14): a failed/blocked grounding build ABORTS the
+     * send with a visible error — the prompt draft is kept and the caller's
+     * [onSendAborted] hands the attachments back (a send is never silently
+     * degraded to "no evidence" while the UI still shows attachment chips).
+     * §15: an ATTACHMENT-ONLY send (empty prompt) is refused up front — the
+     * current text-only pipeline cannot honor it (Vision is not operational),
+     * so a meaningless request never reaches the LLM.
      */
     fun executePrompt(
         agent: AgentDefinition?,
-        attachments: List<TurnAttachment> = emptyList()
+        attachments: List<TurnAttachment> = emptyList(),
+        onSendAborted: ((List<TurnAttachment>) -> Unit)? = null
     ): Boolean {
         val current = _state.value
         val prompt = current.promptInput.trim()
         if (current.isExecuting) return false
         if (prompt.isEmpty() && attachments.isEmpty()) return false
+
+        // FUNCTIONAL CLOSURE (§15): attachment-only prompts are blocked
+        // honestly — without an operational Vision capability there is no
+        // meaningful request to send (the text-grounding digest is EVIDENCE
+        // for a question, never a substitute for one).
+        if (prompt.isEmpty() && attachments.isNotEmpty()) {
+            _state.update {
+                it.copy(
+                    errorMessage = "أضف نصاً يوضح المطلوب مع المرفقات — تحليل الصور (Vision) غير مفعّل في هذا الإصدار، " +
+                            "ولا يُرسل طلب بلا تعليمات."
+                )
+            }
+            return false
+        }
 
         // ------------------------------------------------------------------
         // QUICK CHAT vs AGENT MODE (report gap: "Quick Chat missing — the
@@ -620,26 +964,56 @@ class StudioViewModel(
 
         // The attachment grounding digest is built BEFORE the send is
         // accepted (bounded sandbox reads) so the atomic user-message update
-        // is never delayed by IO, and a failed read degrades to "no digest"
-        // rather than losing the send.
+        // is never delayed by IO.
         viewModelScope.launch {
-            val digest = if (attachments.isEmpty()) {
-                ""
+            if (attachments.isEmpty()) {
+                executeText(
+                    prompt = prompt,
+                    resolvedAgent = resolvedAgent,
+                    appendUserEntry = true,
+                    attachments = attachments,
+                    groundingDigest = "",
+                    anchorUserEntryId = null
+                )
             } else {
-                val workspaceId = runCatching {
-                    workspaceRuntimeService.activeWorkspaceIdOrNull()
-                }.getOrNull()
-                runCatching {
-                    attachmentCoordinator?.buildGroundingDigest(workspaceId ?: "", attachments)
-                }.getOrNull() ?: ""
+                // FUNCTIONAL CLOSURE (§14): the grounding outcome carries its
+                // failures — a blocked read aborts the send VISIBLY (the
+                // drafts are handed back through the caller's callback), it
+                // never silently degrades to "no digest". The ONE honest
+                // exception: a composition with NO attachment coordinator
+                // (the documented JVM-test seam) has no grounding capability
+                // at all — the attachment rides as a display-only reference
+                // with an empty digest, exactly the Task-2 contract.
+                val coordinator = attachmentCoordinator
+                val outcome = if (coordinator == null) {
+                    null
+                } else {
+                    runCatching {
+                        coordinator.buildGroundingDigest(
+                            workspaceRuntimeService.activeWorkspaceIdOrNull() ?: "",
+                            attachments
+                        )
+                    }.getOrNull()
+                }
+                if (coordinator != null && (outcome == null || outcome.isFailed)) {
+                    val reason = when {
+                        outcome == null ->
+                            "فشل تجهيز أدلة المرفقات — لم يُرسل الطلب. أعد المحاولة أو أزل المرفقات المعطلة."
+                        else -> outcome.failures.joinToString("\n")
+                    }
+                    _state.update { it.copy(errorMessage = reason) }
+                    onSendAborted?.invoke(attachments)
+                    return@launch
+                }
+                executeText(
+                    prompt = prompt,
+                    resolvedAgent = resolvedAgent,
+                    appendUserEntry = true,
+                    attachments = attachments,
+                    groundingDigest = outcome?.digest ?: "",
+                    anchorUserEntryId = null
+                )
             }
-            executeText(
-                prompt = prompt,
-                resolvedAgent = resolvedAgent,
-                appendUserEntry = true,
-                attachments = attachments,
-                groundingDigest = digest
-            )
         }
         // Synchronous acceptance — the screen clears ITS OWN draft state
         // (the capability layer's chips) only when the send was really taken.
@@ -647,50 +1021,101 @@ class StudioViewModel(
     }
 
     /**
-     * MESSAGE ACTION (Task 1 §10): re-executes the LAST user message
-     * ("Regenerate" on an assistant message / "Retry" on a failed result).
-     * The user message is NOT duplicated — the existing entry anchors the
-     * new execution; only the lifecycle block and the new result follow it.
+     * MESSAGE ACTION (FUNCTIONAL CLOSURE §6 — targeted regenerate): re-
+     * executes the USER MESSAGE that the tapped assistant entry answers —
+     * identified by scanning BACK from [assistantEntryId] to the nearest
+     * preceding user message (capability results and approval blocks in
+     * between are transparently skipped). The user message is NOT
+     * duplicated — the existing entry anchors the new execution; only the
+     * lifecycle block and the new result follow it. This replaces the old
+     * "lastOrNull { it is ChatEntry.User }" targeting that silently
+     * regenerated whatever happened to be LAST.
      *
      * CHAT CAPABILITIES (Task 2 §17): regeneration is NON-DESTRUCTIVE — the
      * previous result stays in the transcript (append-only history); the new
      * execution re-rides the SAME user message including its attachments.
      */
-    fun regenerateLast(agent: AgentDefinition?) {
+    fun regenerateFromAssistant(assistantEntryId: String, agent: AgentDefinition?) {
         val current = _state.value
         if (current.isExecuting) return
-        val lastUser = current.timeline.lastOrNull { it is ChatEntry.User } as? ChatEntry.User
-            ?: return
+        val assistantIndex = current.timeline.indexOfFirst { it.id == assistantEntryId }
+        if (assistantIndex < 0) return
+        val targetUser = current.timeline.take(assistantIndex)
+            .lastOrNull { it is ChatEntry.User } as? ChatEntry.User ?: return
 
-        val resolvedAgent: AgentDefinition = when (current.chatMode) {
+        launchExecutionForUserEntry(
+            targetUser = targetUser,
+            resolvedAgent = resolveAgentForExecution(agent) ?: return
+        )
+    }
+
+    /**
+     * FUNCTIONAL CLOSURE (§6): resolves the executing agent for a
+     * regenerate/retry path (same honest gating as [executePrompt] — a null
+     * selection in AGENT mode surfaces the actionable error instead of a
+     * silent no-op). Returns null when gated.
+     */
+    private fun resolveAgentForExecution(agent: AgentDefinition?): AgentDefinition? {
+        return when (_state.value.chatMode) {
             ChatMode.QUICK_CHAT -> resolveQuickChatAgent()
             ChatMode.AGENT -> agent ?: run {
                 _state.update {
                     it.copy(errorMessage = "وضع الوكيل يتطلب اختيار وكيلاً من الكتالوج أولاً — أو بدّل إلى «محادثة سريعة».")
                 }
-                return
+                null
             }
         }
+    }
 
-        val attachments = lastUser.attachments.map { it.toTurnAttachment() }
+    /** Shared launch path for targeted regenerate / approval retry. */
+    private fun launchExecutionForUserEntry(
+        targetUser: ChatEntry.User,
+        resolvedAgent: AgentDefinition
+    ) {
+        val attachments = targetUser.attachments.map { it.toTurnAttachment() }
         viewModelScope.launch {
-            val digest = if (attachments.isEmpty()) {
-                ""
+            if (attachments.isEmpty()) {
+                executeText(
+                    prompt = targetUser.text,
+                    resolvedAgent = resolvedAgent,
+                    appendUserEntry = false,
+                    attachments = attachments,
+                    groundingDigest = "",
+                    anchorUserEntryId = targetUser.id
+                )
             } else {
-                val workspaceId = runCatching {
-                    workspaceRuntimeService.activeWorkspaceIdOrNull()
-                }.getOrNull()
-                runCatching {
-                    attachmentCoordinator?.buildGroundingDigest(workspaceId ?: "", attachments)
-                }.getOrNull() ?: ""
+                // §14: the same honest grounding contract as executePrompt —
+                // real failures BLOCK the retry (visible error); the
+                // coordinator-less composition keeps its documented seam.
+                val coordinator = attachmentCoordinator
+                val outcome = if (coordinator == null) {
+                    null
+                } else {
+                    runCatching {
+                        coordinator.buildGroundingDigest(
+                            workspaceRuntimeService.activeWorkspaceIdOrNull() ?: "",
+                            attachments
+                        )
+                    }.getOrNull()
+                }
+                if (coordinator != null && (outcome == null || outcome.isFailed)) {
+                    val reason = when {
+                        outcome == null ->
+                            "فشل تجهيز أدلة المرفقات — لم تُعِد المحاولة. أعد المحاولة أو أزل المرفقات المعطلة."
+                        else -> outcome.failures.joinToString("\n")
+                    }
+                    _state.update { it.copy(errorMessage = reason) }
+                    return@launch
+                }
+                executeText(
+                    prompt = targetUser.text,
+                    resolvedAgent = resolvedAgent,
+                    appendUserEntry = false,
+                    attachments = attachments,
+                    groundingDigest = outcome?.digest ?: "",
+                    anchorUserEntryId = targetUser.id
+                )
             }
-            executeText(
-                prompt = lastUser.text,
-                resolvedAgent = resolvedAgent,
-                appendUserEntry = false,
-                attachments = attachments,
-                groundingDigest = digest
-            )
         }
     }
 
@@ -706,22 +1131,35 @@ class StudioViewModel(
         )
 
     /**
-     * The shared execution core used by both [executePrompt] (fresh prompt,
-     * draft cleared, user entry appended) and [regenerateLast] (existing
-     * user entry anchors the conversation).
+     * The shared execution core used by [executePrompt] (fresh prompt, draft
+     * cleared, user entry appended) and the targeted regenerate paths
+     * (existing user entry anchors the conversation).
      *
      * CHAT CAPABILITIES (Task 2):
      *  - [attachments] ride the user entry as chips and persist with the
      *    durable turn (§16); [groundingDigest] is the bounded evidence block
      *    appended to the LLM-side prompt (§6) — the DISPLAYED text stays the
      *    user's own words, unmodified.
+     *
+     * FUNCTIONAL CLOSURE:
+     *  - §2: the workspace/project are PINNED at launch — session creation,
+     *    turn persistence, and the workspace-scoped task constraints all
+     *    read the pinned values, never the current provider.
+     *  - §8: the live block is ANCHORED to its originating user entry
+     *    ([anchorUserEntryId] / the freshly appended user entry) so the
+     *    timeline renders it exactly there — no more "always at the end"
+     *    chronology (§11).
+     *  - §5: the model the DECISION LAYER actually selected is harvested
+     *    from the real SELECT_MODEL decision event and recorded on the
+     *    assistant entry + the durable turn.
      */
     private fun executeText(
         prompt: String,
         resolvedAgent: AgentDefinition,
         appendUserEntry: Boolean,
         attachments: List<TurnAttachment> = emptyList(),
-        groundingDigest: String = ""
+        groundingDigest: String = "",
+        anchorUserEntryId: String? = null
     ) {
         val current = _state.value
 
@@ -749,7 +1187,8 @@ class StudioViewModel(
         // USER-FACING EXACT MODEL SELECTION (report gap: "direct Model
         // Picker missing"): the selected model resource becomes a DURABLE
         // binding (assignedModelId) honoured by the decision layer — not a
-        // floating preference.
+        // floating preference. (When null, the decision layer picks — §5
+        // harvests WHICH model it actually picked.)
         // ------------------------------------------------------------------
         val selectedModelId = current.selectedModelResourceId
 
@@ -765,6 +1204,12 @@ class StudioViewModel(
         val executionTaskId = java.util.UUID.randomUUID().toString()
         val sentAtMs = System.currentTimeMillis()
         val userEntryId = "user_$executionTaskId"
+        // §8/§11: the live block's anchor — the user entry this execution
+        // belongs to (a regenerate anchors to the EXISTING entry).
+        val liveAnchorId = when {
+            appendUserEntry -> userEntryId
+            else -> anchorUserEntryId
+        } ?: "user_$executionTaskId"
 
         // ONE atomic update: draft cleared (P0-B), user message visible
         // (P0-C) with its attachment chips, live execution opened, previous
@@ -796,7 +1241,8 @@ class StudioViewModel(
                 liveExecution = LiveExecutionState(
                     executionId = executionTaskId,
                     phase = ExecutionPhase.QUEUED,
-                    startedAtMs = sentAtMs
+                    startedAtMs = sentAtMs,
+                    originUserEntryId = liveAnchorId
                 ),
                 sessionTurnStartMs = sentAtMs,
                 isDegraded = false,
@@ -819,18 +1265,27 @@ class StudioViewModel(
         componentRegistry.registerAgent(resolvedAgent)
 
         // ------------------------------------------------------------------
-        // DURABLE SESSION (report gap: sessions were deleted without a
-        // durable replacement): a workspace-scoped session is ensured BEFORE
-        // execution; every completed/failed turn is appended to it, so the
-        // transcript survives process death and can be browsed/resumed.
+        // FUNCTIONAL CLOSURE (§2): EXECUTION-PINNED CONTEXT — everything the
+        // execution persists or attributes is captured NOW, before the kernel
+        // runs: the workspace (ExecutionHost attribution + authorization),
+        // the project (session creation), and the workspace-scoped task
+        // constraints. A mid-execution workspace/project switch (§1 detaches
+        // the view) can neither hijack this execution's persistence nor lose
+        // its turn.
         // ------------------------------------------------------------------
         val turnStartedAt = System.currentTimeMillis()
-        // P1-14 (audit 2026 — no execution drain before workspace deletion):
-        // the execution is ATTRIBUTED to the workspace whose scope it runs
-        // in, so deleting that workspace cancels+drains exactly these jobs
-        // instead of orphaning them.
-        val executionWorkspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull()
-        com.example.application.execution.ExecutionHost.launch(executionTaskId, executionWorkspaceId) {
+        val pinnedWorkspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull()
+        val pinnedProjectId = runCatching { workspaceRuntimeService.activeProjectIdOrNull() }.getOrNull()
+        val pinnedConstraints = com.example.domain.core.task.TaskConstraints(
+            autonomyPolicy = pinnedWorkspaceId?.let { wsId ->
+                runCatching { workspaceRuntimeService.activeWorkspace.value }
+                    .getOrNull()
+                    ?.takeIf { it.id == wsId }
+                    ?.settings?.get("autonomyPolicy")
+                    ?.let { name -> runCatching { AutonomyPolicy.valueOf(name) }.getOrNull() }
+            } ?: AutonomyPolicy.SUPERVISED
+        )
+        com.example.application.execution.ExecutionHost.launch(executionTaskId, pinnedWorkspaceId) {
             var sessionId: ConversationSessionId? = null
             // Terminal-sequence counter: one execution can emit MULTIPLE
             // terminal events (the documented provider-error → fallback
@@ -842,12 +1297,23 @@ class StudioViewModel(
             // execution collected (search intelligence) — projected onto the
             // assistant entry as collapsible sources at completion time.
             val collectedSources = mutableListOf<com.example.presentation.state.ChatSourceRef>()
+            // FUNCTIONAL CLOSURE (§5): the model the decision layer ACTUALLY
+            // selected (harvested from the real SELECT_MODEL decision).
+            var effectiveModelId: String? = null
+            // FUNCTIONAL CLOSURE (§8): once THIS execution hit a consent
+            // request, any FOLLOW-UP kernel error is a cascade consequence of
+            // the denial — it must NOT become a failed assistant entry nor
+            // clear the honest AWAITING_APPROVAL lifecycle.
+            var approvalRequested = false
             try {
                 sessionId = ensureActiveSession(
                     mode = current.chatMode,
                     agent = resolvedAgent,
                     modelResourceId = selectedModelId,
-                    modelDisplayName = current.selectedModelDisplayName
+                    modelDisplayName = current.selectedModelDisplayName,
+                    pinnedWorkspaceId = pinnedWorkspaceId,
+                    pinnedProjectId = pinnedProjectId,
+                    executionTaskId = executionTaskId
                 )
                 // FAIL-CLOSED NETWORK DEFAULT (report gap: "missing monitor =
                 // network available is fail-open"): when no monitor is wired
@@ -867,12 +1333,9 @@ class StudioViewModel(
                     chatMode = current.chatMode.name,
                     // REPAIR ORDER §20 — task constraints sourced from the
                     // AUTHORITATIVE workspace policy (never UI-local state).
-                    constraints = com.example.domain.core.task.TaskConstraints(
-                        autonomyPolicy = workspaceRuntimeService.activeWorkspace.value
-                            ?.settings?.get("autonomyPolicy")
-                            ?.let { name -> runCatching { AutonomyPolicy.valueOf(name) }.getOrNull() }
-                            ?: AutonomyPolicy.SUPERVISED
-                    )
+                    // FUNCTIONAL CLOSURE (§2): the PINNED policy (captured at
+                    // launch), never the current workspace state.
+                    constraints = pinnedConstraints
                 ).collect { event ->
                     // CROSS-FEATURE PROJECTIONS (ADR-6 slice 2): the events
                     // other features mirror (activity trace, decision
@@ -886,6 +1349,17 @@ class StudioViewModel(
                         is ExecutionEvent.Error ->
                             signalBus.emit(StudioSignal.ExecutionEvent(event))
                         else -> Unit
+                    }
+                    // §5: harvest the model the decision layer actually
+                    // SELECTED (the payload's resourceId of a SELECT_MODEL
+                    // action) — the honest runtime binding.
+                    if (event is ExecutionEvent.DecisionMade &&
+                        event.decision.chosenAction.type ==
+                        com.example.domain.core.decision.DecisionActionType.SELECT_MODEL
+                    ) {
+                        (event.decision.chosenAction.payload["resourceId"] as? String)
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { effectiveModelId = it }
                     }
                     _state.update { state ->
                         val updatedLogs = state.executionLog + event
@@ -945,115 +1419,199 @@ class StudioViewModel(
                             }
                             is ExecutionEvent.Completed -> {
                                 terminalSeq++
+                                if (approvalRequested) {
+                                    // §8 CASCADE: a synthesized completion
+                                    // arriving after a consent request is NOT
+                                    // the answer the user asked for — the
+                                    // conversation waits at AWAITING_APPROVAL
+                                    // for the resolution + the honest retry.
+                                    // No assistant entry, no turn fabricated.
+                                    state.copy(
+                                        isExecuting = false,
+                                        executionLog = updatedLogs,
+                                        liveExecution = if (currentExecutionTaskId == executionTaskId) {
+                                            state.liveExecution?.copy(phase = ExecutionPhase.AWAITING_APPROVAL)
+                                        } else {
+                                            state.liveExecution
+                                        }
+                                    )
+                                } else {
                                 val answer = if (event.finalText.isNotBlank()) event.finalText else state.streamText
+                                val honestModelId = effectiveModelId ?: selectedModelId
                                 persistTurnDurably(
                                     sessionId = sessionId,
                                     prompt = prompt,
                                     answer = answer,
                                     agentName = resolvedAgent.identity.name,
                                     agentRole = resolvedAgent.identity.role.displayName,
-                                    modelResourceId = selectedModelId,
+                                    modelResourceId = honestModelId,
                                     tokensConsumed = state.currentTokensConsumed,
                                     durationMs = System.currentTimeMillis() - turnStartedAt,
                                     isSuccessful = true,
                                     eventCount = updatedLogs.size,
                                     // CHAT CAPABILITIES (Task 2 §16): the turn's
                                     // attachment references persist with it.
-                                    attachments = attachments
+                                    attachments = attachments,
+                                    // FUNCTIONAL CLOSURE (§9): the citation
+                                    // chains persist with the turn.
+                                    sources = collectedSources.map { it.toTurnSourceRef() },
+                                    pinnedWorkspaceId = pinnedWorkspaceId,
+                                    pinnedProjectId = pinnedProjectId
                                 )
-                                // P0-D: the finished text has EXACTLY ONE
-                                // display path — the assistant entry. The
-                                // stream text and the live block collapse;
-                                // their numbers survive as the entry's
-                                // execution summary.
-                                state.copy(
-                                    isExecuting = false,
-                                    streamText = "",
-                                    liveExecution = null,
-                                    executionLog = updatedLogs,
-                                    timeline = state.timeline + ChatEntry.Assistant(
-                                        id = "asst_${executionTaskId}_$terminalSeq",
-                                        text = answer,
-                                        agentName = resolvedAgent.identity.name,
-                                        agentRole = resolvedAgent.identity.role.displayName,
-                                        isSuccessful = true,
-                                        modelResourceId = selectedModelId,
-                                        tokensConsumed = state.currentTokensConsumed,
-                                        durationMs = System.currentTimeMillis() - sentAtMs,
-                                        eventCount = updatedLogs.size,
-                                        isDegraded = event.isDegraded,
-                                        // §11: the real search citations collected
-                                        // during this execution ride the entry.
-                                        sources = collectedSources.toList()
-                                    ),
-                                    studioSession = appendStudioTurn(
-                                        state = state,
-                                        prompt = prompt,
-                                        agentName = resolvedAgent.identity.name,
-                                        agentRole = resolvedAgent.identity.role.displayName,
-                                        answer = answer,
-                                        isSuccessful = true,
-                                        modelResourceId = selectedModelId,
-                                        turnId = "turn_${executionTaskId}_$terminalSeq"
+                                // §1/§2: only the CURRENT view's execution
+                                // mutates the timeline — a detached (scope-
+                                // changed) execution still persists above.
+                                if (currentExecutionTaskId != executionTaskId) {
+                                    state.copy(
+                                        isExecuting = false,
+                                        executionLog = updatedLogs
                                     )
-                                )
+                                } else {
+                                    // P0-D: the finished text has EXACTLY ONE
+                                    // display path — the assistant entry. The
+                                    // stream text and the live block collapse;
+                                    // their numbers survive as the entry's
+                                    // execution summary.
+                                    state.copy(
+                                        isExecuting = false,
+                                        streamText = "",
+                                        liveExecution = null,
+                                        executionLog = updatedLogs,
+                                        timeline = state.timeline + ChatEntry.Assistant(
+                                            id = "asst_${executionTaskId}_$terminalSeq",
+                                            text = answer,
+                                            agentName = resolvedAgent.identity.name,
+                                            agentRole = resolvedAgent.identity.role.displayName,
+                                            isSuccessful = true,
+                                            // §5: the model that ACTUALLY served
+                                            // the request (decision-layer truth),
+                                            // falling back to the user's pin.
+                                            modelResourceId = honestModelId,
+                                            tokensConsumed = state.currentTokensConsumed,
+                                            durationMs = System.currentTimeMillis() - sentAtMs,
+                                            eventCount = updatedLogs.size,
+                                            isDegraded = event.isDegraded,
+                                            // §11: the real search citations collected
+                                            // during this execution ride the entry.
+                                            sources = collectedSources.toList()
+                                        ),
+                                        studioSession = appendStudioTurn(
+                                            state = state,
+                                            prompt = prompt,
+                                            agentName = resolvedAgent.identity.name,
+                                            agentRole = resolvedAgent.identity.role.displayName,
+                                            answer = answer,
+                                            isSuccessful = true,
+                                            modelResourceId = honestModelId,
+                                            turnId = "turn_${executionTaskId}_$terminalSeq"
+                                        )
+                                    )
+                                }
+                                }
                             }
                             is ExecutionEvent.Error -> {
                                 terminalSeq++
-                                val answer = state.streamText.ifBlank { event.message }
-                                persistTurnDurably(
-                                    sessionId = sessionId,
-                                    prompt = prompt,
-                                    answer = answer,
-                                    agentName = resolvedAgent.identity.name,
-                                    agentRole = resolvedAgent.identity.role.displayName,
-                                    modelResourceId = selectedModelId,
-                                    tokensConsumed = state.currentTokensConsumed,
-                                    durationMs = System.currentTimeMillis() - turnStartedAt,
-                                    isSuccessful = false,
-                                    eventCount = updatedLogs.size,
-                                    attachments = attachments
-                                )
-                                // CHAT CAPABILITIES (Task 2 §13 — MANDATORY):
-                                // an approval-blocked execution surfaces its
-                                // REAL consent request INLINE in the
-                                // conversation (the gate is the authority; the
-                                // request row is already persisted pending).
-                                println("DIAG error event code=${event.failureCode} exec=\$executionTaskId")
+                                // --------------------------------------------------
+                                // FUNCTIONAL CLOSURE (§8): a consent-blocked
+                                // execution is an AWAITING_APPROVAL state, NOT
+                                // an assistant failure. The failed assistant
+                                // entry is NOT appended; the live lifecycle
+                                // block stays visible in the honest
+                                // AWAITING_APPROVAL phase; the inline approval
+                                // block carries the consent path. No turn is
+                                // fabricated — the exchange is durable through
+                                // its approval block (§9) and completes when
+                                // the user resolves the consent and retries.
+                                // --------------------------------------------------
                                 if (event.failureCode == APPROVAL_REQUIRED_CODE) {
-                                    // The event's OWN executionId — the same id the
-                                    // gate keyed the persisted pending request to
-                                    // (the kernel mints it; the host key is not it).
+                                    approvalRequested = true
                                     requestApprovalBlock(executionId = event.executionId)
-                                }
-                                state.copy(
-                                    isExecuting = false,
-                                    errorMessage = event.message,
-                                    executionLog = updatedLogs,
-                                    liveExecution = null,
-                                    streamText = "",
-                                    timeline = state.timeline + ChatEntry.Assistant(
-                                        id = "asst_${executionTaskId}_$terminalSeq",
-                                        text = answer,
-                                        agentName = resolvedAgent.identity.name,
-                                        agentRole = resolvedAgent.identity.role.displayName,
-                                        isSuccessful = false,
-                                        modelResourceId = selectedModelId,
-                                        tokensConsumed = state.currentTokensConsumed,
-                                        durationMs = System.currentTimeMillis() - sentAtMs,
-                                        eventCount = updatedLogs.size
-                                    ),
-                                    studioSession = appendStudioTurn(
-                                        state = state,
+                                    if (currentExecutionTaskId == executionTaskId) {
+                                        state.copy(
+                                            isExecuting = false,
+                                            executionLog = updatedLogs,
+                                            liveExecution = (updatedLive ?: state.liveExecution)
+                                                ?.copy(phase = ExecutionPhase.AWAITING_APPROVAL)
+                                        )
+                                    } else {
+                                        state.copy(
+                                            isExecuting = false,
+                                            executionLog = updatedLogs
+                                        )
+                                    }
+                                } else if (approvalRequested) {
+                                    // §8 CASCADE: a follow-up error after the
+                                    // consent request is a CONSEQUENCE of the
+                                    // denial — keep the honest AWAITING_APPROVAL
+                                    // lifecycle (the block + retry path), never a
+                                    // fabricated failed assistant entry.
+                                    if (currentExecutionTaskId == executionTaskId) {
+                                        state.copy(
+                                            isExecuting = false,
+                                            executionLog = updatedLogs,
+                                            liveExecution = state.liveExecution?.copy(
+                                                phase = ExecutionPhase.AWAITING_APPROVAL
+                                            )
+                                        )
+                                    } else {
+                                        state.copy(
+                                            isExecuting = false,
+                                            executionLog = updatedLogs
+                                        )
+                                    }
+                                } else {
+                                    val answer = state.streamText.ifBlank { event.message }
+                                    persistTurnDurably(
+                                        sessionId = sessionId,
                                         prompt = prompt,
+                                        answer = answer,
                                         agentName = resolvedAgent.identity.name,
                                         agentRole = resolvedAgent.identity.role.displayName,
-                                        answer = answer,
+                                        modelResourceId = effectiveModelId ?: selectedModelId,
+                                        tokensConsumed = state.currentTokensConsumed,
+                                        durationMs = System.currentTimeMillis() - turnStartedAt,
                                         isSuccessful = false,
-                                        modelResourceId = selectedModelId,
-                                        turnId = "turn_${executionTaskId}_$terminalSeq"
+                                        eventCount = updatedLogs.size,
+                                        attachments = attachments,
+                                        pinnedWorkspaceId = pinnedWorkspaceId,
+                                        pinnedProjectId = pinnedProjectId
                                     )
-                                )
+                                    if (currentExecutionTaskId != executionTaskId) {
+                                        state.copy(
+                                            isExecuting = false,
+                                            executionLog = updatedLogs
+                                        )
+                                    } else {
+                                        state.copy(
+                                            isExecuting = false,
+                                            errorMessage = event.message,
+                                            executionLog = updatedLogs,
+                                            liveExecution = null,
+                                            streamText = "",
+                                            timeline = state.timeline + ChatEntry.Assistant(
+                                                id = "asst_${executionTaskId}_$terminalSeq",
+                                                text = answer,
+                                                agentName = resolvedAgent.identity.name,
+                                                agentRole = resolvedAgent.identity.role.displayName,
+                                                isSuccessful = false,
+                                                modelResourceId = effectiveModelId ?: selectedModelId,
+                                                tokensConsumed = state.currentTokensConsumed,
+                                                durationMs = System.currentTimeMillis() - sentAtMs,
+                                                eventCount = updatedLogs.size
+                                            ),
+                                            studioSession = appendStudioTurn(
+                                                state = state,
+                                                prompt = prompt,
+                                                agentName = resolvedAgent.identity.name,
+                                                agentRole = resolvedAgent.identity.role.displayName,
+                                                answer = answer,
+                                                isSuccessful = false,
+                                                modelResourceId = effectiveModelId ?: selectedModelId,
+                                                turnId = "turn_${executionTaskId}_$terminalSeq"
+                                            )
+                                        )
+                                    }
+                                }
                             }
                             is ExecutionEvent.Cancelled -> {
                                 // System-side cancellation event: the
@@ -1085,7 +1643,12 @@ class StudioViewModel(
                 if (currentExecutionTaskId == executionTaskId) currentExecutionTaskId = null
                 _state.update { state ->
                     val stillLive = state.liveExecution?.executionId == executionTaskId &&
-                        state.liveExecution?.phase != ExecutionPhase.CANCELLED
+                        state.liveExecution?.phase != ExecutionPhase.CANCELLED &&
+                        // FUNCTIONAL CLOSURE (§8): AWAITING_APPROVAL is a
+                        // legitimate resting state (the consent request is
+                        // still open) — the defensive guard must NOT clear it
+                        // as if the execution ended without a signal.
+                        state.liveExecution?.phase != ExecutionPhase.AWAITING_APPROVAL
                     if (stillLive) {
                         state.copy(
                             isExecuting = false,
@@ -1116,23 +1679,121 @@ class StudioViewModel(
     }
 
     // ------------------------------------------------------------------
-    // CHAT CAPABILITIES (Task 2): capability results + inline approvals
+    // CHAT CAPABILITIES + FUNCTIONAL CLOSURE: capability results, their
+    // PENDING lifecycle (§22), and their durable persistence (§9/§10).
     // ------------------------------------------------------------------
 
     /**
-     * Appends one STRUCTURED capability result block to the conversation
-     * (tool / skill / MCP / search / knowledge retrieval — §9–§12). The
-     * invocations live in the capabilities feature; the TIMELINE stays
-     * single-owner — blocks land here in conversation order.
+     * FUNCTIONAL CLOSURE (§22): lands a PENDING capability block in the
+     * conversation the moment the user runs a capability — the sheet can
+     * close immediately without the user losing track of WHAT ran. Returns
+     * the block's id (the caller resolves it later with
+     * [resolveCapabilityResult]).
      */
-    fun appendCapabilityResult(entry: ChatEntry.CapabilityResult) {
-        _state.update { it.copy(timeline = it.timeline + entry) }
+    fun appendPendingCapability(
+        kind: com.example.presentation.state.CapabilityKind,
+        title: String
+    ): String {
+        val pendingId = "cap_${java.util.UUID.randomUUID()}"
+        _state.update {
+            it.copy(
+                timeline = it.timeline + ChatEntry.CapabilityResult(
+                    id = pendingId,
+                    kind = kind,
+                    title = title,
+                    summary = "قيد التنفيذ…",
+                    isSuccessful = true,
+                    isPending = true,
+                    timestampMs = System.currentTimeMillis()
+                )
+            )
+        }
+        return pendingId
     }
 
     /**
-     * CHAT CAPABILITIES (Task 2 §13): surfaces the REAL pending approval of
-     * [executionId] as an inline block in the conversation (idempotent — a
-     * block for the same approval never duplicates).
+     * FUNCTIONAL CLOSURE (§22): resolves a pending capability block with
+     * its real outcome (success / failure / degraded + the result). The
+     * block keeps the pending entry's ID (stable LazyColumn key) and the
+     * resolved outcome is PERSISTED (§9/§10) — capability results are
+     * conversation history and survive the session reopen.
+     */
+    fun resolveCapabilityResult(pendingEntryId: String, resolved: ChatEntry.CapabilityResult) {
+        val resolvedEntry = resolved.copy(id = pendingEntryId)
+        _state.update { state ->
+            state.copy(
+                timeline = state.timeline.map { entry ->
+                    if (entry.id == pendingEntryId && entry is ChatEntry.CapabilityResult) {
+                        resolvedEntry
+                    } else {
+                        entry
+                    }
+                }
+            )
+        }
+        persistCapabilityEvent(resolvedEntry)
+    }
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §9–§12) + FUNCTIONAL CLOSURE (§9/§10):
+     * appends one STRUCTURED capability result block to the conversation
+     * AND persists it as durable timeline history (it re-renders after a
+     * session reopen). The invocations live in the capabilities feature;
+     * the TIMELINE stays single-owner — blocks land here in conversation
+     * order.
+     */
+    fun appendCapabilityResult(entry: ChatEntry.CapabilityResult) {
+        _state.update { it.copy(timeline = it.timeline + entry) }
+        persistCapabilityEvent(entry)
+    }
+
+    /** Persists one capability-result block into the session's durable timeline. */
+    private fun persistCapabilityEvent(entry: ChatEntry.CapabilityResult) {
+        val sessionId = _state.value.activeSessionId ?: return
+        viewModelScope.launch {
+            runCatching {
+                conversationSessionService.appendTimelineEvent(
+                    ConversationTimelineEvent(
+                        id = entry.id,
+                        sessionId = ConversationSessionId(sessionId),
+                        kind = TimelineEventKind.CAPABILITY_RESULT,
+                        capabilityKind = entry.kind.name,
+                        title = entry.title,
+                        summary = entry.summary,
+                        detail = entry.detail,
+                        sources = entry.sources.map { it.toTurnSourceRef() },
+                        isSuccessful = entry.isSuccessful,
+                        isDegraded = entry.isDegraded,
+                        degradedMessage = entry.degradedMessage,
+                        createdAtEpochMs = if (entry.timestampMs > 0) entry.timestampMs else System.currentTimeMillis()
+                    )
+                )
+            }.onFailure { e ->
+                _state.update {
+                    it.copy(
+                        diagnosticBanner = "تعذر حفظ نتيجة القدرة في سجل الجلسة: ${e.localizedMessage}"
+                    )
+                }
+            }
+        }
+    }
+
+    /** Presentation source ref → the durable twin. */
+    private fun com.example.presentation.state.ChatSourceRef.toTurnSourceRef() =
+        TurnSourceRef(
+            title = title,
+            url = url,
+            providerId = providerId,
+            confidenceScore = confidenceScore
+        )
+
+    /**
+     * CHAT CAPABILITIES (Task 2 §13) + FUNCTIONAL CLOSURE (§9): surfaces the
+     * REAL pending approval of [executionId] as an inline block in the
+     * conversation (idempotent — a block for the same approval never
+     * duplicates) AND persists it as durable timeline history — an approval
+     * the user resolved (or left pending) re-renders after a reopen with
+     * its honest state.
      */
     private fun requestApprovalBlock(executionId: String) {
         val gate = humanApprovalGate ?: return
@@ -1146,16 +1807,39 @@ class StudioViewModel(
                 if (exists) {
                     state
                 } else {
-                    state.copy(
-                        timeline = state.timeline + ChatEntry.ApprovalBlock(
+                    val block = ChatEntry.ApprovalBlock(
+                        id = "apv_${pending.approvalId}",
+                        approvalId = pending.approvalId,
+                        executionId = pending.executionId,
+                        toolName = pending.toolName,
+                        riskLevel = pending.riskLevel,
+                        description = pending.prompt,
+                        requestedAction = "تنفيذ الأداة «${pending.toolName}»",
+                        justification = pending.justification
+                    )
+                    state.copy(timeline = state.timeline + block)
+                }
+            }
+            // §9: the approval block is conversation history — durable from
+            // the moment it appears (the state transitions below update it).
+            val sessionId = _state.value.activeSessionId
+            if (sessionId != null) {
+                runCatching {
+                    conversationSessionService.appendTimelineEvent(
+                        ConversationTimelineEvent(
                             id = "apv_${pending.approvalId}",
+                            sessionId = ConversationSessionId(sessionId),
+                            kind = TimelineEventKind.APPROVAL_BLOCK,
+                            title = "تنفيذ الأداة «${pending.toolName}»",
+                            summary = pending.prompt,
+                            detail = pending.prompt,
                             approvalId = pending.approvalId,
                             executionId = pending.executionId,
                             toolName = pending.toolName,
                             riskLevel = pending.riskLevel,
-                            description = pending.prompt,
-                            requestedAction = "تنفيذ الأداة «${pending.toolName}»",
-                            justification = pending.justification
+                            justification = pending.justification,
+                            approvalState = ApprovalBlockState.PENDING.name,
+                            createdAtEpochMs = System.currentTimeMillis()
                         )
                     )
                 }
@@ -1226,6 +1910,11 @@ class StudioViewModel(
      * admissions of this tool pass without a new request) plus resolving
      * the CURRENT pending request — the exact same path
      * GovernanceViewModel.grantAlwaysForApproval uses (one authority).
+     *
+     * FUNCTIONAL CLOSURE (§12): the grant's REAL scope is explicit — a
+     * GLOBAL (device-profile-wide, all workspaces/sessions) standing
+     * permission for this tool, NOT a one-time approval. The UI shows a
+     * confirmation dialog with exactly this scope before calling here.
      */
     fun grantAlwaysForApproval(approvalId: String) {
         val gate = humanApprovalGate ?: return
@@ -1256,7 +1945,10 @@ class StudioViewModel(
             }.onSuccess {
                 updateApprovalBlock(approvalId, ApprovalBlockState.APPROVED)
                 _state.update {
-                    it.copy(diagnosticBanner = "تم السماح دائماً بهذه الأداة (منح EXECUTE دائم).")
+                    it.copy(
+                        diagnosticBanner = "تم السماح دائماً بهذه الأداة: منح EXECUTE دائم على مستوى الجهاز " +
+                                "(كل الجلسات) — يمكنك سحبه من شاشة الحوكمة."
+                    )
                 }
             }.onFailure { e ->
                 _state.update {
@@ -1278,15 +1970,31 @@ class StudioViewModel(
                 }
             )
         }
+        // FUNCTIONAL CLOSURE (§9): the resolved state is mirrored onto the
+        // durable timeline event — a reopened session shows the decision,
+        // not a stale PENDING block.
+        val sessionId = _state.value.activeSessionId ?: return
+        viewModelScope.launch {
+            runCatching {
+                conversationSessionService.updateTimelineEventApprovalState(
+                    sessionId = ConversationSessionId(sessionId),
+                    approvalId = approvalId,
+                    state = blockState.name
+                )
+            }
+        }
     }
 
     /**
-     * CHAT CAPABILITIES (Task 2 §13): retry-after-approval — re-executes the
-     * message that was blocked by consent. History stays append-only (the new
-     * result is a NEW entry; the old ones remain). The consent itself was
-     * resolved through the REAL gate; a future admission of the same tool
-     * still passes the same authorization boundary honestly — with "السماح
-     * دائماً" (a standing EXECUTE grant) it passes WITHOUT a new request.
+     * CHAT CAPABILITIES (Task 2 §13) + FUNCTIONAL CLOSURE (§6): retry-after-
+     * approval — re-executes the message that was blocked by consent. The
+     * retry targets the USER MESSAGE the APPROVED block belongs to (the
+     * nearest preceding user entry — §6's targeting rule), history stays
+     * append-only (the new result is a NEW entry; the old ones remain). The
+     * consent itself was resolved through the REAL gate; a future admission
+     * of the same tool still passes the same authorization boundary
+     * honestly — with "السماح دائماً" (a standing EXECUTE grant) it passes
+     * WITHOUT a new request.
      */
     fun retryAfterApproval(agent: AgentDefinition?) {
         val current = _state.value
@@ -1300,38 +2008,24 @@ class StudioViewModel(
             }
             return
         }
-        val blockedUser = current.timeline
-            .takeWhile { it.id != approvedBlock.id }
-            .lastOrNull { it is ChatEntry.User } as? ChatEntry.User ?: return
-
-        val resolvedAgent: AgentDefinition = when (current.chatMode) {
-            ChatMode.QUICK_CHAT -> resolveQuickChatAgent()
-            ChatMode.AGENT -> agent ?: run {
-                _state.update {
-                    it.copy(errorMessage = "وضع الوكيل يتطلب اختيار وكيلاً من الكتالوج أولاً — أو بدّل إلى «محادثة سريعة».")
-                }
-                return
+        val blockIndex = current.timeline.indexOfFirst { it.id == approvedBlock.id }
+        val blockedUser = if (blockIndex > 0) {
+            current.timeline.take(blockIndex)
+                .lastOrNull { it is ChatEntry.User } as? ChatEntry.User
+        } else {
+            null
+        } ?: run {
+            _state.update {
+                it.copy(errorMessage = "تعذر العثور على الرسالة المرتبطة بهذه الموافقة.")
             }
+            return
         }
 
-        val attachments = blockedUser.attachments.map { it.toTurnAttachment() }
-        viewModelScope.launch {
-            val digest = if (attachments.isEmpty()) "" else {
-                val workspaceId = runCatching {
-                    workspaceRuntimeService.activeWorkspaceIdOrNull()
-                }.getOrNull()
-                runCatching {
-                    attachmentCoordinator?.buildGroundingDigest(workspaceId ?: "", attachments)
-                }.getOrNull() ?: ""
-            }
-            executeText(
-                prompt = blockedUser.text,
-                resolvedAgent = resolvedAgent,
-                appendUserEntry = false,
-                attachments = attachments,
-                groundingDigest = digest
-            )
-        }
+        val resolvedAgent = resolveAgentForExecution(agent) ?: return
+        launchExecutionForUserEntry(
+            targetUser = blockedUser,
+            resolvedAgent = resolvedAgent
+        )
     }
 
     companion object {
