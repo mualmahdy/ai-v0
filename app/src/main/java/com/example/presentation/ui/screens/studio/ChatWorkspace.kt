@@ -213,6 +213,13 @@ fun ChatWorkspace(
             )
 
             // ---- 2. The conversation timeline (the hero of the screen) ----
+            // LAYOUT CONTRACT (the input-acceptance fix): the timeline is
+            // the WEIGHTED middle child — it takes exactly the space that
+            // REMAINS between the header above and the composer below.
+            // (A non-weighted child measured with fillMaxSize would claim
+            // the FULL column height and lay the composer OUT OF BOUNDS —
+            // the reported defect: the chat screen accepted no input
+            // because the field was pushed off-screen.)
             ConversationTimeline(
                 timeline = state.timeline,
                 liveExecution = state.liveExecution,
@@ -239,7 +246,8 @@ fun ChatWorkspace(
                 onApprove = onApprove,
                 onReject = onReject,
                 onRetryAfterApproval = onRetryAfterApproval,
-                onGrantAlways = onGrantAlways
+                onGrantAlways = onGrantAlways,
+                modifier = Modifier.weight(1f)
             )
 
             // ---- 3. The composer (owns the screen's single IME inset) ----
