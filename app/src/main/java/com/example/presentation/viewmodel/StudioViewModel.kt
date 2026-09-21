@@ -104,6 +104,32 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
  *    PENDING block, then resolves — the user never loses track of what
  *    ran, whether it is pending, and what the result was.
  *
+ * FUNCTIONAL RESIDUAL CLOSURE semantics owned here:
+ *  - P1 EXECUTION-IDENTITY GATE: a DETACHED execution (scope change, view
+ *    release, or a replaced current execution) keeps its pinned §2
+ *    persistence but can NEVER mutate this view — no stream text, log,
+ *    gauges, lifecycle phase, isExecuting, error/degraded state, or
+ *    approval blocks. The durable turn reads execution-OWNED mirrors
+ *    (stream/usage/event count), never the live view state; terminal
+ *    persistence runs OUTSIDE the state-update lambda (no CAS-retry
+ *    duplication); a user/system cancellation is never surfaced as an
+ *    unexpected error.
+ *  - P2/P3 CAPABILITY SCOPE PINNING: every capability invocation captures
+ *    its (workspace, project, session) at START; the resolved outcome
+ *    SAVES TO THE ORIGINATING SESSION (explicit policy — never
+ *    auto-redirected into the live scope, never lost). With no session
+ *    yet, the RESOLVED result creates and pins its own durable session
+ *    (a pending block alone creates nothing).
+ *  - P4 TARGETED APPROVAL RETRY: the retry targets the tapped block's
+ *    approvalId — with approvals A and B both resolved, retrying A
+ *    re-executes A's message, never "the last approved one".
+ *  - P5 EXECUTION-PINNED GROUNDING: the send pins its scope SYNCHRONOUSLY
+ *    at acceptance; the grounding digest and the execution share ONE
+ *    captured context (the digest reads the pinned project's sandbox).
+ *  - P6 PINNED TITLING: the first-turn rename is workspace-authorized
+ *    under the execution's OWN pinned workspace (a detached execution
+ *    still titles its own session).
+ *
  * Honesty contract (carried over verbatim from the MainViewModel code it
  * replaces): AGENT mode without a selection fails with an actionable
  * message (never a silent no-op); a missing network monitor means
@@ -189,6 +215,24 @@ class StudioViewModel(
 
     /** Gap-closure P0-01: the ExecutionHost key of the task launched by the Studio screen. */
     private var currentExecutionTaskId: String? = null
+
+    /**
+     * RESIDUAL CLOSURE (P2): the scope each pending capability invocation
+     * started in (pending block id → captured workspace/project/session).
+     * Consumed at resolve time; entries whose invocation never resolves die
+     * with this ViewModel (a PENDING block is runtime-only by design).
+     */
+    private val capabilityInvocationScopes = mutableMapOf<String, CapabilityInvocationScope>()
+
+    /**
+     * RESIDUAL CLOSURE (P2): the invocation-time captured context a
+     * capability result resolves under (save-to-originating-session policy).
+     */
+    private data class CapabilityInvocationScope(
+        val workspaceId: String?,
+        val projectId: Long?,
+        val sessionId: String?
+    )
 
     /**
      * FUNCTIONAL CLOSURE (§1/§2): the last (workspace, project) scope this
@@ -352,6 +396,11 @@ class StudioViewModel(
      * permanent deletion that never happened.
      */
     fun resetTranscriptView() {
+        // RESIDUAL CLOSURE (P1): the fresh view is released from ANY running
+        // execution (detached, not killed — §2 keeps its pinned persistence).
+        // Without this, a running execution kept mutating the RESET view:
+        // its terminal result landed in the fresh conversation.
+        detachRunningExecution(banner = null)
         _state.update {
             it.copy(
                 activeSessionId = null,
@@ -642,6 +691,10 @@ class StudioViewModel(
      */
     fun onSessionDeleted(sessionId: String) {
         if (_state.value.activeSessionId == sessionId) {
+            // RESIDUAL CLOSURE (P1): same view-release contract as
+            // resetTranscriptView — the cleared conversation is detached from
+            // any execution still running into the deleted session.
+            detachRunningExecution(banner = null)
             _state.update {
                 it.copy(
                     activeSessionId = null,
@@ -812,13 +865,23 @@ class StudioViewModel(
                 // First-turn titling: the default title becomes the prompt.
                 // §1/§2: the read is project-scope-authorized under the
                 // execution's OWN pinned project.
+                // RESIDUAL CLOSURE (P6): the RENAME is workspace-authorized
+                // under the pinned workspace too — a detached execution
+                // completing while another workspace is active still titles
+                // its OWN session (the provider's live workspace would make
+                // the rename an authorized no-op and the session would keep
+                // the default title forever).
                 val session = conversationSessionService.getSessionWithTurns(
                     id,
                     pinnedWorkspaceId,
                     expectedProjectId = pinnedProjectId
                 )?.session
                 if (session != null && session.title == ConversationSessionService.DEFAULT_TITLE) {
-                    conversationSessionService.titleFromPrompt(id, prompt)
+                    conversationSessionService.titleFromPrompt(
+                        sessionId = id,
+                        prompt = prompt,
+                        workspaceId = pinnedWorkspaceId
+                    )
                 }
             }.onFailure { e ->
                 _state.update {
@@ -840,6 +903,9 @@ class StudioViewModel(
         answer: String,
         isSuccessful: Boolean,
         modelResourceId: String? = null,
+        /** P1: the execution's OWN usage/count (never the live view gauges). */
+        tokensConsumed: Int = state.currentTokensConsumed,
+        eventCount: Int = state.executionLog.size,
         turnId: String
     ): List<StudioTurn> {
         val turn = StudioTurn(
@@ -848,8 +914,8 @@ class StudioViewModel(
             agentName = agentName,
             agentRole = agentRole,
             answer = answer,
-            eventCount = state.executionLog.size,
-            tokensConsumed = state.currentTokensConsumed,
+            eventCount = eventCount,
+            tokensConsumed = tokensConsumed,
             durationMs = state.sessionTurnStartMs.takeIf { it > 0L }
                 ?.let { System.currentTimeMillis() - it } ?: 0L,
             isSuccessful = isSuccessful,
@@ -962,6 +1028,18 @@ class StudioViewModel(
             }
         }
 
+        // RESIDUAL CLOSURE (P5 — execution-pinned grounding): the scope is
+        // pinned SYNCHRONOUSLY at send acceptance. The grounding digest AND
+        // the execution's pinned context (§2) are the SAME capture — a
+        // workspace/project switch landing between acceptance and the send
+        // coroutine can neither ground another scope's sandbox nor pin the
+        // execution into the wrong scope.
+        val pinnedWorkspaceId = runCatching {
+            workspaceRuntimeService.activeWorkspaceIdOrNull()
+        }.getOrNull()
+        val pinnedProjectId = runCatching {
+            workspaceRuntimeService.activeProjectIdOrNull()
+        }.getOrNull()
         // The attachment grounding digest is built BEFORE the send is
         // accepted (bounded sandbox reads) so the atomic user-message update
         // is never delayed by IO.
@@ -973,7 +1051,9 @@ class StudioViewModel(
                     appendUserEntry = true,
                     attachments = attachments,
                     groundingDigest = "",
-                    anchorUserEntryId = null
+                    anchorUserEntryId = null,
+                    scopeWorkspaceId = pinnedWorkspaceId,
+                    scopeProjectId = pinnedProjectId
                 )
             } else {
                 // FUNCTIONAL CLOSURE (§14): the grounding outcome carries its
@@ -989,9 +1069,12 @@ class StudioViewModel(
                     null
                 } else {
                     runCatching {
+                        // P5: the PINNED project — the digest reads the scope
+                        // the send was accepted in, never the live one.
                         coordinator.buildGroundingDigest(
-                            workspaceRuntimeService.activeWorkspaceIdOrNull() ?: "",
-                            attachments
+                            workspaceId = pinnedWorkspaceId ?: "",
+                            projectId = pinnedProjectId,
+                            attachments = attachments
                         )
                     }.getOrNull()
                 }
@@ -1011,7 +1094,9 @@ class StudioViewModel(
                     appendUserEntry = true,
                     attachments = attachments,
                     groundingDigest = outcome?.digest ?: "",
-                    anchorUserEntryId = null
+                    anchorUserEntryId = null,
+                    scopeWorkspaceId = pinnedWorkspaceId,
+                    scopeProjectId = pinnedProjectId
                 )
             }
         }
@@ -1073,6 +1158,14 @@ class StudioViewModel(
         resolvedAgent: AgentDefinition
     ) {
         val attachments = targetUser.attachments.map { it.toTurnAttachment() }
+        // P5: the scope is pinned SYNCHRONOUSLY at action time — the retry's
+        // grounding and its execution share ONE captured context.
+        val pinnedWorkspaceId = runCatching {
+            workspaceRuntimeService.activeWorkspaceIdOrNull()
+        }.getOrNull()
+        val pinnedProjectId = runCatching {
+            workspaceRuntimeService.activeProjectIdOrNull()
+        }.getOrNull()
         viewModelScope.launch {
             if (attachments.isEmpty()) {
                 executeText(
@@ -1081,7 +1174,9 @@ class StudioViewModel(
                     appendUserEntry = false,
                     attachments = attachments,
                     groundingDigest = "",
-                    anchorUserEntryId = targetUser.id
+                    anchorUserEntryId = targetUser.id,
+                    scopeWorkspaceId = pinnedWorkspaceId,
+                    scopeProjectId = pinnedProjectId
                 )
             } else {
                 // §14: the same honest grounding contract as executePrompt —
@@ -1092,9 +1187,11 @@ class StudioViewModel(
                     null
                 } else {
                     runCatching {
+                        // P5: the PINNED project (the action-time capture).
                         coordinator.buildGroundingDigest(
-                            workspaceRuntimeService.activeWorkspaceIdOrNull() ?: "",
-                            attachments
+                            workspaceId = pinnedWorkspaceId ?: "",
+                            projectId = pinnedProjectId,
+                            attachments = attachments
                         )
                     }.getOrNull()
                 }
@@ -1113,7 +1210,9 @@ class StudioViewModel(
                     appendUserEntry = false,
                     attachments = attachments,
                     groundingDigest = outcome?.digest ?: "",
-                    anchorUserEntryId = targetUser.id
+                    anchorUserEntryId = targetUser.id,
+                    scopeWorkspaceId = pinnedWorkspaceId,
+                    scopeProjectId = pinnedProjectId
                 )
             }
         }
@@ -1159,7 +1258,11 @@ class StudioViewModel(
         appendUserEntry: Boolean,
         attachments: List<TurnAttachment> = emptyList(),
         groundingDigest: String = "",
-        anchorUserEntryId: String? = null
+        anchorUserEntryId: String? = null,
+        /** P5: the send-time pinned workspace (null → read current, internal calls only). */
+        scopeWorkspaceId: String? = null,
+        /** P5: the send-time pinned project (null → read current, internal calls only). */
+        scopeProjectId: Long? = null
     ) {
         val current = _state.value
 
@@ -1274,8 +1377,10 @@ class StudioViewModel(
         // its turn.
         // ------------------------------------------------------------------
         val turnStartedAt = System.currentTimeMillis()
-        val pinnedWorkspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull()
-        val pinnedProjectId = runCatching { workspaceRuntimeService.activeProjectIdOrNull() }.getOrNull()
+        val pinnedWorkspaceId = scopeWorkspaceId
+            ?: runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull()
+        val pinnedProjectId = scopeProjectId
+            ?: runCatching { workspaceRuntimeService.activeProjectIdOrNull() }.getOrNull()
         val pinnedConstraints = com.example.domain.core.task.TaskConstraints(
             autonomyPolicy = pinnedWorkspaceId?.let { wsId ->
                 runCatching { workspaceRuntimeService.activeWorkspace.value }
@@ -1293,6 +1398,15 @@ class StudioViewModel(
             // collision-free id (the millisecond-based ids could collide
             // and crash LazyColumn keys).
             var terminalSeq = 0
+            // RESIDUAL CLOSURE (P1): execution-OWNED mirrors — the values the
+            // durable turn needs (stream text, token usage, event count) are
+            // accumulated per EXECUTION, never read back from the VIEW state
+            // (a detached execution completing while another scope's state is
+            // live would otherwise persist THAT scope's values — a cross-
+            // scope leak into durable storage).
+            val executionStream = StringBuilder()
+            var executionTokens = 0
+            var executionEventCount = 0
             // CHAT CAPABILITIES (Task 2 §11): the REAL citation chains the
             // execution collected (search intelligence) — projected onto the
             // assistant entry as collapsible sources at completion time.
@@ -1337,10 +1451,23 @@ class StudioViewModel(
                     // launch), never the current workspace state.
                     constraints = pinnedConstraints
                 ).collect { event ->
+                    // RESIDUAL CLOSURE (P1): execution-OWNED mirrors first —
+                    // they advance for EVERY event of THIS execution,
+                    // attached or detached.
+                    executionEventCount++
+                    if (event is ExecutionEvent.ContentChunk) {
+                        executionStream.append(event.deltaText)
+                    }
+                    if (event is ExecutionEvent.UsageBudgetUpdate) {
+                        executionTokens = event.promptTokens + event.completionTokens
+                    }
                     // CROSS-FEATURE PROJECTIONS (ADR-6 slice 2): the events
                     // other features mirror (activity trace, decision
                     // case-base/uncertainty) are published on the signal bus
-                    // instead of being written into a shared UiState.
+                    // instead of being written into a shared UiState. These
+                    // mirrors are PROCESS-WIDE by design (executions are
+                    // process-wide — ExecutionHost), so they keep receiving
+                    // detached executions' events too.
                     when (event) {
                         is ExecutionEvent.Started,
                         is ExecutionEvent.DecisionMade,
@@ -1361,6 +1488,118 @@ class StudioViewModel(
                             ?.takeIf { it.isNotBlank() }
                             ?.let { effectiveModelId = it }
                     }
+
+                    // ----------------------------------------------------------------
+                    // RESIDUAL CLOSURE (P1): EXECUTION-IDENTITY GATE.
+                    // A detached execution (scope change §1, view release,
+                    // or a replaced current execution) may still PERSIST its
+                    // terminal outcome under its pinned context (§2) — but
+                    // it may NEVER mutate this view: no stream text, no log
+                    // lines, no token gauges, no lifecycle phase, no
+                    // isExecuting, no error/degraded state, no approval
+                    // blocks. The gate compares EXECUTION IDENTITY (the
+                    // task key), not a global boolean.
+                    // ----------------------------------------------------------------
+                    if (currentExecutionTaskId != executionTaskId) {
+                        when (event) {
+                            is ExecutionEvent.Completed -> if (!approvalRequested) {
+                                // §2: the detached turn lands in ITS OWN pinned
+                                // session — with ITS OWN stream/usage/count.
+                                persistTurnDurably(
+                                    sessionId = sessionId,
+                                    prompt = prompt,
+                                    answer = event.finalText.ifBlank { executionStream.toString() },
+                                    agentName = resolvedAgent.identity.name,
+                                    agentRole = resolvedAgent.identity.role.displayName,
+                                    modelResourceId = effectiveModelId ?: selectedModelId,
+                                    tokensConsumed = executionTokens,
+                                    durationMs = System.currentTimeMillis() - turnStartedAt,
+                                    isSuccessful = true,
+                                    eventCount = executionEventCount,
+                                    attachments = attachments,
+                                    sources = collectedSources.map { it.toTurnSourceRef() },
+                                    pinnedWorkspaceId = pinnedWorkspaceId,
+                                    pinnedProjectId = pinnedProjectId
+                                )
+                            }
+                            is ExecutionEvent.Error -> when {
+                                // §8/§9: the consent request is durable in the
+                                // execution's OWN session (save-to-originating);
+                                // it NEVER surfaces in another scope's view.
+                                event.failureCode == APPROVAL_REQUIRED_CODE -> {
+                                    approvalRequested = true
+                                    requestApprovalBlock(
+                                        kernelExecutionId = event.executionId,
+                                        executionTaskId = executionTaskId,
+                                        sessionId = sessionId,
+                                        pinnedWorkspaceId = pinnedWorkspaceId
+                                    )
+                                }
+                                approvalRequested -> Unit // §8 cascade — nothing further
+                                else -> persistTurnDurably(
+                                    sessionId = sessionId,
+                                    prompt = prompt,
+                                    answer = executionStream.toString().ifBlank { event.message },
+                                    agentName = resolvedAgent.identity.name,
+                                    agentRole = resolvedAgent.identity.role.displayName,
+                                    modelResourceId = effectiveModelId ?: selectedModelId,
+                                    tokensConsumed = executionTokens,
+                                    durationMs = System.currentTimeMillis() - turnStartedAt,
+                                    isSuccessful = false,
+                                    eventCount = executionEventCount,
+                                    attachments = attachments,
+                                    pinnedWorkspaceId = pinnedWorkspaceId,
+                                    pinnedProjectId = pinnedProjectId
+                                )
+                            }
+                            else -> Unit
+                        }
+                        return@collect
+                    }
+
+                    // ATTACHED path: terminal side effects run BEFORE the
+                    // state-update lambda (RESIDUAL CLOSURE P1: a persist
+                    // call inside MutableStateFlow.update could re-run under
+                    // CAS contention and duplicate durable turns; the update
+                    // lambda below is PURE).
+                    if (event is ExecutionEvent.Completed && !approvalRequested) {
+                        persistTurnDurably(
+                            sessionId = sessionId,
+                            prompt = prompt,
+                            answer = event.finalText.ifBlank { executionStream.toString() },
+                            agentName = resolvedAgent.identity.name,
+                            agentRole = resolvedAgent.identity.role.displayName,
+                            modelResourceId = effectiveModelId ?: selectedModelId,
+                            tokensConsumed = executionTokens,
+                            durationMs = System.currentTimeMillis() - turnStartedAt,
+                            isSuccessful = true,
+                            eventCount = executionEventCount,
+                            attachments = attachments,
+                            sources = collectedSources.map { it.toTurnSourceRef() },
+                            pinnedWorkspaceId = pinnedWorkspaceId,
+                            pinnedProjectId = pinnedProjectId
+                        )
+                    }
+                    if (event is ExecutionEvent.Error &&
+                        event.failureCode != APPROVAL_REQUIRED_CODE && !approvalRequested
+                    ) {
+                        persistTurnDurably(
+                            sessionId = sessionId,
+                            prompt = prompt,
+                            answer = executionStream.toString().ifBlank { event.message },
+                            agentName = resolvedAgent.identity.name,
+                            agentRole = resolvedAgent.identity.role.displayName,
+                            modelResourceId = effectiveModelId ?: selectedModelId,
+                            tokensConsumed = executionTokens,
+                            durationMs = System.currentTimeMillis() - turnStartedAt,
+                            isSuccessful = false,
+                            eventCount = executionEventCount,
+                            attachments = attachments,
+                            pinnedWorkspaceId = pinnedWorkspaceId,
+                            pinnedProjectId = pinnedProjectId
+                        )
+                    }
+
                     _state.update { state ->
                         val updatedLogs = state.executionLog + event
                         val updatedLive = state.liveExecution?.let {
@@ -1436,37 +1675,11 @@ class StudioViewModel(
                                         }
                                     )
                                 } else {
-                                val answer = if (event.finalText.isNotBlank()) event.finalText else state.streamText
-                                val honestModelId = effectiveModelId ?: selectedModelId
-                                persistTurnDurably(
-                                    sessionId = sessionId,
-                                    prompt = prompt,
-                                    answer = answer,
-                                    agentName = resolvedAgent.identity.name,
-                                    agentRole = resolvedAgent.identity.role.displayName,
-                                    modelResourceId = honestModelId,
-                                    tokensConsumed = state.currentTokensConsumed,
-                                    durationMs = System.currentTimeMillis() - turnStartedAt,
-                                    isSuccessful = true,
-                                    eventCount = updatedLogs.size,
-                                    // CHAT CAPABILITIES (Task 2 §16): the turn's
-                                    // attachment references persist with it.
-                                    attachments = attachments,
-                                    // FUNCTIONAL CLOSURE (§9): the citation
-                                    // chains persist with the turn.
-                                    sources = collectedSources.map { it.toTurnSourceRef() },
-                                    pinnedWorkspaceId = pinnedWorkspaceId,
-                                    pinnedProjectId = pinnedProjectId
-                                )
-                                // §1/§2: only the CURRENT view's execution
-                                // mutates the timeline — a detached (scope-
-                                // changed) execution still persists above.
-                                if (currentExecutionTaskId != executionTaskId) {
-                                    state.copy(
-                                        isExecuting = false,
-                                        executionLog = updatedLogs
-                                    )
-                                } else {
+                                    // P1: the persist ran ABOVE (outside the
+                                    // state-update lambda); the update itself
+                                    // is PURE view mutation.
+                                    val answer = event.finalText.ifBlank { executionStream.toString() }
+                                    val honestModelId = effectiveModelId ?: selectedModelId
                                     // P0-D: the finished text has EXACTLY ONE
                                     // display path — the assistant entry. The
                                     // stream text and the live block collapse;
@@ -1487,9 +1700,9 @@ class StudioViewModel(
                                             // the request (decision-layer truth),
                                             // falling back to the user's pin.
                                             modelResourceId = honestModelId,
-                                            tokensConsumed = state.currentTokensConsumed,
+                                            tokensConsumed = executionTokens,
                                             durationMs = System.currentTimeMillis() - sentAtMs,
-                                            eventCount = updatedLogs.size,
+                                            eventCount = executionEventCount,
                                             isDegraded = event.isDegraded,
                                             // §11: the real search citations collected
                                             // during this execution ride the entry.
@@ -1503,10 +1716,11 @@ class StudioViewModel(
                                             answer = answer,
                                             isSuccessful = true,
                                             modelResourceId = honestModelId,
+                                            tokensConsumed = executionTokens,
+                                            eventCount = executionEventCount,
                                             turnId = "turn_${executionTaskId}_$terminalSeq"
                                         )
                                     )
-                                }
                                 }
                             }
                             is ExecutionEvent.Error -> {
@@ -1525,92 +1739,69 @@ class StudioViewModel(
                                 // --------------------------------------------------
                                 if (event.failureCode == APPROVAL_REQUIRED_CODE) {
                                     approvalRequested = true
-                                    requestApprovalBlock(executionId = event.executionId)
-                                    if (currentExecutionTaskId == executionTaskId) {
-                                        state.copy(
-                                            isExecuting = false,
-                                            executionLog = updatedLogs,
-                                            liveExecution = (updatedLive ?: state.liveExecution)
-                                                ?.copy(phase = ExecutionPhase.AWAITING_APPROVAL)
-                                        )
-                                    } else {
-                                        state.copy(
-                                            isExecuting = false,
-                                            executionLog = updatedLogs
-                                        )
-                                    }
+                                    // P1/§9: the block persists to the execution's
+                                    // OWN pinned session; the VIEW block only
+                                    // appears for the CURRENT execution (the
+                                    // detached path handled it above the gate).
+                                    requestApprovalBlock(
+                                        kernelExecutionId = event.executionId,
+                                        executionTaskId = executionTaskId,
+                                        sessionId = sessionId,
+                                        pinnedWorkspaceId = pinnedWorkspaceId
+                                    )
+                                    state.copy(
+                                        isExecuting = false,
+                                        executionLog = updatedLogs,
+                                        liveExecution = (updatedLive ?: state.liveExecution)
+                                            ?.copy(phase = ExecutionPhase.AWAITING_APPROVAL)
+                                    )
                                 } else if (approvalRequested) {
                                     // §8 CASCADE: a follow-up error after the
                                     // consent request is a CONSEQUENCE of the
                                     // denial — keep the honest AWAITING_APPROVAL
                                     // lifecycle (the block + retry path), never a
                                     // fabricated failed assistant entry.
-                                    if (currentExecutionTaskId == executionTaskId) {
-                                        state.copy(
-                                            isExecuting = false,
-                                            executionLog = updatedLogs,
-                                            liveExecution = state.liveExecution?.copy(
-                                                phase = ExecutionPhase.AWAITING_APPROVAL
-                                            )
+                                    state.copy(
+                                        isExecuting = false,
+                                        executionLog = updatedLogs,
+                                        liveExecution = state.liveExecution?.copy(
+                                            phase = ExecutionPhase.AWAITING_APPROVAL
                                         )
-                                    } else {
-                                        state.copy(
-                                            isExecuting = false,
-                                            executionLog = updatedLogs
-                                        )
-                                    }
-                                } else {
-                                    val answer = state.streamText.ifBlank { event.message }
-                                    persistTurnDurably(
-                                        sessionId = sessionId,
-                                        prompt = prompt,
-                                        answer = answer,
-                                        agentName = resolvedAgent.identity.name,
-                                        agentRole = resolvedAgent.identity.role.displayName,
-                                        modelResourceId = effectiveModelId ?: selectedModelId,
-                                        tokensConsumed = state.currentTokensConsumed,
-                                        durationMs = System.currentTimeMillis() - turnStartedAt,
-                                        isSuccessful = false,
-                                        eventCount = updatedLogs.size,
-                                        attachments = attachments,
-                                        pinnedWorkspaceId = pinnedWorkspaceId,
-                                        pinnedProjectId = pinnedProjectId
                                     )
-                                    if (currentExecutionTaskId != executionTaskId) {
-                                        state.copy(
-                                            isExecuting = false,
-                                            executionLog = updatedLogs
+                                } else {
+                                    // P1: the persist ran ABOVE (outside the
+                                    // state-update lambda).
+                                    val answer = executionStream.toString().ifBlank { event.message }
+                                    state.copy(
+                                        isExecuting = false,
+                                        errorMessage = event.message,
+                                        executionLog = updatedLogs,
+                                        liveExecution = null,
+                                        streamText = "",
+                                        timeline = state.timeline + ChatEntry.Assistant(
+                                            id = "asst_${executionTaskId}_$terminalSeq",
+                                            text = answer,
+                                            agentName = resolvedAgent.identity.name,
+                                            agentRole = resolvedAgent.identity.role.displayName,
+                                            isSuccessful = false,
+                                            modelResourceId = effectiveModelId ?: selectedModelId,
+                                            tokensConsumed = executionTokens,
+                                            durationMs = System.currentTimeMillis() - sentAtMs,
+                                            eventCount = executionEventCount
+                                        ),
+                                        studioSession = appendStudioTurn(
+                                            state = state,
+                                            prompt = prompt,
+                                            agentName = resolvedAgent.identity.name,
+                                            agentRole = resolvedAgent.identity.role.displayName,
+                                            answer = answer,
+                                            isSuccessful = false,
+                                            modelResourceId = effectiveModelId ?: selectedModelId,
+                                            tokensConsumed = executionTokens,
+                                            eventCount = executionEventCount,
+                                            turnId = "turn_${executionTaskId}_$terminalSeq"
                                         )
-                                    } else {
-                                        state.copy(
-                                            isExecuting = false,
-                                            errorMessage = event.message,
-                                            executionLog = updatedLogs,
-                                            liveExecution = null,
-                                            streamText = "",
-                                            timeline = state.timeline + ChatEntry.Assistant(
-                                                id = "asst_${executionTaskId}_$terminalSeq",
-                                                text = answer,
-                                                agentName = resolvedAgent.identity.name,
-                                                agentRole = resolvedAgent.identity.role.displayName,
-                                                isSuccessful = false,
-                                                modelResourceId = effectiveModelId ?: selectedModelId,
-                                                tokensConsumed = state.currentTokensConsumed,
-                                                durationMs = System.currentTimeMillis() - sentAtMs,
-                                                eventCount = updatedLogs.size
-                                            ),
-                                            studioSession = appendStudioTurn(
-                                                state = state,
-                                                prompt = prompt,
-                                                agentName = resolvedAgent.identity.name,
-                                                agentRole = resolvedAgent.identity.role.displayName,
-                                                answer = answer,
-                                                isSuccessful = false,
-                                                modelResourceId = effectiveModelId ?: selectedModelId,
-                                                turnId = "turn_${executionTaskId}_$terminalSeq"
-                                            )
-                                        )
-                                    }
+                                    )
                                 }
                             }
                             is ExecutionEvent.Cancelled -> {
@@ -1628,12 +1819,24 @@ class StudioViewModel(
                         }
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // RESIDUAL CLOSURE (P1): an honest cancellation (the user's
+                // cancelExecution kills this job; a workspace drain may too)
+                // is NOT an unexpected error — the cancel path already set
+                // the honest CANCELLED trace. Rethrow so the job completes
+                // as cancelled and the finally-block runs its guards.
+                throw e
             } catch (e: Exception) {
-                _state.update {
-                    it.copy(
-                        isExecuting = false,
-                        errorMessage = "حدث خطأ غير متوقع أثناء المعالجة: ${e.localizedMessage}"
-                    )
+                // P1: only the CURRENT view's execution surfaces pipeline
+                // exceptions — a detached execution's failure never writes
+                // an error into another scope's conversation.
+                if (currentExecutionTaskId == executionTaskId) {
+                    _state.update {
+                        it.copy(
+                            isExecuting = false,
+                            errorMessage = "حدث خطأ غير متوقع أثناء المعالجة: ${e.localizedMessage}"
+                        )
+                    }
                 }
             } finally {
                 // DEFENSIVE HONESTY: if this execution is still shown as
@@ -1695,6 +1898,14 @@ class StudioViewModel(
         title: String
     ): String {
         val pendingId = "cap_${java.util.UUID.randomUUID()}"
+        // RESIDUAL CLOSURE (P2): the invocation's scope is captured AT START
+        // — the result later resolves into THIS session under THIS workspace/
+        // project, whatever the live scope is at completion time.
+        capabilityInvocationScopes[pendingId] = CapabilityInvocationScope(
+            workspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull(),
+            projectId = runCatching { workspaceRuntimeService.activeProjectIdOrNull() }.getOrNull(),
+            sessionId = _state.value.activeSessionId
+        )
         _state.update {
             it.copy(
                 timeline = it.timeline + ChatEntry.CapabilityResult(
@@ -1720,18 +1931,36 @@ class StudioViewModel(
      */
     fun resolveCapabilityResult(pendingEntryId: String, resolved: ChatEntry.CapabilityResult) {
         val resolvedEntry = resolved.copy(id = pendingEntryId)
-        _state.update { state ->
-            state.copy(
-                timeline = state.timeline.map { entry ->
-                    if (entry.id == pendingEntryId && entry is ChatEntry.CapabilityResult) {
-                        resolvedEntry
+        // P2: the ORIGINATING scope (captured at invocation start) — the
+        // explicit policy chosen for capability results: SAVE-TO-ORIGINATING-
+        // SESSION. A result completing after a scope switch is neither lost
+        // nor re-routed into the new scope's conversation; it lands in the
+        // session the invocation belongs to (and only the view of THAT
+        // conversation shows it).
+        val scope = capabilityInvocationScopes.remove(pendingEntryId)
+        val currentSessionId = _state.value.activeSessionId
+        val pendingStillInView = _state.value.timeline.any { it.id == pendingEntryId }
+        // The same conversation reopened (pending is runtime-only): a late
+        // result still appears in ITS OWN conversation's view.
+        val sameConversation = scope?.sessionId != null && currentSessionId == scope.sessionId
+        if (pendingStillInView || sameConversation) {
+            _state.update { state ->
+                state.copy(
+                    timeline = if (pendingStillInView) {
+                        state.timeline.map { entry ->
+                            if (entry.id == pendingEntryId && entry is ChatEntry.CapabilityResult) {
+                                resolvedEntry
+                            } else {
+                                entry
+                            }
+                        }
                     } else {
-                        entry
+                        state.timeline + resolvedEntry
                     }
-                }
-            )
+                )
+            }
         }
-        persistCapabilityEvent(resolvedEntry)
+        persistCapabilityEvent(resolvedEntry, scope)
     }
 
     /**
@@ -1744,18 +1973,72 @@ class StudioViewModel(
      */
     fun appendCapabilityResult(entry: ChatEntry.CapabilityResult) {
         _state.update { it.copy(timeline = it.timeline + entry) }
-        persistCapabilityEvent(entry)
+        // P2: the DIRECT (already-resolved) path captures the scope at call
+        // time — the caller is acting on the CURRENT conversation by
+        // definition (documented current-scope operation).
+        val scope = CapabilityInvocationScope(
+            workspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull(),
+            projectId = runCatching { workspaceRuntimeService.activeProjectIdOrNull() }.getOrNull(),
+            sessionId = _state.value.activeSessionId
+        )
+        persistCapabilityEvent(entry, scope)
     }
 
-    /** Persists one capability-result block into the session's durable timeline. */
-    private fun persistCapabilityEvent(entry: ChatEntry.CapabilityResult) {
-        val sessionId = _state.value.activeSessionId ?: return
+    /**
+     * Persists one capability-result block into the ORIGINATING session's
+     * durable timeline.
+     *
+     * RESIDUAL CLOSURE (P2): [scope] is the invocation's captured context —
+     * the event is written under the CAPTURED workspace, into the CAPTURED
+     * session (never the live one at completion time).
+     * RESIDUAL CLOSURE (P3): when the invocation started BEFORE any session
+     * existed, a durable session is CREATED here and pinned to the captured
+     * scope — the result is conversation history by design (§9) and must
+     * survive a reopen. No session is created for invocations that never
+     * resolve (a pending block alone creates nothing).
+     */
+    private fun persistCapabilityEvent(
+        entry: ChatEntry.CapabilityResult,
+        scope: CapabilityInvocationScope?
+    ) {
+        // P3: the mode/model captured at RESOLVE time (the conversation's
+        // shape when the result lands) — read before the launch so the
+        // coroutine's body is deterministic.
+        val resolveTimeMode = _state.value.chatMode
+        val resolveTimeModelId = _state.value.selectedModelResourceId
+        val resolveTimeModelName = _state.value.selectedModelDisplayName
         viewModelScope.launch {
             runCatching {
+                var targetSessionId = scope?.sessionId
+                var bindCreatedSessionToView = false
+                if (targetSessionId == null) {
+                    // P3: no session existed at invocation time — create one
+                    // pinned to the CAPTURED scope (mode = the conversation's
+                    // mode at resolve time; the agent binding is set by the
+                    // next execution's §3 explicit update).
+                    val created = conversationSessionService.createSession(
+                        mode = resolveTimeMode,
+                        modelResourceId = resolveTimeModelId,
+                        modelDisplayName = resolveTimeModelName,
+                        projectId = scope?.projectId,
+                        workspaceId = scope?.workspaceId
+                    )
+                    targetSessionId = created.id.value
+                    // The view binds to the created session ONLY when the
+                    // conversation still lives in the captured scope (a
+                    // switched-away view never receives a foreign binding).
+                    val stillInCapturedScope = runCatching {
+                        workspaceRuntimeService.activeWorkspaceIdOrNull() == scope?.workspaceId &&
+                            workspaceRuntimeService.activeProjectIdOrNull() == scope?.projectId
+                    }.getOrDefault(false)
+                    if (stillInCapturedScope && _state.value.activeSessionId == null) {
+                        bindCreatedSessionToView = true
+                    }
+                }
                 conversationSessionService.appendTimelineEvent(
                     ConversationTimelineEvent(
                         id = entry.id,
-                        sessionId = ConversationSessionId(sessionId),
+                        sessionId = ConversationSessionId(targetSessionId),
                         kind = TimelineEventKind.CAPABILITY_RESULT,
                         capabilityKind = entry.kind.name,
                         title = entry.title,
@@ -1766,8 +2049,12 @@ class StudioViewModel(
                         isDegraded = entry.isDegraded,
                         degradedMessage = entry.degradedMessage,
                         createdAtEpochMs = if (entry.timestampMs > 0) entry.timestampMs else System.currentTimeMillis()
-                    )
+                    ),
+                    workspaceId = scope?.workspaceId
                 )
+                if (bindCreatedSessionToView) {
+                    _state.update { it.copy(activeSessionId = targetSessionId) }
+                }
             }.onFailure { e ->
                 _state.update {
                     it.copy(
@@ -1795,40 +2082,31 @@ class StudioViewModel(
      * the user resolved (or left pending) re-renders after a reopen with
      * its honest state.
      */
-    private fun requestApprovalBlock(executionId: String) {
+    private fun requestApprovalBlock(
+        kernelExecutionId: String,
+        executionTaskId: String,
+        sessionId: ConversationSessionId?,
+        pinnedWorkspaceId: String?
+    ) {
         val gate = humanApprovalGate ?: return
         viewModelScope.launch {
             val pending = runCatching { gate.pendingApprovals() }.getOrDefault(emptyList())
-                .firstOrNull { it.executionId == executionId } ?: return@launch
-            _state.update { state ->
-                val exists = state.timeline.any {
-                    it is ChatEntry.ApprovalBlock && it.approvalId == pending.approvalId
-                }
-                if (exists) {
-                    state
-                } else {
-                    val block = ChatEntry.ApprovalBlock(
-                        id = "apv_${pending.approvalId}",
-                        approvalId = pending.approvalId,
-                        executionId = pending.executionId,
-                        toolName = pending.toolName,
-                        riskLevel = pending.riskLevel,
-                        description = pending.prompt,
-                        requestedAction = "تنفيذ الأداة «${pending.toolName}»",
-                        justification = pending.justification
-                    )
-                    state.copy(timeline = state.timeline + block)
-                }
-            }
-            // §9: the approval block is conversation history — durable from
-            // the moment it appears (the state transitions below update it).
-            val sessionId = _state.value.activeSessionId
+                .firstOrNull { it.executionId == kernelExecutionId } ?: return@launch
+            // §9 + P1: the approval block is conversation history — the
+            // DURABLE write happens FIRST, in the EXECUTION'S OWN pinned
+            // session under the pinned workspace (save-to-originating-session;
+            // the live activeSessionId/workspace is no longer consulted).
+            // RESIDUAL CLOSURE (ordering fix): "durable from the moment it
+            // appears" is now literally true — the view block below can only
+            // be seen AFTER the event exists, so a resolution mirroring onto
+            // the event can never race (and silently no-op against) an event
+            // that has not landed yet.
             if (sessionId != null) {
                 runCatching {
                     conversationSessionService.appendTimelineEvent(
                         ConversationTimelineEvent(
                             id = "apv_${pending.approvalId}",
-                            sessionId = ConversationSessionId(sessionId),
+                            sessionId = sessionId,
                             kind = TimelineEventKind.APPROVAL_BLOCK,
                             title = "تنفيذ الأداة «${pending.toolName}»",
                             summary = pending.prompt,
@@ -1840,8 +2118,34 @@ class StudioViewModel(
                             justification = pending.justification,
                             approvalState = ApprovalBlockState.PENDING.name,
                             createdAtEpochMs = System.currentTimeMillis()
-                        )
+                        ),
+                        workspaceId = pinnedWorkspaceId
                     )
+                }
+            }
+            // RESIDUAL CLOSURE (P1): the VIEW block appears only while THIS
+            // execution is still the view's current one — a detached consent
+            // request never lands in another scope's conversation.
+            if (currentExecutionTaskId == executionTaskId) {
+                _state.update { state ->
+                    val exists = state.timeline.any {
+                        it is ChatEntry.ApprovalBlock && it.approvalId == pending.approvalId
+                    }
+                    if (exists) {
+                        state
+                    } else {
+                        val block = ChatEntry.ApprovalBlock(
+                            id = "apv_${pending.approvalId}",
+                            approvalId = pending.approvalId,
+                            executionId = pending.executionId,
+                            toolName = pending.toolName,
+                            riskLevel = pending.riskLevel,
+                            description = pending.prompt,
+                            requestedAction = "تنفيذ الأداة «${pending.toolName}»",
+                            justification = pending.justification
+                        )
+                        state.copy(timeline = state.timeline + block)
+                    }
                 }
             }
         }
@@ -1996,27 +2300,47 @@ class StudioViewModel(
      * honestly — with "السماح دائماً" (a standing EXECUTE grant) it passes
      * WITHOUT a new request.
      */
-    fun retryAfterApproval(agent: AgentDefinition?) {
+    fun retryAfterApproval(approvalId: String, agent: AgentDefinition?) {
         val current = _state.value
-        if (current.isExecuting) return
-        val approvedBlock = current.timeline.lastOrNull {
-            it is ChatEntry.ApprovalBlock &&
-                it.state == ApprovalBlockState.APPROVED
-        } as? ChatEntry.ApprovalBlock ?: run {
+        if (current.isExecuting) {
+            // Honest refusal (never a silent no-op): the composer is locked
+            // by a running execution — retry when it completes.
             _state.update {
-                it.copy(errorMessage = "لا توجد موافقة قابلة لإعادة المحاولة — وافق على طلب أولاً.")
+                it.copy(errorMessage = "هناك تنفيذ جارٍ بالفعل — أعد المحاولة عند اكتماله.")
             }
             return
         }
-        val blockIndex = current.timeline.indexOfFirst { it.id == approvedBlock.id }
+        // RESIDUAL CLOSURE (P4): the retry targets the SPECIFIC approval
+        // block the user tapped (explicit approvalId identity) — NEVER
+        // "the last approved block". With approvals A and B both resolved,
+        // retrying A re-executes A's message even when B was approved or
+        // rejected afterwards.
+        val targetBlock = current.timeline.firstOrNull {
+            it is ChatEntry.ApprovalBlock && it.approvalId == approvalId
+        } as? ChatEntry.ApprovalBlock ?: run {
+            _state.update {
+                it.copy(errorMessage = "لا توجد موافقة بهذا المعرف في المحادثة الحالية.")
+            }
+            return
+        }
+        if (targetBlock.state != ApprovalBlockState.APPROVED) {
+            _state.update {
+                it.copy(errorMessage = "هذه الموافقة لم تُمنح بعد — وافق على الطلب أولاً ثم أعد المحاولة.")
+            }
+            return
+        }
+        val blockIndex = current.timeline.indexOfFirst { it.id == targetBlock.id }
         val blockedUser = if (blockIndex > 0) {
             current.timeline.take(blockIndex)
                 .lastOrNull { it is ChatEntry.User } as? ChatEntry.User
         } else {
             null
         } ?: run {
+            // P4 (documented scope policy): the retry only re-executes a
+            // message present in the CURRENT conversation's timeline — it
+            // never fabricates a prompt from durable state elsewhere.
             _state.update {
-                it.copy(errorMessage = "تعذر العثور على الرسالة المرتبطة بهذه الموافقة.")
+                it.copy(errorMessage = "تعذر العثور على الرسالة المرتبطة بهذه الموافقة في المحادثة الحالية.")
             }
             return
         }

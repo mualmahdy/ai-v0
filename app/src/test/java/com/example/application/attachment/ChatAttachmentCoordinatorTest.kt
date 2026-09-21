@@ -209,6 +209,7 @@ class ChatAttachmentCoordinatorTest {
 
         val outcome = coordinator.buildGroundingDigest(
             workspaceService.activeWorkspaceIdOrNull()!!,
+            workspaceService.activeProjectIdOrNull(),
             listOf(text)
         )
 
@@ -228,6 +229,7 @@ class ChatAttachmentCoordinatorTest {
         assertFalse(coordinator.isTextGroundable(image))
         val outcome = coordinator.buildGroundingDigest(
             workspaceService.activeWorkspaceIdOrNull()!!,
+            workspaceService.activeProjectIdOrNull(),
             listOf(image)
         )
         // The honest non-textual note rides the digest instead of fake content.
@@ -334,6 +336,7 @@ class ChatAttachmentCoordinatorTest {
 
         val outcome = coordinator.buildGroundingDigest(
             workspaceService.activeWorkspaceIdOrNull()!!,
+            workspaceService.activeProjectIdOrNull(),
             listOf(draft)
         )
 
@@ -348,8 +351,11 @@ class ChatAttachmentCoordinatorTest {
         val draft = coordinator.importFileAttachment("content://saf/noproj.txt", "text/plain")
         workspaceService.setActiveProject(0L)
 
+        // P5: the PINNED project is null here (the workspace's project was
+        // unbound) — the honest no-project failure path.
         val outcome = coordinator.buildGroundingDigest(
             workspaceService.activeWorkspaceIdOrNull()!!,
+            null,
             listOf(draft)
         )
 
@@ -373,6 +379,7 @@ class ChatAttachmentCoordinatorTest {
 
         val outcome = coordinator.buildGroundingDigest(
             workspaceService.activeWorkspaceIdOrNull()!!,
+            workspaceService.activeProjectIdOrNull(),
             listOf(draft)
         )
 

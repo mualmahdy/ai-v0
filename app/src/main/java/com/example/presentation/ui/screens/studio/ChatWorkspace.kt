@@ -131,7 +131,7 @@ fun ChatWorkspace(
     onPingMcp: (String) -> Unit,
     onApprove: (String) -> Unit,
     onReject: (String) -> Unit,
-    onRetryAfterApproval: () -> Unit,
+    onRetryAfterApproval: (String) -> Unit,
     /** §13: "allow always" — the standing EXECUTE grant path (§12: confirmed). */
     onGrantAlways: (String) -> Unit,
     modifier: Modifier = Modifier

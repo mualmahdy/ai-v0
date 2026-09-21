@@ -203,8 +203,13 @@ fun StudioScreen(
         onPingMcp = chatCapabilitiesViewModel::pingMcpServer,
         onApprove = studioViewModel::approveApproval,
         onReject = studioViewModel::rejectApproval,
-        onRetryAfterApproval = {
-            studioViewModel.retryAfterApproval(agent = agentsState.activeAgent)
+        // P4: the tapped approval block's OWN id — the retry re-executes
+        // exactly that block's message, never "the last approved one".
+        onRetryAfterApproval = { approvalId ->
+            studioViewModel.retryAfterApproval(
+                approvalId = approvalId,
+                agent = agentsState.activeAgent
+            )
         },
         onGrantAlways = studioViewModel::grantAlwaysForApproval,
         modifier = modifier

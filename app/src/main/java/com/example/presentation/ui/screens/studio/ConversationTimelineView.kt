@@ -104,8 +104,11 @@ fun ConversationTimeline(
     /** §13: approve/reject the inline approval through the real gate. */
     onApprove: (String) -> Unit = {},
     onReject: (String) -> Unit = {},
-    /** §13: retry the approved execution under its own id. */
-    onRetryAfterApproval: () -> Unit = {},
+    /**
+     * §13 + RESIDUAL CLOSURE (P4): retry the approved execution under its OWN
+     * approval id — the callback carries the tapped block's identity.
+     */
+    onRetryAfterApproval: (String) -> Unit = {},
     /** §13: "allow always" — the standing EXECUTE grant path (§12: confirmed). */
     onGrantAlways: (String) -> Unit = {}
 ) {
@@ -287,7 +290,7 @@ private fun RenderTimelineEntry(
     onRetry: (String) -> Unit,
     onApprove: (String) -> Unit,
     onReject: (String) -> Unit,
-    onRetryAfterApproval: () -> Unit,
+    onRetryAfterApproval: (String) -> Unit,
     onGrantAlways: (String) -> Unit
 ) {
     when (entry) {
@@ -758,7 +761,7 @@ private fun ApprovalBlockMessage(
     entry: ChatEntry.ApprovalBlock,
     onApprove: (String) -> Unit,
     onReject: (String) -> Unit,
-    onRetryAfterApproval: () -> Unit,
+    onRetryAfterApproval: (String) -> Unit,
     onGrantAlways: (String) -> Unit = {}
 ) {
     val pending = entry.state == ApprovalBlockState.PENDING
@@ -873,7 +876,9 @@ private fun ApprovalBlockMessage(
                 ApprovalBlockState.APPROVED -> {
                     Spacer(modifier = Modifier.height(6.dp))
                     TextButton(
-                        onClick = onRetryAfterApproval,
+                        // P4: the retry carries THIS block's approval id —
+                        // the targeted message, never "the last approved".
+                        onClick = { onRetryAfterApproval(entry.approvalId) },
                         modifier = Modifier.testTag("btn_retry_approved_${entry.approvalId}")
                     ) {
                         Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))

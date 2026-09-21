@@ -1173,7 +1173,8 @@ class StudioViewModelTest {
         // with the approval scenario OFF, exactly like the granted-consent
         // production path (no second fake consent request).
         approvalScenario = false
-        viewModel.retryAfterApproval(agent = null)
+        // RESIDUAL CLOSURE (P4): the retry targets the block's OWN id.
+        viewModel.retryAfterApproval(approvalId = block.approvalId, agent = null)
         awaitUntil { capturedExecutionIds.size >= 2 }
         awaitExecutionSettled()
 
@@ -1229,8 +1230,11 @@ class StudioViewModelTest {
     fun `retry without an approval refuses honestly`() {
         runApprovalScenarioPrompt()
         awaitUntil { viewModel.state.value.timeline.any { it is ChatEntry.ApprovalBlock } }
+        val block = viewModel.state.value.timeline
+            .first { it is ChatEntry.ApprovalBlock } as ChatEntry.ApprovalBlock
 
-        viewModel.retryAfterApproval(agent = null)
+        // P4: a PENDING (not yet approved) block refuses the retry honestly.
+        viewModel.retryAfterApproval(approvalId = block.approvalId, agent = null)
         Thread.sleep(200)
         assertNotNull(viewModel.state.value.errorMessage)
         assertTrue(viewModel.state.value.errorMessage!!.contains("وافق"))

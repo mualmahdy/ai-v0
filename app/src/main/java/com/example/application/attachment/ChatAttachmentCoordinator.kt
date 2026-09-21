@@ -209,14 +209,20 @@ class ChatAttachmentCoordinator(
      * FUNCTIONAL CLOSURE (Phase 1 §14): read failures are REPORTED, never
      * swallowed — each text-groundable attachment that could not be read
      * lands in [GroundingOutcome.failures] and the caller blocks the send.
+     *
+     * RESIDUAL CLOSURE (P5 — execution-pinned grounding): [projectId] is the
+     * scope the SEND captured (the same pinned context the execution uses).
+     * The digest reads THAT project's sandbox root — a mid-flight project
+     * switch can neither break the send (the attachment lives in the pinned
+     * project's sandbox) nor ground another project's files.
      */
     suspend fun buildGroundingDigest(
         workspaceId: String,
+        projectId: Long?,
         attachments: List<TurnAttachment>
     ): GroundingOutcome {
         if (attachments.isEmpty()) return GroundingOutcome("", emptyList())
-        val projectId = workspaceRuntimeService.activeProjectIdOrNull()
-            ?: return GroundingOutcome(
+        if (projectId == null) return GroundingOutcome(
                 "",
                 // No project ⇒ no sandbox read possible — every text-groundable
                 // attachment is an honest FAILURE (the send must not pretend).
