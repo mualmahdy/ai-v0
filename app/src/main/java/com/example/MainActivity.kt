@@ -2,7 +2,6 @@ package com.example
 
 import android.os.Bundle
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -13,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.fragment.app.FragmentActivity
 import com.example.presentation.di.AppContainer
 import com.example.presentation.di.ActivityViewModelFactory
 import com.example.presentation.di.AgentsViewModelFactory
@@ -32,6 +32,7 @@ import com.example.presentation.di.StudioViewModelFactory
 import com.example.presentation.di.TasksViewModelFactory
 import com.example.presentation.di.WorkflowsViewModelFactory
 import com.example.presentation.ui.MainAppScreen
+import com.example.presentation.ui.screens.applock.AppLockGate
 import com.example.presentation.viewmodel.ActivityViewModel
 import com.example.presentation.viewmodel.AgentsViewModel
 import com.example.presentation.viewmodel.ExtensionsViewModel
@@ -53,7 +54,16 @@ import com.example.presentation.viewmodel.TasksViewModel
 import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.flow.MutableSharedFlow
 
-class MainActivity : ComponentActivity() {
+/**
+ * APP LOCK (backend) — the Activity is a THIN platform adapter: it forwards
+ * lifecycle transitions to [AppContainer.appLockService] and shows the SYSTEM
+ * authentication prompt through [AppContainer.appLockAuthenticator]. NO
+ * policy logic, timeout arithmetic, persistence, or security decisions live
+ * here (they belong to the service/adapter). FragmentActivity because the
+ * official androidx BiometricPrompt requires a fragment host — a real
+ * technical constraint of the platform prompt, not an architecture change.
+ */
+class MainActivity : FragmentActivity() {
 
     private val appContainer: AppContainer by lazy {
         AppContainer(applicationContext)
@@ -187,6 +197,68 @@ class MainActivity : ComponentActivity() {
         ProjectsViewModelFactory(appContainer)
     }
 
+    // ------------------------------------------------------------------
+    // APP LOCK (backend) — thin platform integration ONLY
+    // ------------------------------------------------------------------
+
+    /** The last system-prompt availability seen (honest cover hints). */
+    @Volatile
+    private var appLockAvailabilityHint: String? = null
+
+    /**
+     * Forwards the app-to-background transition (single-activity app: the
+     * Activity's onStop IS the app backgrounding — no new dependencies).
+     */
+    override fun onStop() {
+        super.onStop()
+        appContainer.appLockService.onAppBackgrounded()
+    }
+
+    /** Forwards the app-to-foreground transition and triggers the prompt. */
+    override fun onStart() {
+        super.onStart()
+        appContainer.appLockService.onAppForegrounded()
+        requestAppUnlock()
+    }
+
+    /**
+     * Shows the SYSTEM authentication prompt when the STATE MACHINE asks for
+     * it (fail-closed: availability problems keep the lock — they are honest
+     * non-successes, never a bypass).
+     */
+    private fun requestAppUnlock() {
+        val service = appContainer.appLockService
+        if (!service.initialized.value) return // policy not proven yet — no prompt
+        if (service.currentState.value !=
+            com.example.domain.core.security.applock.AppLockState.AUTHENTICATION_REQUIRED
+        ) {
+            return // the machine decides when a prompt is demanded
+        }
+        val availability = appContainer.appLockAuthenticator.checkAvailability(this)
+        appLockAvailabilityHint = when (availability) {
+            com.example.application.applock.AppLockAuthAvailability.READY -> null
+            com.example.application.applock.AppLockAuthAvailability.NONE_ENROLLED ->
+                "لا يوجد أسلوب مصادقة مسجل على الجهاز (بصمة قوية أو قفل الشاشة) — سجّل أحدهما من إعدادات الجهاز ثم أعد المحاولة."
+            com.example.application.applock.AppLockAuthAvailability.NO_HARDWARE ->
+                "الجهاز لا يدعم المصادقة الحيوية، ولا يوجد قفل شاشة بديل متاح."
+            com.example.application.applock.AppLockAuthAvailability.HARDWARE_UNAVAILABLE ->
+                "جهاز المصادقة غير متاح حالياً — أعد المحاولة بعد قليل."
+            com.example.application.applock.AppLockAuthAvailability.UNSUPPORTED ->
+                "مزيج المصادقة المطلوب غير مدعوم على هذا الجهاز."
+        }
+        // Fail-closed: an unavailable authenticator keeps the app LOCKED (the
+        // cover explains why); the state machine is not asked to authenticate.
+        if (availability != com.example.application.applock.AppLockAuthAvailability.READY) return
+        if (!service.beginAuthentication()) return
+        appContainer.appLockAuthenticator.launchPrompt(this) { outcome ->
+            service.onAuthenticationResult(outcome)
+            if (outcome != com.example.domain.core.security.applock.AppLockAuthOutcome.SUCCESS) {
+                // Re-arm the cover hint on the next attempt.
+                appLockAvailabilityHint = null
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -207,29 +279,40 @@ class MainActivity : ComponentActivity() {
                 // layout direction is pinned to RTL regardless of device locale —
                 // mirrors, paddings and navigation follow the reading direction.
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-                    Surface(
-                        modifier = Modifier.fillMaxSize(),
-                        color = MaterialTheme.colorScheme.background
+                    // APP LOCK GATE: while the state machine demands
+                    // authentication the app content is NOT composed at all
+                    // (fail-closed cover; the system prompt is launched through
+                    // the thin adapter above — no security logic here).
+                    AppLockGate(
+                        lockStateFlow = appContainer.appLockService.currentState,
+                        initializedFlow = appContainer.appLockService.initialized,
+                        availabilityText = { appLockAvailabilityHint },
+                        onUnlockRequested = { requestAppUnlock() }
                     ) {
-                        MainAppScreen(
-                            viewModel = viewModel,
-                            tasksViewModel = tasksViewModel,
-                            filesViewModel = filesViewModel,
-                            settingsViewModel = settingsViewModel,
-                            studioViewModel = studioViewModel,
-                            chatCapabilitiesViewModel = chatCapabilitiesViewModel,
-                            sessionsViewModel = sessionsViewModel,
-                            knowledgeViewModel = knowledgeViewModel,
-                            governanceViewModel = governanceViewModel,
-                            providersViewModel = providersViewModel,
-                            radarViewModel = radarViewModel,
-                            decisionViewModel = decisionViewModel,
-                            workflowsViewModel = workflowsViewModel,
-                            agentsViewModel = agentsViewModel,
-                            extensionsViewModel = extensionsViewModel,
-                            activityViewModel = activityViewModel,
-                            projectsViewModel = projectsViewModel
-                        )
+                        Surface(
+                            modifier = Modifier.fillMaxSize(),
+                            color = MaterialTheme.colorScheme.background
+                        ) {
+                            MainAppScreen(
+                                viewModel = viewModel,
+                                tasksViewModel = tasksViewModel,
+                                filesViewModel = filesViewModel,
+                                settingsViewModel = settingsViewModel,
+                                studioViewModel = studioViewModel,
+                                chatCapabilitiesViewModel = chatCapabilitiesViewModel,
+                                sessionsViewModel = sessionsViewModel,
+                                knowledgeViewModel = knowledgeViewModel,
+                                governanceViewModel = governanceViewModel,
+                                providersViewModel = providersViewModel,
+                                radarViewModel = radarViewModel,
+                                decisionViewModel = decisionViewModel,
+                                workflowsViewModel = workflowsViewModel,
+                                agentsViewModel = agentsViewModel,
+                                extensionsViewModel = extensionsViewModel,
+                                activityViewModel = activityViewModel,
+                                projectsViewModel = projectsViewModel
+                            )
+                        }
                     }
                 }
             }

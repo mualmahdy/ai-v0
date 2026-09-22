@@ -170,7 +170,16 @@ class StudioViewModel(
      * authority (the SAME service the governance surface grants through).
      * Null ⇒ the affordance reports itself unavailable, honestly.
      */
-    private val permissionGrantService: com.example.application.security.PermissionGrantService? = null
+    private val permissionGrantService: com.example.application.security.PermissionGrantService? = null,
+    /**
+     * RESIDUAL CLOSURE (persistence-failure leak): the honest NON-UI sink for
+     * durable-persistence failures raised by DETACHED executions/invocations —
+     * their scope is gone, so the diagnostic banner belongs to a view they
+     * must no longer touch. Production keeps the SAME convention
+     * AuditTrailService uses for its own write failures (stderr — logcat on
+     * Android); tests observe the messages without capturing stderr.
+     */
+    private val detachedPersistenceFailureSink: (String) -> Unit = { System.err.println(it) }
 ) : ViewModel() {
 
     /** The conversation feature's own slice of UI state (was 18 fields of UiState). */
@@ -824,6 +833,12 @@ class StudioViewModel(
      * EXECUTION-PINNED workspace (§2: a mid-execution workspace switch can
      * neither lose the turn nor write it into the wrong workspace).
      * Fire-and-forget with an honest diagnostic banner on failure.
+     *
+     * RESIDUAL CLOSURE (persistence-failure leak): the FAILURE side-effect is
+     * now bound to the execution's OWN identity too — a DETACHED execution
+     * still persists (and may still fail) under its pinned scope, but its
+     * failure may NEVER mutate the current view (scope B's diagnostic banner
+     * stays clean); it is recorded through the non-UI sink instead.
      */
     private fun persistTurnDurably(
         sessionId: ConversationSessionId?,
@@ -839,7 +854,8 @@ class StudioViewModel(
         attachments: List<TurnAttachment> = emptyList(),
         sources: List<TurnSourceRef> = emptyList(),
         pinnedWorkspaceId: String? = null,
-        pinnedProjectId: Long? = null
+        pinnedProjectId: Long? = null,
+        executionTaskId: String
     ) {
         val id = sessionId ?: return
         viewModelScope.launch {
@@ -884,8 +900,20 @@ class StudioViewModel(
                     )
                 }
             }.onFailure { e ->
-                _state.update {
-                    it.copy(diagnosticBanner = "تعذر حفظ دورة المحادثة بشكل دائم: ${e.localizedMessage}")
+                // RESIDUAL CLOSURE (persistence-failure leak): the banner is
+                // written ONLY while THIS execution is still the view's current
+                // one — a detached execution's persistence failure is recorded
+                // through the non-UI sink, never onto another scope's view.
+                if (currentExecutionTaskId == executionTaskId) {
+                    _state.update {
+                        it.copy(diagnosticBanner = "تعذر حفظ دورة المحادثة بشكل دائم: ${e.localizedMessage}")
+                    }
+                } else {
+                    detachedPersistenceFailureSink(
+                        "durable turn persistence failed for detached execution $executionTaskId " +
+                                "(workspace=${pinnedWorkspaceId}, session=${id.value}): " +
+                                "${e::class.simpleName}: ${e.message}"
+                    )
                 }
             }
         }
@@ -1519,7 +1547,8 @@ class StudioViewModel(
                                     attachments = attachments,
                                     sources = collectedSources.map { it.toTurnSourceRef() },
                                     pinnedWorkspaceId = pinnedWorkspaceId,
-                                    pinnedProjectId = pinnedProjectId
+                                    pinnedProjectId = pinnedProjectId,
+                                    executionTaskId = executionTaskId
                                 )
                             }
                             is ExecutionEvent.Error -> when {
@@ -1549,7 +1578,8 @@ class StudioViewModel(
                                     eventCount = executionEventCount,
                                     attachments = attachments,
                                     pinnedWorkspaceId = pinnedWorkspaceId,
-                                    pinnedProjectId = pinnedProjectId
+                                    pinnedProjectId = pinnedProjectId,
+                                    executionTaskId = executionTaskId
                                 )
                             }
                             else -> Unit
@@ -1577,7 +1607,8 @@ class StudioViewModel(
                             attachments = attachments,
                             sources = collectedSources.map { it.toTurnSourceRef() },
                             pinnedWorkspaceId = pinnedWorkspaceId,
-                            pinnedProjectId = pinnedProjectId
+                            pinnedProjectId = pinnedProjectId,
+                            executionTaskId = executionTaskId
                         )
                     }
                     if (event is ExecutionEvent.Error &&
@@ -1596,7 +1627,8 @@ class StudioViewModel(
                             eventCount = executionEventCount,
                             attachments = attachments,
                             pinnedWorkspaceId = pinnedWorkspaceId,
-                            pinnedProjectId = pinnedProjectId
+                            pinnedProjectId = pinnedProjectId,
+                            executionTaskId = executionTaskId
                         )
                     }
 
@@ -1996,6 +2028,12 @@ class StudioViewModel(
      * scope — the result is conversation history by design (§9) and must
      * survive a reopen. No session is created for invocations that never
      * resolve (a pending block alone creates nothing).
+     *
+     * RESIDUAL CLOSURE (persistence-failure leak): the FAILURE side-effect and
+     * the created-session VIEW BINDING are both bound to the invocation's
+     * captured scope — a capability that started in scope A may fail
+     * durably (and bind its created session) only under A; the visible UI
+     * state of scope B is never mutated by A's persistence path.
      */
     private fun persistCapabilityEvent(
         entry: ChatEntry.CapabilityResult,
@@ -2010,7 +2048,6 @@ class StudioViewModel(
         viewModelScope.launch {
             runCatching {
                 var targetSessionId = scope?.sessionId
-                var bindCreatedSessionToView = false
                 if (targetSessionId == null) {
                     // P3: no session existed at invocation time — create one
                     // pinned to the CAPTURED scope (mode = the conversation's
@@ -2024,16 +2061,6 @@ class StudioViewModel(
                         workspaceId = scope?.workspaceId
                     )
                     targetSessionId = created.id.value
-                    // The view binds to the created session ONLY when the
-                    // conversation still lives in the captured scope (a
-                    // switched-away view never receives a foreign binding).
-                    val stillInCapturedScope = runCatching {
-                        workspaceRuntimeService.activeWorkspaceIdOrNull() == scope?.workspaceId &&
-                            workspaceRuntimeService.activeProjectIdOrNull() == scope?.projectId
-                    }.getOrDefault(false)
-                    if (stillInCapturedScope && _state.value.activeSessionId == null) {
-                        bindCreatedSessionToView = true
-                    }
                 }
                 conversationSessionService.appendTimelineEvent(
                     ConversationTimelineEvent(
@@ -2052,17 +2079,63 @@ class StudioViewModel(
                     ),
                     workspaceId = scope?.workspaceId
                 )
-                if (bindCreatedSessionToView) {
+                // The view binds to the created session ONLY when the view
+                // STILL lives in the captured scope AT THE MOMENT OF THE WRITE
+                // (a switched-away view never receives a foreign binding —
+                // the pre-write check may have raced a scope switch).
+                if (scope != null && scope.sessionId == null &&
+                    invocationScopeStillAttached(scope) &&
+                    _state.value.activeSessionId == null
+                ) {
                     _state.update { it.copy(activeSessionId = targetSessionId) }
                 }
             }.onFailure { e ->
-                _state.update {
-                    it.copy(
-                        diagnosticBanner = "تعذر حفظ نتيجة القدرة في سجل الجلسة: ${e.localizedMessage}"
+                // RESIDUAL CLOSURE (capability persistence leak): the banner
+                // is written ONLY when the CURRENT view still lives in the
+                // invocation's ORIGINATING scope — a result belonging to
+                // scope A never mutates scope B's visible UI state; it is
+                // recorded through the non-UI sink instead.
+                if (invocationScopeStillAttached(scope)) {
+                    _state.update {
+                        it.copy(
+                            diagnosticBanner = "تعذر حفظ نتيجة القدرة في سجل الجلسة: ${e.localizedMessage}"
+                        )
+                    }
+                } else {
+                    detachedPersistenceFailureSink(
+                        "capability event persistence failed for detached invocation " +
+                                "(workspace=${scope?.workspaceId}, project=${scope?.projectId}, " +
+                                "session=${scope?.sessionId}, entry=${entry.id}): " +
+                                "${e::class.simpleName}: ${e.message}"
                     )
                 }
             }
         }
+    }
+
+    /**
+     * RESIDUAL CLOSURE (persistence-failure leak): whether the CURRENT view
+     * still lives in the invocation's ORIGINATING scope — the only view that
+     * may see this invocation's persistence diagnostics or receive its
+     * created-session binding. A session captured at invocation time must
+     * still be the active one; a sessionless invocation matches by
+     * (workspace, project). An UNKNOWN provenance (null scope) never
+     * qualifies (fail-closed — the current scope cannot be proven to be the
+     * originating one).
+     */
+    private fun invocationScopeStillAttached(scope: CapabilityInvocationScope?): Boolean {
+        if (scope == null) return false
+        // Fail-closed runtime reads (a broken scope service can never prove
+        // the current view is the originating one — the OLD binding check
+        // behaved the same way via getOrDefault(false)).
+        val currentWorkspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }
+        val currentProjectId = runCatching { workspaceRuntimeService.activeProjectIdOrNull() }
+        if (currentWorkspaceId.isFailure || currentProjectId.isFailure) return false
+        val sameScope = currentWorkspaceId.getOrNull() == scope.workspaceId &&
+                currentProjectId.getOrNull() == scope.projectId
+        val sessionAligned = scope.sessionId == null ||
+                _state.value.activeSessionId == scope.sessionId
+        return sameScope && sessionAligned
     }
 
     /** Presentation source ref → the durable twin. */

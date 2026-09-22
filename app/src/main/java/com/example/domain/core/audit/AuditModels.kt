@@ -67,4 +67,15 @@ object AuditActions {
     const val POLICY_ROLLED_BACK = "POLICY_ROLLED_BACK"
     const val APPROVAL_GRANTED = "APPROVAL_GRANTED"
     const val APPROVAL_REJECTED = "APPROVAL_REJECTED"
+    // APP LOCK (backend): the lock's policy/lifecycle events — secret-free by
+    // construction (authentication itself is delegated to the Android system;
+    // only policy and outcome transitions are audited, never credentials or
+    // biometric data).
+    const val APP_LOCK_ENABLED = "APP_LOCK_ENABLED"
+    const val APP_LOCK_DISABLED = "APP_LOCK_DISABLED"
+    const val APP_LOCK_TRIGGERED = "APP_LOCK_TRIGGERED"
+    const val APP_LOCK_AUTH_STARTED = "APP_LOCK_AUTH_STARTED"
+    const val APP_LOCK_AUTH_SUCCESS = "APP_LOCK_AUTH_SUCCESS"
+    const val APP_LOCK_AUTH_FAILED = "APP_LOCK_AUTH_FAILED"
+    const val APP_LOCK_AUTH_CANCELLED = "APP_LOCK_AUTH_CANCELLED"
 }

@@ -107,6 +107,30 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
     var appendTimelineEventCount = 0
     var updateTimelineEventStateCount = 0
 
+    /**
+     * RESIDUAL CLOSURE (failure injection — persistence-failure leak tests):
+     * when set, appendTurnForWorkspace throws AFTER recording the attempt
+     * (workspace-scoped the same way the real SQL adapter would fail).
+     */
+    var appendTurnFailure: RuntimeException? = null
+
+    /** Number of appendTurn attempts that FAILED (the injected failure ran). */
+    var failedAppendTurnAttempts = 0
+
+    /**
+     * RESIDUAL CLOSURE (failure injection): when set, appendTimelineEvent-
+     * ForWorkspace throws AFTER recording the attempted target session —
+     * the capability-persistence leak tests prove the failure was aimed at
+     * the ORIGINATING session, not the current one.
+     */
+    var appendTimelineEventFailure: RuntimeException? = null
+
+    /** The sessionId of the LAST failed timeline-event append attempt. */
+    var lastFailedTimelineEventSessionId: String? = null
+
+    /** Number of timeline-event append attempts that FAILED. */
+    var failedAppendTimelineEventAttempts = 0
+
     fun seed(session: ConversationSession) {
         sessionsFlow.value = sessionsFlow.value + session
     }
@@ -154,6 +178,13 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
     ): Boolean {
         val session = getSessionForWorkspace(turn.sessionId, workspaceId) ?: return false
         appendCount++
+        // RESIDUAL CLOSURE (failure injection): the failed attempt still
+        // counts as an append attempt (the failure path RAN — tests assert
+        // the leak-free handling, not the absence of the attempt).
+        appendTurnFailure?.let { failure ->
+            failedAppendTurnAttempts++
+            throw failure
+        }
         appendedTurns += turn
         turns += turn
         upsertSession(
@@ -204,6 +235,11 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
     ): Boolean {
         val session = getSessionForWorkspace(event.sessionId, workspaceId) ?: return false
         appendTimelineEventCount++
+        appendTimelineEventFailure?.let { failure ->
+            failedAppendTimelineEventAttempts++
+            lastFailedTimelineEventSessionId = event.sessionId.value
+            throw failure
+        }
         timelineEvents.removeAll { it.id == event.id }
         timelineEvents += event
         return true
@@ -222,14 +258,20 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
     ): Boolean {
         if (getSessionForWorkspace(sessionId, workspaceId) == null) return false
         updateTimelineEventStateCount++
+        // RESIDUAL CLOSURE (integrity): the SAME final predicate as the Room
+        // SQL — the update applies ONLY to the event in THIS session carrying
+        // THIS approvalId (a stray approvalId from another session changes
+        // nothing), and the result reports whether a row actually changed.
+        var changed = false
         timelineEvents.replaceAll { event ->
-            if (event.approvalId == approvalId) {
+            if (event.sessionId == sessionId && event.approvalId == approvalId) {
+                changed = true
                 event.copy(approvalState = state, isSuccessful = state != "REJECTED")
             } else {
                 event
             }
         }
-        return true
+        return changed
     }
 }
 

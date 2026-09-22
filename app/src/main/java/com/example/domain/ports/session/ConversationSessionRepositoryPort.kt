@@ -161,8 +161,11 @@ interface ConversationSessionRepositoryPort {
     ): List<com.example.domain.core.session.ConversationTimelineEvent> = emptyList()
 
     /**
-     * WORKSPACE-AUTHORIZED approval-state transition of a persisted approval
-     * block (the conversation-visible mirror of the REAL gate decision).
+     * WORKSPACE-AUTHORIZED + SESSION-BOUND approval-state transition of a
+     * persisted approval block (the conversation-visible mirror of the REAL
+     * gate decision). The update applies ONLY to the event carrying
+     * [approvalId] inside [sessionId] (RESIDUAL CLOSURE: an approvalId that
+     * belongs to a different session can never flip that session's block).
      * Returns whether a row was updated.
      */
     suspend fun updateTimelineEventApprovalStateForWorkspace(

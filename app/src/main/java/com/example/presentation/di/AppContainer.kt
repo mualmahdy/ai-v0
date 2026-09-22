@@ -193,6 +193,55 @@ class AppContainer(context: Context) {
         com.example.application.audit.AuditTrailService(database = database)
     }
 
+    // ------------------------------------------------------------------
+    // APP LOCK BACKEND (policy/state machine + platform adapter)
+    // ------------------------------------------------------------------
+
+    /**
+     * APP LOCK — the persisted POLICY store (DataStore Preferences; exactly
+     * app_lock_enabled / app_lock_mode / app_lock_timeout — configuration
+     * ONLY, never authentication state and never credentials).
+     */
+    val appLockSettings: com.example.domain.ports.security.AppLockSettingsPort by lazy {
+        com.example.infrastructure.preferences.AppLockSettingsDataStore(
+            dataStoreFile = java.io.File(
+                java.io.File(appContext.filesDir, "applock"),
+                com.example.infrastructure.preferences.AppLockSettingsDataStore.FILE_NAME
+            ),
+            scope = applicationScope
+        )
+    }
+
+    /**
+     * APP LOCK — the state machine (UNLOCKED → LOCK_PENDING →
+     * AUTHENTICATION_REQUIRED → AUTHENTICATING → UNLOCKED; process death
+     * under an enabled policy starts AUTHENTICATION_REQUIRED — in-memory
+     * unlocked state is never trusted across processes). Audited through the
+     * EXISTING unified trail above (secret-free events).
+     */
+    val appLockService: com.example.application.applock.AppLockService by lazy {
+        com.example.application.applock.AppLockService(
+            settings = appLockSettings,
+            auditTrail = auditTrailService,
+            actorId = localPrincipalId
+        ).also { service ->
+            // Fail-closed process start: load the persisted policy; with the
+            // lock enabled the machine begins AUTHENTICATION_REQUIRED (the
+            // shell shows the system prompt at the first foreground).
+            applicationScope.launch { service.initialize() }
+        }
+    }
+
+    /**
+     * APP LOCK — the Android system-authentication adapter (BiometricPrompt
+     * with BIOMETRIC_STRONG | DEVICE_CREDENTIAL; the ONLY platform-specific
+     * piece — no custom PIN UI, no app-owned secrets, and hardware/enrollment
+     * failures can never unlock).
+     */
+    val appLockAuthenticator: com.example.application.applock.AppLockAuthenticator by lazy {
+        com.example.infrastructure.platform.applock.BiometricAppLockAuthenticator()
+    }
+
     /** Shared sandbox file engine (containment-checked §7/§9/§11). */
     private val sandboxProjectsDir: java.io.File by lazy {
         java.io.File(appContext.filesDir, "workspaces").apply { mkdirs() }

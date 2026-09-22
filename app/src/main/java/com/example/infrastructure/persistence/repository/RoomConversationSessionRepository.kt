@@ -251,12 +251,17 @@ class RoomConversationSessionRepository(
         // WORKSPACE AUTHORIZATION: the state mirror only updates for a session
         // owned by the authorized workspace.
         val owner = sessionDao.byIdAndWorkspace(sessionId.value, workspaceId) ?: return false
-        dao.updateApprovalState(
+        // RESIDUAL CLOSURE (integrity): the FINAL SQL predicate binds the
+        // update to the ORIGINATING session as well — an approvalId that
+        // happens to exist in ANOTHER session's timeline can never flip that
+        // session's block, no matter how the id reached this call.
+        val rows = dao.updateApprovalState(
+            sessionId = owner.sessionId,
             approvalId = approvalId,
             state = state,
             isSuccessful = state != "REJECTED"
         )
-        return true
+        return rows > 0
     }
 
     // ------------------------------------------------------------------

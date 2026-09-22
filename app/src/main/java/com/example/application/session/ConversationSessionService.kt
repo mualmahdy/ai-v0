@@ -266,7 +266,10 @@ suspend fun getSession(
 
     /**
      * Mirrors a REAL gate decision onto the persisted approval block —
-     * WORKSPACE-AUTHORIZED. Returns whether the mirror applied.
+     * WORKSPACE-AUTHORIZED and SESSION-BOUND (RESIDUAL CLOSURE: the update
+     * applies ONLY to the approval event carrying [approvalId] inside
+     * [sessionId] — a stray/colliding approvalId from another session
+     * changes nothing). Returns whether the mirror applied.
      */
     suspend fun updateTimelineEventApprovalState(
         sessionId: ConversationSessionId,

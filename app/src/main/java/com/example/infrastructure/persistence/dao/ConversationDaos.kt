@@ -132,13 +132,21 @@ interface ChatTimelineEventDao {
 
     /**
      * Approval-state transition (the conversation-visible mirror of the REAL
-     * gate decision) — keyed by the approval's own id.
+     * gate decision) — keyed by the approval's own id AND its ORIGINATING
+     * session (RESIDUAL CLOSURE: a wrong/colliding approvalId belonging to
+     * ANOTHER session can never flip this session's block). Returns the
+     * number of updated rows (0 = no such (session, approvalId) event).
      */
     @Query(
         "UPDATE chat_timeline_events SET approvalState = :state, isSuccessful = :isSuccessful " +
-                "WHERE approvalId = :approvalId"
+                "WHERE sessionId = :sessionId AND approvalId = :approvalId"
     )
-    suspend fun updateApprovalState(approvalId: String, state: String, isSuccessful: Boolean)
+    suspend fun updateApprovalState(
+        sessionId: String,
+        approvalId: String,
+        state: String,
+        isSuccessful: Boolean
+    ): Int
 
     @Query("DELETE FROM chat_timeline_events WHERE sessionId = :sessionId")
     suspend fun deleteForSession(sessionId: String)

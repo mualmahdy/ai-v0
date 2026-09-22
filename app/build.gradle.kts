@@ -133,7 +133,15 @@ dependencies {
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
-  // implementation(libs.androidx.datastore.preferences)
+  // APP LOCK BACKEND: DataStore Preferences — persists the app-lock POLICY
+  // only (enabled/mode/timeout; never credentials — see
+  // AppLockSettingsDataStore). Previously present in the catalog but
+  // disabled; the app-lock backend is its first production consumer.
+  implementation(libs.androidx.datastore.preferences)
+  // APP LOCK BACKEND: the official Android system-authentication prompt
+  // (BiometricPrompt, BIOMETRIC_STRONG | DEVICE_CREDENTIAL) — the only new
+  // library of the feature, per the dependency discipline rules.
+  implementation(libs.androidx.biometric)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)

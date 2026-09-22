@@ -127,6 +127,14 @@ class StudioViewModelResidualClosureTest {
     private val approvalStore = com.example.infrastructure.governed.InMemoryHumanApprovalStore()
     private val gate = com.example.application.governed.HumanApprovalGate(approvalStore)
 
+    /**
+     * RESIDUAL CLOSURE (persistence-failure leak tests): the non-UI sink the
+     * ViewModel records DETACHED persistence failures through (production
+     * default is stderr — the AuditTrailService write-failure convention).
+     */
+    private val recordedDetachedFailures =
+        java.util.Collections.synchronizedList(mutableListOf<String>())
+
     @Before
     fun setUp() = runBlocking {
         Dispatchers.setMain(dispatcher)
@@ -268,7 +276,8 @@ class StudioViewModelResidualClosureTest {
             permissionGrantService = com.example.application.security.PermissionGrantService(
                 permissionGrantDao = FakePermissionGrantDaoForVm(),
                 telemetryPort = NoopTelemetryForVm
-            )
+            ),
+            detachedPersistenceFailureSink = { message -> recordedDetachedFailures.add(message) }
         )
     }
 
@@ -885,6 +894,228 @@ class StudioViewModelResidualClosureTest {
         )
     }
 
+
+    // ------------------------------------------------------------------
+    // RESIDUAL CLOSURE — persistence-failure UI leaks + approval integrity
+    // (Test A / Test B / Test C / Test D per the closure task contract)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `Test A - a detached execution's durable turn persistence failure never touches the new scope's banner`() {
+        // The execution starts in workspace A and is held mid-stream.
+        val executionGate = CompletableDeferred<Unit>()
+        streamGates += executionGate
+        runPrompt("تنفيذ يفشل حفظه بعد الفصل")
+        awaitUntil { viewModel.state.value.streamText.isNotBlank() }
+
+        // The user switches to workspace B — the execution DETACHES (the
+        // switch's own banner is the honest scope-change notice).
+        runBlocking { switchToNewWorkspace() }
+        awaitUntil { viewModel.state.value.activeSessionId == null }
+        val bannerBeforeFailure = viewModel.state.value.diagnosticBanner
+
+        // From now on every durable append FAILS (a disk-full-class failure).
+        repository.appendTurnFailure = IllegalStateException("disk full (simulated)")
+
+        // The detached execution completes and tries to persist its turn
+        // into ITS OWN pinned session under workspace A.
+        executionGate.complete(Unit)
+        awaitUntil(20_000) { repository.failedAppendTurnAttempts >= 1 }
+        awaitExecutionSettled()
+
+        // The failure path RAN and was handled: it is recorded honestly in
+        // the NON-UI sink (the failure is real — "nowhere" is not honest)…
+        assertTrue(
+            "the detached persistence failure must be recorded non-visibly",
+            recordedDetachedFailures.any { it.contains("detached execution") && it.contains("disk full") }
+        )
+        // …but the CURRENT scope B's diagnostic state was NEVER mutated by
+        // the old execution's failure (the banner is still exactly the
+        // scope-change notice — no persistence-failure text leaked in).
+        assertEquals(
+            "scope B's diagnostic banner must stay untouched by a detached persistence failure",
+            bannerBeforeFailure,
+            viewModel.state.value.diagnosticBanner
+        )
+        assertFalse(
+            "no persistence-failure text may leak into scope B's banner",
+            viewModel.state.value.diagnosticBanner?.contains("تعذر حفظ دورة المحادثة") == true
+        )
+        // And the view state of B is still the clean, fresh conversation.
+        assertTrue(viewModel.state.value.timeline.isEmpty())
+        assertEquals("", viewModel.state.value.streamText)
+    }
+
+    @Test
+    fun `Test B - a capability persistence failure in a detached scope never touches the new scope's UI`() {
+        // The capability invocation starts in workspace A, before any
+        // session exists (the P3 shape — the resolved result creates one).
+        val pendingId = viewModel.appendPendingCapability(
+            com.example.presentation.state.CapabilityKind.SEARCH,
+            "بحث الإغلاق المتبقي"
+        )
+
+        // The user switches to workspace B before the result resolves.
+        runBlocking { switchToNewWorkspace() }
+        awaitUntil { viewModel.state.value.activeSessionId == null }
+        val bannerBeforeFailure = viewModel.state.value.diagnosticBanner
+
+        // Capability persistence fails from now on.
+        repository.appendTimelineEventFailure =
+            IllegalStateException("timeline write failed (simulated)")
+
+        // The result resolves under the ORIGINATING scope A.
+        viewModel.resolveCapabilityResult(
+            pendingId,
+            ChatEntry.CapabilityResult(
+                id = pendingId,
+                kind = com.example.presentation.state.CapabilityKind.SEARCH,
+                title = "بحث الإغلاق المتبقي",
+                summary = "النتيجة الجاهزة",
+                isSuccessful = true
+            )
+        )
+        awaitUntil(20_000) { repository.failedAppendTimelineEventAttempts >= 1 }
+        awaitExecutionSettled()
+
+        // The result stayed bound to A: the failed write targeted the
+        // session created under the CAPTURED scope (A) — never B's view.
+        assertNotNull(
+            "the capability persistence attempt must have run",
+            repository.lastFailedTimelineEventSessionId
+        )
+        val failedSession = runBlocking {
+            repository.getSession(ConversationSessionId(repository.lastFailedTimelineEventSessionId!!))
+        }
+        assertEquals(
+            "the failed capability write must target the ORIGINATING workspace's session",
+            activeWorkspace.id,
+            failedSession?.workspaceId
+        )
+        // The failure is recorded non-visibly (honest — it really happened)…
+        assertTrue(
+            "the detached capability persistence failure must be recorded non-visibly",
+            recordedDetachedFailures.any { it.contains("detached invocation") }
+        )
+        // …but B's UI state was never mutated: no banner change, no timeline
+        // pollution, no foreign session binding.
+        assertEquals(
+            "scope B's diagnostic banner must stay untouched by A's capability persistence failure",
+            bannerBeforeFailure,
+            viewModel.state.value.diagnosticBanner
+        )
+        assertFalse(
+            "no capability persistence failure text may leak into scope B",
+            viewModel.state.value.diagnosticBanner?.contains("تعذر حفظ نتيجة القدرة") == true
+        )
+        assertTrue(viewModel.state.value.timeline.isEmpty())
+        assertNull("no foreign session binding may leak into B's view", viewModel.state.value.activeSessionId)
+    }
+
+    @Test
+    fun `Test C - an approval update with session B and approvalId A changes nothing`() {
+        // Two sessions in the same workspace, each carrying its OWN approval
+        // event (A's event lives ONLY in session A).
+        val sessionA = com.example.domain.core.session.ConversationSession(
+            id = ConversationSessionId("sess_integrity_a"),
+            workspaceId = activeWorkspace.id,
+            title = "جلسة السلامة أ"
+        )
+        val sessionB = com.example.domain.core.session.ConversationSession(
+            id = ConversationSessionId("sess_integrity_b"),
+            workspaceId = activeWorkspace.id,
+            title = "جلسة السلامة ب"
+        )
+        repository.seed(sessionA)
+        repository.seed(sessionB)
+        runBlocking {
+            repository.appendTimelineEventForWorkspace(
+                com.example.domain.core.session.ConversationTimelineEvent(
+                    id = "apv_evt_a",
+                    sessionId = sessionA.id,
+                    kind = com.example.domain.core.session.TimelineEventKind.APPROVAL_BLOCK,
+                    title = "موافقة أ",
+                    summary = "طلب أ",
+                    approvalId = "approval_a",
+                    approvalState = "PENDING"
+                ),
+                workspaceId = activeWorkspace.id
+            )
+            repository.appendTimelineEventForWorkspace(
+                com.example.domain.core.session.ConversationTimelineEvent(
+                    id = "apv_evt_b",
+                    sessionId = sessionB.id,
+                    kind = com.example.domain.core.session.TimelineEventKind.APPROVAL_BLOCK,
+                    title = "موافقة ب",
+                    summary = "طلب ب",
+                    approvalId = "approval_b",
+                    approvalState = "PENDING"
+                ),
+                workspaceId = activeWorkspace.id
+            )
+        }
+
+        // A WRONG pairing: session B + approvalId A (a stray id reaching the
+        // mirror path) must update NOTHING — not A's event (the old SQL would
+        // have flipped it), not B's event.
+        val applied = runBlocking {
+            sessionService.updateTimelineEventApprovalState(
+                sessionId = sessionB.id,
+                approvalId = "approval_a",
+                state = "APPROVED"
+            )
+        }
+        assertFalse("a (session B, approvalId A) update must report no row changed", applied)
+        val events = runBlocking { repository.timelineEventsForSession(sessionA.id) }
+        assertEquals(
+            "approval A's event in session A must stay PENDING (integrity: session+approvalId)",
+            "PENDING",
+            events.single { it.approvalId == "approval_a" }.approvalState
+        )
+        val eventsB = runBlocking { repository.timelineEventsForSession(sessionB.id) }
+        assertEquals(
+            "approval B's event in session B must stay PENDING too",
+            "PENDING",
+            eventsB.single { it.approvalId == "approval_b" }.approvalState
+        )
+    }
+
+    @Test
+    fun `Test D - an approval update with session A and approvalId A applies correctly`() {
+        val sessionA = com.example.domain.core.session.ConversationSession(
+            id = ConversationSessionId("sess_integrity_d"),
+            workspaceId = activeWorkspace.id,
+            title = "جلسة السلامة د"
+        )
+        repository.seed(sessionA)
+        runBlocking {
+            repository.appendTimelineEventForWorkspace(
+                com.example.domain.core.session.ConversationTimelineEvent(
+                    id = "apv_evt_d",
+                    sessionId = sessionA.id,
+                    kind = com.example.domain.core.session.TimelineEventKind.APPROVAL_BLOCK,
+                    title = "موافقة صحيحة",
+                    summary = "طلب صحيح",
+                    approvalId = "approval_d",
+                    approvalState = "PENDING"
+                ),
+                workspaceId = activeWorkspace.id
+            )
+        }
+
+        val applied = runBlocking {
+            sessionService.updateTimelineEventApprovalState(
+                sessionId = sessionA.id,
+                approvalId = "approval_d",
+                state = "APPROVED"
+            )
+        }
+        assertTrue("the CORRECT (session, approvalId) pairing must apply", applied)
+        val events = runBlocking { repository.timelineEventsForSession(sessionA.id) }
+        val event = events.single { it.approvalId == "approval_d" }
+        assertEquals("APPROVED", event.approvalState)
+        assertTrue(event.isSuccessful)
+    }
 
     // ------------------------------------------------------------------
     // Harness helpers

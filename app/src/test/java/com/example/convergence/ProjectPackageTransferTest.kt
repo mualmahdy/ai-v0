@@ -249,6 +249,252 @@ class ProjectPackageTransferTest {
     }
 
     // ------------------------------------------------------------------
+    // TRANSFER INTEGRITY HARDENING (v2 packages — canonical manifest digest)
+    // ------------------------------------------------------------------
+
+    private fun unzipToMap(bytes: ByteArray): MutableMap<String, ByteArray> {
+        val map = mutableMapOf<String, ByteArray>()
+        java.util.zip.ZipInputStream(ByteArrayInputStream(bytes)).use { zis ->
+            while (true) {
+                val e = zis.nextEntry ?: break
+                map[e.name] = zis.readBytes()
+            }
+        }
+        return map
+    }
+
+    private fun zipFromMap(entries: Map<String, ByteArray>): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zos ->
+            entries.forEach { (name, data) ->
+                zos.putNextEntry(ZipEntry(name)); zos.write(data); zos.closeEntry()
+            }
+        }
+        return out.toByteArray()
+    }
+
+    @Test
+    fun `an exported v2 package carries the manifest digest and imports cleanly`() = runBlocking {
+        val sourceId = sourceProjectId()
+        val buffer = ByteArrayOutputStream()
+        assertTrue(packages.exportProject("ws1", sourceId, buffer) is TransferOutcome.Success)
+
+        val entries = unzipToMap(buffer.toByteArray())
+        assertTrue(
+            "the package must carry the manifest.sha256 integrity entry",
+            entries.containsKey(com.example.application.transfer.ProjectPackageService.MANIFEST_SHA256_ENTRY)
+        )
+        val manifest = org.json.JSONObject(entries["manifest.json"]!!.decodeToString())
+        assertEquals(
+            "exported packages declare schema v2",
+            2,
+            manifest.getInt("packageSchemaVersion")
+        )
+        // The digest matches the manifest bytes (canonical serialization).
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(entries["manifest.json"]!!)
+            .joinToString("") { "%02x".format(it) }
+        assertEquals(digest, entries[com.example.application.transfer.ProjectPackageService.MANIFEST_SHA256_ENTRY]!!.decodeToString().trim())
+
+        val (newId, report) = packages.importProject(
+            "ws1", ByteArrayInputStream(buffer.toByteArray()), ImportConflictPolicy.RENAME
+        )
+        assertTrue("the original package must import: ${report.message}", report.ok)
+        assertNotNull(newId)
+    }
+
+    @Test
+    fun `a tampered manifest is rejected with MANIFEST_HASH_MISMATCH`() = runBlocking {
+        val sourceId = sourceProjectId()
+        val buffer = ByteArrayOutputStream()
+        assertTrue(packages.exportProject("ws1", sourceId, buffer) is TransferOutcome.Success)
+
+        // Tamper: flip the project name INSIDE the manifest (byte-level
+        // corruption or a hand-edited package — the digest is stale now).
+        val entries = unzipToMap(buffer.toByteArray())
+        val manifest = org.json.JSONObject(entries["manifest.json"]!!.decodeToString())
+        manifest.put("projectName", "Evil Renamed")
+        entries["manifest.json"] = manifest.toString(2).toByteArray()
+        val tampered = zipFromMap(entries)
+
+        val before = db.projectDao().activeProjectsForWorkspaceList("ws1").size
+        val (newId, report) = packages.importProject(
+            "ws1", ByteArrayInputStream(tampered), ImportConflictPolicy.RENAME
+        )
+        assertNull("a modified package must be rejected", newId)
+        assertTrue("rejection reason must be the manifest digest: ${report.message}", report.message.contains("MANIFEST_HASH_MISMATCH"))
+        assertEquals("the destination stays untouched", before, db.projectDao().activeProjectsForWorkspaceList("ws1").size)
+    }
+
+    @Test
+    fun `a file removed from the package while declared in contentHashes is rejected`() = runBlocking {
+        val sourceId = sourceProjectId()
+        val buffer = ByteArrayOutputStream()
+        assertTrue(packages.exportProject("ws1", sourceId, buffer) is TransferOutcome.Success)
+
+        // Remove one file from the nested files.zip (a declared-content
+        // file disappears — a corrupted/modified package).
+        val entries = unzipToMap(buffer.toByteArray())
+        val innerFiles = unzipToMap(entries["files.zip"]!!)
+        innerFiles.remove("code/main.kt")
+        entries["files.zip"] = zipFromMap(innerFiles)
+        val mutilated = zipFromMap(entries)
+
+        val before = db.projectDao().activeProjectsForWorkspaceList("ws1").size
+        val (newId, report) = packages.importProject(
+            "ws1", ByteArrayInputStream(mutilated), ImportConflictPolicy.RENAME
+        )
+        assertNull("a package with a missing declared file must be rejected", newId)
+        assertTrue(
+            "rejection reason must be the missing declared file: ${report.message}",
+            report.message.contains("HASH_MISMATCH")
+        )
+        assertEquals(before, db.projectDao().activeProjectsForWorkspaceList("ws1").size)
+    }
+
+    @Test
+    fun `a package declaring schema v2 without the digest entry is rejected`() = runBlocking {
+        val sourceId = sourceProjectId()
+        val buffer = ByteArrayOutputStream()
+        assertTrue(packages.exportProject("ws1", sourceId, buffer) is TransferOutcome.Success)
+
+        // Strip the digest entry while KEEPING the v2 declaration.
+        val entries = unzipToMap(buffer.toByteArray())
+        entries.remove(com.example.application.transfer.ProjectPackageService.MANIFEST_SHA256_ENTRY)
+        val stripped = zipFromMap(entries)
+
+        val (newId, report) = packages.importProject(
+            "ws1", ByteArrayInputStream(stripped), ImportConflictPolicy.RENAME
+        )
+        assertNull(newId)
+        assertTrue(
+            "a v2-declaring package without integrity must be rejected: ${report.message}",
+            report.message.contains("MISSING_MANIFEST_DIGEST")
+        )
+    }
+
+    @Test
+    fun `a v1 legacy package without a digest still imports (backward compatibility)`() = runBlocking {
+        // v1 packages (pre-integrity) stay importable — the documented
+        // compatibility rule; per-file hashes still apply when present.
+        val out = ByteArrayOutputStream()
+        val filesZip = ByteArrayOutputStream()
+        ZipOutputStream(filesZip).use { inner ->
+            inner.putNextEntry(ZipEntry("legacy.txt")); inner.write("legacy".toByteArray()); inner.closeEntry()
+        }
+        val manifest = org.json.JSONObject()
+            .put("packageSchemaVersion", 1)
+            .put("appId", com.example.application.transfer.ProjectPackageService.APP_ID)
+            .put("projectName", "Legacy")
+            .put("secretsExcluded", true)
+        ZipOutputStream(out).use { zos ->
+            zos.putNextEntry(ZipEntry("manifest.json")); zos.write(manifest.toString().toByteArray()); zos.closeEntry()
+            zos.putNextEntry(ZipEntry("project.json"))
+            zos.write(org.json.JSONObject().put("name", "Legacy").toString().toByteArray()); zos.closeEntry()
+            zos.putNextEntry(ZipEntry("files.zip")); zos.write(filesZip.toByteArray()); zos.closeEntry()
+        }
+        val (newId, report) = packages.importProject(
+            "ws1", ByteArrayInputStream(out.toByteArray()), ImportConflictPolicy.RENAME
+        )
+        assertTrue("legacy v1 import must keep working: ${report.message}", report.ok)
+        assertNotNull(newId)
+        assertTrue(File(fileStore.projectRoot(newId!!), "legacy.txt").exists())
+    }
+
+    // ------------------------------------------------------------------
+    // TRANSFER INTEGRITY — foreign-workspace import isolation
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `importing another workspace's package contaminates nothing (clean new identity)`() = runBlocking {
+        db.workspaceDao().insertOrUpdate(
+            WorkspaceEntity(
+                id = "ws2", name = "WS2", description = "",
+                networkPolicy = "HYBRID", autonomyPolicy = "SUPERVISED", settingsJson = "{}",
+                isActive = false, lastActiveProjectId = null,
+                createdAtEpochMs = 1, lastAccessedEpochMs = 1
+            )
+        )
+        val sourceId = sourceProjectId()
+        // One session bound to the SOURCE project (the package carries it).
+        db.conversationSessionDao().upsert(
+            com.example.infrastructure.persistence.entities.ConversationSessionEntity(
+                sessionId = "sess_src", workspaceId = "ws1", title = "جلسة المصدر",
+                mode = "AGENT", turnCount = 2, createdAtEpochMs = 1, lastActiveAtEpochMs = 1,
+                projectId = sourceId
+            )
+        )
+
+        val buffer = ByteArrayOutputStream()
+        assertTrue(packages.exportProject("ws1", sourceId, buffer) is TransferOutcome.Success)
+
+        val (newId, report) = packages.importProject(
+            "ws2", ByteArrayInputStream(buffer.toByteArray()), ImportConflictPolicy.RENAME
+        )
+        assertTrue("import into ws2 must succeed: ${report.message}", report.ok)
+        assertNotNull(newId)
+
+        // The new identity is wholly owned by ws2 — the foreign workspace
+        // metadata (sourceWorkspaceId) is METADATA ONLY.
+        val newProject = db.projectDao().getProjectById(newId!!)!!
+        assertEquals("ws2", newProject.workspaceId)
+        // Knowledge and sessions are REBOUND to the new project under ws2.
+        val docs = db.knowledgeDocumentDao().getProjectPrivateDocuments(newId)
+        assertEquals(1, docs.size)
+        assertEquals("ws2", docs.single().workspaceId)
+        assertEquals(newId, docs.single().projectId)
+        val sessions = db.conversationSessionDao().forProject(newId)
+        assertEquals(1, sessions.size)
+        assertEquals("ws2", sessions.single().workspaceId)
+        assertEquals(newId, sessions.single().projectId)
+        assertTrue(
+            "the imported session is a NEW identity (no id reuse)",
+            sessions.single().sessionId != "sess_src"
+        )
+        // The SOURCE project's rows are untouched (import ≠ mutation).
+        assertEquals(
+            "ws1",
+            db.conversationSessionDao().byId("sess_src")!!.workspaceId
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // SESSION EXPORT — workspace authorization (foreign scope refusal)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `session export refuses a foreign workspace and serves the owner`() = runBlocking {
+        val sourceId = sourceProjectId()
+        db.conversationSessionDao().upsert(
+            com.example.infrastructure.persistence.entities.ConversationSessionEntity(
+                sessionId = "sess_export", workspaceId = "ws1", title = "جلسة التصدير",
+                mode = "QUICK_CHAT", turnCount = 0, createdAtEpochMs = 1, lastActiveAtEpochMs = 1,
+                projectId = sourceId
+            )
+        )
+        db.conversationTurnDao().insert(
+            com.example.infrastructure.persistence.entities.ConversationTurnEntity(
+                turnId = "turn_export_1", sessionId = "sess_export", prompt = "سؤال",
+                answer = "جواب", agentName = null, agentRole = null, modelResourceId = null,
+                tokensConsumed = 1, durationMs = 1, isSuccessful = true, eventCount = 1,
+                createdAtEpochMs = 2
+            )
+        )
+        val exporter = com.example.application.transfer.SessionExportService(db)
+
+        // The OWNING workspace gets the canonical export (org.json renders
+        // "/" as "\/" in JSON — assert the schema marker without the slash).
+        val owned = exporter.exportSession("ws1", "sess_export", com.example.application.transfer.SessionExportService.Format.JSON)
+        assertNotNull(owned)
+        assertTrue(owned!!.contains("aiv0.session.canonical"))
+        assertTrue(owned.contains("sess_export"))
+
+        // A FOREIGN workspace is NOT FOUND — no transcript leaves its owner.
+        val foreign = exporter.exportSession("ws2", "sess_export", com.example.application.transfer.SessionExportService.Format.JSON)
+        assertNull(foreign)
+    }
+
+    // ------------------------------------------------------------------
     // Clone / move
     // ------------------------------------------------------------------
 

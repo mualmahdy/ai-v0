@@ -66,9 +66,17 @@ class ProjectPackageService(
     private val limits: TransferLimits = TransferLimits.DEFAULT
 ) {
     companion object {
-        /** Package schema version — SEPARATE from the Room DB version. */
-        const val PACKAGE_SCHEMA_VERSION = 1
+        /**
+         * Package schema version — SEPARATE from the Room DB version.
+         * v2: the manifest itself is integrity-protected (canonical
+         * serialization → SHA-256 → the manifest.sha256 integrity entry —
+         * TRANSFER INTEGRITY HARDENING); v1 legacy packages (no integrity
+         * entry) remain importable per the backward-compatibility rule.
+         */
+        const val PACKAGE_SCHEMA_VERSION = 2
         const val MANIFEST_ENTRY = "manifest.json"
+        /** The canonical SHA-256 digest of the manifest.json bytes (v2+). */
+        const val MANIFEST_SHA256_ENTRY = "manifest.sha256"
         const val PROJECT_ENTRY = "project.json"
         const val FILES_ENTRY = "files.zip"
         const val KNOWLEDGE_ENTRY = "knowledge.json"
@@ -153,7 +161,14 @@ class ProjectPackageService(
                     zos.write(bytes)
                     zos.closeEntry()
                 }
-                put(MANIFEST_ENTRY, manifest.toString(2).toByteArray())
+                // TRANSFER INTEGRITY HARDENING (v2): the manifest travels with
+                // its canonical digest — the exact bytes below are hashed
+                // (manifest.toString(2) UTF-8 is the canonical serialization)
+                // and the digest lands as its own entry; an importer that sees
+                // a manifest byte-flipped in transit rejects the package.
+                val manifestBytes = manifest.toString(2).toByteArray()
+                put(MANIFEST_ENTRY, manifestBytes)
+                put(MANIFEST_SHA256_ENTRY, sha256Of(manifestBytes).toByteArray())
                 put(PROJECT_ENTRY, JSONObject().apply {
                     put("name", project.name)
                     put("description", project.description ?: "")
@@ -308,6 +323,30 @@ class ProjectPackageService(
                     "الحزمة من تطبيق مختلف ($appId) — غير متوافقة."
                 )
             }
+            // --- TRANSFER INTEGRITY HARDENING (v2): the canonical manifest digest ---
+            // manifest.sha256 = SHA-256 of the exact manifest.json bytes. A
+            // mismatch = the manifest itself was corrupted/modified in
+            // transit (a flipped project name, a stripped contentHashes
+            // object, a doctored count) → reject. A package that DECLARES
+            // schema v2+ must carry the entry; v1 legacy packages (no
+            // integrity entry) stay importable (documented compatibility).
+            val manifestDigestEntry = entries[MANIFEST_SHA256_ENTRY]
+            if (manifestDigestEntry != null) {
+                val expectedManifestSha = manifestDigestEntry.decodeToString().trim().lowercase()
+                if (expectedManifestSha.isBlank() ||
+                    expectedManifestSha != sha256Of(manifestBytes)
+                ) {
+                    return null to TransferFailureExt(
+                        "MANIFEST_HASH_MISMATCH",
+                        "بصمة manifest.json لا تطابق — الحزمة عُدّلت أو تالفة."
+                    )
+                }
+            } else if (schemaVersion >= 2) {
+                return null to TransferFailureExt(
+                    "MISSING_MANIFEST_DIGEST",
+                    "حزمة تصرّح بالإصدار $schemaVersion دون بصمة manifest.sha256 — مرفوضة."
+                )
+            }
             // --- Secret inclusion detection (defense in depth, §13) ---
             val secretsExcluded = manifest.optBoolean("secretsExcluded", false)
             if (!secretsExcluded) {
@@ -342,12 +381,20 @@ class ProjectPackageService(
                 }
             }
             // --- Validate content hashes ---
+            // TRANSFER INTEGRITY HARDENING: every file the manifest declares a
+            // hash for MUST be present in the package — a REMOVED file is a
+            // modified package (the previous check silently passed it).
             val hashes = manifest.optJSONObject("contentHashes")
             if (hashes != null) {
                 for (key in hashes.keys()) {
                     val expected = hashes.optString(key)
-                    val actual = fileEntries[key]?.let { sha256Of(it) }
-                    if (actual != null && expected.isNotBlank() && !actual.equals(expected, ignoreCase = true)) {
+                    val actualBytes = fileEntries[key]
+                        ?: return null to TransferFailureExt(
+                            "HASH_MISMATCH",
+                            "ملف مُصرّح به في الحزمة مفقود: $key — الحزمة تالفة."
+                        )
+                    val actual = sha256Of(actualBytes)
+                    if (expected.isNotBlank() && !actual.equals(expected, ignoreCase = true)) {
                         return null to TransferFailureExt(
                             "HASH_MISMATCH", "بصمة المحتوى لا تطابق لـ $key — الحزمة تالفة."
                         )

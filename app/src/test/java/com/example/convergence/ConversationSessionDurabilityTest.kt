@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -193,5 +194,107 @@ class ConversationSessionDurabilityTest {
         val updated = repository.getSession(session.id)
         assertEquals("Gemini 2.5 Pro", updated?.modelDisplayName)
         assertEquals("google_google_gemini_model_gemini-2_5_pro", updated?.modelResourceId)
+    }
+
+    // ------------------------------------------------------------------
+    // RESIDUAL CLOSURE (approval integrity) — the REAL Room SQL predicate.
+    // The approval-state mirror update is bound to (sessionId, approvalId):
+    // a wrong/colliding approvalId from ANOTHER session can never flip this
+    // session's block (the previous SQL matched rows by approvalId alone).
+    // ------------------------------------------------------------------
+
+    /** A repository WITH the timeline-events DAO wired (the SQL under test). */
+    private fun timelineRepository() = RoomConversationSessionRepository(
+        database = db,
+        sessionDao = db.conversationSessionDao(),
+        turnDao = db.conversationTurnDao(),
+        timelineEventDao = db.chatTimelineEventDao()
+    )
+
+    private suspend fun seedApprovalEvent(
+        sessionId: String,
+        eventId: String,
+        approvalId: String
+    ) {
+        val repo = timelineRepository()
+        assertTrue(
+            repo.appendTimelineEventForWorkspace(
+                com.example.domain.core.session.ConversationTimelineEvent(
+                    id = eventId,
+                    sessionId = ConversationSessionId(sessionId),
+                    kind = com.example.domain.core.session.TimelineEventKind.APPROVAL_BLOCK,
+                    title = "تنفيذ أداة",
+                    summary = "طلب موافقة",
+                    approvalId = approvalId,
+                    approvalState = "PENDING"
+                ),
+                workspaceId = "ws_alpha"
+            )
+        )
+    }
+
+    @Test
+    fun `approval update with session B and approvalId A changes nothing (Room SQL)`() = runBlocking {
+        val sessionA = service.createSession(mode = ChatMode.QUICK_CHAT)
+        val sessionB = service.createSession(mode = ChatMode.QUICK_CHAT)
+        seedApprovalEvent(sessionA.id.value, "apv_room_a", "approval_room_a")
+        seedApprovalEvent(sessionB.id.value, "apv_room_b", "approval_room_b")
+
+        // The WRONG pairing: session B + approvalId A.
+        val applied = timelineRepository().updateTimelineEventApprovalStateForWorkspace(
+            sessionId = sessionB.id,
+            approvalId = "approval_room_a",
+            state = "APPROVED",
+            workspaceId = "ws_alpha"
+        )
+
+        assertFalse("no row may change for a (session B, approvalId A) pairing", applied)
+        val eventsA = timelineRepository().timelineEventsForSession(sessionA.id)
+        assertEquals(
+            "approval A's row must stay PENDING — the SQL predicate is session+approvalId",
+            "PENDING",
+            eventsA.single { it.approvalId == "approval_room_a" }.approvalState
+        )
+        val eventsB = timelineRepository().timelineEventsForSession(sessionB.id)
+        assertEquals(
+            "PENDING",
+            eventsB.single { it.approvalId == "approval_room_b" }.approvalState
+        )
+    }
+
+    @Test
+    fun `approval update with session A and approvalId A applies correctly (Room SQL)`() = runBlocking {
+        val sessionA = service.createSession(mode = ChatMode.QUICK_CHAT)
+        seedApprovalEvent(sessionA.id.value, "apv_room_ok", "approval_room_ok")
+
+        val applied = timelineRepository().updateTimelineEventApprovalStateForWorkspace(
+            sessionId = sessionA.id,
+            approvalId = "approval_room_ok",
+            state = "APPROVED",
+            workspaceId = "ws_alpha"
+        )
+
+        assertTrue("the correct pairing must update the row", applied)
+        val events = timelineRepository().timelineEventsForSession(sessionA.id)
+        val event = events.single { it.approvalId == "approval_room_ok" }
+        assertEquals("APPROVED", event.approvalState)
+        assertTrue(event.isSuccessful)
+    }
+
+    @Test
+    fun `approval update is still workspace-authorized (foreign workspace changes nothing)`() = runBlocking {
+        val sessionA = service.createSession(mode = ChatMode.QUICK_CHAT)
+        seedApprovalEvent(sessionA.id.value, "apv_room_ws", "approval_room_ws")
+
+        val applied = timelineRepository().updateTimelineEventApprovalStateForWorkspace(
+            sessionId = sessionA.id,
+            approvalId = "approval_room_ws",
+            state = "APPROVED",
+            workspaceId = "ws_foreign"
+        )
+
+        assertFalse("a foreign workspace must never update another workspace's row", applied)
+        val events = timelineRepository().timelineEventsForSession(sessionA.id)
+        assertEquals("PENDING", events.single { it.approvalId == "approval_room_ws" }.approvalState)
     }
 }
