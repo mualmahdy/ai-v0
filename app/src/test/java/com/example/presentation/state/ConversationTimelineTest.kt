@@ -152,6 +152,65 @@ class ConversationTimelineTest {
     }
 
     // ------------------------------------------------------------------
+    // UI POLISH §10 — the expandable details' REAL step history
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `real events append their steps to the expandable history`() {
+        var live = ExecutionLifecycleProjection.apply(base, started())
+        live = ExecutionLifecycleProjection.apply(live, decisionMade())
+        live = ExecutionLifecycleProjection.apply(live, actionStarted(stepIndex = 0))
+        live = ExecutionLifecycleProjection.apply(live, actionCompleted())
+        live = ExecutionLifecycleProjection.apply(live, toolRequested("http_fetch"))
+        live = ExecutionLifecycleProjection.apply(live, toolResult("http_fetch"))
+
+        assertEquals(5, live.steps.size)
+        // The step labels are the REAL events' own labels (the decision's
+        // display name, the action's output, the tool names) — never
+        // chain-of-thought, never invented.
+        assertEquals(DecisionActionType.EXECUTE_STEP.displayName, live.steps[0].label)
+        assertEquals(DecisionActionType.EXECUTE_STEP.displayName, live.steps[1].label)
+        assertTrue(live.steps[2].label.startsWith("تم:"))
+        assertEquals("أداة: http_fetch", live.steps[3].label)
+        assertEquals("نتيجة أداة: http_fetch", live.steps[4].label)
+        // Every step carries its honest timestamp.
+        live.steps.forEach { step -> assertTrue(step.timestampMs > 0L) }
+    }
+
+    @Test
+    fun `telemetry events add no steps - the details stay real`() {
+        var live = ExecutionLifecycleProjection.apply(base, started())
+        live = ExecutionLifecycleProjection.apply(live, ExecutionEvent.UsageBudgetUpdate("exec_1", 1, 2, 3, 4))
+        live = ExecutionLifecycleProjection.apply(live, observation())
+        assertEquals(0, live.steps.size)
+    }
+
+    @Test
+    fun `the step history is capped - the LAST steps stay visible`() {
+        var live = ExecutionLifecycleProjection.apply(base, started())
+        repeat(20) { index ->
+            live = ExecutionLifecycleProjection.apply(live, toolRequested("tool_$index"))
+        }
+        assertEquals(14, live.steps.size)
+        assertEquals("أداة: tool_19", live.steps.last().label)
+        assertEquals("أداة: tool_6", live.steps.first().label)
+    }
+
+    @Test
+    fun `blank step labels are dropped - no noise rows in the details`() {
+        val live = ExecutionLifecycleProjection.apply(base, started())
+        // A blank outputSummary would otherwise surface as an empty step.
+        val completed = ExecutionEvent.ActionCompleted(
+            executionId = "exec_1",
+            action = action(),
+            outputSummary = "",
+            observation = observation().observation
+        )
+        val next = ExecutionLifecycleProjection.apply(live, completed)
+        assertEquals(0, next.steps.size)
+    }
+
+    // ------------------------------------------------------------------
     // ChatAutoScrollPolicy (§9)
     // ------------------------------------------------------------------
 

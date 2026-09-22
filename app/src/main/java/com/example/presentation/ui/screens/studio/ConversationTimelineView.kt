@@ -75,6 +75,8 @@ import com.example.presentation.state.ChatSourceRef
 import com.example.presentation.state.CapabilityKind
 import com.example.presentation.state.ExecutionPhase
 import com.example.presentation.state.LiveExecutionState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -577,11 +579,17 @@ private fun CollapsibleSources(
     AnimatedVisibility(visible = expanded) {
         Column(modifier = Modifier.padding(top = 4.dp)) {
             sources.forEachIndexed { index, source ->
+                // UI POLISH §16: the citation line shows the title and the
+                // DOMAIN (parsed from the real URL) — a readable reference
+                // instead of a raw URL wall; the provider id is the honest
+                // fallback for local/provider-scoped citations.
+                val domain = sourceDomain(source.url)
                 Text(
                     text = buildString {
                         append("${index + 1}. ")
                         append(source.title)
-                        source.url?.let { append("\n$it") }
+                        val origin = domain ?: source.providerId
+                        if (origin != null) append(" — $origin")
                         source.confidenceScore?.let {
                             append("\nالثقة: ")
                             append("%.2f".format(it))
@@ -596,6 +604,12 @@ private fun CollapsibleSources(
             }
         }
     }
+}
+
+/** UI POLISH §16: the readable domain of a citation URL (null when absent). */
+internal fun sourceDomain(url: String?): String? {
+    if (url.isNullOrBlank()) return null
+    return runCatching { java.net.URI(url).host?.removePrefix("www.") }.getOrNull()
 }
 
 /**
@@ -956,6 +970,11 @@ private fun StatusPill(text: String, color: Color) {
  * phase line (real events only — see ExecutionLifecycleProjection), the
  * streaming text while tokens arrive, and the honest partial text when the
  * execution was cancelled.
+ *
+ * UI POLISH §10: the counts row is now an EXPANDABLE details affordance —
+ * "2 أداة • 4.2s ⌄" opens the REAL step history (the actions/tools/
+ * verdicts the kernel actually reported, with their honest elapsed times —
+ * never chain-of-thought, never raw telemetry).
  */
 @Composable
 fun ExecutionLifecycleView(
@@ -965,12 +984,35 @@ fun ExecutionLifecycleView(
     modifier: Modifier = Modifier
 ) {
     val cancelled = live.phase == ExecutionPhase.CANCELLED
+
+    // §10: the live duration — recomputed every second while the execution
+    // is running (a real elapsed time, frozen naturally once terminal).
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    val isRunning = live.phase != ExecutionPhase.COMPLETED &&
+        live.phase != ExecutionPhase.FAILED &&
+        live.phase != ExecutionPhase.CANCELLED
+    LaunchedEffect(live.executionId, isRunning) {
+        while (isRunning && kotlinx.coroutines.currentCoroutineContext().isActive) {
+            kotlinx.coroutines.delay(1_000)
+            nowMs = System.currentTimeMillis()
+        }
+    }
+    val durationSeconds = if (live.startedAtMs > 0) {
+        ((if (isRunning) nowMs else System.currentTimeMillis()) - live.startedAtMs)
+            .coerceAtLeast(0) / 1000.0
+    } else 0.0
+
+    // §10: the expandable execution details (real steps only).
+    var detailsExpanded by remember { mutableStateOf(false) }
+    val hasDetails = live.steps.isNotEmpty() || live.toolCount > 0 || live.actionCount > 0
+
     Surface(
         shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (cancelled) 0.35f else 0.55f),
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 2.dp)
+            .animateContentSize()
             .testTag("execution_lifecycle_${live.executionId}")
     ) {
         Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
@@ -1018,19 +1060,6 @@ fun ExecutionLifecycleView(
                     }
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                if (live.toolCount > 0 || live.actionCount > 0) {
-                    Text(
-                        text = buildString {
-                            if (live.actionCount > 0) append("${live.actionCount} إجراء")
-                            if (live.toolCount > 0) {
-                                if (isNotEmpty()) append(" • ")
-                                append("${live.toolCount} أداة")
-                            }
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.outline
-                    )
-                }
                 if (streamText.isNotBlank()) {
                     IconButton(onClick = onCopyStream, modifier = Modifier.size(28.dp)) {
                         Icon(
@@ -1039,6 +1068,78 @@ fun ExecutionLifecycleView(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(14.dp)
                         )
+                    }
+                }
+            }
+
+            // ---- §10: the expandable DETAILS affordance ("2 أداة • 4.2s ⌄")
+            // — real counts + the honest elapsed time; expanding reveals the
+            // step history projected from the REAL kernel events.
+            if (hasDetails) {
+                Surface(
+                    onClick = { detailsExpanded = !detailsExpanded },
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp)
+                        .testTag("execution_details_toggle_${live.executionId}")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = buildString {
+                                if (live.toolCount > 0) append("${live.toolCount} أداة")
+                                if (live.actionCount > 0) {
+                                    if (isNotEmpty()) append(" • ")
+                                    append("${live.actionCount} إجراء")
+                                }
+                                if (durationSeconds > 0) {
+                                    if (isNotEmpty()) append(" • ")
+                                    append("%.1fs".format(durationSeconds))
+                                }
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            if (detailsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (detailsExpanded) "إخفاء تفاصيل التنفيذ" else "عرض تفاصيل التنفيذ",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+                AnimatedVisibility(visible = detailsExpanded) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp)
+                            .testTag("execution_details_panel_${live.executionId}")
+                    ) {
+                        if (live.steps.isEmpty()) {
+                            Text(
+                                text = "لا تفاصيل بعد — الخطوات الفعلية تظهر هنا فور حدوثها.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            live.steps.forEach { step ->
+                                val elapsed = if (live.startedAtMs > 0) {
+                                    ((step.timestampMs - live.startedAtMs).coerceAtLeast(0)) / 1000.0
+                                } else 0.0
+                                Text(
+                                    text = "+%.1fs • ${step.label}".format(elapsed),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    modifier = Modifier.padding(vertical = 1.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }

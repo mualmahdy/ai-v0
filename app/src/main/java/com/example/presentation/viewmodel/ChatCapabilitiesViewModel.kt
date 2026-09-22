@@ -154,6 +154,23 @@ class ChatCapabilitiesViewModel(
     /** FUNCTIONAL CLOSURE (§21): the last scope this catalog resolved for. */
     private var lastSeenScope: Pair<String, Long?>? = null
 
+    /**
+     * UI POLISH (§4 — Creation group honesty): the LLM connection fact —
+     * TRUE when an operational LLM resource exists (lifecycle ENABLED or
+     * ACTIVE, health not UNAVAILABLE — the same operational truth the
+     * workspace's connect banner uses). The providers feature owns the
+     * resources; the SCREEN pushes the fact here (value+lambda seam, the
+     * established sessionNetworkPolicy pattern — no new dependency).
+     */
+    private var hasActiveLlm: Boolean = false
+
+    /** The screen pushes the LLM availability fact (see [hasActiveLlm]). */
+    fun setLlmConnected(connected: Boolean) {
+        if (hasActiveLlm == connected) return
+        hasActiveLlm = connected
+        refreshCapabilities()
+    }
+
     // ------------------------------------------------------------------
     // §3/§4 — the capability catalog
     // ------------------------------------------------------------------
@@ -240,6 +257,7 @@ class ChatCapabilitiesViewModel(
                     semanticKnowledgeReady = ragPipelineService.isLocalSemanticModelReady,
                     searchProviderWired = true, // production wires the local-fallback adapter
                     isNetworkAvailable = networkMonitorProvider?.isNetworkAvailable?.value ?: false,
+                    hasActiveLlm = hasActiveLlm,
                     enabledSkillCount = operationalSkillCount,
                     registeredToolCount = componentRegistry.listTools().size,
                     mcpServerCount = enabledMcpServers.size,

@@ -18,9 +18,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -32,14 +37,20 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.TurnAttachment
 
 /**
  * ============================================================================
- * ChatComposer — the conversation input (Chat Workspace Task 1 §12, extended
- * by CHAT CAPABILITIES Task 2 §3/§5)
+ * ChatComposer — the COMMAND SURFACE of the conversation (Chat Workspace
+ * Task 1 §12, CHAT CAPABILITIES Task 2 §3/§5, UI POLISH §7)
  * ============================================================================
  *
  * IME (§4A): the composer root owns the SINGLE imePadding of the screen —
@@ -47,9 +58,19 @@ import com.example.domain.core.session.TurnAttachment
  * shell consumes the navigation-bar share of the insets so this padding
  * lands EXACTLY at the keyboard's top edge (no gap, no double padding).
  *
- * TASK 2: the leading "+" button is the CAPABILITY ENTRY POINT (§3) and the
- * chips row stages the ATTACHMENT DRAFTS picked through SAF (§5) — each
- * chip removable before send, import progress honestly visible.
+ * THE COMMAND SURFACE (§7), top to bottom:
+ *  1. the ATTACHMENT DRAFTS chips row (SAF-picked, removable before send);
+ *  2. the CONTEXT STRIP — one compact row carrying the capability hub entry
+ *     and the live AGENT/MODEL binding chip (the conversation's command
+ *     context — both open EXISTING surfaces, nothing new is invented);
+ *  3. the INPUT ROW — [+] quick attach | the field | the VOICE placeholder
+ *     (disabled with the honest reason — UNAVAILABLE ≠ HIDDEN) | Send/Stop.
+ *
+ * The VOICE placeholder (§3/§7): speech has NO runtime execution path in
+ * this version (the provider architecture knows the service type; nothing
+ * executes it). The mic is therefore VISIBLE but non-executable, at reduced
+ * opacity, with the real reason in its accessibility label — never hidden,
+ * never a dead button that pretends to work.
  */
 @Composable
 fun ChatComposer(
@@ -60,8 +81,19 @@ fun ChatComposer(
     onCancel: () -> Unit,
     onClearDraft: () -> Unit,
     modifier: Modifier = Modifier,
-    /** Task-2: opens the capability menu (the "+" entry point — §3). */
+    /** Task-2: opens the capability hub (the context strip's chip — §3). */
     onOpenCapabilities: () -> Unit = {},
+    /** UI POLISH §7: the [+] quick-attach — launches the file picker directly. */
+    onQuickAttach: () -> Unit = {},
+    /** UI POLISH §3/§7: quick attach mirrors the hub's ATTACH_FILE availability. */
+    canQuickAttach: Boolean = true,
+    quickAttachDisabledReason: String? = null,
+    /** UI POLISH §7: opens the conversation-context sheet (agent/model). */
+    onOpenContext: () -> Unit = {},
+    /** UI POLISH §7: the live binding the agent/model chip summarizes. */
+    chatMode: ChatMode = ChatMode.QUICK_CHAT,
+    selectedModelDisplayName: String? = null,
+    activeAgentName: String? = null,
     /** Task-2: the staged attachment drafts (chips before send — §5). */
     attachmentDrafts: List<TurnAttachment> = emptyList(),
     /** Task-2: remove one attachment BEFORE send (§5). */
@@ -186,22 +218,62 @@ fun ChatComposer(
                 )
             }
 
-            Row(verticalAlignment = Alignment.Bottom) {
-                // The capability entry point (Task 2 §3 — "+" opens the
-                // categorized menu; progressive disclosure, not a giant list).
-                Surface(
+            // ---- §7: the CONTEXT STRIP — the command row under the drafts.
+            // Two compact chips, two EXISTING surfaces: the capability hub
+            // and the conversation-context (agent/model) sheet.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp)
+                    .testTag("composer_context_strip")
+            ) {
+                CommandChip(
+                    icon = Icons.Default.Apps,
+                    text = "القدرات",
                     onClick = onOpenCapabilities,
+                    tag = "btn_open_capabilities",
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                CommandChip(
+                    icon = if (chatMode == ChatMode.AGENT) Icons.Default.Psychology
+                    else Icons.Default.AutoAwesome,
+                    text = contextChipLabel(chatMode, selectedModelDisplayName, activeAgentName),
+                    onClick = onOpenContext,
+                    tag = "chip_composer_agent_model",
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+            }
+
+            // ---- §7: the INPUT ROW — quick attach | field | voice | send ----
+            Row(verticalAlignment = Alignment.Bottom) {
+                // The [+] quick-attach (§7): the most common intent, one tap
+                // from the field. Mirrors the hub's ATTACH_FILE availability
+                // honestly — disabled with the REAL reason when the storage
+                // layer has no active project (§3: never a mystery dead button).
+                val quickAttachDescription = if (canQuickAttach) {
+                    "إرفاق ملف مع الرسالة"
+                } else {
+                    quickAttachDisabledReason?.let { "إرفاق ملف — $it" }
+                        ?: "إرفاق ملف — غير متاح حالياً"
+                }
+                Surface(
+                    onClick = { if (canQuickAttach) onQuickAttach() },
+                    enabled = canQuickAttach,
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     modifier = Modifier
                         .size(48.dp)
-                        .testTag("btn_open_capabilities")
+                        .semantics { contentDescription = quickAttachDescription }
+                        .testTag("btn_quick_attach")
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             Icons.Default.Add,
-                            contentDescription = "القدرات — إرفاق ملفات أو استدعاء أدوات ومهارات",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            contentDescription = null,
+                            tint = if (canQuickAttach) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
                         )
                     }
                 }
@@ -237,6 +309,32 @@ fun ChatComposer(
                     }
                 )
                 Spacer(modifier = Modifier.width(8.dp))
+
+                // ---- §3/§7: the VOICE placeholder — speech has no runtime
+                // execution path in this version, so the mic stays VISIBLE
+                // (reduced opacity, NO click action) with the honest reason
+                // in its accessibility label. UNAVAILABLE ≠ HIDDEN. (It is
+                // non-interactive by design — no touch target is required,
+                // and the semantics node stays discoverable.)
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .semantics {
+                            contentDescription =
+                                "الإدخال الصوتي — غير متاح في هذا الإصدار (لا يوجد مسار تنفيذ للصوت)"
+                        }
+                        .testTag("voice_input_placeholder")
+                ) {
+                    Icon(
+                        Icons.Default.Mic,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+
                 // FUNCTIONAL CLOSURE (§15): attachment-ONLY sends are refused —
                 // Vision is not operational, so "chips without a question" is
                 // a meaningless request. The send button requires TEXT; the
@@ -254,7 +352,7 @@ fun ChatComposer(
                         androidx.compose.foundation.layout.Box(contentAlignment = Alignment.Center) {
                             Icon(
                                 Icons.Default.Close,
-                                contentDescription = "إلغاء التنفيذ",
+                                contentDescription = "إيقاف التنفيذ",
                                 tint = MaterialTheme.colorScheme.error
                             )
                         }
@@ -280,6 +378,55 @@ fun ChatComposer(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * §7: one compact command chip of the composer's context strip — a 48dp
+ * touch target that opens its EXISTING owning surface (hub / context sheet).
+ */
+@Composable
+private fun CommandChip(
+    icon: ImageVector,
+    text: String,
+    onClick: () -> Unit,
+    tag: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+        modifier = modifier
+            .heightIn(min = 44.dp)
+            .testTag(tag)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Icon(
+                Icons.Default.ArrowDropDown,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp)
+            )
         }
     }
 }

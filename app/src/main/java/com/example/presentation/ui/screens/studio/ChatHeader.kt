@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -38,15 +39,18 @@ import com.example.domain.core.task.AutonomyPolicy
 
 /**
  * ============================================================================
- * ChatHeader — the compact conversation header (Chat Workspace Task 1 §6)
+ * ChatHeader — the compact conversation header (Chat Workspace Task 1 §6,
+ * UI POLISH §6 — identity + context + IMPORTANT STATE only)
  * ============================================================================
  *
  * A SMALL header that carries only the conversation's context: the session
  * title, the current project, ONE compact context chip (mode + model, or the
  * agent — never duplicated in multiple cards), ONE policy summary chip (the
- * scopes stay SEPARATE: network ≠ autonomy), and the session actions. All
- * deeper controls live behind the two chips (sheets), keeping the timeline
- * the visual core of the screen.
+ * scopes stay SEPARATE: network ≠ autonomy), the session actions, and the
+ * live EXECUTION STATE while the assistant works (§6 "important states" —
+ * real phases only, never engine internals or debug identifiers). All deeper
+ * controls live behind the chips (sheets), keeping the timeline the visual
+ * core of the screen.
  */
 @Composable
 fun ChatHeader(
@@ -66,7 +70,13 @@ fun ChatHeader(
      * Null = the button is not composed at all.
      */
     onOpenSessions: (() -> Unit)?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * UI POLISH §6: the live execution indicator — composed only while an
+     * execution is running (the honest phase label; null = idle/hidden).
+     */
+    isExecuting: Boolean = false,
+    executionPhaseLabel: String? = null
 ) {
     Column(
         modifier = modifier
@@ -141,6 +151,34 @@ fun ChatHeader(
                     .weight(1f, fill = false)
                     .testTag("chip_advanced_summary")
             )
+        }
+
+        // ---- UI POLISH §6: the live EXECUTION STATE (the header's one
+        // "important state") — a compact, honest indicator while the
+        // assistant works: spinner + the real phase label. Hidden when idle.
+        if (isExecuting && executionPhaseLabel != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp)
+                    .testTag("header_execution_indicator")
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(12.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = executionPhaseLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }

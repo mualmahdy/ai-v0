@@ -212,6 +212,11 @@ fun ChatWorkspace(
                 activeAgentName = activeAgent?.identity?.name,
                 networkPolicy = state.networkPolicy,
                 autonomyPolicy = shellAutonomyPolicy,
+                // UI POLISH §6 ("important states", no internals): the live
+                // execution state — a compact indicator while the assistant
+                // works (real phases only — never engine internals).
+                isExecuting = state.isExecuting,
+                executionPhaseLabel = state.liveExecution?.let { lifecycleLabel(it) },
                 onOpenContext = { contextSheetOpen = true },
                 onOpenSettings = { settingsSheetOpen = true },
                 onNewSession = onNewSession,
@@ -262,7 +267,14 @@ fun ChatWorkspace(
                 modifier = Modifier.weight(1f)
             )
 
-            // ---- 3. The composer (owns the screen's single IME inset) ----
+            // ---- 3. The composer — the COMMAND SURFACE (§7) ----
+            // The [+] quick-attach mirrors the hub's ATTACH_FILE row (§3:
+            // the honest availability + reason, never a mystery dead button);
+            // the context strip carries the hub entry + the live agent/model
+            // binding chip; the voice placeholder stays visibly disabled.
+            val attachItem = capabilityState.capabilities.firstOrNull {
+                it.key == ChatCapabilityKey.ATTACH_FILE
+            }
             ChatComposer(
                 value = state.promptInput,
                 isExecuting = state.isExecuting,
@@ -274,11 +286,18 @@ fun ChatWorkspace(
                 onCancel = onCancelExecution,
                 onClearDraft = { onPromptInput("") },
                 onOpenCapabilities = {
-                    // §3: the "+" opens the categorized menu (internal state)
+                    // §3: the context strip's chip opens the categorized hub
                     // and the capability layer refreshes its facts.
                     onOpenCapabilities()
                     capabilityMenuOpen = true
                 },
+                onQuickAttach = { filePicker.launch(arrayOf("*/*")) },
+                canQuickAttach = attachItem?.status == ChatCapabilityStatus.AVAILABLE,
+                quickAttachDisabledReason = attachItem?.reason,
+                onOpenContext = { contextSheetOpen = true },
+                chatMode = state.chatMode,
+                selectedModelDisplayName = state.selectedModelDisplayName,
+                activeAgentName = activeAgent?.identity?.name,
                 attachmentDrafts = capabilityState.attachmentDrafts,
                 onRemoveAttachment = onRemoveAttachment,
                 isImportingAttachment = capabilityState.isImportingAttachment,
@@ -370,12 +389,35 @@ fun ChatWorkspace(
                 when (key) {
                     ChatCapabilityKey.ATTACH_FILE -> filePicker.launch(arrayOf("*/*"))
                     ChatCapabilityKey.ATTACH_FOLDER -> folderPicker.launch(null)
-                    ChatCapabilityKey.VISION_ANALYSIS -> Unit // Planned — not clickable (§7).
                     ChatCapabilityKey.KNOWLEDGE_RETRIEVAL -> knowledgeSheetOpen = true
                     ChatCapabilityKey.SEARCH_INTELLIGENCE -> searchSheetOpen = true
+                    // UI POLISH §4: the AGENT entry opens the EXISTING
+                    // conversation-context sheet (agent catalog + model
+                    // binding) — one surface, one selection concept.
+                    ChatCapabilityKey.AGENT -> contextSheetOpen = true
+                    // UI POLISH §4: the WORKFLOW entry navigates to the
+                    // EXISTING tasks/plans board (TasksScreen hosts the
+                    // workflows builder — presentation integration only).
+                    ChatCapabilityKey.WORKFLOW -> onNavigate(WorkspaceRoutes.TASKS)
                     ChatCapabilityKey.SKILLS -> skillsSheetOpen = true
                     ChatCapabilityKey.TOOLS -> toolsSheetOpen = true
                     ChatCapabilityKey.MCP_SERVERS -> mcpSheetOpen = true
+                    // UI POLISH §4 (Creation via the conversation's REAL
+                    // generation path): the entry PREFILLS the draft (§18 —
+                    // never auto-sends; the user stays in control of send).
+                    ChatCapabilityKey.DOCUMENT_CREATION ->
+                        onPromptInput(com.example.presentation.state.ChatCapabilityTemplates.DOCUMENT)
+                    ChatCapabilityKey.CODE_CREATION ->
+                        onPromptInput(com.example.presentation.state.ChatCapabilityTemplates.CODE)
+                    // UNAVAILABLE ≠ HIDDEN (§3): the version-level disabled
+                    // rows stay visible in the hub with their real reason —
+                    // they are not clickable and reach no handler.
+                    ChatCapabilityKey.VISION_ANALYSIS,
+                    ChatCapabilityKey.IMAGE_GENERATION,
+                    ChatCapabilityKey.SPEECH,
+                    ChatCapabilityKey.CAMERA,
+                    ChatCapabilityKey.SCREEN_SHARE,
+                    ChatCapabilityKey.RESULT_TO_ARTIFACT -> Unit
                 }
             }
         )
@@ -759,7 +801,10 @@ private fun ChatContextPane(
                     ContextRow("الوكيل", agentName ?: "—")
                     ContextRow("الرموز (الجلسة)", "${state.sessionTotalTokens}")
                     ContextRow("الميزانية المتبقية", "${state.remainingBudget}")
-                    ContextRow("سياسة الشبكة", state.networkPolicy.name)
+                    // UI POLISH §6: the user-facing display name — never the
+                    // raw enum identifier (internal/debug values stay out of
+                    // the conversation surfaces).
+                    ContextRow("سياسة الشبكة", state.networkPolicy.displayName)
                 }
             }
 

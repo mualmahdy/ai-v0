@@ -13,7 +13,9 @@ import org.junit.Test
 /**
  * ============================================================================
  * ChatCapabilityPolicyTest — CHAT CAPABILITIES Task 2 §4 (the platform
- * availability policy) + §7 (Vision honesty) + §19 (adaptive layout)
+ * availability policy) + §7 (Vision honesty) + §19 (adaptive layout) +
+ * UI POLISH §3/§4 (the four hub groups, UNAVAILABLE ≠ HIDDEN, Creation
+ * entries' LLM honesty)
  * ============================================================================
  *
  * The REQUIRED test areas covered here (Task 2 §21):
@@ -24,6 +26,14 @@ import org.junit.Test
  *      honest rationale (implemented=false ⇒ never faked as available);
  *  26. adaptive layout state — the pane topology per width class;
  *  28. error/degraded capability behavior — degraded hints stay clickable.
+ *
+ * UI POLISH additions:
+ *  - the hub's FOUR professional groups (Files & Context / Search &
+ *    Intelligence / Media / Creation) in render order;
+ *  - UNAVAILABLE ≠ HIDDEN: the version-level Media/Creation capabilities
+ *    with no runtime execution path stay VISIBLE with real reasons;
+ *  - the Creation entries' honest LLM gating (prefill needs a live LLM);
+ *  - AGENT / WORKFLOW / document / code rows resolve to their REAL paths.
  */
 class ChatCapabilityPolicyTest {
 
@@ -63,13 +73,21 @@ class ChatCapabilityPolicyTest {
                     // has healthy (handshake-complete) MCP servers.
                     healthyMcpServerCount = 3,
                     searchProviderWired = true,
-                    isNetworkAvailable = true
+                    isNetworkAvailable = true,
+                    // UI POLISH §4: the Creation entries need a live LLM.
+                    hasActiveLlm = true
                 )
             }
         )
-        assertEquals(8, resolved.size)
+        assertEquals(17, resolved.size)
         resolved
             .filter { it.key != ChatCapabilityKey.VISION_ANALYSIS }
+            // UI POLISH §3: the version-level no-execution-path rows stay
+            // honestly UNAVAILABLE even in a fully provisioned workspace —
+            // a live LLM/project cannot fake an execution path that does
+            // not exist (image generation, speech, camera, screen share,
+            // save-result-as-artifact).
+            .filter { it.key !in VERSION_LEVEL_UNAVAILABLE_KEYS }
             .forEach { item ->
                 assertEquals(
                     "expected AVAILABLE for ${item.key}: ${item.reason}",
@@ -86,6 +104,15 @@ class ChatCapabilityPolicyTest {
                 )
             }
     }
+
+    /** UI POLISH §3: capabilities with NO runtime execution path in this version. */
+    private val VERSION_LEVEL_UNAVAILABLE_KEYS = setOf(
+        ChatCapabilityKey.IMAGE_GENERATION,
+        ChatCapabilityKey.SPEECH,
+        ChatCapabilityKey.CAMERA,
+        ChatCapabilityKey.SCREEN_SHARE,
+        ChatCapabilityKey.RESULT_TO_ARTIFACT
+    )
 
     // ------------------------------------------------------------------
     // 2 — unavailable reason (§21.2)
@@ -286,16 +313,105 @@ class ChatCapabilityPolicyTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `the menu is categorized into the three agreed groups`() {
+    fun `the hub is categorized into the four professional groups in render order`() {
         val resolved = ChatCapabilityPolicy.resolve(facts())
         val categories = resolved.map { it.category }.distinct()
         assertEquals(
             listOf(
-                ChatCapabilityCategory.FILES_AND_MEDIA,
-                ChatCapabilityCategory.KNOWLEDGE,
-                ChatCapabilityCategory.INTELLIGENCE
+                ChatCapabilityCategory.FILES_AND_CONTEXT,
+                ChatCapabilityCategory.SEARCH_AND_INTELLIGENCE,
+                ChatCapabilityCategory.MEDIA,
+                ChatCapabilityCategory.CREATION
             ),
             categories
         )
+    }
+
+    // ------------------------------------------------------------------
+    // UI POLISH §3 — UNAVAILABLE ≠ HIDDEN: the version-level rows
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `media capabilities without an execution path stay VISIBLE-disabled with real reasons`() {
+        val resolved = ChatCapabilityPolicy.resolve(
+            facts {
+                copy(
+                    activeProjectId = 7L,
+                    knowledgeDocumentCount = 3,
+                    hasActiveLlm = true,
+                    enabledSkillCount = 1,
+                    registeredToolCount = 1,
+                    healthyMcpServerCount = 1
+                )
+            }
+        )
+        val expectedReasons = mapOf(
+            ChatCapabilityKey.IMAGE_GENERATION to ChatCapabilityReasons.IMAGE_GENERATION,
+            ChatCapabilityKey.SPEECH to ChatCapabilityReasons.SPEECH,
+            ChatCapabilityKey.CAMERA to ChatCapabilityReasons.CAMERA,
+            ChatCapabilityKey.SCREEN_SHARE to ChatCapabilityReasons.SCREEN_SHARE
+        )
+        expectedReasons.forEach { (key, reason) ->
+            val item = resolved.first { it.key == key }
+            assertEquals("$key must stay visible-disabled", ChatCapabilityStatus.UNAVAILABLE, item.status)
+            assertEquals("$key carries the real reason", reason, item.reason)
+            assertFalse("$key is never clickable", ChatCapabilityPolicy.isClickable(item))
+        }
+    }
+
+    @Test
+    fun `result-to-artifact is honestly unavailable - attachments register artifacts but results do not`() {
+        val resolved = ChatCapabilityPolicy.resolve(facts { copy(activeProjectId = 7L) })
+        val item = resolved.first { it.key == ChatCapabilityKey.RESULT_TO_ARTIFACT }
+        assertEquals(ChatCapabilityStatus.UNAVAILABLE, item.status)
+        assertEquals(ChatCapabilityReasons.RESULT_TO_ARTIFACT, item.reason)
+        assertFalse(ChatCapabilityPolicy.isClickable(item))
+    }
+
+    @Test
+    fun `creation entries are honest about the LLM gate - no live model, no generation`() {
+        val noLlm = ChatCapabilityPolicy.resolve(facts { copy(hasActiveLlm = false) })
+        listOf(
+            ChatCapabilityKey.DOCUMENT_CREATION,
+            ChatCapabilityKey.CODE_CREATION
+        ).forEach { key ->
+            val item = noLlm.first { it.key == key }
+            assertEquals("$key without an LLM is UNAVAILABLE", ChatCapabilityStatus.UNAVAILABLE, item.status)
+            assertEquals("$key carries the actionable reason", ChatCapabilityReasons.NO_ACTIVE_LLM, item.reason)
+            assertFalse(ChatCapabilityPolicy.isClickable(item))
+        }
+
+        val withLlm = ChatCapabilityPolicy.resolve(facts { copy(hasActiveLlm = true) })
+        listOf(
+            ChatCapabilityKey.DOCUMENT_CREATION,
+            ChatCapabilityKey.CODE_CREATION
+        ).forEach { key ->
+            val item = withLlm.first { it.key == key }
+            assertEquals("$key with a live LLM is AVAILABLE", ChatCapabilityStatus.AVAILABLE, item.status)
+            assertTrue(ChatCapabilityPolicy.isClickable(item))
+        }
+    }
+
+    @Test
+    fun `agent and workflow entries resolve to their real existing surfaces`() {
+        val resolved = ChatCapabilityPolicy.resolve(facts())
+        // AGENT opens the conversation-context sheet (the durable catalog).
+        val agent = resolved.first { it.key == ChatCapabilityKey.AGENT }
+        assertEquals(ChatCapabilityStatus.AVAILABLE, agent.status)
+        assertTrue(ChatCapabilityPolicy.isClickable(agent))
+        assertEquals(ChatCapabilityCategory.SEARCH_AND_INTELLIGENCE, agent.category)
+        // WORKFLOW navigates to the existing tasks/plans board.
+        val workflow = resolved.first { it.key == ChatCapabilityKey.WORKFLOW }
+        assertEquals(ChatCapabilityStatus.AVAILABLE, workflow.status)
+        assertTrue(ChatCapabilityPolicy.isClickable(workflow))
+        assertEquals(ChatCapabilityCategory.SEARCH_AND_INTELLIGENCE, workflow.category)
+    }
+
+    @Test
+    fun `the creation prefill templates are real drafts - a trailing prompt for the user`() {
+        assertTrue(ChatCapabilityTemplates.DOCUMENT.endsWith(": "))
+        assertTrue(ChatCapabilityTemplates.CODE.endsWith(": "))
+        assertTrue(ChatCapabilityTemplates.DOCUMENT.isNotBlank())
+        assertTrue(ChatCapabilityTemplates.CODE.isNotBlank())
     }
 }

@@ -9,6 +9,7 @@ import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -234,6 +235,80 @@ class ChatInputAcceptanceTest {
         composeRule.onNodeWithTag("btn_open_capabilities").performClick()
         composeRule.waitUntil(timeoutMillis = 20_000) {
             composeRule.onAllNodesWithTag("capability_menu_sheet").fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // UI POLISH §7 — the composer as a COMMAND SURFACE
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `the composer context strip carries the hub and agent-model chips`() {
+        openChatScreen()
+        composeRule.onNodeWithTag("composer_context_strip").assertIsDisplayed()
+        composeRule.onNodeWithTag("btn_open_capabilities").assertIsDisplayed()
+        composeRule.onNodeWithTag("chip_composer_agent_model").assertIsDisplayed()
+    }
+
+    @Test
+    fun `the voice placeholder is VISIBLE with the honest unavailable reason`() {
+        openChatScreen()
+        // §3 UNAVAILABLE ≠ HIDDEN: the mic is composed (never hidden),
+        // carries NO click action, and its accessibility label states the
+        // real reason — the verified absence of a speech execution path.
+        composeRule.onNodeWithTag("voice_input_placeholder").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(
+            "الإدخال الصوتي — غير متاح في هذا الإصدار (لا يوجد مسار تنفيذ للصوت)"
+        ).assertExists()
+    }
+
+    @Test
+    fun `the quick attach button sits beside the field`() {
+        openChatScreen()
+        composeRule.onNodeWithTag("btn_quick_attach").assertIsDisplayed()
+        composeRule.onNodeWithTag("prompt_text_field").assertIsDisplayed()
+    }
+
+    @Test
+    fun `the capability hub renders the four professional groups`() {
+        openChatScreen()
+        composeRule.onNodeWithTag("btn_open_capabilities").performClick()
+        composeRule.waitUntil(timeoutMillis = 20_000) {
+            composeRule.onAllNodesWithTag("capability_menu_sheet").fetchSemanticsNodes().isNotEmpty()
+        }
+        listOf(
+            "capability_group_FILES_AND_CONTEXT",
+            "capability_group_SEARCH_AND_INTELLIGENCE",
+            "capability_group_MEDIA",
+            "capability_group_CREATION"
+        ).forEach { groupTag ->
+            composeRule.onNodeWithTag(groupTag).assertExists()
+        }
+    }
+
+    @Test
+    fun `UNAVAILABLE is not HIDDEN - media and creation rows stay visible in the hub`() {
+        openChatScreen()
+        composeRule.onNodeWithTag("btn_open_capabilities").performClick()
+        composeRule.waitUntil(timeoutMillis = 20_000) {
+            composeRule.onAllNodesWithTag("capability_menu_sheet").fetchSemanticsNodes().isNotEmpty()
+        }
+        // The version-level no-execution-path capabilities are PRESENT on
+        // the surface (disabled rows with their real reasons) — removing
+        // them from the hub is the regression this test pins.
+        listOf(
+            "capability_VISION_ANALYSIS",
+            "capability_IMAGE_GENERATION",
+            "capability_SPEECH",
+            "capability_CAMERA",
+            "capability_SCREEN_SHARE",
+            "capability_RESULT_TO_ARTIFACT",
+            "capability_DOCUMENT_CREATION",
+            "capability_CODE_CREATION",
+            "capability_AGENT",
+            "capability_WORKFLOW"
+        ).forEach { rowTag ->
+            composeRule.onNodeWithTag(rowTag).assertExists()
         }
     }
 

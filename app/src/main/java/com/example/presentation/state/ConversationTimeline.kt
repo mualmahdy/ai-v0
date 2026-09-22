@@ -206,6 +206,17 @@ enum class ExecutionPhase {
 }
 
 /**
+ * UI POLISH §10: one REAL execution step in the live block's expandable
+ * details — a short honest label (the action/tool/verdict the kernel
+ * actually reported) + its timestamp. Steps are APPEND-ONLY facts from
+ * the [ExecutionEvent] stream — never chain-of-thought, never invented.
+ */
+data class ExecutionStep(
+    val label: String,
+    val timestampMs: Long
+)
+
+/**
  * The LIVE execution state attached to the user message that STARTED it
  * (FUNCTIONAL CLOSURE §8/§11: [originUserEntryId] anchors the block to its
  * originating user entry — the timeline renders it EXACTLY there instead
@@ -223,6 +234,8 @@ data class LiveExecutionState(
     val startedAtMs: Long = 0L,
     val actionCount: Int = 0,
     val toolCount: Int = 0,
+    /** UI POLISH §10: the REAL step history for the expandable details. */
+    val steps: List<ExecutionStep> = emptyList(),
     val isDegraded: Boolean = false,
     val degradedMessage: String? = null,
     /** FUNCTIONAL CLOSURE (§8/§11): the user entry this execution answers. */
@@ -240,6 +253,24 @@ object ExecutionLifecycleProjection {
     /** The verdict of [ExecutionEvent.BudgetGateDecision] that awaits a human. */
     private const val APPROVAL_DECISION = "APPROVAL_REQUIRED"
 
+    /** UI POLISH §10: the step-history cap (the LAST steps stay visible). */
+    private const val STEP_HISTORY_LIMIT = 14
+
+    /**
+     * UI POLISH §10: appends one REAL step to the history (capped). A blank
+     * CONTENT is dropped — a step the kernel did not actually describe is
+     * noise, not a detail (the label never invents content).
+     */
+    private fun LiveExecutionState.withStep(prefix: String?, content: String?): LiveExecutionState {
+        val clean = content?.take(60)?.trim().orEmpty()
+        if (clean.isBlank()) return this
+        val label = if (prefix.isNullOrBlank()) clean else "$prefix $clean"
+        return copy(
+            steps = (steps + ExecutionStep(label, System.currentTimeMillis()))
+                .takeLast(STEP_HISTORY_LIMIT)
+        )
+    }
+
     /**
      * Applies one event to [current]. ContentChunk text accumulation and
      * terminal collapse are the ViewModel's job — this projection only owns
@@ -256,12 +287,12 @@ object ExecutionLifecycleProjection {
             is ExecutionEvent.DecisionMade -> next = current.copy(
                 phase = ExecutionPhase.PLANNING,
                 phaseDetail = event.decision.chosenAction.type.displayName
-            )
+            ).withStep(prefix = null, content = event.decision.chosenAction.type.displayName)
 
             is ExecutionEvent.Replanned -> next = current.copy(
                 phase = ExecutionPhase.PLANNING,
                 phaseDetail = event.reason.take(48)
-            )
+            ).withStep(prefix = "إعادة تخطيط:", content = event.reason)
 
             is ExecutionEvent.ActionStarted -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
@@ -270,30 +301,30 @@ object ExecutionLifecycleProjection {
                 // موثوق", "تنفيذ أداة برمجية مباشرة", "استرجاع المعرفة
                 // والوثائق (RAG)"…) — actual events, no chain-of-thought.
                 phaseDetail = event.action.type.displayName.take(48)
-            )
+            ).withStep(prefix = null, content = event.action.type.displayName)
 
             is ExecutionEvent.ActionCompleted -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
                 actionCount = current.actionCount + 1,
                 phaseDetail = event.outputSummary.take(48)
-            )
+            ).withStep(prefix = "تم:", content = event.outputSummary)
 
             is ExecutionEvent.ActionFailed -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
                 actionCount = current.actionCount + 1,
                 phaseDetail = event.errorDescription.take(48)
-            )
+            ).withStep(prefix = "فشل إجراء:", content = event.errorDescription)
 
             is ExecutionEvent.ToolRequested -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
                 toolCount = current.toolCount + 1,
                 phaseDetail = event.toolName
-            )
+            ).withStep(prefix = "أداة:", content = event.toolName)
 
             is ExecutionEvent.ToolResult -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
                 phaseDetail = event.toolName
-            )
+            ).withStep(prefix = "نتيجة أداة:", content = event.toolName)
 
             is ExecutionEvent.ContentChunk -> next = current.copy(
                 phase = ExecutionPhase.STREAMING,
@@ -309,17 +340,17 @@ object ExecutionLifecycleProjection {
 
             is ExecutionEvent.RateLimitEncountered -> next = current.copy(
                 phaseDetail = "حد معدل مؤقت"
-            )
+            ).withStep(prefix = null, content = "حد معدل مؤقت")
 
             is ExecutionEvent.Degraded -> next = current.copy(
                 isDegraded = true,
                 degradedMessage = event.message
-            )
+            ).withStep(prefix = "نمط تراجعي:", content = event.message)
 
             is ExecutionEvent.Error -> next = current.copy(
                 phase = ExecutionPhase.FAILED,
                 phaseDetail = event.message.take(48)
-            )
+            ).withStep(prefix = "فشل:", content = event.message)
 
             is ExecutionEvent.Completed -> next = current.copy(
                 phase = ExecutionPhase.COMPLETED

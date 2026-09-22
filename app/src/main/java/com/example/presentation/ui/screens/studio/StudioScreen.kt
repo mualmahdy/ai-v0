@@ -92,6 +92,25 @@ fun StudioScreen(
     // navigation shell uses — chat-first / sessions+chat / sessions+chat+context).
     val widthClass = navWidthClassForWidthDp(LocalConfiguration.current.screenWidthDp)
 
+    // ------------------------------------------------------------------
+    // UI POLISH (§4 — Creation group honesty): the LLM connection fact the
+    // capability hub resolves its Creation rows on. The providers feature
+    // owns the resources (owner-VM composition); the operational truth of
+    // "an LLM is usable" = lifecycle ENABLED **or** ACTIVE (the runtime
+    // promotes healthy resources to ACTIVE) AND health not UNAVAILABLE.
+    // Pushed to the capability layer as value+lambda (the sessionNetworkPolicy
+    // seam pattern — no new cross-VM dependency).
+    // ------------------------------------------------------------------
+    val hasActiveLlm = providersState.materializedResources.any {
+        it.resourceType == com.example.domain.core.resource.ResourceType.LLM &&
+            (it.lifecycleState == com.example.domain.core.resource.ResourceLifecycleState.ENABLED ||
+                it.lifecycleState == com.example.domain.core.resource.ResourceLifecycleState.ACTIVE) &&
+            it.healthStatus != com.example.domain.core.provider.HealthStatus.UNAVAILABLE
+    }
+    LaunchedEffect(hasActiveLlm) {
+        chatCapabilitiesViewModel.setLlmConnected(hasActiveLlm)
+    }
+
     ChatWorkspace(
         state = studioState,
         shellAutonomyPolicy = state.autonomyPolicy,

@@ -24,8 +24,17 @@ import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SettingsEthernet
 import androidx.compose.material.icons.filled.School
@@ -71,20 +80,30 @@ import com.example.presentation.state.ChatInvocationCodec
 
 /**
  * ============================================================================
- * ChatCapabilityMenu — the composer "+" entry point (CHAT CAPABILITIES Task
- * 2 §3/§4; FUNCTIONAL CLOSURE Phase 1 §17/§18/§19)
+ * ChatCapabilityMenu — the composer entry point's CAPABILITY HUB (CHAT
+ * CAPABILITIES Task 2 §3/§4; FUNCTIONAL CLOSURE Phase 1 §17/§18/§19; UI
+ * POLISH §3/§4 — the four professional groups)
  * ============================================================================
  *
- * A CATEGORIZED, progressive-disclosure sheet — never a giant flat list:
+ * A CATEGORIZED, progressive-disclosure hub — never a giant flat list:
  *
- *   الملفات والوسائط:  إرفاق ملف / إرفاق مجلد / تحليل صورة (Vision)
- *   المعرفة:           استرجاع قاعدة المعرفة / بحث ذكي
- *   الذكاء:            المهارات / الأدوات / خوادم MCP
+ *   الملفات والسياق:  إرفاق ملف / إرفاق مجلد / استرجاع قاعدة المعرفة (RAG)
+ *   البحث والذكاء:    بحث ذكي / الوكيل والنموذج / خطط الوكلاء والمهام /
+ *                     المهارات / الأدوات / خوادم MCP
+ *   الوسائط:          تحليل صورة (Vision) / توليد الصور / الصوت /
+ *                     الكاميرا / مشاركة الشاشة
+ *   الإنشاء:          إنشاء مستند / كتابة شيفرة / حفظ النتيجة كأثر
  *
  * Availability is the PLATFORM policy (§4): Available rows are clickable;
  * Unavailable rows stay VISIBLE but faded with the REAL reason; Planned rows
  * (only genuinely planned capabilities like Vision) show "قريباً" — never a
  * "قريباً" for a temporary provider/network/dependency problem.
+ *
+ * UNAVAILABLE ≠ HIDDEN (§3): the Media/Creation capabilities that the
+ * architecture knows but that have NO runtime execution path in this version
+ * (image generation, speech, camera, screen share, save-result-as-artifact)
+ * are shown as disabled rows with the verified reason — they are never
+ * removed from the surface.
  *
  * FUNCTIONAL CLOSURE (Phase 1): every run form produces a VALIDATED, TYPED
  * payload through the pure [ChatInvocationCodec] BEFORE anything is invoked:
@@ -111,6 +130,8 @@ fun ChatCapabilityMenu(
             modifier = Modifier
                 .padding(horizontal = 16.dp)
                 .padding(bottom = 20.dp)
+                .heightIn(max = 620.dp)
+                .verticalScroll(rememberScrollState())
         ) {
             Text(
                 text = "القدرات",
@@ -126,8 +147,11 @@ fun ChatCapabilityMenu(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+                        .testTag("capability_group_${category.name}")
                 )
-                rows.forEach { item -> CapabilityRow(item = item, onClick = { onCapabilityClick(item.key) }) }
+                rows.forEach { item ->
+                    CapabilityRow(item = item, onClick = { onCapabilityClick(item.key) })
+                }
             }
             if (isInvoking) {
                 Spacer(modifier = Modifier.height(8.dp))
@@ -216,14 +240,27 @@ private fun CapabilityRow(
 }
 
 private fun capabilityIcon(key: ChatCapabilityKey): ImageVector = when (key) {
+    // Files & Context
     ChatCapabilityKey.ATTACH_FILE -> Icons.AutoMirrored.Filled.InsertDriveFile
     ChatCapabilityKey.ATTACH_FOLDER -> Icons.Default.Folder
-    ChatCapabilityKey.VISION_ANALYSIS -> Icons.Default.Visibility
     ChatCapabilityKey.KNOWLEDGE_RETRIEVAL -> Icons.Default.School
+    // Search & Intelligence
     ChatCapabilityKey.SEARCH_INTELLIGENCE -> Icons.Default.Search
+    ChatCapabilityKey.AGENT -> Icons.Default.Psychology
+    ChatCapabilityKey.WORKFLOW -> Icons.Default.AccountTree
     ChatCapabilityKey.SKILLS -> Icons.Default.Bolt
     ChatCapabilityKey.TOOLS -> Icons.Default.SettingsEthernet
     ChatCapabilityKey.MCP_SERVERS -> Icons.Default.Link
+    // Media
+    ChatCapabilityKey.VISION_ANALYSIS -> Icons.Default.Visibility
+    ChatCapabilityKey.IMAGE_GENERATION -> Icons.Default.Palette
+    ChatCapabilityKey.SPEECH -> Icons.Default.Mic
+    ChatCapabilityKey.CAMERA -> Icons.Default.PhotoCamera
+    ChatCapabilityKey.SCREEN_SHARE -> Icons.Default.ScreenShare
+    // Creation
+    ChatCapabilityKey.DOCUMENT_CREATION -> Icons.Default.Description
+    ChatCapabilityKey.CODE_CREATION -> Icons.Default.Code
+    ChatCapabilityKey.RESULT_TO_ARTIFACT -> Icons.Default.Inventory2
 }
 
 /**

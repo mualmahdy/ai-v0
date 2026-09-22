@@ -6,15 +6,27 @@ import com.example.domain.core.radar.RadarCapabilityCheck
 
 /**
  * ============================================================================
- * ChatCapabilityPolicy — the CHAT capability menu's availability contract
- * (CHAT CAPABILITIES Task 2 §3/§4)
+ * ChatCapabilityPolicy — the CHAT capability hub's availability contract
+ * (CHAT CAPABILITIES Task 2 §3/§4; CHAT WORKSPACE PROFESSIONAL POLISH §3/§4)
  * ============================================================================
  *
  * "Conversation first + Capability on demand + Progressive disclosure": the
- * composer's "+" opens a CATEGORIZED menu (never a giant list), and EVERY
- * entry carries an honest availability state — the platform-wide rule is
- * that a capability is NEVER deleted from the UI just because it is not
- * ready; it is shown faded with the REAL reason instead.
+ * composer's entry point opens a CATEGORIZED hub (never a giant list), and
+ * EVERY entry carries an honest availability state.
+ *
+ * UNAVAILABLE ≠ HIDDEN (§3 — the platform-wide rule): a capability that is
+ * KNOWN to the architecture but has no runtime execution path in this
+ * version is NEVER removed from the surface — it is shown disabled (faded,
+ * non-clickable) with the REAL short reason. When the reason is not
+ * knowable from code, the honest generic label is "غير متاح في هذا الإصدار"
+ * — never an invented reason, never a vague "قريباً" (PLANNED is reserved for
+ * capabilities the radar genuinely declares planned, e.g. Vision).
+ *
+ * The hub's four groups (§4):
+ *   الملفات والسياق:  إرفاق ملف / إرفاق مجلد / استرجاع قاعدة المعرفة (RAG)
+ *   البحث والذكاء:    بحث ذكي / وكيل / خطط الوكلاء / مهارات / أدوات / خوادم MCP
+ *   الوسائط:          تحليل صورة (Vision) / توليد الصور / الصوت / الكاميرا / مشاركة الشاشة
+ *   الإنشاء:          مستند / شيفرة / حفظ النتيجة كأثر
  *
  * THIS IS A PURE POLICY over facts that the caller collects from the REAL
  * sources of truth (no second availability system is built):
@@ -23,7 +35,8 @@ import com.example.domain.core.radar.RadarCapabilityCheck
  *    states — VISION is PLANNED there, for instance);
  *  - the live extension/tool registries (skills, MCP servers, tools);
  *  - the knowledge corpus count;
- *  - the wired search provider + the session network policy.
+ *  - the wired search provider + the session network policy;
+ *  - the LLM connection state (the conversation generation path).
  */
 enum class ChatCapabilityStatus {
     /** Clickable, normal visual treatment. */
@@ -34,25 +47,42 @@ enum class ChatCapabilityStatus {
     PLANNED
 }
 
-/** The capability menu entries (keys are stable identities, not display text). */
+/** The capability hub entries (keys are stable identities, not display text). */
 enum class ChatCapabilityKey {
+    // ---- Files & Context ----
     ATTACH_FILE,
     ATTACH_FOLDER,
-    VISION_ANALYSIS,
     KNOWLEDGE_RETRIEVAL,
+    // ---- Search & Intelligence ----
     SEARCH_INTELLIGENCE,
+    AGENT,
+    WORKFLOW,
     SKILLS,
     TOOLS,
-    MCP_SERVERS
+    MCP_SERVERS,
+    // ---- Media ----
+    VISION_ANALYSIS,
+    IMAGE_GENERATION,
+    SPEECH,
+    CAMERA,
+    SCREEN_SHARE,
+    // ---- Creation ----
+    DOCUMENT_CREATION,
+    CODE_CREATION,
+    RESULT_TO_ARTIFACT
 }
 
+/**
+ * The hub's four groups (§4) — ordered as the sheet renders them.
+ */
 enum class ChatCapabilityCategory(val title: String) {
-    FILES_AND_MEDIA("الملفات والوسائط"),
-    KNOWLEDGE("المعرفة"),
-    INTELLIGENCE("الذكاء")
+    FILES_AND_CONTEXT("الملفات والسياق"),
+    SEARCH_AND_INTELLIGENCE("البحث والذكاء"),
+    MEDIA("الوسائط"),
+    CREATION("الإنشاء")
 }
 
-/** One menu row: capability + its honest availability right now. */
+/** One hub row: capability + its honest availability right now. */
 data class ChatCapabilityItem(
     val key: ChatCapabilityKey,
     val category: ChatCapabilityCategory,
@@ -63,6 +93,42 @@ data class ChatCapabilityItem(
     /** True when the capability runs but degraded (shown as a hint, still clickable). */
     val isDegraded: Boolean = false
 )
+
+/**
+ * Composer prefill templates for the CREATION entries that reach the
+ * conversation's real generation path (§4/§18: the draft is FILLED, never
+ * auto-sent — exactly the ChatEmptyState starter contract).
+ */
+object ChatCapabilityTemplates {
+    const val DOCUMENT = "أنشئ لي مستنداً منظّماً حول: "
+    const val CODE = "اكتب لي شيفرة برمجية لـ: "
+}
+
+/**
+ * Honest reason constants for the version-level UNAVAILABLE entries — the
+ * reasons were verified against the REAL runtime (not invented):
+ *  - IMAGE_GENERATION / SPEECH: the provider architecture KNOWS these
+ *    service types, but they map to ResourceType.INTEGRATION with NO
+ *    registered validator/execution path (ResourceValidation's own comment:
+ *    "validation fails explicitly rather than pretending").
+ *  - CAMERA / SCREEN_SHARE: no capture/projection path exists at all.
+ *  - RESULT_TO_ARTIFACT: no chat-side save-result-as-artifact action is
+ *    wired (attachments DO register artifacts; results do not).
+ */
+object ChatCapabilityReasons {
+    const val IMAGE_GENERATION =
+        "غير متاح في هذا الإصدار — لا يوجد مسار تنفيذ لتوليد الصور"
+    const val SPEECH =
+        "غير متاح في هذا الإصدار — لا يوجد مسار تنفيذ للصوت"
+    const val CAMERA =
+        "غير متاح في هذا الإصدار — لا يوجد مسار للكاميرا"
+    const val SCREEN_SHARE =
+        "غير متاح في هذا الإصدار — لا يوجد مسار لمشاركة الشاشة"
+    const val RESULT_TO_ARTIFACT =
+        "غير متاح في هذا الإصدار — حفظ نتائج المحادثة كآثار غير مربوط بعد"
+    const val NO_ACTIVE_LLM =
+        "غير متاح حالياً — لا يوجد ذكاء نشط في مساحة العمل؛ اربط مزوّد LLM أولاً"
+}
 
 /** The real-world facts the policy decides on (collected from live sources). */
 data class ChatCapabilityFacts(
@@ -80,6 +146,8 @@ data class ChatCapabilityFacts(
     val searchProviderWired: Boolean = true,
     /** Current session network policy (drives the degraded hint). */
     val isNetworkAvailable: Boolean = true,
+    /** The conversation generation path is LIVE (an operational LLM resource). */
+    val hasActiveLlm: Boolean = false,
     /**
      * FUNCTIONAL CLOSURE (§20): OPERATIONAL skills — ENABLED manifests that
      * are ACTUALLY REGISTERED as runnable tool ports. A manifest whose tool
@@ -115,10 +183,10 @@ object ChatCapabilityPolicy {
         "قدرة مخططة فقط (لا تنفيذ) — تحليل الصور غير مفعّل في هذا الإصدار."
 
     fun resolve(facts: ChatCapabilityFacts): List<ChatCapabilityItem> = listOf(
-        // ---------------- Files & Media ----------------
+        // ---------------- Files & Context ----------------
         ChatCapabilityItem(
             key = ChatCapabilityKey.ATTACH_FILE,
-            category = ChatCapabilityCategory.FILES_AND_MEDIA,
+            category = ChatCapabilityCategory.FILES_AND_CONTEXT,
             title = "إرفاق ملف",
             subtitle = "ملف من جهازك يُرسل مع الرسالة (نصوص وأكواد تُقرأ فعلياً)",
             status = if (facts.activeProjectId != null) {
@@ -132,7 +200,7 @@ object ChatCapabilityPolicy {
         ),
         ChatCapabilityItem(
             key = ChatCapabilityKey.ATTACH_FOLDER,
-            category = ChatCapabilityCategory.FILES_AND_MEDIA,
+            category = ChatCapabilityCategory.FILES_AND_CONTEXT,
             title = "إرفاق مجلد",
             subtitle = "مجلد يُستورد كوحدة واحدة إلى ملعب المشروع",
             status = when {
@@ -149,22 +217,10 @@ object ChatCapabilityPolicy {
             }
         ),
         ChatCapabilityItem(
-            key = ChatCapabilityKey.VISION_ANALYSIS,
-            category = ChatCapabilityCategory.FILES_AND_MEDIA,
-            title = "تحليل صورة (Vision)",
-            subtitle = "فهم محتوى الصور داخل المحادثة",
-            // §7: VISION is NOT operational — the radar declares it
-            // implemented=false ⇒ PLANNED. Never a fake vision request.
-            status = ChatCapabilityStatus.PLANNED,
-            reason = radarReason(facts, CapabilityType.VISION) ?: VISION_PLANNED_REASON
-        ),
-
-        // ---------------- Knowledge ----------------
-        ChatCapabilityItem(
             key = ChatCapabilityKey.KNOWLEDGE_RETRIEVAL,
-            category = ChatCapabilityCategory.KNOWLEDGE,
-            title = "استرجاع من قاعدة المعرفة",
-            subtitle = "بحث في المستندات المفهرسة (RAG) وعرض المقاطع ذات الصلة",
+            category = ChatCapabilityCategory.FILES_AND_CONTEXT,
+            title = "استرجاع من قاعدة المعرفة (RAG)",
+            subtitle = "بحث في المستندات المفهرسة وعرض المقاطع ذات الصلة",
             status = if (facts.knowledgeDocumentCount > 0) {
                 ChatCapabilityStatus.AVAILABLE
             } else {
@@ -176,11 +232,13 @@ object ChatCapabilityPolicy {
             isDegraded = facts.knowledgeDocumentCount > 0 &&
                 facts.semanticKnowledgeReady == false
         ),
+
+        // ---------------- Search & Intelligence ----------------
         ChatCapabilityItem(
             key = ChatCapabilityKey.SEARCH_INTELLIGENCE,
-            category = ChatCapabilityCategory.KNOWLEDGE,
+            category = ChatCapabilityCategory.SEARCH_AND_INTELLIGENCE,
             title = "بحث ذكي",
-            subtitle = "بحث متعدد المصادر مع ترتيب ومراجع قابلة للطي",
+            subtitle = "بحث عميق متعدد المصادر: تحليل → تفتيت → دمج → ترتيب → مراجع",
             status = if (facts.searchProviderWired) {
                 ChatCapabilityStatus.AVAILABLE
             } else {
@@ -192,11 +250,23 @@ object ChatCapabilityPolicy {
             // The pipeline's honest local-only fallback when offline.
             isDegraded = facts.searchProviderWired && !facts.isNetworkAvailable
         ),
-
-        // ---------------- Intelligence ----------------
+        ChatCapabilityItem(
+            key = ChatCapabilityKey.AGENT,
+            category = ChatCapabilityCategory.SEARCH_AND_INTELLIGENCE,
+            title = "الوكيل والنموذج",
+            subtitle = "اختيار الوكيل أو نموذج المحادثة (الكتالوج الدائم + بناء وكيل)",
+            status = ChatCapabilityStatus.AVAILABLE
+        ),
+        ChatCapabilityItem(
+            key = ChatCapabilityKey.WORKFLOW,
+            category = ChatCapabilityCategory.SEARCH_AND_INTELLIGENCE,
+            title = "خطط الوكلاء والمهام",
+            subtitle = "بناء خطط الوكلاء ومتابعة المهام الدائمة من لوحة المهام",
+            status = ChatCapabilityStatus.AVAILABLE
+        ),
         ChatCapabilityItem(
             key = ChatCapabilityKey.SKILLS,
-            category = ChatCapabilityCategory.INTELLIGENCE,
+            category = ChatCapabilityCategory.SEARCH_AND_INTELLIGENCE,
             title = "المهارات",
             subtitle = "تشغيل مهارة مثبتة وعرض نتيجتها في المحادثة",
             // FUNCTIONAL CLOSURE (§20): the fact is the OPERATIONAL count —
@@ -213,7 +283,7 @@ object ChatCapabilityPolicy {
         ),
         ChatCapabilityItem(
             key = ChatCapabilityKey.TOOLS,
-            category = ChatCapabilityCategory.INTELLIGENCE,
+            category = ChatCapabilityCategory.SEARCH_AND_INTELLIGENCE,
             title = "الأدوات",
             subtitle = "تنفيذ أداة مسجلة عبر مسار التنفيذ المحكوم",
             status = if (facts.registeredToolCount > 0) {
@@ -227,7 +297,7 @@ object ChatCapabilityPolicy {
         ),
         ChatCapabilityItem(
             key = ChatCapabilityKey.MCP_SERVERS,
-            category = ChatCapabilityCategory.INTELLIGENCE,
+            category = ChatCapabilityCategory.SEARCH_AND_INTELLIGENCE,
             title = "خوادم MCP",
             subtitle = "استدعاء أدوات الخوادم المتصلة (بروتوكول MCP)",
             // FUNCTIONAL CLOSURE (§20): operational truth — the existence of
@@ -248,6 +318,97 @@ object ChatCapabilityPolicy {
                     "لا يوجد خادم متصل (سليم ومفعّل) — أنجز المصافحة من شاشة «الإضافات» ثم أعد المحاولة"
                 else -> null
             }
+        ),
+
+        // ---------------- Media ----------------
+        ChatCapabilityItem(
+            key = ChatCapabilityKey.VISION_ANALYSIS,
+            category = ChatCapabilityCategory.MEDIA,
+            title = "تحليل صورة (Vision)",
+            subtitle = "فهم محتوى الصور داخل المحادثة",
+            // §7: VISION is NOT operational — the radar declares it
+            // implemented=false ⇒ PLANNED. Never a fake vision request.
+            status = ChatCapabilityStatus.PLANNED,
+            reason = radarReason(facts, CapabilityType.VISION) ?: VISION_PLANNED_REASON
+        ),
+        ChatCapabilityItem(
+            key = ChatCapabilityKey.IMAGE_GENERATION,
+            category = ChatCapabilityCategory.MEDIA,
+            title = "توليد الصور",
+            subtitle = "إنشاء صور من وصف نصي",
+            // §3 UNAVAILABLE ≠ HIDDEN: the service type EXISTS in the provider
+            // architecture, but there is NO runtime execution path (it maps
+            // to INTEGRATION which fails validation explicitly) — shown
+            // disabled with the real reason, never hidden.
+            status = ChatCapabilityStatus.UNAVAILABLE,
+            reason = ChatCapabilityReasons.IMAGE_GENERATION
+        ),
+        ChatCapabilityItem(
+            key = ChatCapabilityKey.SPEECH,
+            category = ChatCapabilityCategory.MEDIA,
+            title = "الصوت (إدخال وإخراج)",
+            subtitle = "تحويل الكلام إلى نص والعكس",
+            // §3: same verified situation as image generation — the provider
+            // architecture knows the SPEECH service type; no execution path.
+            status = ChatCapabilityStatus.UNAVAILABLE,
+            reason = ChatCapabilityReasons.SPEECH
+        ),
+        ChatCapabilityItem(
+            key = ChatCapabilityKey.CAMERA,
+            category = ChatCapabilityCategory.MEDIA,
+            title = "الكاميرا",
+            subtitle = "التقاط صورة أو فيديو للمحادثة",
+            // §3: no capture path exists in this version at all.
+            status = ChatCapabilityStatus.UNAVAILABLE,
+            reason = ChatCapabilityReasons.CAMERA
+        ),
+        ChatCapabilityItem(
+            key = ChatCapabilityKey.SCREEN_SHARE,
+            category = ChatCapabilityCategory.MEDIA,
+            title = "مشاركة الشاشة",
+            subtitle = "مشاركة محتوى الشاشة مع المحادثة",
+            // §3: no projection path exists in this version at all.
+            status = ChatCapabilityStatus.UNAVAILABLE,
+            reason = ChatCapabilityReasons.SCREEN_SHARE
+        ),
+
+        // ---------------- Creation ----------------
+        ChatCapabilityItem(
+            key = ChatCapabilityKey.DOCUMENT_CREATION,
+            category = ChatCapabilityCategory.CREATION,
+            title = "إنشاء مستند",
+            subtitle = "عبر المحادثة — يُعبّأ قالب الطلب في حقل الإدخال ثم ترسله",
+            // The REAL path is the conversation's LLM generation; the entry
+            // only PREFILLS the draft (§18 — never auto-sends).
+            status = if (facts.hasActiveLlm) {
+                ChatCapabilityStatus.AVAILABLE
+            } else {
+                ChatCapabilityStatus.UNAVAILABLE
+            },
+            reason = if (!facts.hasActiveLlm) ChatCapabilityReasons.NO_ACTIVE_LLM else null
+        ),
+        ChatCapabilityItem(
+            key = ChatCapabilityKey.CODE_CREATION,
+            category = ChatCapabilityCategory.CREATION,
+            title = "كتابة شيفرة",
+            subtitle = "عبر المحادثة — يُعبّأ قالب الطلب في حقل الإدخال ثم ترسله",
+            status = if (facts.hasActiveLlm) {
+                ChatCapabilityStatus.AVAILABLE
+            } else {
+                ChatCapabilityStatus.UNAVAILABLE
+            },
+            reason = if (!facts.hasActiveLlm) ChatCapabilityReasons.NO_ACTIVE_LLM else null
+        ),
+        ChatCapabilityItem(
+            key = ChatCapabilityKey.RESULT_TO_ARTIFACT,
+            category = ChatCapabilityCategory.CREATION,
+            title = "حفظ النتيجة كأثر",
+            subtitle = "تحويل إجابة أو نتيجة إلى أثر دائم قابل للتصفح",
+            // §3: attachments DO register artifacts (the real import path);
+            // a chat-side save-RESULT-as-artifact action is not wired yet —
+            // honest disabled row, never hidden.
+            status = ChatCapabilityStatus.UNAVAILABLE,
+            reason = ChatCapabilityReasons.RESULT_TO_ARTIFACT
         )
     )
 
@@ -268,7 +429,7 @@ object ChatCapabilityPolicy {
         }
     }
 
-    /** Whether a menu row is clickable (ONLY Available rows are). */
+    /** Whether a hub row is clickable (ONLY Available rows are). */
     fun isClickable(item: ChatCapabilityItem): Boolean =
         item.status == ChatCapabilityStatus.AVAILABLE
 }
