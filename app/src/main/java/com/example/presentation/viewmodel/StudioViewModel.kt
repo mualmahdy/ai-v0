@@ -179,7 +179,16 @@ class StudioViewModel(
      * AuditTrailService uses for its own write failures (stderr — logcat on
      * Android); tests observe the messages without capturing stderr.
      */
-    private val detachedPersistenceFailureSink: (String) -> Unit = { System.err.println(it) }
+    private val detachedPersistenceFailureSink: (String) -> Unit = { System.err.println(it) },
+    /**
+     * CHAT FINAL CLOSURE (session-binding race probe — the
+     * detachedPersistenceFailureSink convention): invoked at the START of
+     * every durable-session establishment so the race between send
+     * acceptance and the kernel coroutine's session read is DETERMINISTICALLY
+     * testable (production default: no-op — the establishment itself is
+     * unchanged).
+     */
+    private val sessionEstablishmentProbe: suspend () -> Unit = {}
 ) : ViewModel() {
 
     /** The conversation feature's own slice of UI state (was 18 fields of UiState). */
@@ -296,6 +305,10 @@ class StudioViewModel(
                 append(" بدأت محادثة جديدة ضمن النطاق الحالي.")
             }
         )
+        // CHAT FINAL CLOSURE: the released conversation's approval-mirror
+        // registrations die with it (a reopened session re-registers its
+        // OWN blocks from its durable events).
+        approvalMirrorScopes.clear()
         _state.update {
             it.copy(
                 activeSessionId = null,
@@ -410,6 +423,9 @@ class StudioViewModel(
         // Without this, a running execution kept mutating the RESET view:
         // its terminal result landed in the fresh conversation.
         detachRunningExecution(banner = null)
+        // CHAT FINAL CLOSURE: same release contract as a scope change — the
+        // reset view no longer owns any approval mirror.
+        approvalMirrorScopes.clear()
         _state.update {
             it.copy(
                 activeSessionId = null,
@@ -427,22 +443,66 @@ class StudioViewModel(
     /**
      * User-FACING MODEL PICKER (report gap): selects the exact LLM resource
      * the conversation binds to. `resourceId == null` → the runtime decision
-     * layer picks (previous behaviour). The choice is persisted onto the
-     * active durable session (exact runtime binding survives restarts).
+     * layer picks (previous behaviour).
+     *
+     * CHAT FINAL CLOSURE (§7 model persistence): the durable binding is now
+     * PERSIST-FIRST — capture scope → persist (workspace-authorized) →
+     * verify the result → update the UI accordingly. A failed/ineffective
+     * persistence leaves the PREVIOUS selection in place (never a saved-
+     * looking lie) and surfaces the honest error. With NO active session
+     * there is nothing durable to pin yet — the choice is UI-only and the
+     * NEXT execution's session creation carries it durably (nothing is
+     * claimed as persisted).
      */
     fun selectModel(resourceId: String?, displayName: String?) {
-        _state.update {
-            it.copy(selectedModelResourceId = resourceId, selectedModelDisplayName = displayName)
+        val current = _state.value
+        val sessionId = current.activeSessionId
+        if (sessionId == null) {
+            _state.update {
+                it.copy(selectedModelResourceId = resourceId, selectedModelDisplayName = displayName)
+            }
+            return
         }
-        val sessionId = _state.value.activeSessionId ?: return
+        // Scope captured SYNCHRONOUSLY at tap time (a mid-persist workspace
+        // switch can neither redirect the write nor fake its result).
+        val pinnedWorkspaceId = runCatching {
+            workspaceRuntimeService.activeWorkspaceIdOrNull()
+        }.getOrNull()
         viewModelScope.launch {
             runCatching {
                 conversationSessionService.setSessionModel(
                     sessionId = ConversationSessionId(sessionId),
                     modelResourceId = resourceId,
-                    modelDisplayName = displayName
+                    modelDisplayName = displayName,
+                    workspaceId = pinnedWorkspaceId
                 )
-            }
+            }.fold(
+                onSuccess = { persisted ->
+                    if (persisted) {
+                        _state.update {
+                            it.copy(
+                                selectedModelResourceId = resourceId,
+                                selectedModelDisplayName = displayName
+                            )
+                        }
+                    } else {
+                        // The write was a no-op (workspace-authorized refusal) —
+                        // the displayed selection must NOT move.
+                        _state.update {
+                            it.copy(
+                                errorMessage = "تعذر حفظ اختيار النموذج في الجلسة الدائمة — الاختيار المعروض بقي كما هو."
+                            )
+                        }
+                    }
+                },
+                onFailure = { failure ->
+                    _state.update {
+                        it.copy(
+                            errorMessage = "تعذر حفظ اختيار النموذج: ${failure.localizedMessage} — الاختيار المعروض بقي كما هو."
+                        )
+                    }
+                }
+            )
         }
     }
 
@@ -458,19 +518,37 @@ class StudioViewModel(
      */
     fun startNewSession(agent: AgentDefinition?) {
         detachRunningExecution(banner = null)
+        // CHAT FINAL CLOSURE (§6 scope race): the workspace/project AND the
+        // conversation shape are captured SYNCHRONOUSLY at acceptance — the
+        // coroutine never re-reads the live active scope (a rapid switch
+        // between tap and coroutine dispatch can neither bind the session to
+        // the wrong scope nor record the wrong mode/model).
+        val accepted = _state.value
+        val acceptedChatMode = accepted.chatMode
+        val acceptedModelId = accepted.selectedModelResourceId
+        val acceptedModelName = accepted.selectedModelDisplayName
+        val pinnedWorkspaceId = runCatching {
+            workspaceRuntimeService.activeWorkspaceIdOrNull()
+        }.getOrNull()
+        val pinnedProjectId = runCatching {
+            workspaceRuntimeService.activeProjectIdOrNull()
+        }.getOrNull()
         viewModelScope.launch {
             runCatching {
-                val current = _state.value
                 val session = conversationSessionService.createSession(
-                    mode = current.chatMode,
+                    mode = acceptedChatMode,
                     agentId = agent?.identity?.id?.value,
                     agentName = agent?.identity?.name,
-                    modelResourceId = current.selectedModelResourceId,
-                    modelDisplayName = current.selectedModelDisplayName,
+                    modelResourceId = acceptedModelId,
+                    modelDisplayName = acceptedModelName,
                     // GAP-14: new sessions are project-scoped from creation —
-                    // bound to the ACTIVE workspace's active project (null =
-                    // shared workspace session when no project is bound).
-                    projectId = workspaceRuntimeService.activeProjectIdOrNull()
+                    // bound to the PINNED project (null = shared workspace
+                    // session when no project is bound).
+                    projectId = pinnedProjectId,
+                    // CHAT FINAL CLOSURE (§6): the pinned workspace — passed
+                    // EXPLICITLY so the service's live workspaceIdProvider is
+                    // never consulted after a scope switch.
+                    workspaceId = pinnedWorkspaceId
                 )
                 _state.update {
                     it.copy(
@@ -533,6 +611,22 @@ class StudioViewModel(
                     expectedProjectId = activeProjectId
                 ) ?: return@launch
                 detachRunningExecution(banner = null)
+                // CHAT FINAL CLOSURE (approval durable-state invariant): the
+                // reopened conversation's approval blocks register their OWN
+                // durable mirror location — a decision the user makes while
+                // THIS conversation is open updates the event in THIS session,
+                // even if the live scope has moved on by then.
+                approvalMirrorScopes.clear()
+                loaded.timelineEvents
+                    .filter { it.kind == TimelineEventKind.APPROVAL_BLOCK }
+                    .forEach { event ->
+                        event.approvalId?.let { approvalId ->
+                            approvalMirrorScopes[approvalId] = ApprovalMirrorScope(
+                                sessionId = loaded.session.id.value,
+                                workspaceId = workspaceId
+                            )
+                        }
+                    }
                 _state.update { state ->
                     state.copy(
                         activeSessionId = loaded.session.id.value,
@@ -704,6 +798,9 @@ class StudioViewModel(
             // resetTranscriptView — the cleared conversation is detached from
             // any execution still running into the deleted session.
             detachRunningExecution(banner = null)
+            // CHAT FINAL CLOSURE: the deleted session's approval mirrors are
+            // gone with it (their durable events were deleted too).
+            approvalMirrorScopes.clear()
             _state.update {
                 it.copy(
                     activeSessionId = null,
@@ -742,9 +839,48 @@ class StudioViewModel(
     }
 
     /**
-     * Ensures the ACTIVE durable session exists (creating it bound to the
-     * EXECUTION-PINNED workspace/project — §2 — and the current mode/model on
-     * first use), then sets it active.
+     * The explicit outcome of establishing the DURABLE session an execution
+     * will persist into. CHAT FINAL CLOSURE: `Failed` is NOT silently
+     * convertible to "run anyway" — the caller MUST fail closed.
+     */
+    private sealed interface DurableSessionEstablishment {
+        data class Established(val sessionId: ConversationSessionId) : DurableSessionEstablishment
+        data class Failed(val reason: String) : DurableSessionEstablishment
+    }
+
+    /**
+     * The (session, workspace) an approval block's durable mirror lives in —
+     * CHAT FINAL CLOSURE (approval durable-state invariant): captured when
+     * the block's timeline event is written (or when a session is reopened
+     * and rebuilt from its durable events), so a later decision mirrors onto
+     * the event's OWN session instead of whatever session is live then.
+     */
+    private data class ApprovalMirrorScope(
+        val sessionId: String,
+        val workspaceId: String?
+    )
+
+    /**
+     * approvalId → the durable mirror location of its approval block.
+     */
+    private val approvalMirrorScopes = mutableMapOf<String, ApprovalMirrorScope>()
+
+    /**
+     * Ensures the durable session an EXECUTION persists into — bound to the
+     * EXECUTION-PINNED workspace/project (§2) and the mode/model accepted
+     * with the send.
+     *
+     * CHAT FINAL CLOSURE (P1 session binding): the reuse candidate is the
+     * SESSION CAPTURED AT SEND ACCEPTANCE ([sessionCandidateId]) — NEVER
+     * the live activeSessionId. An execution accepted while session A was
+     * active can therefore never slide into session B that the user opened
+     * mid-execution: the candidate is either still valid (reused under the
+     * pinned scope) or released/created under the execution's OWN pinned
+     * scope.
+     *
+     * CHAT FINAL CLOSURE (P1 fail-closed): failures return [DurableSessionEstablishment.Failed]
+     * — the caller refuses the execution (no durable session ⇒ no normal
+     * persisted execution); nothing is swallowed into a silent null.
      *
      * FUNCTIONAL CLOSURE (§3): an existing session is reused ONLY when it is
      * still COMPATIBLE with what is being executed:
@@ -767,10 +903,15 @@ class StudioViewModel(
         modelDisplayName: String?,
         pinnedWorkspaceId: String?,
         pinnedProjectId: Long?,
-        executionTaskId: String
-    ): ConversationSessionId? {
-        return runCatching {
-            val existingId = _state.value.activeSessionId
+        executionTaskId: String,
+        sessionCandidateId: String?
+    ): DurableSessionEstablishment {
+        // CHAT FINAL CLOSURE (race probe): parks BEFORE any session read —
+        // the session-binding regression tests hold the establishment open
+        // while the live active session is switched underneath it.
+        sessionEstablishmentProbe()
+        return try {
+            val existingId = sessionCandidateId
             if (existingId != null) {
                 val existing = conversationSessionService.getSessionWithTurns(
                     ConversationSessionId(existingId),
@@ -798,7 +939,7 @@ class StudioViewModel(
                                 workspaceId = pinnedWorkspaceId
                             )
                         }
-                        return existing.id
+                        return DurableSessionEstablishment.Established(existing.id)
                     }
                     // Incompatible → release the binding (the session stays
                     // durable + browsable in its own scope) and create a new
@@ -824,8 +965,12 @@ class StudioViewModel(
             if (currentExecutionTaskId == executionTaskId) {
                 _state.update { it.copy(activeSessionId = session.id.value) }
             }
-            session.id
-        }.getOrNull()
+            DurableSessionEstablishment.Established(session.id)
+        } catch (failure: Exception) {
+            DurableSessionEstablishment.Failed(
+                failure.localizedMessage ?: failure::class.simpleName ?: "فشل غير معروف"
+            )
+        }
     }
 
     /**
@@ -859,8 +1004,14 @@ class StudioViewModel(
     ) {
         val id = sessionId ?: return
         viewModelScope.launch {
-            runCatching {
-                conversationSessionService.appendTurn(
+            try {
+                // CHAT FINAL CLOSURE (P1 appendTurn result): the service's
+                // null return is an AUTHORIZATION/SESSION FAILURE (nothing
+                // written) — it is treated EXACTLY like a thrown failure:
+                // the turn is NOT considered saved, the user sees the honest
+                // banner, and the first-turn titling never runs against a
+                // turn that was not persisted.
+                val appended = conversationSessionService.appendTurn(
                     sessionId = id,
                     prompt = prompt,
                     answer = answer,
@@ -878,6 +1029,11 @@ class StudioViewModel(
                     attachments = attachments,
                     sources = sources
                 )
+                if (appended == null) {
+                    throw IllegalStateException(
+                        "appendTurn did not persist the turn (authorization/missing-session under the pinned workspace)"
+                    )
+                }
                 // First-turn titling: the default title becomes the prompt.
                 // §1/§2: the read is project-scope-authorized under the
                 // execution's OWN pinned project.
@@ -899,14 +1055,14 @@ class StudioViewModel(
                         workspaceId = pinnedWorkspaceId
                     )
                 }
-            }.onFailure { e ->
+            } catch (e: Exception) {
                 // RESIDUAL CLOSURE (persistence-failure leak): the banner is
                 // written ONLY while THIS execution is still the view's current
                 // one — a detached execution's persistence failure is recorded
                 // through the non-UI sink, never onto another scope's view.
                 if (currentExecutionTaskId == executionTaskId) {
                     _state.update {
-                        it.copy(diagnosticBanner = "تعذر حفظ دورة المحادثة بشكل دائم: ${e.localizedMessage}")
+                        it.copy(diagnosticBanner = "تعذر حفظ دورة المحادثة بشكل دائم: ${e.localizedMessage ?: e.message}")
                     }
                 } else {
                     detachedPersistenceFailureSink(
@@ -1335,6 +1491,14 @@ class StudioViewModel(
         val executionTaskId = java.util.UUID.randomUUID().toString()
         val sentAtMs = System.currentTimeMillis()
         val userEntryId = "user_$executionTaskId"
+        // CHAT FINAL CLOSURE (P1 session binding): the SESSION CANDIDATE is
+        // captured AT ACCEPTANCE (with the rest of the execution context).
+        // The execution's persistence lifecycle (reuse check, turn append,
+        // approval events, titling) uses THIS candidate end-to-end — never
+        // the live activeSessionId, which the user may have switched to
+        // another session by the time the kernel coroutine reaches its
+        // session-establishment step.
+        val sessionCandidateId = current.activeSessionId
         // §8/§11: the live block's anchor — the user entry this execution
         // belongs to (a regenerate anchors to the EXISTING entry).
         val liveAnchorId = when {
@@ -1448,15 +1612,48 @@ class StudioViewModel(
             // clear the honest AWAITING_APPROVAL lifecycle.
             var approvalRequested = false
             try {
-                sessionId = ensureActiveSession(
+                when (val establishment = ensureActiveSession(
                     mode = current.chatMode,
                     agent = resolvedAgent,
                     modelResourceId = selectedModelId,
                     modelDisplayName = current.selectedModelDisplayName,
                     pinnedWorkspaceId = pinnedWorkspaceId,
                     pinnedProjectId = pinnedProjectId,
-                    executionTaskId = executionTaskId
-                )
+                    executionTaskId = executionTaskId,
+                    sessionCandidateId = sessionCandidateId
+                )) {
+                    is DurableSessionEstablishment.Established ->
+                        sessionId = establishment.sessionId
+                    is DurableSessionEstablishment.Failed -> {
+                        // --------------------------------------------------
+                        // CHAT FINAL CLOSURE (P1 fail-closed): NO durable
+                        // session ⇒ NO normal persisted execution. The LLM
+                        // is never invoked as if persistence existed; the
+                        // user sees an explicit failure state (the message
+                        // stays with its FAILED lifecycle block so the
+                        // retry affordances remain honest).
+                        // --------------------------------------------------
+                        if (currentExecutionTaskId == executionTaskId) {
+                            _state.update {
+                                it.copy(
+                                    isExecuting = false,
+                                    liveExecution = it.liveExecution?.copy(
+                                        phase = ExecutionPhase.FAILED,
+                                        phaseDetail = null
+                                    ),
+                                    errorMessage = "تعذر إنشاء/استعادة الجلسة الدائمة للتنفيذ" +
+                                            " (${establishment.reason}) — لم يُنفَّذ الطلب حفاظاً على دوام المحادثة. أعد المحاولة."
+                                )
+                            }
+                        } else {
+                            detachedPersistenceFailureSink(
+                                "durable session establishment failed for detached execution " +
+                                        "$executionTaskId (workspace=$pinnedWorkspaceId): ${establishment.reason}"
+                            )
+                        }
+                        return@launch
+                    }
+                }
                 // FAIL-CLOSED NETWORK DEFAULT (report gap: "missing monitor =
                 // network available is fail-open"): when no monitor is wired
                 // we assume OFFLINE, so OFFLINE/degraded policies engage
@@ -1631,6 +1828,27 @@ class StudioViewModel(
                             executionTaskId = executionTaskId
                         )
                     }
+                    // CHAT FINAL CLOSURE (nested-update purity — the CAS-retry
+                    // race): the consent request's side effects (the durable
+                    // event write + the view block) run BEFORE the state-update
+                    // lambda, exactly like the persist calls above. Calling
+                    // requestApprovalBlock INSIDE the update lambda nested a
+                    // second _state.update inside the CAS-retried lambda — under
+                    // contention the retry re-ran the side effects and raced the
+                    // execution's terminal finally-guard (the AWAITING_APPROVAL
+                    // block could be transiently erased and the retry path then
+                    // saw a live-less state). The update lambda below stays PURE.
+                    if (event is ExecutionEvent.Error &&
+                        event.failureCode == APPROVAL_REQUIRED_CODE
+                    ) {
+                        approvalRequested = true
+                        requestApprovalBlock(
+                            kernelExecutionId = event.executionId,
+                            executionTaskId = executionTaskId,
+                            sessionId = sessionId,
+                            pinnedWorkspaceId = pinnedWorkspaceId
+                        )
+                    }
 
                     _state.update { state ->
                         val updatedLogs = state.executionLog + event
@@ -1770,17 +1988,10 @@ class StudioViewModel(
                                 // the user resolves the consent and retries.
                                 // --------------------------------------------------
                                 if (event.failureCode == APPROVAL_REQUIRED_CODE) {
-                                    approvalRequested = true
-                                    // P1/§9: the block persists to the execution's
-                                    // OWN pinned session; the VIEW block only
-                                    // appears for the CURRENT execution (the
-                                    // detached path handled it above the gate).
-                                    requestApprovalBlock(
-                                        kernelExecutionId = event.executionId,
-                                        executionTaskId = executionTaskId,
-                                        sessionId = sessionId,
-                                        pinnedWorkspaceId = pinnedWorkspaceId
-                                    )
+                                    // CHAT FINAL CLOSURE: the consent request's
+                                    // side effects (durable write + view block)
+                                    // ran ABOVE, OUTSIDE this PURE lambda — only
+                                    // the honest lifecycle mutation remains here.
                                     state.copy(
                                         isExecuting = false,
                                         executionLog = updatedLogs,
@@ -1883,7 +2094,11 @@ class StudioViewModel(
                         // legitimate resting state (the consent request is
                         // still open) — the defensive guard must NOT clear it
                         // as if the execution ended without a signal.
-                        state.liveExecution?.phase != ExecutionPhase.AWAITING_APPROVAL
+                        state.liveExecution?.phase != ExecutionPhase.AWAITING_APPROVAL &&
+                        // CHAT FINAL CLOSURE (P1 fail-closed): a FAILED block
+                        // the fail-closed path itself raised is ALREADY the
+                        // honest terminal state — the guard must not erase it.
+                        state.liveExecution?.phase != ExecutionPhase.FAILED
                     if (stillLive) {
                         state.copy(
                             isExecuting = false,
@@ -2174,8 +2389,17 @@ class StudioViewModel(
             // be seen AFTER the event exists, so a resolution mirroring onto
             // the event can never race (and silently no-op against) an event
             // that has not landed yet.
+            //
+            // CHAT FINAL CLOSURE (P1 approval persistence): the write RESULT
+            // is now part of the state machine — a PENDING block is shown as
+            // durable history ONLY when the event was actually written. A
+            // failed write (returned false or threw) surfaces the explicit
+            // failure and NO inline block masquerades as durable state; the
+            // user is routed to the governance surface where the SAME gate
+            // request is resolvable.
+            var durableWriteSucceeded = false
             if (sessionId != null) {
-                runCatching {
+                durableWriteSucceeded = runCatching {
                     conversationSessionService.appendTimelineEvent(
                         ConversationTimelineEvent(
                             id = "apv_${pending.approvalId}",
@@ -2194,8 +2418,30 @@ class StudioViewModel(
                         ),
                         workspaceId = pinnedWorkspaceId
                     )
-                }
+                }.getOrDefault(false)
             }
+            if (!durableWriteSucceeded) {
+                if (currentExecutionTaskId == executionTaskId) {
+                    _state.update {
+                        it.copy(
+                            errorMessage = "تعذر تسجيل طلب الموافقة في سجل الجلسة الدائم — لم تُعرض كتلة الموافقة في المحادثة. " +
+                                    "يمكنك حل الطلب من شاشة الحوكمة."
+                        )
+                    }
+                } else {
+                    detachedPersistenceFailureSink(
+                        "approval event persistence failed for detached execution $executionTaskId " +
+                                "(workspace=$pinnedWorkspaceId, approval=${pending.approvalId}): no durable block written"
+                    )
+                }
+                return@launch
+            }
+            // The mirror location of this approval's durable event — used by
+            // every later decision update (never the live activeSessionId).
+            approvalMirrorScopes[pending.approvalId] = ApprovalMirrorScope(
+                sessionId = sessionId!!.value,
+                workspaceId = pinnedWorkspaceId
+            )
             // RESIDUAL CLOSURE (P1): the VIEW block appears only while THIS
             // execution is still the view's current one — a detached consent
             // request never lands in another scope's conversation.
@@ -2303,29 +2549,62 @@ class StudioViewModel(
                 }
                 return@launch
             }
-            runCatching {
-                val pending = runCatching { gate.pendingApprovals() }.getOrDefault(emptyList())
-                    .firstOrNull { it.approvalId == approvalId }
-                if (pending != null) {
-                    grants.grant(
-                        principalType = com.example.domain.core.security.governance.PrincipalType.USER,
-                        principalId = localPrincipalId,
-                        // GLOBAL grant (workspaceId = null): standing consent for
-                        // the tool across the single-user device profile.
-                        resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
-                        resourceId = pending.toolName,
-                        permission = com.example.domain.core.security.governance.Permission.EXECUTE,
-                        grantedBy = localPrincipalId
-                    )
-                    gate.approve(approvalId, localPrincipalId)
-                }
-            }.onSuccess {
-                updateApprovalBlock(approvalId, ApprovalBlockState.APPROVED)
+            // CHAT FINAL CLOSURE (P1 grantAlways false-success): the pending
+            // request is verified FIRST, OUTSIDE the success path — a missing
+            // (already-resolved / expired / unknown) request can NEVER end in
+            // "APPROVED + تم السماح دائماً…". The grant, the gate resolution,
+            // and their RESULTS are each verified before any UI mutation.
+            val pending = runCatching { gate.pendingApprovals() }.getOrDefault(emptyList())
+                .firstOrNull { it.approvalId == approvalId }
+            if (pending == null) {
                 _state.update {
                     it.copy(
-                        diagnosticBanner = "تم السماح دائماً بهذه الأداة: منح EXECUTE دائم على مستوى الجهاز " +
-                                "(كل الجلسات) — يمكنك سحبه من شاشة الحوكمة."
+                        errorMessage = "لا يوجد طلب موافقة قائم بهذا المعرف — ربما حُلّ سابقاً أو انتهت صلاحيته؛ لم يُسجَّل أي منح دائم."
                     )
+                }
+                return@launch
+            }
+            runCatching {
+                grants.grant(
+                    principalType = com.example.domain.core.security.governance.PrincipalType.USER,
+                    principalId = localPrincipalId,
+                    // GLOBAL grant (workspaceId = null): standing consent for
+                    // the tool across the single-user device profile.
+                    resourceType = com.example.domain.core.security.governance.SecurableResourceType.TOOL,
+                    resourceId = pending.toolName,
+                    permission = com.example.domain.core.security.governance.Permission.EXECUTE,
+                    grantedBy = localPrincipalId
+                )
+                gate.approve(approvalId, localPrincipalId)
+            }.onSuccess { resolution ->
+                when (resolution) {
+                    com.example.domain.core.security.governance.ApprovalResolution.APPROVED -> {
+                        updateApprovalBlock(approvalId, ApprovalBlockState.APPROVED)
+                        _state.update {
+                            it.copy(
+                                diagnosticBanner = "تم السماح دائماً بهذه الأداة: منح EXECUTE دائم على مستوى الجهاز " +
+                                        "(كل الجلسات) — يمكنك سحبه من شاشة الحوكمة."
+                            )
+                        }
+                    }
+                    com.example.domain.core.security.governance.ApprovalResolution.REJECTED -> {
+                        // The gate holds a REJECTED decision — the block keeps
+                        // the REAL state; no grant-success messaging.
+                        updateApprovalBlock(approvalId, ApprovalBlockState.REJECTED)
+                        _state.update {
+                            it.copy(
+                                errorMessage = "الطلب بالفعل مرفوض — لم يُسجَّل المنح الدائم."
+                            )
+                        }
+                    }
+                    else -> {
+                        updateApprovalBlock(approvalId, ApprovalBlockState.EXPIRED)
+                        _state.update {
+                            it.copy(
+                                errorMessage = "انتهت صلاحية طلب الموافقة قبل إتمام المنح الدائم — أعد المحاولة على طلب قائم."
+                            )
+                        }
+                    }
                 }
             }.onFailure { e ->
                 _state.update {
@@ -2350,14 +2629,43 @@ class StudioViewModel(
         // FUNCTIONAL CLOSURE (§9): the resolved state is mirrored onto the
         // durable timeline event — a reopened session shows the decision,
         // not a stale PENDING block.
-        val sessionId = _state.value.activeSessionId ?: return
+        //
+        // CHAT FINAL CLOSURE (approval durable-state invariant): the mirror
+        // targets the session the APPROVAL BLOCK was durably written in (the
+        // tracked [approvalMirrorScopes]) — NEVER the live activeSessionId
+        // (which may belong to another conversation by decision time). The
+        // UI above shows the GATE's decision (the authorization authority);
+        // a failed durable mirror surfaces an EXPLICIT error instead of
+        // silently claiming the persisted state moved.
+        val mirrorScope = approvalMirrorScopes[approvalId]
+        if (mirrorScope == null) {
+            // The block was never durably written (its request already
+            // failed persistence honestly) — nothing to mirror, and the
+            // decision remains gate-truth only.
+            return
+        }
+        val mirrorSessionId = mirrorScope.sessionId
+        val mirrorWorkspaceId = mirrorScope.workspaceId
         viewModelScope.launch {
-            runCatching {
-                conversationSessionService.updateTimelineEventApprovalState(
-                    sessionId = ConversationSessionId(sessionId),
+            try {
+                val mirrored = conversationSessionService.updateTimelineEventApprovalState(
+                    sessionId = ConversationSessionId(mirrorSessionId),
                     approvalId = approvalId,
-                    state = blockState.name
+                    state = blockState.name,
+                    workspaceId = mirrorWorkspaceId
                 )
+                if (!mirrored) {
+                    throw IllegalStateException(
+                        "the durable approval event did not change (missing row in its own session)"
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        errorMessage = "تم تسجيل قرارك في بوابة الموافقة لكن تعذر تحديث السجل الدائم للجلسة " +
+                                "(${e.localizedMessage ?: e.message}) — قد تظهر الحالة القديمة بعد إعادة فتح الجلسة."
+                    )
+                }
             }
         }
     }
@@ -2372,8 +2680,14 @@ class StudioViewModel(
      * of the same tool still passes the same authorization boundary
      * honestly — with "السماح دائماً" (a standing EXECUTE grant) it passes
      * WITHOUT a new request.
+     *
+     * CHAT FINAL CLOSURE: returns the id of the RETARGETED user message (the
+     * tapped block's own message) — a deterministic witness for the
+     * targeting invariant (a transitory live-block emission can conflate
+     * under fast kernel completions); null when the retry was honestly
+     * refused (with the actionable error already surfaced).
      */
-    fun retryAfterApproval(approvalId: String, agent: AgentDefinition?) {
+    fun retryAfterApproval(approvalId: String, agent: AgentDefinition?): String? {
         val current = _state.value
         if (current.isExecuting) {
             // Honest refusal (never a silent no-op): the composer is locked
@@ -2381,7 +2695,7 @@ class StudioViewModel(
             _state.update {
                 it.copy(errorMessage = "هناك تنفيذ جارٍ بالفعل — أعد المحاولة عند اكتماله.")
             }
-            return
+            return null
         }
         // RESIDUAL CLOSURE (P4): the retry targets the SPECIFIC approval
         // block the user tapped (explicit approvalId identity) — NEVER
@@ -2394,13 +2708,13 @@ class StudioViewModel(
             _state.update {
                 it.copy(errorMessage = "لا توجد موافقة بهذا المعرف في المحادثة الحالية.")
             }
-            return
+            return null
         }
         if (targetBlock.state != ApprovalBlockState.APPROVED) {
             _state.update {
                 it.copy(errorMessage = "هذه الموافقة لم تُمنح بعد — وافق على الطلب أولاً ثم أعد المحاولة.")
             }
-            return
+            return null
         }
         val blockIndex = current.timeline.indexOfFirst { it.id == targetBlock.id }
         val blockedUser = if (blockIndex > 0) {
@@ -2415,14 +2729,17 @@ class StudioViewModel(
             _state.update {
                 it.copy(errorMessage = "تعذر العثور على الرسالة المرتبطة بهذه الموافقة في المحادثة الحالية.")
             }
-            return
+            return null
         }
 
-        val resolvedAgent = resolveAgentForExecution(agent) ?: return
+        val resolvedAgent = resolveAgentForExecution(agent) ?: return null
         launchExecutionForUserEntry(
             targetUser = blockedUser,
             resolvedAgent = resolvedAgent
         )
+        // CHAT FINAL CLOSURE: the deterministic targeting witness — THIS
+        // block's own message id.
+        return blockedUser.id
     }
 
     companion object {

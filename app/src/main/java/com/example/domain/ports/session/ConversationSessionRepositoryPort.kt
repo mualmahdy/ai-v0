@@ -116,14 +116,16 @@ interface ConversationSessionRepositoryPort {
 
     /**
      * WORKSPACE-AUTHORIZED model pin update — no-op for a session owned by
-     * another workspace.
+     * another workspace. CHAT FINAL CLOSURE (§7 model persistence): returns
+     * whether the pin ACTUALLY applied, so callers can verify the durable
+     * result instead of treating a silent no-op as success.
      */
     suspend fun updateSessionModelForWorkspace(
         id: ConversationSessionId,
         workspaceId: String,
         modelResourceId: String?,
         modelDisplayName: String?
-    )
+    ): Boolean
 
     /**
      * WORKSPACE-AUTHORIZED rename — no-op for a session owned by another

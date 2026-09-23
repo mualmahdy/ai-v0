@@ -130,6 +130,34 @@ class ConversationTimelineTest {
         assertEquals(ExecutionPhase.CANCELLED, next.phase)
     }
 
+    // ------------------------------------------------------------------
+    // CHAT FINAL CLOSURE (§15) — deterministic projection timestamps: the
+    // caller-supplied nowMs parameterizes the step clock for testing.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `step timestamps honor the caller-supplied nowMs - the projection is deterministic`() {
+        val fixedNow = 1_000L
+        val live = ExecutionLifecycleProjection.apply(
+            base,
+            toolRequested("web_search"),
+            nowMs = fixedNow
+        )
+        assertEquals(1, live.steps.size)
+        assertEquals(fixedNow, live.steps.single().timestampMs)
+
+        val later = ExecutionLifecycleProjection.apply(
+            live,
+            toolResult("web_search"),
+            nowMs = fixedNow + 5_000
+        )
+        assertEquals(
+            "each step carries ITS caller-supplied timestamp",
+            listOf(fixedNow, fixedNow + 5_000),
+            later.steps.map { it.timestampMs }
+        )
+    }
+
     @Test
     fun `telemetry events leave the lifecycle untouched`() {
         val telemetry = listOf(

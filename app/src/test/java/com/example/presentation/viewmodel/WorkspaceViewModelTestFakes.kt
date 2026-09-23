@@ -131,6 +131,41 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
     /** Number of timeline-event append attempts that FAILED. */
     var failedAppendTimelineEventAttempts = 0
 
+    // ------------------------------------------------------------------
+    // CHAT FINAL CLOSURE (failure/suspension injection hooks):
+    // one-shot or sticky probes for the regression tests of the session-
+    // binding race, the fail-closed durable-session invariant, and the
+    // persistence-result honesty invariants (same convention as
+    // [appendTurnFailure] — the attempt runs, the outcome is scripted).
+    // ------------------------------------------------------------------
+
+    /**
+     * One-shot suspension gates consumed by successive getSessionWithTurnsForWorkspace
+     * calls (the session-binding race's mid-read park point).
+     */
+    val sessionWithTurnsGates = java.util.concurrent.ConcurrentLinkedQueue<kotlinx.coroutines.CompletableDeferred<Unit>>()
+
+    /** Number of times a sessionWithTurns gate was CONSUMED (suspension started). */
+    val consumedSessionWithTurnsGates = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** When set, upsertSession (session creation) FAILS — fail-closed tests. */
+    var upsertFailure: RuntimeException? = null
+
+    /** Number of upsertSession attempts that FAILED. */
+    var failedUpsertAttempts = 0
+
+    /** When set, appendTurnForWorkspace returns false WITHOUT writing (authorization-style no-op). */
+    var appendTurnReject: Boolean = false
+
+    /** When set, appendTimelineEventForWorkspace returns false WITHOUT writing. */
+    var appendTimelineEventReject: Boolean = false
+
+    /** When set, updateTimelineEventApprovalStateForWorkspace returns false WITHOUT changing anything. */
+    var updateTimelineEventStateReject: Boolean = false
+
+    /** When set, updateSessionModelForWorkspace returns false WITHOUT writing. */
+    var rejectModelUpdate: Boolean = false
+
     fun seed(session: ConversationSession) {
         sessionsFlow.value = sessionsFlow.value + session
     }
@@ -158,6 +193,12 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
         id: ConversationSessionId,
         workspaceId: String
     ): ConversationSessionWithTurns? {
+        // CHAT FINAL CLOSURE (session-binding race probe): optional park
+        // points for the reuse-check reads.
+        sessionWithTurnsGates.poll()?.let { gate ->
+            consumedSessionWithTurnsGates.incrementAndGet()
+            gate.await()
+        }
         val session = getSessionForWorkspace(id, workspaceId) ?: return null
         return ConversationSessionWithTurns(
             session = session,
@@ -169,6 +210,12 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
 
     override suspend fun upsertSession(session: ConversationSession) {
         upsertCount++
+        // CHAT FINAL CLOSURE (fail-closed probe): session creation fails —
+        // the ViewModel must refuse the execution, not run un-persisted.
+        upsertFailure?.let { failure ->
+            failedUpsertAttempts++
+            throw failure
+        }
         sessionsFlow.value = sessionsFlow.value.filter { it.id != session.id } + session
     }
 
@@ -178,6 +225,9 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
     ): Boolean {
         val session = getSessionForWorkspace(turn.sessionId, workspaceId) ?: return false
         appendCount++
+        // CHAT FINAL CLOSURE (persistence-result probe): the honest no-op —
+        // nothing written, false returned (the caller must surface it).
+        if (appendTurnReject) return false
         // RESIDUAL CLOSURE (failure injection): the failed attempt still
         // counts as an append attempt (the failure path RAN — tests assert
         // the leak-free handling, not the absence of the attempt).
@@ -213,9 +263,12 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
         workspaceId: String,
         modelResourceId: String?,
         modelDisplayName: String?
-    ) {
-        val session = getSessionForWorkspace(id, workspaceId) ?: return
+    ): Boolean {
+        // CHAT FINAL CLOSURE (model-persistence probe): the honest no-op.
+        if (rejectModelUpdate) return false
+        val session = getSessionForWorkspace(id, workspaceId) ?: return false
         upsertSession(session.copy(modelResourceId = modelResourceId, modelDisplayName = modelDisplayName))
+        return true
     }
 
     override suspend fun renameSessionForWorkspace(
@@ -235,6 +288,9 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
     ): Boolean {
         val session = getSessionForWorkspace(event.sessionId, workspaceId) ?: return false
         appendTimelineEventCount++
+        // CHAT FINAL CLOSURE (persistence-result probe): nothing written,
+        // false returned — the caller must not show a durable state.
+        if (appendTimelineEventReject) return false
         appendTimelineEventFailure?.let { failure ->
             failedAppendTimelineEventAttempts++
             lastFailedTimelineEventSessionId = event.sessionId.value
@@ -258,6 +314,10 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
     ): Boolean {
         if (getSessionForWorkspace(sessionId, workspaceId) == null) return false
         updateTimelineEventStateCount++
+        // CHAT FINAL CLOSURE (approval-mirror probe): the honest no-op — no
+        // row changed, false returned (the caller must surface the stale
+        // durable state instead of silently claiming the mirror applied).
+        if (updateTimelineEventStateReject) return false
         // RESIDUAL CLOSURE (integrity): the SAME final predicate as the Room
         // SQL — the update applies ONLY to the event in THIS session carrying
         // THIS approvalId (a stray approvalId from another session changes

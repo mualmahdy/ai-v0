@@ -14,9 +14,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -26,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -63,10 +66,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.presentation.state.ApprovalBlockState
 import com.example.presentation.state.ChatAutoScrollPolicy
@@ -385,7 +392,12 @@ private fun UserMessage(
                                             text = attachment.name,
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                            maxLines = 1
+                                            maxLines = 1,
+                                            // CHAT FINAL CLOSURE (§13): a long
+                                            // filename ellipsizes instead of
+                                            // breaking the bubble's layout.
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.widthIn(max = 180.dp)
                                         )
                                     }
                                 }
@@ -535,12 +547,19 @@ private fun AssistantMessage(
 /**
  * CHAT CAPABILITIES (Task 2 §15): the collapsible sources block —
  * "المصادر (N)" collapsed by default; the details open on demand.
+ *
+ * CHAT FINAL CLOSURE (§11 actionable sources): a source carrying a REAL
+ * http(s) URL is OPENABLE — its row opens the platform browser through the
+ * standard Android ACTION_VIEW intent (no new navigation infrastructure;
+ * rows without a usable URL stay plainly readable with their provider id).
+ * Each row keeps a ≥48dp touch target and explicit open-state semantics.
  */
 @Composable
 private fun CollapsibleSources(
     sources: List<ChatSourceRef>,
     tagSuffix: String
 ) {
+    val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
     Surface(
         onClick = { expanded = !expanded },
@@ -584,32 +603,95 @@ private fun CollapsibleSources(
                 // instead of a raw URL wall; the provider id is the honest
                 // fallback for local/provider-scoped citations.
                 val domain = sourceDomain(source.url)
-                Text(
-                    text = buildString {
-                        append("${index + 1}. ")
-                        append(source.title)
-                        val origin = domain ?: source.providerId
-                        if (origin != null) append(" — $origin")
-                        source.confidenceScore?.let {
-                            append("\nالثقة: ")
-                            append("%.2f".format(it))
+                val openable = source.url.isWebUrl()
+                val origin = domain ?: source.providerId
+                val rowText = buildString {
+                    append("${index + 1}. ")
+                    append(source.title)
+                    if (origin != null) append(" — $origin")
+                    source.confidenceScore?.let {
+                        append("\nالثقة: ")
+                        append("%.2f".format(it))
+                    }
+                }
+                if (openable) {
+                    Surface(
+                        onClick = {
+                            // §11: the platform's own browser navigation —
+                            // ACTION_VIEW over the source's REAL URL (a
+                            // malformed URL at click time degrades honestly
+                            // to a no-op, never a crash).
+                            runCatching {
+                                context.startActivity(
+                                    android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse(source.url)
+                                    )
+                                )
+                            }
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 1.dp)
+                            .heightIn(min = 48.dp)
+                            .semantics { contentDescription = "فتح المصدر: ${source.title}" }
+                            .testTag("source_item_${tagSuffix}_$index")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = rowText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Icon(
+                                Icons.AutoMirrored.Filled.OpenInNew,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
                         }
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .padding(vertical = 2.dp)
-                        .testTag("source_item_${tagSuffix}_$index")
-                )
+                    }
+                } else {
+                    Text(
+                        text = rowText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .padding(vertical = 2.dp)
+                            .testTag("source_item_${tagSuffix}_$index")
+                    )
+                }
             }
         }
     }
 }
 
-/** UI POLISH §16: the readable domain of a citation URL (null when absent). */
+/**
+ * UI POLISH §16: the readable domain of a citation URL (null when absent).
+ */
 internal fun sourceDomain(url: String?): String? {
     if (url.isNullOrBlank()) return null
     return runCatching { java.net.URI(url).host?.removePrefix("www.") }.getOrNull()
+}
+
+/**
+ * CHAT FINAL CLOSURE (§11): whether a citation URL is really OPENABLE in a
+ * browser — http(s) only (workspace:// and other internal schemes stay
+ * readable rows; they have no browser target).
+ */
+internal fun String?.isWebUrl(): Boolean {
+    if (isNullOrBlank()) return false
+    return startsWith("http://", ignoreCase = true) ||
+            startsWith("https://", ignoreCase = true)
 }
 
 /**
@@ -1061,12 +1143,18 @@ fun ExecutionLifecycleView(
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 if (streamText.isNotBlank()) {
-                    IconButton(onClick = onCopyStream, modifier = Modifier.size(28.dp)) {
+                    // CHAT FINAL CLOSURE (§12): default-sized IconButton — the
+                    // explicit 28dp size override killed the 48dp minimum touch
+                    // target (the icon inside stays visually compact).
+                    IconButton(
+                        onClick = onCopyStream,
+                        modifier = Modifier.testTag("btn_copy_stream_${live.executionId}")
+                    ) {
                         Icon(
                             Icons.Default.ContentCopy,
                             contentDescription = "نسخ النص الجزئي",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(14.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
@@ -1187,7 +1275,9 @@ internal fun lifecycleLabel(live: LiveExecutionState): String = when (live.phase
     ExecutionPhase.CANCELLED -> "أُلغي التنفيذ"
 }
 
-/** A small, honest message action (§10) — real callbacks only. */
+/** A small, honest message action (§10) — real callbacks only.
+ *  CHAT FINAL CLOSURE (§12 touch targets): the row keeps a ≥48dp minimum
+ *  INTERACTIVE height — a 14dp icon is never the de-facto touch target. */
 @Composable
 private fun MessageAction(
     label: String,
@@ -1201,6 +1291,7 @@ private fun MessageAction(
         color = Color.Transparent,
         modifier = Modifier
             .padding(vertical = 2.dp)
+            .heightIn(min = 48.dp)
             .testTag(tag)
     ) {
         Row(

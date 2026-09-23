@@ -165,7 +165,9 @@ fun ChatCapabilityMenu(
     }
 }
 
-/** One capability row with the honest §4 availability treatment. */
+/** One capability row with the honest §4 availability treatment.
+ *  CHAT FINAL CLOSURE (§12 touch targets): the row keeps a ≥48dp minimum
+ *  interactive height (a full-width row was previously ~40dp). */
 @Composable
 private fun CapabilityRow(
     item: ChatCapabilityItem,
@@ -184,6 +186,7 @@ private fun CapabilityRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 3.dp)
+            .heightIn(min = 48.dp)
             .testTag("capability_${item.key.name}")
     ) {
         Row(

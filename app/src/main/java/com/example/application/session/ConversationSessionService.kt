@@ -216,14 +216,17 @@ suspend fun getSession(
 
     /**
      * Pins the exact model resource for the session (durable user choice) —
-     * WORKSPACE-AUTHORIZED.
+     * WORKSPACE-AUTHORIZED. CHAT FINAL CLOSURE (§7 model persistence):
+     * returns whether the pin ACTUALLY applied (false = the session is not
+     * writable in that workspace — the caller must NOT show the choice as
+     * saved).
      */
     suspend fun setSessionModel(
         sessionId: ConversationSessionId,
         modelResourceId: String?,
         modelDisplayName: String?,
         workspaceId: String? = null
-    ) = repository.updateSessionModelForWorkspace(
+    ): Boolean = repository.updateSessionModelForWorkspace(
         sessionId, workspaceId ?: workspaceIdProvider(), modelResourceId, modelDisplayName
     )
 

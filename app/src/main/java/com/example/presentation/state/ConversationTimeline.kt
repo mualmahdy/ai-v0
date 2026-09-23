@@ -260,13 +260,22 @@ object ExecutionLifecycleProjection {
      * UI POLISH §10: appends one REAL step to the history (capped). A blank
      * CONTENT is dropped — a step the kernel did not actually describe is
      * noise, not a detail (the label never invents content).
+     *
+     * CHAT FINAL CLOSURE (§15): the step timestamp comes from the caller-
+     * supplied [nowMs] (defaulting to the wall clock) so the projection is
+     * DETERMINISTICALLY testable — a small, architecture-compatible seam,
+     * not a refactor.
      */
-    private fun LiveExecutionState.withStep(prefix: String?, content: String?): LiveExecutionState {
+    private fun LiveExecutionState.withStep(
+        prefix: String?,
+        content: String?,
+        nowMs: Long
+    ): LiveExecutionState {
         val clean = content?.take(60)?.trim().orEmpty()
         if (clean.isBlank()) return this
         val label = if (prefix.isNullOrBlank()) clean else "$prefix $clean"
         return copy(
-            steps = (steps + ExecutionStep(label, System.currentTimeMillis()))
+            steps = (steps + ExecutionStep(label, nowMs))
                 .takeLast(STEP_HISTORY_LIMIT)
         )
     }
@@ -275,8 +284,16 @@ object ExecutionLifecycleProjection {
      * Applies one event to [current]. ContentChunk text accumulation and
      * terminal collapse are the ViewModel's job — this projection only owns
      * the lifecycle shape.
+     *
+     * CHAT FINAL CLOSURE (§15): [nowMs] parameterizes the projection's clock
+     * (default: the wall clock) — tests pass a fixed value for deterministic
+     * step timestamps; production callers are unchanged.
      */
-    fun apply(current: LiveExecutionState, event: ExecutionEvent): LiveExecutionState {
+    fun apply(
+        current: LiveExecutionState,
+        event: ExecutionEvent,
+        nowMs: Long = System.currentTimeMillis()
+    ): LiveExecutionState {
         var next = current
         when (event) {
             is ExecutionEvent.Started -> next = current.copy(
@@ -287,12 +304,12 @@ object ExecutionLifecycleProjection {
             is ExecutionEvent.DecisionMade -> next = current.copy(
                 phase = ExecutionPhase.PLANNING,
                 phaseDetail = event.decision.chosenAction.type.displayName
-            ).withStep(prefix = null, content = event.decision.chosenAction.type.displayName)
+            ).withStep(prefix = null, content = event.decision.chosenAction.type.displayName, nowMs = nowMs)
 
             is ExecutionEvent.Replanned -> next = current.copy(
                 phase = ExecutionPhase.PLANNING,
                 phaseDetail = event.reason.take(48)
-            ).withStep(prefix = "إعادة تخطيط:", content = event.reason)
+            ).withStep(prefix = "إعادة تخطيط:", content = event.reason, nowMs = nowMs)
 
             is ExecutionEvent.ActionStarted -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
@@ -301,30 +318,30 @@ object ExecutionLifecycleProjection {
                 // موثوق", "تنفيذ أداة برمجية مباشرة", "استرجاع المعرفة
                 // والوثائق (RAG)"…) — actual events, no chain-of-thought.
                 phaseDetail = event.action.type.displayName.take(48)
-            ).withStep(prefix = null, content = event.action.type.displayName)
+            ).withStep(prefix = null, content = event.action.type.displayName, nowMs = nowMs)
 
             is ExecutionEvent.ActionCompleted -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
                 actionCount = current.actionCount + 1,
                 phaseDetail = event.outputSummary.take(48)
-            ).withStep(prefix = "تم:", content = event.outputSummary)
+            ).withStep(prefix = "تم:", content = event.outputSummary, nowMs = nowMs)
 
             is ExecutionEvent.ActionFailed -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
                 actionCount = current.actionCount + 1,
                 phaseDetail = event.errorDescription.take(48)
-            ).withStep(prefix = "فشل إجراء:", content = event.errorDescription)
+            ).withStep(prefix = "فشل إجراء:", content = event.errorDescription, nowMs = nowMs)
 
             is ExecutionEvent.ToolRequested -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
                 toolCount = current.toolCount + 1,
                 phaseDetail = event.toolName
-            ).withStep(prefix = "أداة:", content = event.toolName)
+            ).withStep(prefix = "أداة:", content = event.toolName, nowMs = nowMs)
 
             is ExecutionEvent.ToolResult -> next = current.copy(
                 phase = ExecutionPhase.EXECUTING,
                 phaseDetail = event.toolName
-            ).withStep(prefix = "نتيجة أداة:", content = event.toolName)
+            ).withStep(prefix = "نتيجة أداة:", content = event.toolName, nowMs = nowMs)
 
             is ExecutionEvent.ContentChunk -> next = current.copy(
                 phase = ExecutionPhase.STREAMING,
@@ -340,17 +357,17 @@ object ExecutionLifecycleProjection {
 
             is ExecutionEvent.RateLimitEncountered -> next = current.copy(
                 phaseDetail = "حد معدل مؤقت"
-            ).withStep(prefix = null, content = "حد معدل مؤقت")
+            ).withStep(prefix = null, content = "حد معدل مؤقت", nowMs = nowMs)
 
             is ExecutionEvent.Degraded -> next = current.copy(
                 isDegraded = true,
                 degradedMessage = event.message
-            ).withStep(prefix = "نمط تراجعي:", content = event.message)
+            ).withStep(prefix = "نمط تراجعي:", content = event.message, nowMs = nowMs)
 
             is ExecutionEvent.Error -> next = current.copy(
                 phase = ExecutionPhase.FAILED,
                 phaseDetail = event.message.take(48)
-            ).withStep(prefix = "فشل:", content = event.message)
+            ).withStep(prefix = "فشل:", content = event.message, nowMs = nowMs)
 
             is ExecutionEvent.Completed -> next = current.copy(
                 phase = ExecutionPhase.COMPLETED

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -146,17 +147,25 @@ fun ChatComposer(
                                     text = attachment.name,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    maxLines = 1
+                                    maxLines = 1,
+                                    // CHAT FINAL CLOSURE (§13): a long filename
+                                    // ellipsizes (never breaks the chips row).
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 180.dp)
                                 )
+                                // CHAT FINAL CLOSURE (§12 touch targets): the
+                                // remove control keeps the default 48dp
+                                // minimum interactive size — the previous
+                                // explicit .size(24.dp) made a 14dp icon the
+                                // de-facto touch target.
                                 IconButton(
-                                    onClick = { onRemoveAttachment(attachment.id) },
-                                    modifier = Modifier.size(24.dp)
+                                    onClick = { onRemoveAttachment(attachment.id) }
                                 ) {
                                     Icon(
                                         Icons.Default.Close,
                                         contentDescription = "إزالة المرفق «${attachment.name}»",
                                         tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                                        modifier = Modifier.size(14.dp)
+                                        modifier = Modifier.size(16.dp)
                                     )
                                 }
                             }

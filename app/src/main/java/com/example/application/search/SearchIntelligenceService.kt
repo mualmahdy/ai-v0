@@ -101,6 +101,14 @@ class SearchIntelligenceService(
         val decomposition = decompose(query)
         val sourceSelection = selectSources(decomposition.primaryIntent)
 
+        // CHAT FINAL CLOSURE (§14 — search state truthfulness): per-provider
+        // call outcomes are COUNTED instead of silently dropped. isPartial
+        // now means "some source degraded or failed" — NEVER "zero results"
+        // (an empty-but-healthy result set is SUCCESS_EMPTY, a different
+        // truth from a degraded or failed search).
+        var degradedCalls = 0
+        var failedCalls = 0
+
         // Fan out: run each sub-query against each selected provider in parallel.
         val allResults = coroutineScope {
             decomposition.subQueries.flatMapIndexed { subQueryIndex, subQuery ->
@@ -115,7 +123,16 @@ class SearchIntelligenceService(
                         )
                     }
                 }
-            }.flatMap { it.await() }
+            }.flatMap { deferred ->
+                deferred.await().let { call ->
+                    when (call.status) {
+                        ProviderCallStatus.SUCCEEDED -> Unit
+                        ProviderCallStatus.DEGRADED -> degradedCalls++
+                        ProviderCallStatus.FAILED -> failedCalls++
+                    }
+                    call.items
+                }
+            }
         }
 
         // Deduplicate by canonical URL + normalized title.
@@ -136,14 +153,33 @@ class SearchIntelligenceService(
             )
         }
 
+        val isPartial = degradedCalls > 0 || failedCalls > 0
+        val degradationReason = when {
+            degradedCalls > 0 && failedCalls > 0 ->
+                "بعض المصادر رجّعت نتائج جزئية وبعضها فشل"
+            degradedCalls > 0 -> "بعض المصادر لم يستجب بالكامل"
+            failedCalls > 0 -> "بعض المصادر لم يستجب"
+            else -> null
+        }
+
         return SearchIntelligenceResult(
             originalQuery = query,
             decomposition = decomposition,
             rankedItems = ranked,
             citations = citations,
-            isPartial = ranked.isEmpty()
+            isPartial = isPartial,
+            degradationReason = degradationReason
         )
     }
+
+    /** The honest per-provider call status (§14 — counted, never dropped). */
+    private enum class ProviderCallStatus { SUCCEEDED, DEGRADED, FAILED }
+
+    /** One provider call's outcome: its ranked items + the call status. */
+    private data class ProviderCallResult(
+        val items: List<RankedSearchItem>,
+        val status: ProviderCallStatus
+    )
 
     /**
      * Decompose a query into sub-queries.
@@ -225,20 +261,29 @@ class SearchIntelligenceService(
         preference: SourcePreference,
         maxResults: Int,
         provider: SearchProviderPort
-    ): List<RankedSearchItem> {
+    ): ProviderCallResult {
         val searchQuery = SearchQuery(
             query = subQuery.text,
             maxResults = minOf(maxResults, preference.maxResults),
             freshOnly = preference.freshOnly
         )
         return when (val result = provider.search(searchQuery)) {
-            is Outcome.Success -> result.value.items.mapIndexed { _, item ->
-                toRanked(item, preference.providerId, subQueryIndex, subQuery.weight)
-            }
-            is Outcome.Degraded -> result.partialValue?.items?.mapIndexed { _, item ->
-                toRanked(item, preference.providerId, subQueryIndex, subQuery.weight * 0.7f)
-            } ?: emptyList()
-            is Outcome.Error -> emptyList()
+            is Outcome.Success -> ProviderCallResult(
+                items = result.value.items.mapIndexed { _, item ->
+                    toRanked(item, preference.providerId, subQueryIndex, subQuery.weight)
+                },
+                status = ProviderCallStatus.SUCCEEDED
+            )
+            is Outcome.Degraded -> ProviderCallResult(
+                items = result.partialValue?.items?.mapIndexed { _, item ->
+                    toRanked(item, preference.providerId, subQueryIndex, subQuery.weight * 0.7f)
+                } ?: emptyList(),
+                status = ProviderCallStatus.DEGRADED
+            )
+            is Outcome.Error -> ProviderCallResult(
+                items = emptyList(),
+                status = ProviderCallStatus.FAILED
+            )
         }
     }
 

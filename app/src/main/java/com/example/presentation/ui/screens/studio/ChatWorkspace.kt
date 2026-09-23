@@ -4,6 +4,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -54,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.domain.core.resource.ResourceType
 import com.example.domain.core.session.ConversationSession
+import com.example.presentation.state.ChatAdaptiveLayout
 import com.example.presentation.state.ChatCapabilityKey
 import com.example.presentation.state.ChatCapabilityStatus
 import com.example.presentation.ui.navigation.NavWidthClass
@@ -185,11 +187,20 @@ fun ChatWorkspace(
             it.healthStatus != com.example.domain.core.provider.HealthStatus.UNAVAILABLE
     }
 
-    // §19: the adaptive shell — sessions pane (medium+), chat, context pane
-    // (expanded). COMPACT stays chat-first.
-    Row(modifier = modifier.testTag("agent_studio_screen")) {
+    // §19 + CHAT FINAL CLOSURE (§10 responsive topology): the adaptive shell
+    // resolves its EFFECTIVE pane policy against the width the chat shell
+    // ACTUALLY measured (net of the navigation rail and shell paddings) —
+    // proportional pane widths with clamps, honest downgrades (context pane
+    // drops first, then the sessions pane falls back to the sheet), and a
+    // guaranteed usable chat column (never a squeezed strip).
+    BoxWithConstraints(modifier = modifier.testTag("agent_studio_screen")) {
+        val panePolicy = ChatAdaptiveLayout.panePolicyFor(
+            widthClass = widthClass,
+            availableWidthDp = maxWidth.value.toInt()
+        )
+        Row(modifier = Modifier.fillMaxSize()) {
 
-        if (widthClass != NavWidthClass.COMPACT) {
+        if (panePolicy.panes.sessionsPane) {
             ChatSessionsPane(
                 sessions = sessions,
                 activeSessionId = state.activeSessionId,
@@ -197,7 +208,7 @@ fun ChatWorkspace(
                 onDeleteRequest = { deleteSessionTarget = it },
                 onNewSession = onNewSession,
                 modifier = Modifier
-                    .width(300.dp)
+                    .width(panePolicy.sessionsPaneWidthDp.coerceAtLeast(1).dp)
                     .fillMaxHeight()
             )
         }
@@ -220,9 +231,10 @@ fun ChatWorkspace(
                 onOpenContext = { contextSheetOpen = true },
                 onOpenSettings = { settingsSheetOpen = true },
                 onNewSession = onNewSession,
-                // §19: the browser button exists ONLY in compact (medium+
-                // panes already show the sessions list — no duplicates).
-                onOpenSessions = if (widthClass == NavWidthClass.COMPACT) {
+                // §19 + CHAT FINAL CLOSURE (§10): the browser button exists
+                // only when the sessions surface is a SHEET (panes already
+                // show the sessions list — no duplicates).
+                onOpenSessions = if (panePolicy.panes.headerSessionsButton) {
                     { onSessionBrowserOpen(true) }
                 } else {
                     null
@@ -250,7 +262,7 @@ fun ChatWorkspace(
                         hasSessions = sessions.isNotEmpty(),
                         onStarterPrompt = { onPromptInput(it) },
                         onResumeSessions = {
-                            if (widthClass == NavWidthClass.COMPACT) {
+                            if (panePolicy.panes.sessionsSheet) {
                                 onSessionBrowserOpen(true)
                             }
                         }
@@ -307,19 +319,19 @@ fun ChatWorkspace(
             )
         }
 
-        if (widthClass == NavWidthClass.EXPANDED) {
+        if (panePolicy.panes.contextPane) {
             ChatContextPane(
                 state = state,
                 capabilityState = capabilityState,
                 agentName = activeAgent?.identity?.name,
                 modifier = Modifier
-                    .width(280.dp)
+                    .width(panePolicy.contextPaneWidthDp.coerceAtLeast(1).dp)
                     .fillMaxHeight()
             )
         }
-    }
+        }
 
-    // ---- Secondary surfaces (§6: nothing stacks above the transcript) ----
+        // ---- Secondary surfaces (§6: nothing stacks above the transcript) ----
     if (contextSheetOpen) {
         ChatContextSheet(
             chatMode = state.chatMode,
@@ -361,7 +373,10 @@ fun ChatWorkspace(
     }
 
     // ---- Task-2 §18: the scalable session browser surface ----
-    if (widthClass == NavWidthClass.COMPACT && isSessionBrowserOpen) {
+    // CHAT FINAL CLOSURE (§10): the sheet is the sessions surface whenever
+    // the EFFECTIVE policy says so (compact, or a downgraded medium/expanded
+    // whose width cannot host the pane beside a usable chat column).
+    if (panePolicy.panes.sessionsSheet && isSessionBrowserOpen) {
         SessionBrowserSheet(
             sessions = sessions,
             activeSessionId = state.activeSessionId,
@@ -534,6 +549,7 @@ fun ChatWorkspace(
             },
             onDismiss = { deleteSessionTarget = null }
         )
+    }
     }
 }
 

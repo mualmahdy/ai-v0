@@ -414,4 +414,199 @@ class ChatCapabilityPolicyTest {
         assertTrue(ChatCapabilityTemplates.DOCUMENT.isNotBlank())
         assertTrue(ChatCapabilityTemplates.CODE.isNotBlank())
     }
+
+    // ------------------------------------------------------------------
+    // CHAT FINAL CLOSURE (§8) — Vision presentation derives from the RADAR's
+    // real operational state (never a hardcoded PLANNED over a real state,
+    // never a fake availability).
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `vision reflects a radar AVAILABLE state - not a hardcoded planned label`() {
+        val resolved = ChatCapabilityPolicy.resolve(
+            facts {
+                copy(
+                    radarChecks = mapOf(
+                        CapabilityType.VISION to radarCheck(
+                            CapabilityType.VISION,
+                            OperationalCapabilityState.AVAILABLE,
+                            "قدرة الرؤية تشغيلية ومتحقق منها زمنياً"
+                        )
+                    )
+                )
+            }
+        )
+        val vision = resolved.first { it.key == ChatCapabilityKey.VISION_ANALYSIS }
+        assertEquals(ChatCapabilityStatus.AVAILABLE, vision.status)
+        assertTrue("a radar-AVAILABLE vision is clickable", ChatCapabilityPolicy.isClickable(vision))
+        assertFalse(vision.isDegraded)
+    }
+
+    @Test
+    fun `vision reflects a radar DEGRADED state as available-with-hint`() {
+        val resolved = ChatCapabilityPolicy.resolve(
+            facts {
+                copy(
+                    radarChecks = mapOf(
+                        CapabilityType.VISION to radarCheck(
+                            CapabilityType.VISION,
+                            OperationalCapabilityState.DEGRADED,
+                            "تعذر مزود الرؤية الأساسي - مسار بديل نشط"
+                        )
+                    )
+                )
+            }
+        )
+        val vision = resolved.first { it.key == ChatCapabilityKey.VISION_ANALYSIS }
+        assertEquals(ChatCapabilityStatus.AVAILABLE, vision.status)
+        assertTrue("degraded-but-executable vision stays clickable", ChatCapabilityPolicy.isClickable(vision))
+        assertTrue("the degraded hint is set", vision.isDegraded)
+    }
+
+    @Test
+    fun `vision reflects radar BLOCKED FAILED DISABLED PARTIAL UNKNOWN and DEPRECATED as honestly unavailable`() {
+        listOf(
+            OperationalCapabilityState.BLOCKED,
+            OperationalCapabilityState.FAILED,
+            OperationalCapabilityState.DISABLED,
+            OperationalCapabilityState.PARTIAL,
+            OperationalCapabilityState.UNKNOWN,
+            OperationalCapabilityState.DEPRECATED
+        ).forEach { state ->
+            val resolved = ChatCapabilityPolicy.resolve(
+                facts {
+                    copy(
+                        radarChecks = mapOf(
+                            CapabilityType.VISION to radarCheck(
+                                CapabilityType.VISION,
+                                state,
+                                "سبب الرادار الحقيقي لـ $state"
+                            )
+                        )
+                    )
+                }
+            )
+            val vision = resolved.first { it.key == ChatCapabilityKey.VISION_ANALYSIS }
+            assertEquals(
+                "a real non-operational radar state must show UNAVAILABLE ($state)",
+                ChatCapabilityStatus.UNAVAILABLE,
+                vision.status
+            )
+            assertEquals("the RADAR's rationale is surfaced ($state)", "سبب الرادار الحقيقي لـ $state", vision.reason)
+            assertFalse(vision.isDegraded)
+            assertFalse(ChatCapabilityPolicy.isClickable(vision))
+        }
+    }
+
+    @Test
+    fun `the search intelligence copy names the real pipeline - never an independent deep research`() {
+        val resolved = ChatCapabilityPolicy.resolve(facts())
+        val search = resolved.first { it.key == ChatCapabilityKey.SEARCH_INTELLIGENCE }
+        // §9: the row presents the SEARCH INTELLIGENCE pipeline; it never
+        // borrows "Deep Research" framing no independent workflow backs.
+        assertFalse(search.subtitle.contains("عميق"))
+        assertTrue(search.subtitle.contains("متعدد المصادر"))
+        assertEquals("بحث ذكي", search.title)
+    }
+
+    // ------------------------------------------------------------------
+    // CHAT FINAL CLOSURE (§10) — the effective responsive pane policy
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `medium at its lower bound downgrades the sessions pane to the sheet - chat is never squeezed`() {
+        // A 600dp-class device: after the navigation rail (~80dp) the chat
+        // shell measures ~520dp — a fixed 300dp pane would leave ~220dp of
+        // chat (unusable). The policy downgrades honestly instead.
+        val policy = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.MEDIUM,
+            availableWidthDp = 520
+        )
+        assertFalse("no sessions pane beside a squeezed chat", policy.panes.sessionsPane)
+        assertTrue("the sessions surface falls back to the sheet", policy.panes.sessionsSheet)
+        assertTrue(policy.panes.headerSessionsButton)
+        assertEquals(0, policy.sessionsPaneWidthDp)
+        assertEquals(0, policy.contextPaneWidthDp)
+    }
+
+    @Test
+    fun `medium with room hosts a clamped proportional sessions pane`() {
+        val policy = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.MEDIUM,
+            availableWidthDp = 700
+        )
+        assertTrue(policy.panes.sessionsPane)
+        assertFalse(policy.panes.sessionsSheet)
+        assertFalse(policy.panes.contextPane)
+        // round(700 * 0.30) = 210 → clamped up to the pane's own 220 minimum.
+        assertEquals(220, policy.sessionsPaneWidthDp)
+        assertTrue(
+            "the chat column keeps at least its usable minimum",
+            700 - policy.sessionsPaneWidthDp >= ChatAdaptiveLayout.CHAT_MIN_WIDTH_DP
+        )
+    }
+
+    @Test
+    fun `medium near the upper bound keeps the proportional sessions pane`() {
+        // An 839dp-class device: ~759dp of chat shell after the rail —
+        // round(759 * 0.30) = 228dp of sessions, ~531dp of chat.
+        val policy = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.MEDIUM,
+            availableWidthDp = 759
+        )
+        assertTrue(policy.panes.sessionsPane)
+        assertEquals(228, policy.sessionsPaneWidthDp)
+        assertTrue(
+            759 - policy.sessionsPaneWidthDp >= ChatAdaptiveLayout.CHAT_MIN_WIDTH_DP
+        )
+    }
+
+    @Test
+    fun `expanded at its lower bound drops the context pane first - sessions plus a usable chat`() {
+        // An 840dp-class device: ~760dp after the rail. A fixed 300+280
+        // panes would leave ~180dp of chat (broken). The policy keeps the
+        // sessions pane + a usable chat; the context pane's content stays
+        // reachable through the header's context sheet.
+        val policy = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.EXPANDED,
+            availableWidthDp = 760
+        )
+        assertTrue(policy.panes.sessionsPane)
+        assertFalse("the context pane drops before the chat column does", policy.panes.contextPane)
+        assertEquals(0, policy.contextPaneWidthDp)
+        assertTrue(
+            760 - policy.sessionsPaneWidthDp >= ChatAdaptiveLayout.CHAT_MIN_WIDTH_DP
+        )
+    }
+
+    @Test
+    fun `expanded with full room hosts all three panes with clamped widths`() {
+        val policy = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.EXPANDED,
+            availableWidthDp = 1120
+        )
+        assertTrue(policy.panes.sessionsPane)
+        assertTrue(policy.panes.contextPane)
+        // round(1120 * 0.22) = 246dp of context; sessions = round(874 * 0.30) = 262dp.
+        assertEquals(246, policy.contextPaneWidthDp)
+        assertEquals(262, policy.sessionsPaneWidthDp)
+        assertTrue(
+            1120 - policy.sessionsPaneWidthDp - policy.contextPaneWidthDp >=
+                ChatAdaptiveLayout.CHAT_MIN_WIDTH_DP
+        )
+    }
+
+    @Test
+    fun `compact keeps the pure chat-first sheet topology at any width`() {
+        val policy = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.COMPACT,
+            availableWidthDp = 360
+        )
+        assertFalse(policy.panes.sessionsPane)
+        assertTrue(policy.panes.sessionsSheet)
+        assertFalse(policy.panes.contextPane)
+        assertTrue(policy.panes.headerSessionsButton)
+        assertEquals(0, policy.sessionsPaneWidthDp)
+        assertEquals(0, policy.contextPaneWidthDp)
+    }
 }

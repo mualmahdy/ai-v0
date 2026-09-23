@@ -175,14 +175,14 @@ class RoomConversationSessionRepository(
         workspaceId: String,
         modelResourceId: String?,
         modelDisplayName: String?
-    ) {
-        sessionDao.updateModelForWorkspace(
+    ): Boolean {
+        return sessionDao.updateModelForWorkspace(
             id = id.value,
             workspaceId = workspaceId,
             modelId = modelResourceId,
             modelDisplayName = modelDisplayName,
             now = System.currentTimeMillis()
-        )
+        ) > 0
     }
 
     override suspend fun renameSessionForWorkspace(

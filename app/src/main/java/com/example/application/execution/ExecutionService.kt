@@ -2386,11 +2386,26 @@ class ExecutionService(
          * workspace-stage validation see the REAL workspace instead of
          * refusing a chat-invoked tool with WORKSPACE_SCOPE_REQUIRED.
          */
-        workspaceId: String? = null
+        workspaceId: String? = null,
+        /**
+         * CHAT FINAL CLOSURE (§4 scope pinning): the PROJECT the invocation
+         * was accepted in — pinned into the [ExecutionScope] so file tools
+         * (FileSystemTool.resolveProjectId) resolve the PINNED sandbox FIRST
+         * and never fall back to the live active project mid-invocation.
+         */
+        projectId: Long? = null,
+        /**
+         * CHAT FINAL CLOSURE (§4 scope pinning): the conversation session the
+         * invocation belongs to (when available) — egress control can enforce
+         * session-scoped network blocks under the same pinned identity.
+         */
+        sessionId: String? = null
     ): ExecutionEvent.ToolResult = kotlinx.coroutines.withContext(
         com.example.domain.core.execution.ExecutionScope(
             executionId = executionId,
-            workspaceId = workspaceId ?: "unattributed"
+            workspaceId = workspaceId ?: "unattributed",
+            projectId = projectId,
+            sessionId = sessionId
         )
     ) {
         handleToolExecution(

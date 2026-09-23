@@ -192,7 +192,13 @@ fun StudioScreen(
                 kind = CapabilityKind.SEARCH,
                 title = "بحث ذكي: $query"
             )
-            chatCapabilitiesViewModel.invokeSearch(query, agentsState.activeAgent) { entry ->
+            // CHAT FINAL CLOSURE (§4/§5): the session the invocation belongs
+            // to rides the invocation (pinned scope snapshot end-to-end).
+            chatCapabilitiesViewModel.invokeSearch(
+                query = query,
+                agent = agentsState.activeAgent,
+                sessionId = studioState.activeSessionId
+            ) { entry ->
                 studioViewModel.resolveCapabilityResult(pendingId, entry)
             }
         },
@@ -201,7 +207,10 @@ fun StudioScreen(
                 kind = CapabilityKind.KNOWLEDGE_RETRIEVAL,
                 title = "استرجاع المعرفة: $query"
             )
-            chatCapabilitiesViewModel.invokeKnowledgeRetrieval(query) { entry ->
+            chatCapabilitiesViewModel.invokeKnowledgeRetrieval(
+                query = query,
+                sessionId = studioState.activeSessionId
+            ) { entry ->
                 studioViewModel.resolveCapabilityResult(pendingId, entry)
             }
         },
@@ -214,7 +223,8 @@ fun StudioScreen(
                 toolName = toolName,
                 argumentsJson = argumentsJson,
                 agent = agentsState.activeAgent,
-                isMcp = kind == CapabilityKind.MCP
+                isMcp = kind == CapabilityKind.MCP,
+                sessionId = studioState.activeSessionId
             ) { entry ->
                 studioViewModel.resolveCapabilityResult(pendingId, entry)
             }

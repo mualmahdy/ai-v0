@@ -182,6 +182,64 @@ object ChatCapabilityPolicy {
     private const val VISION_PLANNED_REASON =
         "قدرة مخططة فقط (لا تنفيذ) — تحليل الصور غير مفعّل في هذا الإصدار."
 
+    /**
+     * CHAT FINAL CLOSURE (§8 capability truthfulness): the presentation
+     * state of a RADAR-TRACKED capability is DERIVED from the radar's REAL
+     * operational state — the radar is the declared authority, so an
+     * AVAILABLE/DEGRADED capability shows as available (degraded hinted),
+     * and BLOCKED/FAILED/DISABLED/PARTIAL/DEPRECATED/UNKNOWN show as
+     * honestly unavailable with the radar's rationale. PLANNED is reserved
+     * for the radar's genuine PLANNED declarations (or the honest default
+     * when no radar exists in the composition). No fake availability is
+     * ever created — and a real state is never masked as "قريباً".
+     */
+    private fun radarCapabilityStatus(
+        facts: ChatCapabilityFacts,
+        type: CapabilityType
+    ): ChatCapabilityStatus {
+        val check = facts.radarChecks[type] ?: return ChatCapabilityStatus.PLANNED
+        return when (check.state) {
+            OperationalCapabilityState.AVAILABLE -> ChatCapabilityStatus.AVAILABLE
+            // Executable with fallback (the radar's own isExecutable rule) —
+            // degraded hint, still clickable (the SEARCH row's convention).
+            OperationalCapabilityState.DEGRADED -> ChatCapabilityStatus.AVAILABLE
+            // The radar's GENUINE planned declaration (its current VISION
+            // declaration table: implemented=false).
+            OperationalCapabilityState.PLANNED -> ChatCapabilityStatus.PLANNED
+            // UNKNOWN / PARTIAL / BLOCKED / FAILED / DISABLED / DEPRECATED:
+            // not executable right now — honestly unavailable with the
+            // radar's rationale (never masked as "قريباً").
+            else -> ChatCapabilityStatus.UNAVAILABLE
+        }
+    }
+
+    /** The degraded hint of a radar-tracked capability (§8). */
+    private fun radarCapabilityDegraded(
+        facts: ChatCapabilityFacts,
+        type: CapabilityType
+    ): Boolean {
+        val check = facts.radarChecks[type] ?: return false
+        return check.state == OperationalCapabilityState.DEGRADED
+    }
+
+    /**
+     * The radar's rationale surfaced for ANY non-default state (§8 — the
+     * REAL reason the radar derived, never an invented one).
+     */
+    private fun radarStateReason(
+        facts: ChatCapabilityFacts,
+        type: CapabilityType,
+        fallback: String
+    ): String? {
+        val check = facts.radarChecks[type] ?: return fallback
+        return when (check.state) {
+            OperationalCapabilityState.PLANNED,
+            OperationalCapabilityState.UNKNOWN ->
+                check.rationale.ifBlank { fallback }
+            else -> check.rationale.ifBlank { fallback }
+        }
+    }
+
     fun resolve(facts: ChatCapabilityFacts): List<ChatCapabilityItem> = listOf(
         // ---------------- Files & Context ----------------
         ChatCapabilityItem(
@@ -238,7 +296,12 @@ object ChatCapabilityPolicy {
             key = ChatCapabilityKey.SEARCH_INTELLIGENCE,
             category = ChatCapabilityCategory.SEARCH_AND_INTELLIGENCE,
             title = "بحث ذكي",
-            subtitle = "بحث عميق متعدد المصادر: تحليل → تفتيت → دمج → ترتيب → مراجع",
+            // CHAT FINAL CLOSURE (§9 Deep Research truthfulness): this is the
+            // SEARCH INTELLIGENCE pipeline (analyze → decompose → fan-out →
+            // dedup → rank → citations) — NOT an independent Deep Research
+            // workflow (none exists in this version). The copy names exactly
+            // what runs; it never borrows a bigger feature's name.
+            subtitle = "بحث متعدد المصادر: تحليل الاستعلام → تفتيت → مصادر متعددة → ترتيب → مراجع",
             status = if (facts.searchProviderWired) {
                 ChatCapabilityStatus.AVAILABLE
             } else {
@@ -326,10 +389,16 @@ object ChatCapabilityPolicy {
             category = ChatCapabilityCategory.MEDIA,
             title = "تحليل صورة (Vision)",
             subtitle = "فهم محتوى الصور داخل المحادثة",
-            // §7: VISION is NOT operational — the radar declares it
-            // implemented=false ⇒ PLANNED. Never a fake vision request.
-            status = ChatCapabilityStatus.PLANNED,
-            reason = radarReason(facts, CapabilityType.VISION) ?: VISION_PLANNED_REASON
+            // CHAT FINAL CLOSURE (§8): the status is DERIVED from the radar's
+            // real operational state (see [radarCapabilityStatus]) — PLANNED
+            // only when the radar genuinely declares it planned (its current
+            // declaration table: implemented=false) or when no radar exists.
+            // A future radar AVAILABLE/DEGRADED state is reflected truthfully;
+            // BLOCKED/FAILED/DISABLED show the real reason. Never a fake
+            // availability, never a masked real state.
+            status = radarCapabilityStatus(facts, CapabilityType.VISION),
+            reason = radarStateReason(facts, CapabilityType.VISION, VISION_PLANNED_REASON),
+            isDegraded = radarCapabilityDegraded(facts, CapabilityType.VISION)
         ),
         ChatCapabilityItem(
             key = ChatCapabilityKey.IMAGE_GENERATION,
@@ -412,23 +481,6 @@ object ChatCapabilityPolicy {
         )
     )
 
-    /**
-     * The radar's rationale for a capability when a check exists — the radar
-     * is the authority for capability-level states; its Arabic reasons are
-     * already user-facing.
-     */
-    private fun radarReason(
-        facts: ChatCapabilityFacts,
-        type: CapabilityType
-    ): String? {
-        val check = facts.radarChecks[type] ?: return null
-        return when (check.state) {
-            OperationalCapabilityState.PLANNED ->
-                check.rationale.ifBlank { VISION_PLANNED_REASON }
-            else -> null
-        }
-    }
-
     /** Whether a hub row is clickable (ONLY Available rows are). */
     fun isClickable(item: ChatCapabilityItem): Boolean =
         item.status == ChatCapabilityStatus.AVAILABLE
@@ -476,5 +528,139 @@ object ChatAdaptiveLayout {
             contextPane = true,
             headerSessionsButton = false
         )
+    }
+
+    // ------------------------------------------------------------------
+    // CHAT FINAL CLOSURE (§10 responsive topology): the EFFECTIVE pane
+    // policy for the ACTUAL available width — a PURE function, unit-testable
+    // without composition. The class topology (compact = chat + sheet,
+    // medium = sessions + chat, expanded = sessions + chat + context) is the
+    // BASELINE; fixed pane widths are replaced by proportional shares with
+    // clamps, and a pane that cannot coexist with a USABLE chat column
+    // (≥ [CHAT_MIN_WIDTH_DP]) is honestly downgraded: the context pane drops
+    // first (its content stays reachable through the header's context sheet),
+    // then the sessions pane falls back to the bottom-sheet surface (its
+    // compact-equivalent). The chat column itself is NEVER squeezed to an
+    // unusable strip by sibling panes.
+    // ------------------------------------------------------------------
+
+    /**
+     * The minimum USABLE chat column. 360dp keeps the composer and one
+     * comfortable reading column intact — a 700dp-class device (600dp after
+     * the rail) keeps its sessions pane with a 380dp chat, while a 600dp-class
+     * device honestly falls back to the sheet instead of a ~220dp strip.
+     */
+    const val CHAT_MIN_WIDTH_DP = 360
+
+    private const val SESSIONS_PANE_MIN_DP = 220
+    private const val SESSIONS_PANE_MAX_DP = 300
+    private const val SESSIONS_PANE_FRACTION = 0.30f
+
+    private const val CONTEXT_PANE_MIN_DP = 240
+    private const val CONTEXT_PANE_MAX_DP = 280
+    private const val CONTEXT_PANE_FRACTION = 0.22f
+
+    /** The effective topology + concrete pane widths for an available width. */
+    data class ChatPanePolicy(
+        val panes: ChatPanes,
+        /** 0 when the sessions pane is not shown. */
+        val sessionsPaneWidthDp: Int,
+        /** 0 when the context pane is not shown. */
+        val contextPaneWidthDp: Int
+    )
+
+    /**
+     * Resolves the effective pane policy for [widthClass] at the ACTUAL
+     * [availableWidthDp] (the width the chat shell measured, already net of
+     * the navigation rail and shell paddings).
+     */
+    fun panePolicyFor(
+        widthClass: com.example.presentation.ui.navigation.NavWidthClass,
+        availableWidthDp: Int
+    ): ChatPanePolicy {
+        val available = availableWidthDp.coerceAtLeast(0)
+        val compactPanes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.COMPACT)
+        return when (widthClass) {
+            com.example.presentation.ui.navigation.NavWidthClass.COMPACT ->
+                ChatPanePolicy(compactPanes, sessionsPaneWidthDp = 0, contextPaneWidthDp = 0)
+
+            com.example.presentation.ui.navigation.NavWidthClass.MEDIUM ->
+                sidePaneWidth(
+                    availableWidthDp = available,
+                    fraction = SESSIONS_PANE_FRACTION,
+                    minDp = SESSIONS_PANE_MIN_DP,
+                    maxDp = SESSIONS_PANE_MAX_DP
+                )?.let { sessionsWidth ->
+                    ChatPanePolicy(
+                        panes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.MEDIUM),
+                        sessionsPaneWidthDp = sessionsWidth,
+                        contextPaneWidthDp = 0
+                    )
+                } ?: ChatPanePolicy(compactPanes, sessionsPaneWidthDp = 0, contextPaneWidthDp = 0)
+
+            com.example.presentation.ui.navigation.NavWidthClass.EXPANDED -> {
+                // Three panes when BOTH side panes fit beside a usable chat;
+                // the CONTEXT pane drops first (header context sheet keeps its
+                // content reachable); the sessions pane falls back last.
+                val contextWidth = sidePaneWidth(
+                    availableWidthDp = available,
+                    fraction = CONTEXT_PANE_FRACTION,
+                    minDp = CONTEXT_PANE_MIN_DP,
+                    maxDp = CONTEXT_PANE_MAX_DP
+                )
+                val sessionsWidthWithContext = contextWidth?.let { ctx ->
+                    sidePaneWidth(
+                        availableWidthDp = available - ctx,
+                        fraction = SESSIONS_PANE_FRACTION,
+                        minDp = SESSIONS_PANE_MIN_DP,
+                        maxDp = SESSIONS_PANE_MAX_DP
+                    )
+                }
+                if (contextWidth != null && sessionsWidthWithContext != null) {
+                    ChatPanePolicy(
+                        panes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.EXPANDED),
+                        sessionsPaneWidthDp = sessionsWidthWithContext,
+                        contextPaneWidthDp = contextWidth
+                    )
+                } else {
+                    sidePaneWidth(
+                        availableWidthDp = available,
+                        fraction = SESSIONS_PANE_FRACTION,
+                        minDp = SESSIONS_PANE_MIN_DP,
+                        maxDp = SESSIONS_PANE_MAX_DP
+                    )?.let { sessionsWidth ->
+                        ChatPanePolicy(
+                            panes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.MEDIUM),
+                            sessionsPaneWidthDp = sessionsWidth,
+                            contextPaneWidthDp = 0
+                        )
+                    } ?: ChatPanePolicy(compactPanes, sessionsPaneWidthDp = 0, contextPaneWidthDp = 0)
+                }
+            }
+        }
+    }
+
+    /**
+     * The width of one side pane: its proportional share clamped to
+     * [minDp, maxDp] — as long as the REMAINING chat column keeps at least
+     * [CHAT_MIN_WIDTH_DP]; otherwise the pane shrinks to what the chat can
+     * spare. Null when even the pane's minimum cannot coexist with a usable
+     * chat column (the pane must be downgraded).
+     */
+    private fun sidePaneWidth(
+        availableWidthDp: Int,
+        fraction: Float,
+        minDp: Int,
+        maxDp: Int
+    ): Int? {
+        if (availableWidthDp < minDp + CHAT_MIN_WIDTH_DP) return null
+        val proportional = (availableWidthDp * fraction).let {
+            kotlin.math.round(it).toInt()
+        }
+        val clamped = proportional.coerceIn(minDp, maxDp)
+        if (availableWidthDp - clamped >= CHAT_MIN_WIDTH_DP) return clamped
+        // The proportional clamp squeezed the chat — shrink the pane to the
+        // chat's actual spare capacity (still within its own bounds).
+        return (availableWidthDp - CHAT_MIN_WIDTH_DP).coerceIn(minDp, maxDp)
     }
 }

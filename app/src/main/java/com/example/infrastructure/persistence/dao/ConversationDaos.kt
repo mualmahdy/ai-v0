@@ -70,9 +70,11 @@ interface ConversationSessionDao {
     @Query("UPDATE chat_sessions SET modelResourceId = :modelId, modelDisplayName = :modelDisplayName, lastActiveAtEpochMs = :now WHERE sessionId = :id")
     suspend fun updateModel(id: String, modelId: String?, modelDisplayName: String?, now: Long)
 
-    /** WORKSPACE-AUTHORIZED model pin — only the owning workspace's row. */
+    /** WORKSPACE-AUTHORIZED model pin — only the owning workspace's row.
+     *  CHAT FINAL CLOSURE (§7): returns the changed-row count so the update
+     *  is VERIFIABLE (a silent no-op is distinguishable from success). */
     @Query("UPDATE chat_sessions SET modelResourceId = :modelId, modelDisplayName = :modelDisplayName, lastActiveAtEpochMs = :now WHERE sessionId = :id AND workspaceId = :workspaceId")
-    suspend fun updateModelForWorkspace(id: String, workspaceId: String, modelId: String?, modelDisplayName: String?, now: Long)
+    suspend fun updateModelForWorkspace(id: String, workspaceId: String, modelId: String?, modelDisplayName: String?, now: Long): Int
 
     @Query("UPDATE chat_sessions SET title = :title, lastActiveAtEpochMs = :now WHERE sessionId = :id")
     suspend fun rename(id: String, title: String, now: Long)

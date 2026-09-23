@@ -17,6 +17,7 @@ import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.session.TurnAttachment
 import com.example.domain.core.tools.ToolDeclaration
+import com.example.domain.core.execution.ExecutionScope
 import com.example.infrastructure.network.NetworkMonitor
 import com.example.presentation.state.CapabilityKind
 import com.example.presentation.state.ChatCapabilityFacts
@@ -153,6 +154,24 @@ class ChatCapabilitiesViewModel(
 
     /** FUNCTIONAL CLOSURE (§21): the last scope this catalog resolved for. */
     private var lastSeenScope: Pair<String, Long?>? = null
+
+    /**
+     * CHAT FINAL CLOSURE (§4/§5 scope snapshot): the (workspace, project)
+     * captured SYNCHRONOUSLY at invocation acceptance. One immutable capture
+     * per invocation — the long-running call may never re-read the live
+     * active scope (adapters fall back to it only when no ExecutionScope is
+     * present, which the pinned [ExecutionScope] now guarantees here).
+     */
+    private data class InvocationScopeSnapshot(
+        val workspaceId: String?,
+        val projectId: Long?
+    )
+
+    /** Captured at acceptance — see [InvocationScopeSnapshot]. */
+    private fun captureInvocationScope(): InvocationScopeSnapshot = InvocationScopeSnapshot(
+        workspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull(),
+        projectId = runCatching { workspaceRuntimeService.activeProjectIdOrNull() }.getOrNull()
+    )
 
     /**
      * UI POLISH (§4 — Creation group honesty): the LLM connection fact —
@@ -418,14 +437,29 @@ class ChatCapabilitiesViewModel(
     fun invokeSearch(
         query: String,
         agent: com.example.domain.core.agent.AgentDefinition?,
+        sessionId: String? = null,
         onResult: (ChatEntry.CapabilityResult) -> Unit
     ) {
         val trimmed = query.trim()
         if (trimmed.isBlank() || _state.value.isInvoking) return
         _state.update { it.copy(isInvoking = true, errorMessage = null) }
+        // CHAT FINAL CLOSURE (§5 scope snapshot): the invocation's scope is
+        // captured AT ACCEPTANCE and pinned for the whole pipeline — the
+        // MultiSourceSearchAdapter's local-workspace fallback resolves the
+        // pinned project (never the live one at fan-out time).
+        val scope = captureInvocationScope()
         viewModelScope.launch {
             val result = runCatching {
-                searchIntelligenceService.searchIntelligent(trimmed)
+                kotlinx.coroutines.withContext(
+                    ExecutionScope(
+                        executionId = "capsearch_${UUID.randomUUID()}",
+                        workspaceId = scope.workspaceId ?: "unattributed",
+                        projectId = scope.projectId,
+                        sessionId = sessionId
+                    )
+                ) {
+                    searchIntelligenceService.searchIntelligent(trimmed)
+                }
             }
             _state.update { it.copy(isInvoking = false) }
             val entry = result.fold(
@@ -438,15 +472,23 @@ class ChatCapabilitiesViewModel(
                             confidenceScore = chain.confidenceScore
                         )
                     }
+                    // CHAT FINAL CLOSURE (§14 search states): SUCCESS_EMPTY
+                    // (no results, all sources answered) is NOT degraded —
+                    // "لا توجد نتائج" is a different truth from "البحث عمل
+                    // جزئياً" and from "فشل البحث".
                     ChatEntry.CapabilityResult(
                         id = "cap_${UUID.randomUUID()}",
                         kind = CapabilityKind.SEARCH,
                         title = "بحث ذكي: $trimmed",
                         summary = when {
-                            intelligence.rankedItems.isEmpty() ->
+                            intelligence.rankedItems.isEmpty() && !intelligence.isPartial ->
                                 "لا نتائج مطابقة للاستعلام."
+                            intelligence.rankedItems.isEmpty() ->
+                                "لا نتائج — مع تعذر بعض المصادر" +
+                                        " (${intelligence.degradationReason ?: "بعض المصادر لم يستجب"})."
                             intelligence.isPartial ->
-                                "اكتمل بنمط تراجعي (${intelligence.rankedItems.size} نتيجة) — ${intelligence.degradationReason ?: "بعض المصادر لم يستجب"}."
+                                "اكتمل بنمط تراجعي (${intelligence.rankedItems.size} نتيجة) — " +
+                                        "${intelligence.degradationReason ?: "بعض المصادر لم يستجب"}."
                             else ->
                                 "تم العثور على ${intelligence.rankedItems.size} نتيجة مرتبة."
                         },
@@ -458,7 +500,7 @@ class ChatCapabilitiesViewModel(
                             }.ifBlank { null },
                         sources = sources,
                         isDegraded = intelligence.isPartial,
-                        degradedMessage = intelligence.degradationReason,
+                        degradedMessage = intelligence.degradationReason?.takeIf { intelligence.isPartial },
                         timestampMs = System.currentTimeMillis()
                     )
                 },
@@ -489,14 +531,28 @@ class ChatCapabilitiesViewModel(
      */
     fun invokeKnowledgeRetrieval(
         query: String,
+        sessionId: String? = null,
         onResult: (ChatEntry.CapabilityResult) -> Unit
     ) {
         val trimmed = query.trim()
         if (trimmed.isBlank() || _state.value.isInvoking) return
         _state.update { it.copy(isInvoking = true, errorMessage = null) }
+        // CHAT FINAL CLOSURE (§5 scope snapshot): pinned at acceptance — the
+        // RAG pipeline's retrieval scope (workspace/project filter and stale
+        // working-set repair) resolves the PINNED scope, never the live one.
+        val scope = captureInvocationScope()
         viewModelScope.launch {
             val outcome = runCatching {
-                ragPipelineService.retrieveRelevantContext(trimmed)
+                kotlinx.coroutines.withContext(
+                    ExecutionScope(
+                        executionId = "caprag_${UUID.randomUUID()}",
+                        workspaceId = scope.workspaceId ?: "unattributed",
+                        projectId = scope.projectId,
+                        sessionId = sessionId
+                    )
+                ) {
+                    ragPipelineService.retrieveRelevantContext(trimmed)
+                }
             }
             _state.update { it.copy(isInvoking = false) }
             val entry = outcome.fold(
@@ -559,10 +615,19 @@ class ChatCapabilitiesViewModel(
         argumentsJson: String,
         agent: com.example.domain.core.agent.AgentDefinition?,
         isMcp: Boolean,
+        sessionId: String? = null,
         onResult: (ChatEntry.CapabilityResult) -> Unit
     ) {
         if (_state.value.isInvoking) return
         _state.update { it.copy(isInvoking = true, errorMessage = null) }
+        // CHAT FINAL CLOSURE (§4 scope pinning): the invocation's workspace,
+        // project AND session (when available) are captured SYNCHRONOUSLY at
+        // acceptance and pinned into the governed execution's
+        // [ExecutionScope] — a project/workspace switch between acceptance
+        // and execution dispatch can neither re-target the tool's sandbox
+        // (FileSystemTool resolves the PINNED projectId first) nor re-attribute
+        // the invocation to another workspace.
+        val scope = captureInvocationScope()
         viewModelScope.launch {
             val invocationId = "capexec_${UUID.randomUUID()}"
             val resolvedAgent = resolveInvocationAgent(agent)
@@ -573,12 +638,14 @@ class ChatCapabilitiesViewModel(
                     argumentsJson = argumentsJson.ifBlank { "{}" },
                     agent = resolvedAgent,
                     isMcp = isMcp,
-                    // Pin the ACTIVE workspace (the same authority the
-                    // orchestrator pins) so the admission pipeline's
-                    // workspace-scope stage validates against it.
-                    workspaceId = runCatching {
-                        workspaceRuntimeService.activeWorkspaceIdOrNull()
-                    }.getOrNull()
+                    // The PINNED workspace (captured at acceptance — the same
+                    // authority the orchestrator pins) so the admission
+                    // pipeline's workspace-scope stage validates against it.
+                    workspaceId = scope.workspaceId,
+                    // CHAT FINAL CLOSURE: the PINNED project + session ride the
+                    // SAME ExecutionScope the kernel's own executions use.
+                    projectId = scope.projectId,
+                    sessionId = sessionId
                 )
             }
             _state.update { it.copy(isInvoking = false) }

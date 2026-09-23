@@ -107,13 +107,16 @@ class SessionProjectIsolationTest {
             workspaceId: String,
             modelResourceId: String?,
             modelDisplayName: String?
-        ) {
+        ): Boolean {
+            val existing = store.value.firstOrNull { it.id == id && it.workspaceId == workspaceId }
+                ?: return false
             store.value = store.value.map {
-                if (it.id == id && it.workspaceId == workspaceId) it.copy(
+                if (it.id == existing.id) it.copy(
                     modelResourceId = modelResourceId,
                     modelDisplayName = modelDisplayName
                 ) else it
             }
+            return true
         }
 
         override suspend fun renameSessionForWorkspace(
