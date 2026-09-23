@@ -1,6 +1,7 @@
 package com.example.presentation.viewmodel
 
 import android.content.Context
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.application.artifacts.ArtifactService
@@ -240,9 +241,10 @@ class ChatCapabilitiesScopePinningTest {
 
     @After
     fun tearDown() {
+        if (::viewModel.isInitialized) viewModel.viewModelScope.cancel()
         extensionScope.cancel()
-        Dispatchers.resetMain()
         database.close()
+        Dispatchers.resetMain()
     }
 
     /** Creates + binds a NEW active project in the active workspace. */

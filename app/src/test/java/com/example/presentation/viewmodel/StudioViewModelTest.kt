@@ -1,5 +1,6 @@
 package com.example.presentation.viewmodel
 
+import androidx.lifecycle.viewModelScope
 import com.example.application.decision.DecisionService
 import com.example.application.orchestration.AgentOrchestrator
 import com.example.application.registry.ComponentRegistry
@@ -312,6 +313,7 @@ class StudioViewModelTest {
 
     @After
     fun tearDown() {
+        if (::viewModel.isInitialized) viewModel.viewModelScope.cancel()
         signalCollectorScope.cancel()
         Dispatchers.resetMain()
     }

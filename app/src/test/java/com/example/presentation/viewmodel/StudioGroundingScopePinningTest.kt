@@ -1,6 +1,7 @@
 package com.example.presentation.viewmodel
 
 import android.content.Context
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.application.artifacts.ArtifactService
@@ -217,8 +218,9 @@ class StudioGroundingScopePinningTest {
 
     @After
     fun tearDown() {
-        Dispatchers.resetMain()
+        if (::viewModel.isInitialized) viewModel.viewModelScope.cancel()
         database.close()
+        Dispatchers.resetMain()
     }
 
     // ------------------------------------------------------------------
