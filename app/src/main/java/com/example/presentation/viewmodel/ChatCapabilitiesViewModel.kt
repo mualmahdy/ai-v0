@@ -130,7 +130,7 @@ class ChatCapabilitiesViewModel(
                             // project's sandbox — dropping them (with their
                             // imported files cleaned up) prevents sending
                             // stale-scope references from the new scope.
-                            dropAttachmentDraftsForScopeChange()
+                            dropAttachmentDraftsForScopeChange(previous)
                             refreshCapabilities()
                         }
                     }
@@ -202,15 +202,14 @@ class ChatCapabilitiesViewModel(
      * orphaned storage is left behind. Failures surface on the honest
      * attachmentError channel.
      */
-    private fun dropAttachmentDraftsForScopeChange() {
+    private fun dropAttachmentDraftsForScopeChange(staleScope: Pair<String, Long?>?) {
         val drafts = _state.value.attachmentDrafts
         if (drafts.isEmpty()) return
         viewModelScope.launch {
             var failure: String? = null
-            val cleanupScope = staleScope
-                ?.let { (workspaceId, projectId) ->
-                    ChatAttachmentCoordinator.AttachmentScope(workspaceId, projectId)
-                }
+            val cleanupScope = staleScope?.second?.let { projectId ->
+                ChatAttachmentCoordinator.AttachmentScope(staleScope.first, projectId)
+            }
             drafts.forEach { draft ->
                 runCatching {
                     attachmentCoordinator.deleteImportedAttachment(draft, cleanupScope)
@@ -832,7 +831,7 @@ class ChatCapabilitiesViewModel(
             it.identity.id.value == ConversationSessionService.QUICK_CHAT_AGENT_ID
         }
     }
-}
+
     // Composer drafts are scoped to the semantic conversation. The project
     // scope is tracked separately so a session switch never cleans a draft
     // through the wrong project after a workspace/project transition.
@@ -880,4 +879,4 @@ class ChatCapabilitiesViewModel(
             }
         }
     }
-
+}

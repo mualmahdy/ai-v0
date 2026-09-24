@@ -44,6 +44,10 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.unit.dp
 import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.TurnAttachment
@@ -296,6 +300,18 @@ fun ChatComposer(
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 56.dp)
+                        .heightIn(max = 168.dp)
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.Enter && event.isCtrlPressed) {
+                                if (value.isNotBlank() && !isExecuting) onSend()
+                                true
+                            } else if (event.type == KeyEventType.KeyDown && event.key == Key.Escape && isExecuting) {
+                                onCancel()
+                                true
+                            } else {
+                                false
+                            }
+                        }
                         .testTag("prompt_text_field"),
                     shape = RoundedCornerShape(16.dp),
                     maxLines = 5,
@@ -439,20 +455,3 @@ private fun CommandChip(
         }
     }
 }
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.isCtrlPressed
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-                        .heightIn(max = 168.dp)
-                        .onPreviewKeyEvent { event ->
-                            if (event.type == KeyEventType.KeyDown && event.key == Key.Enter && event.isCtrlPressed) {
-                                if (value.isNotBlank() && !isExecuting) onSend()
-                                true
-                            } else if (event.type == KeyEventType.KeyDown && event.key == Key.Escape && isExecuting) {
-                                onCancel()
-                                true
-                            } else {
-                                false
-                            }
-                        }
-
