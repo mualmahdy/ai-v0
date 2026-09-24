@@ -116,6 +116,24 @@ class ChatAttachmentCoordinatorTest {
         database.close()
     }
 
+    /** Creates a sibling project without changing the current workspace. */
+    private suspend fun createSiblingProject(): Long {
+        val daoField = WorkspaceRuntimeService::class.java.getDeclaredField("projectDao")
+        daoField.isAccessible = true
+        val dao = daoField.get(workspaceService) as FakeProjectDaoForVm
+        val entity = com.example.infrastructure.persistence.entities.ProjectEntity(
+            name = "مشروع المرفق الشقيق",
+            description = "",
+            rootPath = "",
+            createdAtEpochMs = System.currentTimeMillis(),
+            updatedAtEpochMs = System.currentTimeMillis(),
+            workspaceId = workspaceService.activeWorkspaceIdOrNull()!!
+        )
+        val generated = (dao.stored.keys.maxOrNull() ?: 500L) + 1
+        dao.stored[generated] = entity.copy(id = generated)
+        return generated
+    }
+
     // ------------------------------------------------------------------
     // 6 — attachment → message contract (§21.6)
     // ------------------------------------------------------------------
@@ -140,6 +158,42 @@ class ChatAttachmentCoordinatorTest {
         assertEquals(ArtifactType.ATTACHMENT, artifact.type)
         assertEquals("ملاحظات.txt", artifact.name)
         assertTrue(artifact.storageUri.startsWith("attachments/"))
+    }
+
+    @Test
+    fun `explicit import scope stays pinned after active project switch`() = runBlocking {
+        contentFiles["content://saf/pinned.txt"] = "pinned.txt" to "أدلة المشروع الأصلي".toByteArray()
+
+        val originalScope = coordinator.captureActiveScope()
+        val siblingProjectId = createSiblingProject()
+        workspaceService.setActiveProject(siblingProjectId)
+
+        val attachment = coordinator.importFileAttachment(
+            uri = "content://saf/pinned.txt",
+            reportedMimeType = "text/plain",
+            scope = originalScope
+        )
+
+        assertTrue(
+            fileStore.stat(
+                fileStore.projectRoot(originalScope.projectId),
+                attachment.storageUri
+            ).exists
+        )
+        assertFalse(
+            fileStore.stat(
+                fileStore.projectRoot(siblingProjectId),
+                attachment.storageUri
+            ).exists
+        )
+        assertTrue(
+            artifactService.forProject(originalScope.projectId)
+                .any { it.id == attachment.artifactId }
+        )
+        assertTrue(
+            artifactService.forProject(siblingProjectId)
+                .none { it.id == attachment.artifactId }
+        )
     }
 
     @Test

@@ -207,9 +207,14 @@ class ChatCapabilitiesViewModel(
         if (drafts.isEmpty()) return
         viewModelScope.launch {
             var failure: String? = null
+            val cleanupScope = staleScope
+                ?.let { (workspaceId, projectId) ->
+                    ChatAttachmentCoordinator.AttachmentScope(workspaceId, projectId)
+                }
             drafts.forEach { draft ->
-                runCatching { attachmentCoordinator.deleteImportedAttachment(draft) }
-                    .onFailure { e -> failure = e.message }
+                runCatching {
+                    attachmentCoordinator.deleteImportedAttachment(draft, cleanupScope)
+                }.onFailure { e -> failure = e.message }
             }
             _state.update {
                 it.copy(
@@ -308,6 +313,24 @@ class ChatCapabilitiesViewModel(
      */
     fun pickFiles(uris: List<String>, mimeTypes: List<String?> = emptyList()) {
         if (uris.isEmpty()) return
+
+        // Capture BOTH the semantic conversation and the storage scope BEFORE
+        // launching async work. Completion is admitted only while both still
+        // identify the conversation that requested the import.
+        val acceptedConversationKey = boundConversationKey
+        val acceptedScope = runCatching {
+            attachmentCoordinator.captureActiveScope()
+        }.getOrElse { error ->
+            _state.update {
+                it.copy(
+                    isImportingAttachment = false,
+                    attachmentError = error.message
+                        ?: "تعذر تثبيت نطاق استيراد المرفق."
+                )
+            }
+            return
+        }
+
         _state.update { it.copy(isImportingAttachment = true, attachmentError = null) }
         viewModelScope.launch {
             var failure: String? = null
@@ -316,7 +339,8 @@ class ChatCapabilitiesViewModel(
                 try {
                     imported += attachmentCoordinator.importFileAttachment(
                         uri = uri,
-                        reportedMimeType = mimeTypes.getOrNull(index)
+                        reportedMimeType = mimeTypes.getOrNull(index),
+                        scope = acceptedScope
                     )
                 } catch (e: ChatAttachmentCoordinator.AttachmentImportException) {
                     failure = e.message
@@ -324,9 +348,31 @@ class ChatCapabilitiesViewModel(
                     failure = "فشل استيراد المرفق: ${e.localizedMessage}"
                 }
             }
+
+            val stillAttached = boundConversationKey == acceptedConversationKey &&
+                boundConversationScope == (acceptedScope.workspaceId to acceptedScope.projectId)
+
+            if (!stillAttached) {
+                // The import completed for its ORIGINAL owner, but that owner
+                // is no longer visible. Never leak the late result into the
+                // new context; clean its real footprint through the ORIGINAL
+                // scope and keep the new draft list untouched.
+                imported.forEach { draft ->
+                    runCatching {
+                        attachmentCoordinator.deleteImportedAttachment(draft, acceptedScope)
+                    }.onFailure { error ->
+                        failure = error.message
+                    }
+                }
+            }
+
             _state.update {
                 it.copy(
-                    attachmentDrafts = it.attachmentDrafts + imported,
+                    attachmentDrafts = if (stillAttached) {
+                        it.attachmentDrafts + imported
+                    } else {
+                        it.attachmentDrafts
+                    },
                     isImportingAttachment = false,
                     attachmentError = failure
                 )
@@ -338,15 +384,43 @@ class ChatCapabilitiesViewModel(
     /** Imports a SAF document TREE (folder) as one draft — §5. */
     fun pickFolder(treeUri: String) {
         if (treeUri.isBlank()) return
+
+        val acceptedConversationKey = boundConversationKey
+        val acceptedScope = runCatching {
+            attachmentCoordinator.captureActiveScope()
+        }.getOrElse { error ->
+            _state.update {
+                it.copy(
+                    isImportingAttachment = false,
+                    attachmentError = error.message
+                        ?: "تعذر تثبيت نطاق استيراد المجلد."
+                )
+            }
+            return
+        }
+
         _state.update { it.copy(isImportingAttachment = true, attachmentError = null) }
         viewModelScope.launch {
             try {
-                val attachment = attachmentCoordinator.importFolderAttachment(treeUri)
-                _state.update {
-                    it.copy(
-                        attachmentDrafts = it.attachmentDrafts + attachment,
-                        isImportingAttachment = false
-                    )
+                val attachment = attachmentCoordinator.importFolderAttachment(
+                    treeUri = treeUri,
+                    scope = acceptedScope
+                )
+                val stillAttached = boundConversationKey == acceptedConversationKey &&
+                    boundConversationScope == (acceptedScope.workspaceId to acceptedScope.projectId)
+
+                if (!stillAttached) {
+                    attachmentCoordinator.deleteImportedAttachment(attachment, acceptedScope)
+                } else {
+                    _state.update {
+                        it.copy(
+                            attachmentDrafts = it.attachmentDrafts + attachment,
+                            isImportingAttachment = false
+                        )
+                    }
+                }
+                if (!stillAttached) {
+                    _state.update { it.copy(isImportingAttachment = false) }
                 }
             } catch (e: ChatAttachmentCoordinator.AttachmentImportException) {
                 _state.update {

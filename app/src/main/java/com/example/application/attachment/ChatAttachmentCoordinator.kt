@@ -57,6 +57,28 @@ class ChatAttachmentCoordinator(
     private val folderZipSource: (suspend (treeUri: String) -> InputStream?)? = null
 ) {
 
+    /** Immutable workspace/project destination captured before an attachment job starts. */
+    data class AttachmentScope(
+        val workspaceId: String,
+        val projectId: Long
+    )
+
+    /**
+     * Captures the currently active attachment destination synchronously.
+     * Callers must capture this BEFORE launching an asynchronous import so a
+     * later workspace/project switch cannot retarget the import.
+     */
+    fun captureActiveScope(): AttachmentScope {
+        val workspaceId = runCatching {
+            workspaceRuntimeService.requireActiveWorkspaceId()
+        }.getOrElse { throw AttachmentImportException("لا توجد مساحة عمل نشطة.") }
+        val projectId = workspaceRuntimeService.activeProjectIdOrNull()
+            ?: throw AttachmentImportException(
+                "إرفاق الملفات يتطلب مشروعاً نشطاً — مخزن الرمل ذو نطاق المشروع. اختر مشروعاً أو أنشئ واحداً ثم أعد المحاولة."
+            )
+        return AttachmentScope(workspaceId = workspaceId, projectId = projectId)
+    }
+
     /** Per-attachment digest cap — keeps grounding bounded for context windows. */
     private val maxPerAttachmentDigestChars = 8_000
     private val maxTotalDigestChars = 24_000
@@ -66,15 +88,27 @@ class ChatAttachmentCoordinator(
     // ------------------------------------------------------------------
 
     /**
-     * Imports ONE picked file into the ACTIVE project sandbox and returns the
-     * durable [TurnAttachment] reference. The import itself is the REAL
-     * transfer path (staging + atomic promotion + limits + audit).
+     * Captures the active scope for synchronous callers. Asynchronous UI
+     * callers MUST pass an explicit scope captured before launching work.
      */
     suspend fun importFileAttachment(
         uri: String,
         reportedMimeType: String? = null
+    ): TurnAttachment =
+        importFileAttachment(uri, reportedMimeType, captureActiveScope())
+
+    /**
+     * Imports ONE picked file into the caller-provided project sandbox and
+     * returns the durable [TurnAttachment] reference. The import itself is
+     * the REAL transfer path (staging + atomic promotion + limits + audit).
+     */
+    suspend fun importFileAttachment(
+        uri: String,
+        reportedMimeType: String?,
+        scope: AttachmentScope
     ): TurnAttachment {
-        val (workspaceId, projectId) = requireActiveProject()
+        val workspaceId = scope.workspaceId
+        val projectId = scope.projectId
         val displayName = contentPort.queryDisplayName(uri)
             ?: uri.substringAfterLast('/').ifBlank { "attachment" }
         val stream = contentPort.openRead(uri)
@@ -113,14 +147,25 @@ class ChatAttachmentCoordinator(
     }
 
     /**
-     * Imports a picked FOLDER (SAF document tree, serialized to the ZIP the
-     * backend's folder-import contract expects) into the active project
-     * sandbox. Unavailable honestly when no folder zipper is wired.
+     * Captures the active scope for synchronous callers. Asynchronous UI
+     * callers MUST pass an explicit scope captured before launching work.
      */
-    suspend fun importFolderAttachment(treeUri: String): TurnAttachment {
+    suspend fun importFolderAttachment(treeUri: String): TurnAttachment =
+        importFolderAttachment(treeUri, captureActiveScope())
+
+    /**
+     * Imports a picked FOLDER (SAF document tree, serialized to the ZIP the
+     * backend's folder-import contract expects) into the caller-provided
+     * project sandbox. Unavailable honestly when no folder zipper is wired.
+     */
+    suspend fun importFolderAttachment(
+        treeUri: String,
+        scope: AttachmentScope
+    ): TurnAttachment {
         val zipper = folderZipSource
             ?: throw AttachmentImportException("استيراد المجلدات غير متاح في هذا التكوين.")
-        val (workspaceId, projectId) = requireActiveProject()
+        val workspaceId = scope.workspaceId
+        val projectId = scope.projectId
         val zipStream = zipper(treeUri)
             ?: throw AttachmentImportException("تعذر قراءة المجلد المحدد.")
         val displayName = contentPort.queryDisplayName(treeUri)
@@ -337,8 +382,13 @@ class ChatAttachmentCoordinator(
      * [AttachmentCleanupException] so the caller can keep the draft visible
      * (honest) instead of silently dropping state above orphaned files.
      */
-    suspend fun deleteImportedAttachment(attachment: TurnAttachment): Boolean {
-        val (workspaceId, projectId) = requireActiveProject()
+    suspend fun deleteImportedAttachment(
+        attachment: TurnAttachment,
+        scope: AttachmentScope? = null
+    ): Boolean {
+        val resolvedScope = scope ?: captureActiveScope()
+        val workspaceId = resolvedScope.workspaceId
+        val projectId = resolvedScope.projectId
         var deleted = false
         val artifactId = attachment.artifactId
         if (artifactId != null) {
