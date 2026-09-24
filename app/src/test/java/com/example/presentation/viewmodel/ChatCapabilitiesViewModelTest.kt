@@ -201,6 +201,7 @@ class ChatCapabilitiesViewModelTest {
             capabilityRadarService = null,
             networkMonitorProvider = null
         )
+        viewModel.bindConversationKey("test_conversation")
     }
 
     @After
