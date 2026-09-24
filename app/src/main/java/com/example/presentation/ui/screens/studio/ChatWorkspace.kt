@@ -254,6 +254,7 @@ fun ChatWorkspace(
                 liveExecution = state.liveExecution,
                 streamText = state.streamText,
                 sendSignal = sendSignal,
+                conversationKey = state.activeSessionId ?: "draft:${state.chatMode.name}",
                 emptyContent = {
                     if (!hasActiveLlm) {
                         ConnectLlmBanner(onNavigate = { onNavigate(WorkspaceRoutes.PROVIDERS) })

@@ -99,15 +99,6 @@ fun ChatHeader(
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                if (projectName != null) {
-                    Text(
-                        text = "المشروع: $projectName",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
             }
             onOpenSessions?.let { openSessions ->
                 IconButton(onClick = openSessions, modifier = Modifier.testTag("btn_open_sessions")) {

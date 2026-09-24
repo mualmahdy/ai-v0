@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -104,6 +105,8 @@ fun ConversationTimeline(
     liveExecution: LiveExecutionState?,
     streamText: String,
     sendSignal: Int,
+    /** Stable conversation identity; changing it creates a fresh scroll state. */
+    conversationKey: String? = null,
     emptyContent: @Composable () -> Unit,
     onCopy: (String) -> Unit,
     onEdit: (String) -> Unit,
@@ -121,7 +124,7 @@ fun ConversationTimeline(
     /** §13: "allow always" — the standing EXECUTE grant path (§12: confirmed). */
     onGrantAlways: (String) -> Unit = {}
 ) {
-    val listState = rememberLazyListState()
+    val listState = androidx.compose.runtime.saveable.rememberSaveable(conversationKey, saver = androidx.compose.foundation.lazy.LazyListState.Saver) { androidx.compose.foundation.lazy.LazyListState() }
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
@@ -489,7 +492,7 @@ private fun AssistantMessage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
-                MarkdownContent(markdown = entry.text)
+                RichMarkdownContent(markdown = entry.text)
             }
 
             // ---- Collapsible sources (Task 2 §15: "المصادر (N)") ----
@@ -596,7 +599,7 @@ private fun CollapsibleSources(
         }
     }
     AnimatedVisibility(visible = expanded) {
-        Column(modifier = Modifier.padding(top = 4.dp)) {
+        Column(modifier = Modifier.padding(top = 4.dp).heightIn(max = 320.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) {
             sources.forEachIndexed { index, source ->
                 // UI POLISH §16: the citation line shows the title and the
                 // DOMAIN (parsed from the real URL) — a readable reference
@@ -779,13 +782,7 @@ private fun CapabilityResultMessage(
 
             if (!entry.detail.isNullOrBlank()) {
                 Spacer(modifier = Modifier.height(6.dp))
-                SelectionContainer {
-                    Text(
-                        text = entry.detail,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
+                RichMarkdownContent(markdown = entry.detail)
             }
 
             if (entry.sources.isNotEmpty()) {

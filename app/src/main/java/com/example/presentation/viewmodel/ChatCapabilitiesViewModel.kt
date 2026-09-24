@@ -759,3 +759,51 @@ class ChatCapabilitiesViewModel(
         }
     }
 }
+    // Composer drafts are scoped to the semantic conversation. The project
+    // scope is tracked separately so a session switch never cleans a draft
+    // through the wrong project after a workspace/project transition.
+    private var boundConversationKey: String? = null
+    private var boundConversationScope: Pair<String, Long>? = null
+    private var conversationBindingInitialized = false
+
+    /** Binds composer state to a conversation boundary without touching the timeline owner. */
+    fun bindConversationKey(key: String?) {
+        val currentScope = runCatching {
+            val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return@runCatching null
+            val projectId = workspaceRuntimeService.activeProjectIdOrNull() ?: return@runCatching null
+            workspaceId to projectId
+        }.getOrNull()
+        if (!conversationBindingInitialized) {
+            conversationBindingInitialized = true
+            boundConversationKey = key
+            boundConversationScope = currentScope
+            return
+        }
+        if (boundConversationKey == key) {
+            boundConversationScope = currentScope
+            return
+        }
+        val staleDrafts = _state.value.attachmentDrafts
+        val staleScope = boundConversationScope
+        boundConversationKey = key
+        boundConversationScope = currentScope
+        _state.update {
+            it.copy(
+                attachmentDrafts = emptyList(),
+                attachmentError = null,
+                isImportingAttachment = false
+            )
+        }
+        // A pure session switch stays in the same project, so the existing
+        // coordinator can safely delete the old draft footprint. On a scope
+        // transition we deliberately leave cleanup to the existing scope
+        // observer, avoiding deletion through the NEW project's scope.
+        if (staleDrafts.isNotEmpty() && staleScope != null && staleScope == currentScope) {
+            viewModelScope.launch {
+                staleDrafts.forEach { draft ->
+                    runCatching { attachmentCoordinator.deleteImportedAttachment(draft) }
+                }
+            }
+        }
+    }
+

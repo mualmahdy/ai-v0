@@ -88,6 +88,12 @@ fun StudioScreen(
         }
     }
 
+    // The composer follows the same semantic boundary as the visible chat.
+    val conversationKey = studioState.activeSessionId ?: "draft:${studioState.chatMode.name}"
+    LaunchedEffect(conversationKey, projectsState.currentProject?.id) {
+        chatCapabilitiesViewModel.bindConversationKey(conversationKey)
+    }
+
     // §19 (Task 2): the adaptive width class (the same M3 breakpoints the
     // navigation shell uses — chat-first / sessions+chat / sessions+chat+context).
     val widthClass = navWidthClassForWidthDp(LocalConfiguration.current.screenWidthDp)
