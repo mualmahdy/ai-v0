@@ -131,3 +131,75 @@ class's lower bound (600dp / 840dp devices).
 - Message actions, capability rows, attachment removal, and the stream-copy
   control keep ≥48dp interactive targets with meaningful content
   descriptions.
+
+## 9. FRONTIER UPGRADE 2026 — rendering pipeline invariants
+
+The frontier chat upgrade (one-pipeline markdown, syntax highlighting,
+reasoning tokens, session management, D-11 merge, context gauge) adds four
+invariants to this closure:
+
+### 9.1 One-markdown-pipeline invariant
+
+`ChatMarkdownParser` is THE markdown parser. The rich renderer
+(`ChatRichContent`) owns chart/mermaid/math/quote/wide-table dispatch and
+delegates every basic-markdown stretch to the same typed `MdBlock`s the
+plain surface used to re-parse per line. No second inline scanner exists;
+every tolerance rule (unclosed markers stay literal, lone `$`/`~` degrade
+honestly) lives in exactly one tested place. Regression proof:
+`ChatMarkdownTest` + `ChatRichContentTest` (the parser contract suites).
+
+### 9.2 Highlighter-never-loses invariant
+
+`ChatSyntaxHighlighting` is a HIGHLIGHTER, not a parser: joined token text
+always rebuilds the input line byte-for-byte (tested), unknown languages
+degrade to the exact pre-highlighting plain rendering, and the palette is
+derived from the ACTIVE MaterialTheme colorScheme (never hard-coded —
+correct in light and dark). Regression proof: `ChatSyntaxHighlightingTest`
+(17 JVM-pure cases, Arabic text inside strings/comments survives verbatim).
+
+### 9.3 Reasoning-lane separation invariant
+
+Reasoning is a FIRST-CLASS separate lane: `ExecutionEvent.ReasoningChunk`
+never mixes into `ContentChunk`, the answer accumulator, or the final text
+(by adapter construction AND by ExecutionService contract); providers that
+report no reasoning never trigger a fabricated thinking placeholder
+(honest absence). The live UI shows the model's OWN thinking in a subdued
+collapsible lane (its own phase THINKING — «يفكر…»), which rides the
+finished Assistant entry as runtime-only state (a restored session honestly
+shows none — the durable turn stores the answer). Regression proof:
+`ReasoningTokenStreamingTest` (6 adversarial cases) +
+`ConversationTimelineTest` (THINKING projection).
+
+### 9.4 One-turn-per-question invariant (the D-11 resolution)
+
+A provider Error + the run's terminal Completed land as ONE timeline entry
+and ONE durable turn (the timeline is REBUILT from durable turns — a
+display-only merge would have resurrected the double entry on reopen). The
+failed turn carries the provider's own failure message (the kernel's
+generic fallback never masks a real error); a failed+degraded entry renders
+the honest merged pill «اكتمل جزئياً بعد خطأ». Durability is never lost by
+the merge: the finally-guard lands the failed turn if the kernel dies
+before any terminal event. The kernel's event topology itself is untouched
+(D-11's own scope call). Regression proof: the updated
+`StudioViewModelTest` single-turn pin + the four Studio ViewModel suites.
+
+### 9.5 Context-gauge honesty invariant
+
+`ContextWindowGauge` renders ONLY measured usage + the governance layer's
+REAL remaining budget; unknown figures (REMAINING_UNKNOWN sentinel) render
+nothing — never a fabricated 0% bar. Severity tinting is threshold-honest
+(primary → tertiary ≥70% → error ≥90%). Regression proof:
+`ConversationTimelineTest` (gauge contract cases).
+
+### 9.6 Screenshot matrix (the deferred-3 closure)
+
+`ChatSurfaceRoborazziMatrixTest` pins the chat surface's reference
+captures (rich conversation with highlighted code + sources + collapsed
+reasoning + approval; the D-11 merged failure entry; live THINKING
+collapsed/expanded; live STREAMING markdown) under the slice-6/7 matrix
+precedent: fixed timestamps for byte-stable comparisons, RTL like
+production, references committed at `app/src/test/screenshots/chat/`.
+Recording uses the dedicated `recordRoborazziDebug` task; plain
+`testDebugUnitTest` runs the tests capture-silent (the same contract as
+the slice-6/7 matrices — CI's plain gate stays green; verification is the
+`verifyRoborazziDebug` task: 5/5 unchanged).

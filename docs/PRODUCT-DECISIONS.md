@@ -63,6 +63,20 @@ change owned by the Studio feature), OR a product decision makes provider
 errors terminal (an execution-contract change owned by ADR-4). Until then
 this topology is contractual.
 
+**RESOLVED (2026-09, frontier chat upgrade):** the reopen condition fired —
+the Studio transcript merge landed. A non-approval provider Error is now
+RECORDED (banner feedback immediate) and rendered ONCE, folded into the
+run's terminal Completed: ONE timeline entry, ONE durable turn (the merge
+is durable-level BY DESIGN — the timeline is rebuilt from durable turns on
+session reopen, so a display-only merge would resurrect the double entry).
+The merged turn keeps the provider's own failure message (the kernel's
+generic fallback never masks a real error) and renders the honest pill
+«اكتمل جزئياً بعد خطأ» when the Completed carried isDegraded. The
+finally-guard preserves durability (a kernel death before any terminal
+event still lands the failed turn). The kernel's event topology stays
+EXACTLY as this decision ruled — the change is wholly in the Studio
+display layer, per the reopen clause's own ownership boundary.
+
 ---
 
 ## D-12 — i18n at UI-redesign track closure: Arabic-only stands; string extraction is the PREREQUISITE for any language expansion (GAP-20 / ADR-6 slice 8)
