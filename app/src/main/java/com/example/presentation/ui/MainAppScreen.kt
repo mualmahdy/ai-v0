@@ -354,16 +354,31 @@ fun MainAppScreen(
     //   - navigationBars: owned by the bottom NavigationBar itself;
     //   - ime: owned ONLY by the chat composer (the single element that
     //     must hug the keyboard).
-    // While the IME is visible the bottom NavigationBar is HIDDEN (the
-    // keyboard occupies its region — keeping it would leave a bar-height
-    // gap between the composer and the keyboard) and the content insets
-    // are consumed for descendants so the composer's imePadding lands
-    // EXACTLY at the keyboard's top edge — no double padding, no
-    // keyboard-sized blank after send. Portrait and landscape share the
-    // math (insets are edge-based, not orientation-based).
+    // While the IME is visible the bottom NavigationBar yields its region
+    // to the keyboard and the content insets are consumed for descendants
+    // so the composer's imePadding lands EXACTLY at the keyboard's top
+    // edge — no double padding, no keyboard-sized blank after send.
+    // Portrait and landscape share the math (insets are edge-based, not
+    // orientation-based).
+    //
+    // GAP CLOSURE (§4A-refine — the persistent strip above the keyboard):
+    // the bar's disappearance is gated on the ANIMATED inset values, not on
+    // a binary "ime arrived" flip. The bar stays until the keyboard has
+    // actually COVERED the bar's own navigation-bar region (the IME window
+    // draws over it, so the swap is invisible) and returns as soon as the
+    // region is uncovered again. A binary flip double-books the region for
+    // a visible window — bar height + ime padding on the same strip —
+    // which is exactly the blank gap that kept coming back above the
+    // keyboard on every open.
     // ------------------------------------------------------------------
     val density = LocalDensity.current
-    val isImeVisible = WindowInsets.ime.getBottom(density) > 0
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    val navigationBarBottomPx = WindowInsets.navigationBars.getBottom(density)
+    val showBottomNavigationBar = shouldShowBottomNavigationBar(
+        isCompact = isCompact,
+        imeBottomPx = imeBottomPx,
+        navigationBarBottomPx = navigationBarBottomPx
+    )
 
     Scaffold(
         modifier = modifier
@@ -391,10 +406,12 @@ fun MainAppScreen(
             )
         },
         bottomBar = {
-            // §4A: while the IME is visible the bar yields its region to
-            // the keyboard — the composer then hugs the keyboard exactly,
-            // instead of floating a bar-height gap above it.
-            if (isCompact && !isImeVisible) {
+            // §4A-refine: the bar yields exactly when the keyboard has
+            // covered the bar's own region — never before (that would
+            // leave a bar-height blank strip above the still-animating
+            // keyboard) and never after (the composer's imePadding takes
+            // over precisely at that edge).
+            if (showBottomNavigationBar) {
                 NavigationBar(
                     modifier = Modifier
                         .windowInsetsPadding(WindowInsets.navigationBars)
@@ -1102,4 +1119,38 @@ private fun CreateWorkspaceDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("إلغاء") } }
     )
+}
+
+/**
+ * IME / INSETS (§4A-refine — the frame-perfect bottom-bar gate): decides
+ * whether the compact bottom NavigationBar occupies its region, from the
+ * LIVE (animated) inset values:
+ *
+ *  - keyboard fully closed ([imeBottomPx] == 0): the bar shows — regardless
+ *    of the navigation-bar inset value (a zero inset on some devices must
+ *    not hide a bar that still has its own layout height);
+ *  - keyboard open and already covering the bar's navigation-bar region
+ *    (ime >= navigationBars): the bar yields — the IME window draws over
+ *    that exact region, so the swap is visually invisible and the
+ *    composer's imePadding takes over precisely at the keyboard's edge;
+ *  - keyboard animating IN (0 < ime < navigationBars): the bar STAYS until
+ *    the keyboard visually covers it — a binary "ime arrived" gate would
+ *    remove the bar while the keyboard is still sliding, double-booking
+ *    the strip (bar height + ime padding) and painting the blank gap that
+ *    kept returning above the keyboard on every open;
+ *  - keyboard animating OUT (ime falling below navigationBars): the bar
+ *    returns while the keyboard's shrinking tail still covers the region —
+ *    no blank frame in either direction.
+ *
+ * Pure on purpose: unit-tested without composition (the invariant that
+ * kills the gap lives here, not in the composable).
+ */
+internal fun shouldShowBottomNavigationBar(
+    isCompact: Boolean,
+    imeBottomPx: Int,
+    navigationBarBottomPx: Int
+): Boolean {
+    if (!isCompact) return false
+    if (imeBottomPx <= 0) return true
+    return imeBottomPx < navigationBarBottomPx
 }

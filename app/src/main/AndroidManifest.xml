@@ -30,6 +30,17 @@
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.MyApplication">
+            <!-- IME (§4A companion): the edge-to-edge window must RESIZE with
+                 the soft keyboard so WindowInsets.ime and the actual window
+                 layout never desynchronize (the desync shows as a persistent
+                 blank strip between the composer and the keyboard — the
+                 window pans while imePadding() also pads, double-booking the
+                 keyboard region). adjustResize is the canonical edge-to-edge
+                 companion; on API 35+ it is already the forced behavior and
+                 this declaration is a no-op, while on API 24–34 it is what
+                 makes the single imePadding() land exactly at the keyboard's
+                 top edge on every device. -->
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
