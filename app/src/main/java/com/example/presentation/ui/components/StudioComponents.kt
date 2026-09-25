@@ -302,6 +302,16 @@ fun ExecutionEventTimelineItem(
                 event.deltaText.take(40)
             )
         }
+        // FRONTIER REASONING: thinking deltas are their own event lane —
+        // labeled distinctly, never presented as answer content.
+        is ExecutionEvent.ReasoningChunk -> {
+            Quadruple(
+                Icons.Default.Psychology,
+                MaterialTheme.colorScheme.outline,
+                "تدفق التفكير",
+                event.deltaText.take(40)
+            )
+        }
         is ExecutionEvent.UsageBudgetUpdate -> {
             Quadruple(
                 Icons.Default.Bolt,

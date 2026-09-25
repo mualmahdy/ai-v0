@@ -134,6 +134,15 @@ class OpenAiCompatibleLlmAdapter(
                     val choice = json.optJSONArray("choices")?.optJSONObject(0)
                     val message = choice?.optJSONObject("message")
                     val content = message?.optString("content") ?: ""
+                    // FRONTIER REASONING: DeepSeek-R1 convention `reasoning_content`
+                    // (and the `reasoning` gateway variant) — captured SEPARATELY
+                    // from the answer text, never mixed into it.
+                    val reasoning = message
+                        ?.takeIf { it.has("reasoning_content") || it.has("reasoning") }
+                        ?.let {
+                            if (it.has("reasoning_content")) it.optString("reasoning_content", "")
+                            else it.optString("reasoning", "")
+                        }.orEmpty()
                     val toolCalls = parseToolCalls(message)
                     val usageJson = json.optJSONObject("usage")
                     val usage = TokenUsage(
@@ -150,6 +159,7 @@ class OpenAiCompatibleLlmAdapter(
                     Outcome.Success(
                         LlmResponse(
                             text = content,
+                            reasoningText = reasoning,
                             toolCalls = toolCalls,
                             usage = usage,
                             finishReason = choice?.optString("finish_reason"),
@@ -273,6 +283,23 @@ class OpenAiCompatibleLlmAdapter(
                                     ExecutionEvent.ContentChunk(
                                         executionId = executionId,
                                         deltaText = deltaText,
+                                        sequenceIndex = sequenceIndex++
+                                    )
+                                )
+                            }
+                            // FRONTIER REASONING: `reasoning_content` (DeepSeek-R1
+                            // convention) and `reasoning` (gateway convention)
+                            // stream as separate delta fields BEFORE the content
+                            // tokens — emitted as ReasoningChunk, NEVER mixed
+                            // into ContentChunk or the final text.
+                            val reasoningDelta =
+                                if (delta.has("reasoning_content")) delta.optString("reasoning_content", "")
+                                else delta.optString("reasoning", "")
+                            if (reasoningDelta.isNotEmpty()) {
+                                emit(
+                                    ExecutionEvent.ReasoningChunk(
+                                        executionId = executionId,
+                                        deltaText = reasoningDelta,
                                         sequenceIndex = sequenceIndex++
                                     )
                                 )

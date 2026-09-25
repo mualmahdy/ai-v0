@@ -73,9 +73,15 @@ data class ToolCallRequest(
 
 /**
  * Full non-streaming response from an LLM.
+ *
+ * FRONTIER REASONING: [reasoningText] carries the model's reasoning/thinking
+ * when the provider returns one (DeepSeek-R1 style `reasoning_content` /
+ * `reasoning`, Gemini thought parts). Empty means the model reported no
+ * reasoning — never fabricated.
  */
 data class LlmResponse(
     val text: String,
+    val reasoningText: String = "",
     val toolCalls: List<ToolCallRequest> = emptyList(),
     val usage: TokenUsage,
     val finishReason: String? = null,

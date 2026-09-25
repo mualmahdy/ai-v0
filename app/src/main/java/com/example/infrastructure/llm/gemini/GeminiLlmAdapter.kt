@@ -171,15 +171,23 @@ class GeminiLlmAdapter(
     }
 
     private fun buildRequestBody(request: LlmRequest, stream: Boolean): String {
+        // FRONTIER REASONING: includeThoughts makes Gemini 2.5-family models
+        // stream their OWN thinking as dedicated `thought: true` parts — the
+        // honest capability the adapter already ADVERTISED in its metadata.
+        // For a model without thinking support the provider rejects the
+        // config; the adapter degrades honestly through its normal error
+        // path (never fabricated reasoning).
+        val generationConfig = JSONObject()
+            .put("temperature", request.config.temperature.toDouble())
+            .put("topP", 0.95)
+            .put("maxOutputTokens", request.config.maxOutputTokens)
+            .put(
+                "thinkingConfig",
+                JSONObject().put("includeThoughts", true)
+            )
         val body = JSONObject()
             .put("contents", buildContents(request.messages))
-            .put(
-                "generationConfig",
-                JSONObject()
-                    .put("temperature", request.config.temperature.toDouble())
-                    .put("topP", 0.95)
-                    .put("maxOutputTokens", request.config.maxOutputTokens)
-            )
+            .put("generationConfig", generationConfig)
         buildSystemInstruction(request.messages)?.let { body.put("systemInstruction", it) }
         buildToolDeclarations(request)?.let { body.put("tools", it) }
         if (stream) body.put("stream", true) // informational only for REST; alt=sse drives it
@@ -223,11 +231,19 @@ class GeminiLlmAdapter(
                     val candidate = json.optJSONArray("candidates")?.optJSONObject(0)
                     val parts = candidate?.optJSONObject("content")?.optJSONArray("parts")
                     val sb = StringBuilder()
+                    // FRONTIER REASONING: thought parts (thought == true) are the
+                    // model's thinking — collected SEPARATELY from the answer.
+                    val reasoning = StringBuilder()
                     val toolCalls = mutableListOf<ToolCallRequest>()
                     if (parts != null) {
                         for (i in 0 until parts.length()) {
                             val part = parts.optJSONObject(i) ?: continue
-                            sb.append(part.optString("text", "") ?: "")
+                            val partText = part.optString("text", "") ?: ""
+                            if (part.optBoolean("thought", false)) {
+                                reasoning.append(partText)
+                            } else {
+                                sb.append(partText)
+                            }
                             // REAL protocol support: parse functionCall parts into
                             // domain ToolCallRequests (previously ignored entirely).
                             val fn = part.optJSONObject("functionCall") ?: continue
@@ -256,6 +272,7 @@ class GeminiLlmAdapter(
                     Outcome.Success(
                         LlmResponse(
                             text = sb.toString(),
+                            reasoningText = reasoning.toString(),
                             toolCalls = toolCalls,
                             usage = usage,
                             finishReason = finish,
@@ -306,6 +323,11 @@ class GeminiLlmAdapter(
             val call = client.newCall(requestWithKey(url, buildRequestBody(request, stream = true), stream = true))
             var sequence = 0
             val fullText = StringBuilder()
+            // FRONTIER REASONING: streamed thought parts accumulate here —
+            // tracked separately so (a) they never leak into fullText and
+            // (b) a reasoning-only stream is NOT an empty stream (no false
+            // single-shot fallback).
+            val fullReasoning = StringBuilder()
             // GOVERNANCE PHASE: cached + provider-total token capture.
             var promptTokens = 0
             var completionTokens = 0
@@ -336,6 +358,19 @@ class GeminiLlmAdapter(
                         if (payload.startsWith("data:")) {
                             val json = payload.removePrefix("data:").trim()
                             if (json.isNotBlank() && json != "[DONE]") {
+                                // FRONTIER REASONING: thought parts → ReasoningChunk
+                                // (streamed thinking), answer parts → ContentChunk.
+                                val thoughtDelta = extractThoughts(json)
+                                if (thoughtDelta.isNotEmpty()) {
+                                    fullReasoning.append(thoughtDelta)
+                                    emit(
+                                        ExecutionEvent.ReasoningChunk(
+                                            executionId = executionId,
+                                            deltaText = thoughtDelta,
+                                            sequenceIndex = sequence++
+                                        )
+                                    )
+                                }
                                 val delta = extractDelta(json)
                                 if (delta.isNotEmpty()) {
                                     fullText.append(delta)
@@ -377,12 +412,13 @@ class GeminiLlmAdapter(
             }
 
             // FALLBACK (defect family 6): the single-shot fallback fires only
-            // when the SSE stream produced NEITHER text NOR tool calls. A
-            // tool-call-only stream is a COMPLETE response — falling back
-            // would duplicate the request. And when the fallback DOES run, its
-            // tool calls are emitted too (previously discarded, silently
-            // breaking the tool loop for stream-less providers).
-            if (fullText.isBlank() && streamedToolCallCount == 0) {
+            // when the SSE stream produced NEITHER text NOR tool calls NOR
+            // reasoning. A reasoning-only or tool-call-only stream is a
+            // COMPLETE response — falling back would duplicate the request.
+            // And when the fallback DOES run, its tool calls are emitted too
+            // (previously discarded, silently breaking the tool loop for
+            // stream-less providers).
+            if (fullText.isBlank() && streamedToolCallCount == 0 && fullReasoning.isBlank()) {
                 // SSE produced nothing (some regions / proxies strip it) — fall back
                 // to the single-shot endpoint and emit one chunk. Honest, visible.
                 val fallback = generate(request)
@@ -474,13 +510,27 @@ class GeminiLlmAdapter(
 
     /** Extracts the concatenated text delta from one SSE data payload. */
     private fun extractDelta(json: String): String {
+        // FRONTIER REASONING: thought parts are EXCLUDED — extractDelta owns
+        // the ANSWER text only; thinking text goes through extractThoughts.
+        return extractParts(json, thoughtsOnly = false)
+    }
+
+    /** FRONTIER REASONING: the `thought: true` parts' text of one payload. */
+    private fun extractThoughts(json: String): String =
+        extractParts(json, thoughtsOnly = true)
+
+    private fun extractParts(json: String, thoughtsOnly: Boolean): String {
         return runCatching {
             val obj = JSONObject(json)
             val parts = obj.optJSONArray("candidates")?.optJSONObject(0)
                 ?.optJSONObject("content")?.optJSONArray("parts") ?: return ""
             val sb = StringBuilder()
             for (i in 0 until parts.length()) {
-                sb.append(parts.optJSONObject(i)?.optString("text", "") ?: "")
+                val part = parts.optJSONObject(i) ?: continue
+                val isThought = part.optBoolean("thought", false)
+                if (isThought == thoughtsOnly) {
+                    sb.append(part.optString("text", "") ?: "")
+                }
             }
             sb.toString()
         }.getOrDefault("")

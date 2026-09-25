@@ -55,6 +55,10 @@ sealed interface ChatEntry {
      * CHAT CAPABILITIES (Task 2 §11): when the execution used search, the
      * entry carries the REAL citation chains collected from the kernel's
      * ActionCompleted observations — rendered as a collapsible sources block.
+     *
+     * FRONTIER REASONING: [reasoning] carries the model's OWN streamed
+     * thinking when the provider reported one — runtime-only (the durable
+     * turn stores the answer; a restored session honestly shows no thinking).
      */
     data class Assistant(
         override val id: String,
@@ -68,7 +72,8 @@ sealed interface ChatEntry {
         val eventCount: Int = 0,
         val isDegraded: Boolean = false,
         val sources: List<ChatSourceRef> = emptyList(),
-        val artifacts: List<ChatArtifactRef> = emptyList()
+        val artifacts: List<ChatArtifactRef> = emptyList(),
+        val reasoning: String = ""
     ) : ChatEntry
 
     /**
@@ -191,6 +196,13 @@ enum class ExecutionPhase {
 
     /** The economic gate requires a human approval. */
     AWAITING_APPROVAL,
+
+    /**
+     * FRONTIER REASONING: the model is streaming its thinking tokens
+     * (ReasoningChunk events) — a REAL provider-reported phase, distinct
+     * from answer streaming.
+     */
+    THINKING,
 
     /** Answer tokens are streaming. */
     STREAMING,
@@ -345,6 +357,15 @@ object ExecutionLifecycleProjection {
 
             is ExecutionEvent.ContentChunk -> next = current.copy(
                 phase = ExecutionPhase.STREAMING,
+                phaseDetail = null
+            )
+
+            // FRONTIER REASONING: thinking tokens are a real, distinct phase —
+            // the model works BEFORE it answers. No step-history entry (the
+            // thinking text gets its own collapsible surface in the live
+            // block, never chain-of-thought soup in the steps list).
+            is ExecutionEvent.ReasoningChunk -> next = current.copy(
+                phase = ExecutionPhase.THINKING,
                 phaseDetail = null
             )
 

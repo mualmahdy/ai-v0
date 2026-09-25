@@ -1086,6 +1086,11 @@ class ExecutionService(
                         textAccumulator.append(event.deltaText)
                         onEvent(event)
                     }
+                    // FRONTIER REASONING: thinking deltas are forwarded to
+                    // consumers untouched — they never enter the answer
+                    // accumulator (the final text is reasoning-free by
+                    // contract).
+                    is ExecutionEvent.ReasoningChunk -> onEvent(event)
                     is ExecutionEvent.ToolRequested -> {
                         onEvent(event)
                         val toolResult = handleToolExecution(executionId, event.callId, event.toolName, event.argumentsJson, agent)

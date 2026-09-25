@@ -45,6 +45,31 @@ class ConversationTimelineTest {
         assertEquals(ExecutionPhase.STREAMING, next.phase)
     }
 
+    // ------------------------------------------------------------------
+    // FRONTIER REASONING — the thinking lane is a REAL provider-reported
+    // phase, distinct from answer streaming.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `ReasoningChunk projects to THINKING`() {
+        val next = ExecutionLifecycleProjection.apply(
+            base,
+            ExecutionEvent.ReasoningChunk("exec_1", "أفكر في المسألة", 0)
+        )
+        assertEquals(ExecutionPhase.THINKING, next.phase)
+    }
+
+    @Test
+    fun `reasoning then content moves THINKING to STREAMING in order`() {
+        val thinking = ExecutionLifecycleProjection.apply(
+            base,
+            ExecutionEvent.ReasoningChunk("exec_1", "خطوة تفكير", 0)
+        )
+        assertEquals(ExecutionPhase.THINKING, thinking.phase)
+        val answering = ExecutionLifecycleProjection.apply(thinking, chunk("الجواب"))
+        assertEquals(ExecutionPhase.STREAMING, answering.phase)
+    }
+
     @Test
     fun `ActionStarted projects to EXECUTING with the real action label`() {
         val next = ExecutionLifecycleProjection.apply(base, actionStarted(stepIndex = 2))

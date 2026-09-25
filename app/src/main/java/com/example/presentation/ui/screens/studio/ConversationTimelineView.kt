@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Search
@@ -107,6 +108,8 @@ fun ConversationTimeline(
     sendSignal: Int,
     /** Stable conversation identity; changing it creates a fresh scroll state. */
     conversationKey: String? = null,
+    /** FRONTIER REASONING: the live thinking text streamed before the answer. */
+    reasoningText: String = "",
     emptyContent: @Composable () -> Unit,
     onCopy: (String) -> Unit,
     onEdit: (String) -> Unit,
@@ -195,6 +198,14 @@ fun ConversationTimeline(
             runCatching { listState.scrollToItem(itemCount - 1) }
         }
     }
+    // FRONTIER REASONING: thinking tokens stream too — a following user keeps
+    // seeing the live block grow while the model thinks.
+    LaunchedEffect(reasoningText.length) {
+        if (reasoningText.isEmpty()) return@LaunchedEffect
+        if (ChatAutoScrollPolicy.shouldFollow(isFollowing, pendingSendScroll)) {
+            runCatching { listState.scrollToItem(itemCount - 1) }
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         LazyColumn(
@@ -227,6 +238,7 @@ fun ConversationTimeline(
                         ExecutionLifecycleView(
                             live = liveExecution!!,
                             streamText = streamText,
+                            reasoningText = reasoningText,
                             onCopyStream = { clipboard.setText(AnnotatedString(streamText)) }
                         )
                     }
@@ -484,6 +496,17 @@ private fun AssistantMessage(
             }
 
             Spacer(modifier = Modifier.height(4.dp))
+
+            // ---- FRONTIER REASONING: the model's thinking rides the finished
+            // entry (runtime-only — restored sessions honestly show none).
+            if (entry.reasoning.isNotBlank()) {
+                CollapsibleReasoning(
+                    reasoning = entry.reasoning,
+                    isLive = false,
+                    tagSuffix = entry.id
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+            }
 
             if (entry.text.isBlank()) {
                 Text(
@@ -1059,6 +1082,7 @@ private fun StatusPill(text: String, color: Color) {
 fun ExecutionLifecycleView(
     live: LiveExecutionState,
     streamText: String,
+    reasoningText: String = "",
     onCopyStream: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1155,6 +1179,17 @@ fun ExecutionLifecycleView(
                         )
                     }
                 }
+            }
+
+            // ---- FRONTIER REASONING: the model's own streamed thinking,
+            // collapsible — one honest lane, never mixed into the answer.
+            if (reasoningText.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                CollapsibleReasoning(
+                    reasoning = reasoningText,
+                    isLive = live.phase == ExecutionPhase.THINKING,
+                    tagSuffix = live.executionId
+                )
             }
 
             // ---- §10: the expandable DETAILS affordance ("2 أداة • 4.2s ⌄")
@@ -1266,10 +1301,75 @@ internal fun lifecycleLabel(live: LiveExecutionState): String = when (live.phase
     ExecutionPhase.PLANNING -> "تخطيط"
     ExecutionPhase.EXECUTING -> "تنفيذ"
     ExecutionPhase.AWAITING_APPROVAL -> "بانتظار موافقة"
+    ExecutionPhase.THINKING -> "يفكر…"
     ExecutionPhase.STREAMING -> "بث الإجابة…"
     ExecutionPhase.COMPLETED -> "اكتمل التنفيذ"
     ExecutionPhase.FAILED -> "فشل التنفيذ"
     ExecutionPhase.CANCELLED -> "أُلغي التنفيذ"
+}
+
+/**
+ * FRONTIER REASONING: the collapsible thinking block — the model's OWN
+ * streamed reasoning (ReasoningChunk accumulation), rendered in a subdued
+ * lane DISTINCT from the answer (smaller type, outline tint, italic), so
+ * thinking never reads as content. Collapsed by default with an honest
+ * word count; the live variant shows the streaming cursor while the model
+ * is still thinking. Never rendered for absent reasoning (no fabricated
+ * "thinking" placeholders).
+ */
+@Composable
+private fun CollapsibleReasoning(
+    reasoning: String,
+    isLive: Boolean,
+    tagSuffix: String
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val wordCount = reasoning.trim().split(Regex("\\s+")).count { it.isNotEmpty() }
+    Surface(
+        onClick = { expanded = !expanded },
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("reasoning_block_$tagSuffix")
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Psychology,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "التفكير ($wordCount كلمة)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                Icon(
+                    if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "إخفاء التفكير" else "عرض التفكير",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(modifier = Modifier.padding(top = 4.dp)) {
+                    SelectionContainer {
+                        Text(
+                            text = reasoning + if (isLive) " ▌" else "",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("reasoning_text_$tagSuffix")
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 /** A small, honest message action (§10) — real callbacks only.

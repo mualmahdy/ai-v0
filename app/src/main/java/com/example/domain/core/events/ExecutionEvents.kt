@@ -103,6 +103,26 @@ sealed interface ExecutionEvent {
     ) : ExecutionEvent
 
     /**
+     * FRONTIER REASONING: an incremental REASONING (thinking) delta from a
+     * reasoning-capable model — the model's own visible thought process,
+     * streamed BEFORE/DURING the answer tokens. Strictly SEPARATE from
+     * [ContentChunk]: reasoning is never mixed into the answer text; a
+     * provider that reports no reasoning simply never emits this event
+     * (honest absence, never a fabricated "thinking" placeholder).
+     *
+     * Wire sources: OpenAI-compatible `delta.reasoning_content` /
+     * `delta.reasoning` (DeepSeek-R1 & gateway convention) and Gemini
+     * thought parts (`parts[].thought == true` with
+     * `generationConfig.thinkingConfig.includeThoughts`).
+     */
+    data class ReasoningChunk(
+        override val executionId: String,
+        val deltaText: String,
+        val sequenceIndex: Int,
+        override val timestampMs: Long = System.currentTimeMillis()
+    ) : ExecutionEvent
+
+    /**
      * Emitted when a tool invocation is required.
      */
     data class ToolRequested(

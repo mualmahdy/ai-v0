@@ -327,6 +327,11 @@ class TelemetryService(
                 // High-frequency; we just bump a counter so we know how many chunks were emitted.
                 incrementCounter("CONTENT_CHUNK", dims)
             }
+            // FRONTIER REASONING: thinking deltas are counted in their own
+            // lane (never conflated with answer chunks in telemetry).
+            is ExecutionEvent.ReasoningChunk -> {
+                incrementCounter("REASONING_CHUNK", dims)
+            }
             is ExecutionEvent.ToolRequested -> {
                 incrementCounter("TOOL_REQUESTED", dims.copy(toolName = event.toolName))
             }

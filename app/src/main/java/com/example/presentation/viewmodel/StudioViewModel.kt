@@ -197,6 +197,10 @@ class StudioViewModel(
         val isExecuting: Boolean = false,
         val executionLog: List<ExecutionEvent> = emptyList(),
         val streamText: String = "",
+        // FRONTIER REASONING: the live thinking text (ReasoningChunk
+        // accumulation) — cleared when the turn collapses into its Assistant
+        // entry (which carries the reasoning from there on).
+        val reasoningText: String = "",
         // Session transcript (Studio as a real conversation console).
         val studioSession: List<StudioTurn> = emptyList(),
         val sessionTurnStartMs: Long = 0L,
@@ -315,6 +319,7 @@ class StudioViewModel(
                 timeline = emptyList(),
                 studioSession = emptyList(),
                 streamText = "",
+                reasoningText = "",
                 executionLog = emptyList(),
                 liveExecution = null,
                 sessionTurnStartMs = 0L,
@@ -389,6 +394,7 @@ class StudioViewModel(
                 timeline = emptyList(),
                 studioSession = emptyList(),
                 streamText = "",
+                reasoningText = "",
                 executionLog = emptyList(),
                 liveExecution = null,
                 sessionTurnStartMs = 0L,
@@ -432,6 +438,7 @@ class StudioViewModel(
                 timeline = emptyList(),
                 studioSession = emptyList(),
                 streamText = "",
+                reasoningText = "",
                 executionLog = emptyList(),
                 liveExecution = null,
                 sessionTurnStartMs = 0L,
@@ -557,6 +564,7 @@ class StudioViewModel(
                         timeline = emptyList(),
                         executionLog = emptyList(),
                         streamText = "",
+                        reasoningText = "",
                         liveExecution = null,
                         restoredAgentId = null
                     )
@@ -651,6 +659,7 @@ class StudioViewModel(
                         timeline = rebuildTimeline(loaded.turns, loaded.timelineEvents),
                         executionLog = emptyList(),
                         streamText = "",
+                        reasoningText = "",
                         liveExecution = null,
                         isExecuting = false
                     )
@@ -807,6 +816,7 @@ class StudioViewModel(
                     studioSession = emptyList(),
                     timeline = emptyList(),
                     streamText = "",
+                    reasoningText = "",
                     liveExecution = null,
                     restoredAgentId = null
                 )
@@ -1532,6 +1542,7 @@ class StudioViewModel(
                 },
                 isExecuting = true,
                 streamText = "",
+                reasoningText = "",
                 executionLog = emptyList(),
                 liveExecution = LiveExecutionState(
                     executionId = executionTaskId,
@@ -1597,6 +1608,9 @@ class StudioViewModel(
             // live would otherwise persist THAT scope's values — a cross-
             // scope leak into durable storage).
             val executionStream = StringBuilder()
+            // FRONTIER REASONING: the thinking-text twin of executionStream —
+            // accumulated for the Assistant entry, never persisted durably.
+            val executionReasoning = StringBuilder()
             var executionTokens = 0
             var executionEventCount = 0
             // CHAT CAPABILITIES (Task 2 §11): the REAL citation chains the
@@ -1682,6 +1696,9 @@ class StudioViewModel(
                     executionEventCount++
                     if (event is ExecutionEvent.ContentChunk) {
                         executionStream.append(event.deltaText)
+                    }
+                    if (event is ExecutionEvent.ReasoningChunk) {
+                        executionReasoning.append(event.deltaText)
                     }
                     if (event is ExecutionEvent.UsageBudgetUpdate) {
                         executionTokens = event.promptTokens + event.completionTokens
@@ -1888,6 +1905,15 @@ class StudioViewModel(
                                     liveExecution = updatedLive
                                 )
                             }
+                            // FRONTIER REASONING: thinking tokens accumulate in
+                            // their own lane — never mixed into streamText.
+                            is ExecutionEvent.ReasoningChunk -> {
+                                state.copy(
+                                    reasoningText = state.reasoningText + event.deltaText,
+                                    executionLog = updatedLogs,
+                                    liveExecution = updatedLive
+                                )
+                            }
                             is ExecutionEvent.Degraded -> {
                                 state.copy(
                                     isDegraded = true,
@@ -1938,6 +1964,7 @@ class StudioViewModel(
                                     state.copy(
                                         isExecuting = false,
                                         streamText = "",
+                                        reasoningText = "",
                                         liveExecution = null,
                                         executionLog = updatedLogs,
                                         timeline = state.timeline + ChatEntry.Assistant(
@@ -1956,7 +1983,11 @@ class StudioViewModel(
                                             isDegraded = event.isDegraded,
                                             // §11: the real search citations collected
                                             // during this execution ride the entry.
-                                            sources = collectedSources.toList()
+                                            sources = collectedSources.toList(),
+                                            // FRONTIER REASONING: the model's own
+                                            // thinking rides the entry (runtime-only;
+                                            // restored sessions honestly show none).
+                                            reasoning = executionReasoning.toString()
                                         ),
                                         studioSession = appendStudioTurn(
                                             state = state,
@@ -2021,6 +2052,7 @@ class StudioViewModel(
                                         executionLog = updatedLogs,
                                         liveExecution = null,
                                         streamText = "",
+                                        reasoningText = "",
                                         timeline = state.timeline + ChatEntry.Assistant(
                                             id = "asst_${executionTaskId}_$terminalSeq",
                                             text = answer,
@@ -2030,7 +2062,11 @@ class StudioViewModel(
                                             modelResourceId = effectiveModelId ?: selectedModelId,
                                             tokensConsumed = executionTokens,
                                             durationMs = System.currentTimeMillis() - sentAtMs,
-                                            eventCount = executionEventCount
+                                            eventCount = executionEventCount,
+                                            // FRONTIER REASONING: what the model
+                                            // thought before failing is part of the
+                                            // honest record of that failed turn.
+                                            reasoning = executionReasoning.toString()
                                         ),
                                         studioSession = appendStudioTurn(
                                             state = state,
