@@ -22,10 +22,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -36,6 +40,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -95,6 +100,12 @@ fun ChatWorkspace(
     agents: List<com.example.domain.core.agent.AgentDefinition>,
     activeAgent: com.example.domain.core.agent.AgentDefinition?,
     isSessionBrowserOpen: Boolean,
+    /** FRONTIER: the session-list search query + its setter (browser sheet). */
+    sessionSearchQuery: String = "",
+    onSessionSearchQueryChange: (String) -> Unit = {},
+    /** FRONTIER: rename/export reach the REAL services through the screen. */
+    onRenameSession: (String, String) -> Unit = { _, _ -> },
+    onExportSession: (String) -> Unit = {},
     /** Task-2: the capability layer's state (menu facts + drafts + mirrors). */
     capabilityState: ChatCapabilitiesViewModel.ChatCapabilitiesUiState,
     /** Task-2 §19: the adaptive width class (COMPACT / MEDIUM / EXPANDED). */
@@ -146,6 +157,9 @@ fun ChatWorkspace(
     var agentBuilderOpen by rememberSaveable { mutableStateOf(false) }
     var deleteAgentTarget by rememberSaveable { mutableStateOf<String?>(null) }
     var deleteSessionTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    // FRONTIER RENAME: the session being renamed + its draft title (survives
+    // rotation mid-edit — rememberSaveable like the delete target).
+    var renameSessionTarget by rememberSaveable { mutableStateOf<String?>(null) }
 
     // Task-2 capability surfaces (progressive disclosure — one at a time).
     var capabilityMenuOpen by rememberSaveable { mutableStateOf(false) }
@@ -204,8 +218,12 @@ fun ChatWorkspace(
             ChatSessionsPane(
                 sessions = sessions,
                 activeSessionId = state.activeSessionId,
+                searchQuery = sessionSearchQuery,
+                onSearchQueryChange = onSessionSearchQueryChange,
                 onOpen = onOpenSession,
                 onDeleteRequest = { deleteSessionTarget = it },
+                onRenameRequest = { renameSessionTarget = it },
+                onExportRequest = onExportSession,
                 onNewSession = onNewSession,
                 modifier = Modifier
                     .width(panePolicy.sessionsPaneWidthDp.coerceAtLeast(1).dp)
@@ -382,11 +400,15 @@ fun ChatWorkspace(
         SessionBrowserSheet(
             sessions = sessions,
             activeSessionId = state.activeSessionId,
+            searchQuery = sessionSearchQuery,
+            onSearchQueryChange = onSessionSearchQueryChange,
             onOpen = { sessionId ->
                 onOpenSession(sessionId)
                 onSessionBrowserOpen(false)
             },
             onDeleteRequest = { deleteSessionTarget = it },
+            onRenameRequest = { renameSessionTarget = it },
+            onExportRequest = onExportSession,
             onNewSession = {
                 onNewSession()
                 onSessionBrowserOpen(false)
@@ -552,6 +574,39 @@ fun ChatWorkspace(
             onDismiss = { deleteSessionTarget = null }
         )
     }
+
+    // FRONTIER RENAME: the honest inline rename dialog — pre-filled with
+    // the CURRENT title (the user edits what exists, never retypes it).
+    renameSessionTarget?.let { targetId ->
+        val current = sessions.firstOrNull { it.id.value == targetId }?.title ?: ""
+        var draftTitle by rememberSaveable(targetId) { mutableStateOf(current) }
+        AlertDialog(
+            onDismissRequest = { renameSessionTarget = null },
+            title = { Text("إعادة تسمية الجلسة") },
+            text = {
+                OutlinedTextField(
+                    value = draftTitle,
+                    onValueChange = { if (it.length <= 80) draftTitle = it },
+                    singleLine = true,
+                    label = { Text("اسم الجلسة") },
+                    modifier = Modifier.testTag("rename_session_field")
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRenameSession(targetId, draftTitle)
+                        renameSessionTarget = null
+                    },
+                    enabled = draftTitle.isNotBlank(),
+                    modifier = Modifier.testTag("rename_session_confirm")
+                ) { Text("حفظ") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameSessionTarget = null }) { Text("إلغاء") }
+            }
+        )
+    }
     }
 }
 
@@ -610,15 +665,20 @@ private fun ConnectLlmBanner(onNavigate: () -> Unit) {
 
 /**
  * The sessions PANE (medium/expanded): the real durable sessions, ordered
- * most-recently-active first (the repository's ordering), with open +
- * delete-with-confirmation. No session management beyond that — §20.
+ * most-recently-active first (the repository's ordering), with search +
+ * open + rename + export + delete-with-confirmation (FRONTIER session
+ * management — the REAL services, never mock actions).
  */
 @Composable
 private fun ChatSessionsPane(
     sessions: List<ConversationSession>,
     activeSessionId: String?,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
     onOpen: (String) -> Unit,
     onDeleteRequest: (String) -> Unit,
+    onRenameRequest: (String) -> Unit,
+    onExportRequest: (String) -> Unit,
     onNewSession: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -643,11 +703,20 @@ private fun ChatSessionsPane(
                 }
             }
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+            SessionSearchField(
+                query = searchQuery,
+                onQueryChange = onSearchQueryChange,
+                testTagPrefix = "pane"
+            )
             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (sessions.isEmpty()) {
                     item(key = "pane_empty") {
                         Text(
-                            "لا جلسات محفوظة بعد — أرسل أول رسالة لتُنشأ جلسة دائمة تلقائياً.",
+                            if (searchQuery.isNotBlank()) {
+                                "لا جلسة تطابق البحث «${searchQuery.trim()}» — جرّب كلمة أقصر."
+                            } else {
+                                "لا جلسات محفوظة بعد — أرسل أول رسالة لتُنشأ جلسة دائمة تلقائياً."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -658,7 +727,9 @@ private fun ChatSessionsPane(
                         session = session,
                         isActive = session.id.value == activeSessionId,
                         onOpen = { onOpen(session.id.value) },
-                        onDelete = { onDeleteRequest(session.id.value) }
+                        onDelete = { onDeleteRequest(session.id.value) },
+                        onRename = { onRenameRequest(session.id.value) },
+                        onExport = { onExportRequest(session.id.value) }
                     )
                 }
             }
@@ -672,8 +743,12 @@ private fun ChatSessionsPane(
 private fun SessionBrowserSheet(
     sessions: List<ConversationSession>,
     activeSessionId: String?,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
     onOpen: (String) -> Unit,
     onDeleteRequest: (String) -> Unit,
+    onRenameRequest: (String) -> Unit,
+    onExportRequest: (String) -> Unit,
     onNewSession: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -686,9 +761,18 @@ private fun SessionBrowserSheet(
         ) {
             Text("جلسات المحادثة الدائمة", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(8.dp))
+            SessionSearchField(
+                query = searchQuery,
+                onQueryChange = onSearchQueryChange,
+                testTagPrefix = "sheet"
+            )
             if (sessions.isEmpty()) {
                 Text(
-                    "لا جلسات محفوظة بعد — أرسل أول رسالة لتُنشأ جلسة دائمة تلقائياً.",
+                    if (searchQuery.isNotBlank()) {
+                        "لا جلسة تطابق البحث «${searchQuery.trim()}» — جرّب كلمة أقصر."
+                    } else {
+                        "لا جلسات محفوظة بعد — أرسل أول رسالة لتُنشأ جلسة دائمة تلقائياً."
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -699,7 +783,9 @@ private fun SessionBrowserSheet(
                             session = session,
                             isActive = session.id.value == activeSessionId,
                             onOpen = { onOpen(session.id.value) },
-                            onDelete = { onDeleteRequest(session.id.value) }
+                            onDelete = { onDeleteRequest(session.id.value) },
+                            onRename = { onRenameRequest(session.id.value) },
+                            onExport = { onExportRequest(session.id.value) }
                         )
                     }
                 }
@@ -712,13 +798,51 @@ private fun SessionBrowserSheet(
     }
 }
 
-/** One session row shared by the pane and the sheet (§18: title/mode/time/model). */
+/**
+ * FRONTIER SEARCH: the shared session-list query field — case-insensitive
+ * title/agent/model search (the pure filter runs upstream; this is only
+ * the honest input surface).
+ */
+@Composable
+private fun SessionSearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    testTagPrefix: String
+) {
+    OutlinedTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        singleLine = true,
+        placeholder = { Text("ابحث في الجلسات…") },
+        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+        trailingIcon = {
+            if (query.isNotEmpty()) {
+                IconButton(
+                    onClick = { onQueryChange("") },
+                    modifier = Modifier.testTag("${testTagPrefix}_search_clear")
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = "مسح البحث", modifier = Modifier.size(18.dp))
+                }
+            }
+        },
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .testTag("${testTagPrefix}_session_search")
+    )
+}
+
+/** One session row shared by the pane and the sheet (§18: title/mode/time/model
+ *  + FRONTIER rename/export/delete actions — the REAL services). */
 @Composable
 private fun SessionRow(
     session: ConversationSession,
     isActive: Boolean,
     onOpen: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onRename: () -> Unit,
+    onExport: () -> Unit
 ) {
     val timeFormat = remember { SimpleDateFormat("HH:mm • dd/MM", Locale.getDefault()) }
     Surface(
@@ -763,6 +887,22 @@ private fun SessionRow(
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = onRename, modifier = Modifier.testTag("btn_rename_session_${session.id.value}")) {
+                Icon(
+                    Icons.Default.Edit,
+                    contentDescription = "إعادة تسمية الجلسة «${session.title}»",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            IconButton(onClick = onExport, modifier = Modifier.testTag("btn_export_session_${session.id.value}")) {
+                Icon(
+                    Icons.Default.Share,
+                    contentDescription = "تصدير الجلسة «${session.title}» كمشاركة نصية",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
                 )
             }
             IconButton(onClick = onDelete) {

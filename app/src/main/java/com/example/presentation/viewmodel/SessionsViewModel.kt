@@ -56,6 +56,8 @@ class SessionsViewModel(
     data class SessionsUiState(
         val sessions: List<ConversationSession> = emptyList(),
         val isSessionBrowserOpen: Boolean = false,
+        /** FRONTIER: the session-list search query (blank = all sessions). */
+        val searchQuery: String = "",
         val errorMessage: String? = null
     )
 
@@ -86,6 +88,64 @@ class SessionsViewModel(
     /** Opens/closes the durable session browser sheet. */
     fun setSessionBrowserOpen(open: Boolean) {
         _state.update { it.copy(isSessionBrowserOpen = open) }
+    }
+
+    /** FRONTIER SEARCH: the session-list query (blank = show all). */
+    fun setSearchQuery(query: String) {
+        _state.update { it.copy(searchQuery = query) }
+    }
+
+    /** FRONTIER RENAME: renames a durable session through the REAL service. */
+    fun renameSession(sessionId: String, title: String) {
+        val clean = title.trim()
+        if (clean.isEmpty()) return // blank rename is an honest no-op
+        viewModelScope.launch {
+            runCatching {
+                conversationSessionService.renameSession(ConversationSessionId(sessionId), clean)
+            }.onFailure { e ->
+                _state.update { it.copy(errorMessage = "تعذّرت إعادة التسمية: ${e.localizedMessage}") }
+            }
+        }
+    }
+
+    /**
+     * FRONTIER EXPORT: loads the durable session WITH its turns and hands
+     * the rendered Markdown transcript to [onReady]. A session that cannot
+     * be loaded (deleted mid-tap, workspace mismatch) fires [onUnavailable]
+     * honestly — never an empty fabricated transcript.
+     */
+    fun exportSession(
+        sessionId: String,
+        onReady: (title: String, markdown: String) -> Unit,
+        onUnavailable: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            // GAP-14: project-private sessions export ONLY under their own
+            // active project — the same scoping the browser list shows.
+            val activeProjectId = activeWorkspace.value?.activeProjectId?.takeIf { it > 0L }
+            val loaded = runCatching {
+                conversationSessionService.getSessionWithTurns(
+                    ConversationSessionId(sessionId),
+                    expectedProjectId = activeProjectId
+                )
+            }.getOrNull()
+            if (loaded == null) {
+                onUnavailable()
+            } else {
+                onReady(
+                    loaded.session.title,
+                    com.example.presentation.state.SessionTranscriptExporter
+                        .toTranscriptMarkdown(loaded.session, loaded.turns)
+                )
+            }
+        }
+    }
+
+    /** FRONTIER EXPORT: honest feedback when a session can no longer load. */
+    fun reportExportUnavailable() {
+        _state.update {
+            it.copy(errorMessage = "تعذّر تصدير الجلسة — ربما حُذفت للتو. حدّث القائمة وحاول مجدداً.")
+        }
     }
 
     /**

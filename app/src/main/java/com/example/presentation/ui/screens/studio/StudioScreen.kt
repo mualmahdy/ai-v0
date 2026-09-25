@@ -117,17 +117,51 @@ fun StudioScreen(
         chatCapabilitiesViewModel.setLlmConnected(hasActiveLlm)
     }
 
+    // FRONTIER EXPORT: the platform share sheet target — hoisted OUT of the
+    // callback (Compose locals are composable-context-only).
+    val shareContext = androidx.compose.ui.platform.LocalContext.current
+
     ChatWorkspace(
         state = studioState,
         shellAutonomyPolicy = state.autonomyPolicy,
         projectName = projectsState.currentProject?.name,
         activeSessionTitle = sessionsState.sessions
             .firstOrNull { it.id.value == studioState.activeSessionId }?.title,
-        sessions = sessionsState.sessions,
+        // FRONTIER SEARCH: the pure filter (title/agent/model, case-insensitive)
+        // runs ONCE here — pane and sheet render the same filtered truth.
+        sessions = com.example.presentation.state.SessionTranscriptExporter.filterSessions(
+            sessionsState.sessions,
+            sessionsState.searchQuery
+        ),
         llmResources = providersState.materializedResources,
         agents = agentsState.availableAgents,
         activeAgent = agentsState.activeAgent,
         isSessionBrowserOpen = sessionsState.isSessionBrowserOpen,
+        sessionSearchQuery = sessionsState.searchQuery,
+        onSessionSearchQueryChange = sessionsViewModel::setSearchQuery,
+        onRenameSession = { sessionId, title ->
+            sessionsViewModel.renameSession(sessionId, title)
+        },
+        onExportSession = { sessionId ->
+            // FRONTIER EXPORT: the durable transcript leaves through the
+            // platform share sheet (ACTION_SEND, plain Markdown text — no
+            // storage permission, no file provider, honest content).
+            val context = shareContext
+            sessionsViewModel.exportSession(
+                sessionId,
+                onReady = { title, markdown ->
+                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "text/markdown"
+                        putExtra(android.content.Intent.EXTRA_SUBJECT, title)
+                        putExtra(android.content.Intent.EXTRA_TEXT, markdown)
+                    }
+                    context.startActivity(
+                        android.content.Intent.createChooser(send, "مشاركة الجلسة")
+                    )
+                },
+                onUnavailable = { sessionsViewModel.reportExportUnavailable() }
+            )
+        },
         capabilityState = capabilityState,
         widthClass = widthClass,
         onNavigate = onNavigate,
