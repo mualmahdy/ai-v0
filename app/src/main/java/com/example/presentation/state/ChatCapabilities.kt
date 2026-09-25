@@ -504,7 +504,11 @@ object ChatAdaptiveLayout {
         /** True when the context/execution pane is shown beside the chat. */
         val contextPane: Boolean,
         /** True when the header shows the browse-sessions button. */
-        val headerSessionsButton: Boolean
+        val headerSessionsButton: Boolean,
+        /** True when an active artifact gets a dedicated permanent pane. */
+        val artifactPane: Boolean = false,
+        /** True when an active artifact falls back to a sheet. */
+        val artifactSheet: Boolean = false
     )
 
     fun panesFor(
@@ -560,29 +564,44 @@ object ChatAdaptiveLayout {
     private const val CONTEXT_PANE_MAX_DP = 280
     private const val CONTEXT_PANE_FRACTION = 0.22f
 
+    private const val ARTIFACT_PANE_MIN_DP = 280
+    private const val ARTIFACT_PANE_MAX_DP = 320
+    private const val ARTIFACT_PANE_FRACTION = 0.26f
+
     /** The effective topology + concrete pane widths for an available width. */
     data class ChatPanePolicy(
         val panes: ChatPanes,
         /** 0 when the sessions pane is not shown. */
         val sessionsPaneWidthDp: Int,
         /** 0 when the context pane is not shown. */
-        val contextPaneWidthDp: Int
+        val contextPaneWidthDp: Int,
+        /** 0 when the artifact is not rendered as a permanent pane. */
+        val artifactPaneWidthDp: Int = 0
     )
 
     /**
      * Resolves the effective pane policy for [widthClass] at the ACTUAL
      * [availableWidthDp] (the width the chat shell measured, already net of
      * the navigation rail and shell paddings).
+     *
+     * ARTIFACT CANVAS (§10): [artifactActive] promotes the artifact preview
+     * to a DEDICATED pane — but with the LOWEST pane priority (sessions
+     * first, context second, artifact third): the artifact pane is added
+     * only when the existing expanded topology already fits AND the
+     * artifact's minimum still leaves the chat its usable column. Any other
+     * topology honestly downgrades the artifact to the sheet surface.
      */
     fun panePolicyFor(
         widthClass: com.example.presentation.ui.navigation.NavWidthClass,
-        availableWidthDp: Int
+        availableWidthDp: Int,
+        artifactActive: Boolean = false
     ): ChatPanePolicy {
         val available = availableWidthDp.coerceAtLeast(0)
         val compactPanes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.COMPACT)
+        val compactWithArtifact = compactPanes.copy(artifactSheet = artifactActive)
         return when (widthClass) {
             com.example.presentation.ui.navigation.NavWidthClass.COMPACT ->
-                ChatPanePolicy(compactPanes, sessionsPaneWidthDp = 0, contextPaneWidthDp = 0)
+                ChatPanePolicy(compactWithArtifact, sessionsPaneWidthDp = 0, contextPaneWidthDp = 0)
 
             com.example.presentation.ui.navigation.NavWidthClass.MEDIUM ->
                 sidePaneWidth(
@@ -592,16 +611,19 @@ object ChatAdaptiveLayout {
                     maxDp = SESSIONS_PANE_MAX_DP
                 )?.let { sessionsWidth ->
                     ChatPanePolicy(
-                        panes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.MEDIUM),
+                        panes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.MEDIUM).copy(
+                            artifactSheet = artifactActive
+                        ),
                         sessionsPaneWidthDp = sessionsWidth,
                         contextPaneWidthDp = 0
                     )
-                } ?: ChatPanePolicy(compactPanes, sessionsPaneWidthDp = 0, contextPaneWidthDp = 0)
+                } ?: ChatPanePolicy(compactWithArtifact, sessionsPaneWidthDp = 0, contextPaneWidthDp = 0)
 
             com.example.presentation.ui.navigation.NavWidthClass.EXPANDED -> {
-                // Three panes when BOTH side panes fit beside a usable chat;
-                // the CONTEXT pane drops first (header context sheet keeps its
-                // content reachable); the sessions pane falls back last.
+                // Pane priority is sessions > context > artifact. The
+                // artifact pane is added ONLY after the existing expanded
+                // topology already preserves the usable chat column; it
+                // never displaces the context or sessions panes.
                 val contextWidth = sidePaneWidth(
                     availableWidthDp = available,
                     fraction = CONTEXT_PANE_FRACTION,
@@ -617,10 +639,22 @@ object ChatAdaptiveLayout {
                     )
                 }
                 if (contextWidth != null && sessionsWidthWithContext != null) {
+                    val artifactWidth = if (artifactActive) {
+                        sidePaneWidth(
+                            availableWidthDp = available - contextWidth - sessionsWidthWithContext,
+                            fraction = ARTIFACT_PANE_FRACTION,
+                            minDp = ARTIFACT_PANE_MIN_DP,
+                            maxDp = ARTIFACT_PANE_MAX_DP
+                        )
+                    } else null
                     ChatPanePolicy(
-                        panes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.EXPANDED),
+                        panes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.EXPANDED).copy(
+                            artifactPane = artifactWidth != null,
+                            artifactSheet = artifactActive && artifactWidth == null
+                        ),
                         sessionsPaneWidthDp = sessionsWidthWithContext,
-                        contextPaneWidthDp = contextWidth
+                        contextPaneWidthDp = contextWidth,
+                        artifactPaneWidthDp = artifactWidth ?: 0
                     )
                 } else {
                     sidePaneWidth(
@@ -630,11 +664,13 @@ object ChatAdaptiveLayout {
                         maxDp = SESSIONS_PANE_MAX_DP
                     )?.let { sessionsWidth ->
                         ChatPanePolicy(
-                            panes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.MEDIUM),
+                            panes = panesFor(com.example.presentation.ui.navigation.NavWidthClass.MEDIUM).copy(
+                                artifactSheet = artifactActive
+                            ),
                             sessionsPaneWidthDp = sessionsWidth,
                             contextPaneWidthDp = 0
                         )
-                    } ?: ChatPanePolicy(compactPanes, sessionsPaneWidthDp = 0, contextPaneWidthDp = 0)
+                    } ?: ChatPanePolicy(compactWithArtifact, sessionsPaneWidthDp = 0, contextPaneWidthDp = 0)
                 }
             }
         }

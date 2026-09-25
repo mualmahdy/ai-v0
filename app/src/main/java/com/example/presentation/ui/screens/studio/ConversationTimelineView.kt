@@ -78,6 +78,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.presentation.state.ApprovalBlockState
+import com.example.presentation.state.ChatArtifactRef
 import com.example.presentation.state.ChatAutoScrollPolicy
 import com.example.presentation.state.ChatEntry
 import com.example.presentation.state.ChatSourceRef
@@ -125,7 +126,12 @@ fun ConversationTimeline(
      */
     onRetryAfterApproval: (String) -> Unit = {},
     /** §13: "allow always" — the standing EXECUTE grant path (§12: confirmed). */
-    onGrantAlways: (String) -> Unit = {}
+    onGrantAlways: (String) -> Unit = {},
+    /**
+     * ARTIFACT CANVAS (§10): opens a conversation artifact card in the
+     * scope-aware preview surface (pane at expanded width, sheet below).
+     */
+    onOpenArtifact: (ChatArtifactRef) -> Unit = {}
 ) {
     val listState = androidx.compose.runtime.saveable.rememberSaveable(conversationKey, saver = androidx.compose.foundation.lazy.LazyListState.Saver) { androidx.compose.foundation.lazy.LazyListState() }
     val clipboard = LocalClipboardManager.current
@@ -229,7 +235,8 @@ fun ConversationTimeline(
                         onApprove = onApprove,
                         onReject = onReject,
                         onRetryAfterApproval = onRetryAfterApproval,
-                        onGrantAlways = onGrantAlways
+                        onGrantAlways = onGrantAlways,
+                        onOpenArtifact = onOpenArtifact
                     )
                 }
 
@@ -254,7 +261,8 @@ fun ConversationTimeline(
                         onApprove = onApprove,
                         onReject = onReject,
                         onRetryAfterApproval = onRetryAfterApproval,
-                        onGrantAlways = onGrantAlways
+                        onGrantAlways = onGrantAlways,
+                        onOpenArtifact = onOpenArtifact
                     )
                 }
             }
@@ -315,7 +323,8 @@ private fun RenderTimelineEntry(
     onApprove: (String) -> Unit,
     onReject: (String) -> Unit,
     onRetryAfterApproval: (String) -> Unit,
-    onGrantAlways: (String) -> Unit
+    onGrantAlways: (String) -> Unit,
+    onOpenArtifact: (ChatArtifactRef) -> Unit
 ) {
     when (entry) {
         is ChatEntry.User -> UserMessage(
@@ -330,12 +339,14 @@ private fun RenderTimelineEntry(
             // FUNCTIONAL CLOSURE (§6): the action carries the ENTRY ID — the
             // targeted message is regenerated/retried, never "the last one".
             onRegenerate = { onRegenerate(entry.id) },
-            onRetry = { onRetry(entry.id) }
+            onRetry = { onRetry(entry.id) },
+            onOpenArtifact = onOpenArtifact
         )
 
         is ChatEntry.CapabilityResult -> CapabilityResultMessage(
             entry = entry,
-            onCopy = { onCopy(entry.detail ?: entry.summary) }
+            onCopy = { onCopy(entry.detail ?: entry.summary) },
+            onOpenArtifact = onOpenArtifact
         )
 
         is ChatEntry.ApprovalBlock -> ApprovalBlockMessage(
@@ -455,7 +466,9 @@ private fun AssistantMessage(
     entry: ChatEntry.Assistant,
     onCopy: () -> Unit,
     onRegenerate: () -> Unit,
-    onRetry: () -> Unit
+    onRetry: () -> Unit,
+    /** ARTIFACT CANVAS (§10): opens one of this message's artifacts. */
+    onOpenArtifact: (ChatArtifactRef) -> Unit
 ) {
     val failed = !entry.isSuccessful
     Surface(
@@ -527,6 +540,17 @@ private fun AssistantMessage(
             if (entry.sources.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(6.dp))
                 CollapsibleSources(sources = entry.sources, tagSuffix = entry.id)
+            }
+
+            // ---- ARTIFACT CANVAS (§10): the turn's produced artifacts as
+            // OPENABLE cards (the same shared renderer capability results
+            // use — one card, one contract; the open goes through the
+            // scope-aware preview, never a local read). ----
+            if (entry.artifacts.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                entry.artifacts.forEach { artifact ->
+                    ArtifactCard(artifact = artifact, onOpen = { onOpenArtifact(artifact) })
+                }
             }
 
             // ---- Execution summary (the collapsed lifecycle — §5) ----
@@ -733,7 +757,9 @@ internal fun String?.isWebUrl(): Boolean {
 @Composable
 private fun CapabilityResultMessage(
     entry: ChatEntry.CapabilityResult,
-    onCopy: () -> Unit
+    onCopy: () -> Unit,
+    /** ARTIFACT CANVAS (§10): opens one of this result's artifacts. */
+    onOpenArtifact: (ChatArtifactRef) -> Unit
 ) {
     val failed = !entry.isSuccessful
     Surface(
@@ -821,39 +847,10 @@ private fun CapabilityResultMessage(
             if (entry.artifacts.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(6.dp))
                 entry.artifacts.forEach { artifact ->
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 2.dp)
-                            .testTag("artifact_card_${artifact.artifactId}")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.InsertDriveFile,
-                                contentDescription = "أثر: ${artifact.name}",
-                                tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = artifact.name,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Text(
-                                    text = "نوع: ${artifact.type} • ${artifact.mimeType}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
+                    // ARTIFACT CANVAS (§10): the ONE shared card — assistant
+                    // messages and capability results stopped drifting apart
+                    // by sharing the renderer (and the scope-aware open).
+                    ArtifactCard(artifact = artifact, onOpen = { onOpenArtifact(artifact) })
                 }
             }
 

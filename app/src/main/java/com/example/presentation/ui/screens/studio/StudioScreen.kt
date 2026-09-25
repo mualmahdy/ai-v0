@@ -281,6 +281,11 @@ fun StudioScreen(
             )
         },
         onGrantAlways = studioViewModel::grantAlwaysForApproval,
+        // ARTIFACT CANVAS (§10): the conversation's artifact cards open the
+        // scope-aware preview surface (pane at expanded width, sheet below).
+        onOpenArtifact = studioViewModel::openArtifact,
+        onCloseArtifact = studioViewModel::closeArtifact,
+        onRequestArtifactEdit = studioViewModel::requestArtifactEdit,
         modifier = modifier
     )
 }

@@ -609,4 +609,81 @@ class ChatCapabilityPolicyTest {
         assertEquals(0, policy.sessionsPaneWidthDp)
         assertEquals(0, policy.contextPaneWidthDp)
     }
+
+    // ------------------------------------------------------------------
+    // ARTIFACT CANVAS (§10): the artifact pane's LOWEST priority + honest
+    // sheet fallback — the artifact never displaces the sessions/context
+    // panes and never squeezes the chat column.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `expanded artifact opens as a dedicated pane when the width is sufficient`() {
+        // 1300dp: context 280 + sessions 300 leaves 720dp — the artifact's
+        // 280 minimum beside a 440dp chat column fits honestly.
+        val policy = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.EXPANDED,
+            availableWidthDp = 1300,
+            artifactActive = true
+        )
+        assertTrue("the artifact gets its dedicated pane", policy.panes.artifactPane)
+        assertFalse("no sheet duplication when the pane exists", policy.panes.artifactSheet)
+        assertEquals(280, policy.artifactPaneWidthDp)
+        assertTrue(
+            "the chat column keeps its usable minimum beside ALL three panes",
+            1300 - policy.sessionsPaneWidthDp - policy.contextPaneWidthDp -
+                policy.artifactPaneWidthDp >= ChatAdaptiveLayout.CHAT_MIN_WIDTH_DP
+        )
+    }
+
+    @Test
+    fun `expanded artifact falls back to a sheet before squeezing the chat`() {
+        // 1120dp hosts sessions + context + a usable chat (the existing
+        // 'full room' case) — but only 612dp remain: the artifact's 280
+        // minimum would leave a 332dp chat (unusable). The artifact honestly
+        // downgrades to the sheet; the sessions/context panes are untouched
+        // (priority: sessions > context > artifact).
+        val policy = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.EXPANDED,
+            availableWidthDp = 1120,
+            artifactActive = true
+        )
+        assertFalse("no artifact pane beside a squeezed chat", policy.panes.artifactPane)
+        assertTrue("the artifact falls back to the sheet", policy.panes.artifactSheet)
+        assertEquals(0, policy.artifactPaneWidthDp)
+        assertTrue("sessions pane keeps its place", policy.panes.sessionsPane)
+        assertTrue("context pane keeps its place", policy.panes.contextPane)
+        assertEquals(246, policy.contextPaneWidthDp)
+        assertEquals(262, policy.sessionsPaneWidthDp)
+    }
+
+    @Test
+    fun `medium and compact artifacts always open as the sheet`() {
+        val medium = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.MEDIUM,
+            availableWidthDp = 700,
+            artifactActive = true
+        )
+        assertFalse(medium.panes.artifactPane)
+        assertTrue(medium.panes.artifactSheet)
+
+        val compact = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.COMPACT,
+            availableWidthDp = 400,
+            artifactActive = true
+        )
+        assertFalse(compact.panes.artifactPane)
+        assertTrue(compact.panes.artifactSheet)
+    }
+
+    @Test
+    fun `without an active artifact no artifact surface exists at any width`() {
+        val policy = ChatAdaptiveLayout.panePolicyFor(
+            com.example.presentation.ui.navigation.NavWidthClass.EXPANDED,
+            availableWidthDp = 1300,
+            artifactActive = false
+        )
+        assertFalse(policy.panes.artifactPane)
+        assertFalse(policy.panes.artifactSheet)
+        assertEquals(0, policy.artifactPaneWidthDp)
+    }
 }

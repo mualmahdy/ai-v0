@@ -202,4 +202,50 @@ production, references committed at `app/src/test/screenshots/chat/`.
 Recording uses the dedicated `recordRoborazziDebug` task; plain
 `testDebugUnitTest` runs the tests capture-silent (the same contract as
 the slice-6/7 matrices — CI's plain gate stays green; verification is the
-`verifyRoborazziDebug` task: 5/5 unchanged).
+`verifyRoborazziDebug` task: 6/6 unchanged — five timeline/live
+captures plus the §10 artifact-canvas capture).
+
+## 10. Artifact canvas — scope-aware preview invariant
+
+Conversation artifact cards (assistant turns AND capability results — one
+shared `ArtifactCard`, one contract) open ONLY through `StudioViewModel`
+and the real `ArtifactService.readContent()` authorization path. The
+accessor scope is captured from the active workspace/project at open
+time; a late read re-checks the presentation request token AND the live
+workspace/project/session before committing state, so a read that
+resolves after a session or project switch can never paint another
+conversation's canvas. Session boundaries (open, delete, mode switch,
+execution detach) release the preview with the conversation it belonged
+to. The preview caps at `ARTIFACT_PREVIEW_MAX_CHARS` with a visible
+truncation notice — the full content stays on disk, never silently cut.
+
+The textual-preview read policy is ONE pure function
+(`ChatArtifactRef.isTextuallyPreviewable()`, state layer) shared by the
+ViewModel's read decision and the canvas's degradation message — the
+duplicated-parser drift taught the lesson once. Binary/unknown artifacts
+stay explicitly unpreviewed: never decoded, never represented as
+fabricated content. The staged edit request (`requestArtifactEdit`)
+loads a reviewable prompt carrying the artifact's NAME only — nothing is
+auto-sent and internal identifiers never leak into user text.
+
+`ChatAdaptiveLayout` gives the artifact surface the LOWEST pane priority:
+sessions first, context second, artifact third. The artifact becomes a
+dedicated pane only when the existing expanded topology already fits AND
+the artifact's minimum still leaves the chat its usable column (never a
+squeezed strip); every other topology honestly opens the artifact as a
+bottom sheet — same canvas, same scope invariant, smaller frame.
+
+## 11. IME inset chain — the frame-perfect bottom-bar gate
+
+The §4A inset chain (single composer `imePadding`, consumed
+navigation-bars share) is closed at its two remaining desync edges:
+the window declares `adjustResize` (the edge-to-edge companion — without
+it the window pans while `imePadding()` also pads, double-booking the
+keyboard region as the persistent blank strip that returned on every
+open), and the compact bottom NavigationBar yields through the pure
+`shouldShowBottomNavigationBar` gate on the ANIMATED inset values — the
+bar stays until the keyboard has actually covered the bar's own region
+(the IME window draws over the swap, so it is invisible) and returns the
+moment the region is uncovered. No frame ever double-books the strip in
+either animation direction; the gate is a pure function with its own
+unit suite (9 cases).

@@ -2296,6 +2296,9 @@ class StudioViewModelFactory(
                 // service ("السماح دائماً" — the same authority governance uses).
                 humanApprovalGate = appContainer.humanApprovalGate,
                 attachmentCoordinator = appContainer.chatAttachmentCoordinator,
+                // ARTIFACT CANVAS (§10): the REAL scope-aware artifact read
+                // path behind the conversation's preview surface.
+                artifactService = appContainer.artifactService,
                 localPrincipalId = appContainer.localPrincipalId,
                 permissionGrantService = appContainer.permissionGrantService
             ) as T

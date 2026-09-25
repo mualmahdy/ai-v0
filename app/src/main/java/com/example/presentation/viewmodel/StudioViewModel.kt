@@ -2,6 +2,7 @@ package com.example.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.application.artifacts.ArtifactService
 import com.example.application.attachment.ChatAttachmentCoordinator
 import com.example.application.governed.HumanApprovalGate
 import com.example.application.registry.ComponentRegistry
@@ -15,6 +16,7 @@ import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.ConversationSessionId
 import com.example.domain.core.session.ConversationTimelineEvent
+import com.example.domain.core.context.ResourceScope
 import com.example.domain.core.session.TimelineEventKind
 import com.example.domain.core.session.TurnAttachment
 import com.example.domain.core.session.TurnSourceRef
@@ -25,6 +27,7 @@ import com.example.presentation.state.ExecutionLifecycleProjection
 import com.example.presentation.state.ExecutionPhase
 import com.example.presentation.state.LiveExecutionState
 import com.example.presentation.state.StudioTurn
+import com.example.presentation.state.isTextuallyPreviewable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -163,6 +166,13 @@ class StudioViewModel(
      * ViewModel only CONSUMES built references + digest at send time).
      */
     private val attachmentCoordinator: ChatAttachmentCoordinator? = null,
+    /**
+     * ARTIFACT CANVAS (§10): the unified artifact/resource service behind
+     * the conversation's preview surface — the REAL scope-aware read path,
+     * never a fabricated preview. Null in compositions without the
+     * governed backend (JVM unit tests may assert the honest degradation).
+     */
+    private val artifactService: ArtifactService? = null,
     /** The device-user identity that resolves approvals (governance convention). */
     private val localPrincipalId: String = "local-device-user",
     /**
@@ -229,6 +239,14 @@ class StudioViewModel(
         val sessionTotalTokens: Int = 0,
         val remainingBudget: Int = 30000,
         val networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
+        /** ARTIFACT CANVAS (§10): the artifact opened in the preview surface. */
+        val activeArtifact: com.example.presentation.state.ChatArtifactRef? = null,
+        /** ARTIFACT CANVAS (§10): the previewed text content (null until read). */
+        val artifactContent: String? = null,
+        /** ARTIFACT CANVAS (§10): true while the scope-aware read is in flight. */
+        val isArtifactLoading: Boolean = false,
+        /** ARTIFACT CANVAS (§10): the honest read/preview failure channel. */
+        val artifactError: String? = null,
         val errorMessage: String? = null
     )
 
@@ -237,6 +255,13 @@ class StudioViewModel(
 
     /** Gap-closure P0-01: the ExecutionHost key of the task launched by the Studio screen. */
     private var currentExecutionTaskId: String? = null
+
+    /**
+     * ARTIFACT CANVAS (§10): monotonic request token — a late artifact read
+     * from a superseded request (or a different session/project scope) can
+     * never mutate the CURRENT preview state.
+     */
+    private var artifactRequestSerial: Long = 0L
 
     /**
      * RESIDUAL CLOSURE (P2): the scope each pending capability invocation
@@ -336,10 +361,112 @@ class StudioViewModel(
      */
     private fun detachRunningExecution(banner: String?) {
         currentExecutionTaskId = null
+        // ARTIFACT CANVAS (§10): session boundaries (open, delete, detach)
+        // release the preview with the conversation it belonged to.
+        clearArtifactPreview()
         _state.update {
             it.copy(
                 isExecuting = false,
                 diagnosticBanner = banner ?: it.diagnosticBanner
+            )
+        }
+    }
+
+    // --- Artifact preview surface (§10) ---
+
+    /** Releases the presentation-owned artifact request and invalidates late reads. */
+    private fun clearArtifactPreview() {
+        artifactRequestSerial += 1L
+        _state.update {
+            it.copy(
+                activeArtifact = null,
+                artifactContent = null,
+                isArtifactLoading = false,
+                artifactError = null
+            )
+        }
+    }
+
+    /**
+     * ARTIFACT CANVAS (§10): opens ONE artifact through the REAL
+     * scope-aware artifact service. The accessor scope is captured from the
+     * active workspace/project at open time; the late read re-checks the
+     * request token AND the live scope before committing state, so a read
+     * that resolves after a session/project switch can never paint another
+     * conversation's canvas. Non-textual artifacts stay explicitly
+     * unpreviewed (the canvas shows the honest reason) — never decoded,
+     * never fabricated.
+     */
+    fun openArtifact(artifact: com.example.presentation.state.ChatArtifactRef) {
+        val service = artifactService
+        val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
+        val projectId = workspaceRuntimeService.activeProjectIdOrNull()
+        val sessionId = _state.value.activeSessionId
+        val requestId = ++artifactRequestSerial
+        val accessorScope = workspaceId?.let { ws ->
+            projectId?.let { ResourceScope.Project(ws, it) } ?: ResourceScope.Workspace(ws)
+        }
+        _state.update {
+            it.copy(
+                activeArtifact = artifact,
+                artifactContent = null,
+                isArtifactLoading = false,
+                artifactError = null
+            )
+        }
+        if (service == null || accessorScope == null || artifact.artifactId.isBlank()) {
+            _state.update { it.copy(artifactError = "لا يمكن معاينة الأثر ضمن النطاق الحالي.") }
+            return
+        }
+        if (!artifact.isTextuallyPreviewable()) return
+        _state.update { it.copy(isArtifactLoading = true) }
+        viewModelScope.launch {
+            val bytes = runCatching {
+                service.readContent(accessorScope, artifact.artifactId)
+            }.getOrElse {
+                if (requestId == artifactRequestSerial) {
+                    _state.update {
+                        it.copy(isArtifactLoading = false, artifactError = "تعذر قراءة الأثر ضمن النطاق الحالي.")
+                    }
+                }
+                return@launch
+            }
+            val stillAttached = requestId == artifactRequestSerial &&
+                _state.value.activeArtifact?.artifactId == artifact.artifactId &&
+                _state.value.activeSessionId == sessionId &&
+                workspaceRuntimeService.activeWorkspaceIdOrNull() == workspaceId &&
+                workspaceRuntimeService.activeProjectIdOrNull() == projectId
+            if (!stillAttached) return@launch
+            if (bytes == null) {
+                _state.update {
+                    it.copy(isArtifactLoading = false, artifactError = "تعذر قراءة الأثر ضمن النطاق الحالي.")
+                }
+                return@launch
+            }
+            val raw = bytes.toString(Charsets.UTF_8)
+            val content = if (raw.length > ARTIFACT_PREVIEW_MAX_CHARS) {
+                raw.take(ARTIFACT_PREVIEW_MAX_CHARS) + "\n\n[تم تقليص المعاينة إلى $ARTIFACT_PREVIEW_MAX_CHARS حرف]"
+            } else raw
+            _state.update {
+                it.copy(isArtifactLoading = false, artifactContent = content, artifactError = null)
+            }
+        }
+    }
+
+    /** Closes the artifact preview without touching conversation history. */
+    fun closeArtifact() = clearArtifactPreview()
+
+    /**
+     * ARTIFACT CANVAS (§10): stages a REVIEWABLE edit request in the
+     * composer — the artifact is never mutated and nothing is auto-sent;
+     * the user stays the sender. The staged prompt carries the artifact's
+     * NAME only (its identifier is an internal concern, not user text).
+     */
+    fun requestArtifactEdit() {
+        val artifact = _state.value.activeArtifact ?: return
+        _state.update {
+            it.copy(
+                promptInput = "أريد تعديل الأثر «${artifact.name}». أعطني التعديل المقترح، وسأراجعه قبل الإرسال."
             )
         }
     }
@@ -387,6 +514,9 @@ class StudioViewModel(
             _state.update { it.copy(chatMode = mode) }
             return
         }
+        // ARTIFACT CANVAS (§10): the mode change is a semantic session
+        // boundary — the old conversation's preview goes with it.
+        clearArtifactPreview()
         _state.update {
             it.copy(
                 chatMode = mode,
@@ -2827,5 +2957,12 @@ class StudioViewModel(
 
         /** The kernel's honest failure code for a consent-blocked execution. */
         const val APPROVAL_REQUIRED_CODE = "HUMAN_APPROVAL_REQUIRED"
+
+        /**
+         * ARTIFACT CANVAS (§10): the preview's rendering cap — the FULL
+         * content stays on disk; only the PREVIEW is honestly truncated with
+         * a visible notice (never a silent cut, never a frozen frame).
+         */
+        const val ARTIFACT_PREVIEW_MAX_CHARS = 120_000
     }
 }

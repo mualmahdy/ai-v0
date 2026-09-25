@@ -20,6 +20,7 @@ import com.example.presentation.state.ExecutionStep
 import com.example.presentation.state.LiveExecutionState
 import com.example.presentation.ui.screens.studio.ConversationTimeline
 import com.example.presentation.ui.screens.studio.ExecutionLifecycleView
+import com.example.presentation.ui.screens.studio.SmartArtifactCanvas
 import com.example.ui.theme.MyApplicationTheme
 import com.github.takahirom.roborazzi.RobolectricDeviceQualifiers
 import com.github.takahirom.roborazzi.captureRoboImage
@@ -50,7 +51,10 @@ import org.robolectric.annotation.GraphicsMode
  *     clean answer;
  *  3. the live THINKING phase (reasoning collapsed AND expanded);
  *  4. the live STREAMING phase rendering markdown as it arrives (the
- *     streaming-polish contract) with the real step history.
+ *     streaming-polish contract) with the real step history;
+ *  5. the ARTIFACT CANVAS (§10): the scope-aware preview surface over a
+ *     deterministic markdown artifact — header identity + copy/edit/close
+ *     actions + the unified rich pipeline body.
  *
  * Determinism contract: every timestamp is FIXED (startedAtMs = 0 kills
  * the live duration ticker; fixed step timestamps pin the elapsed labels)
@@ -312,5 +316,46 @@ class ChatSurfaceRoborazziMatrixTest {
         }
         composeTestRule.waitForIdle()
         composeTestRule.onRoot().captureRoboImage(filePath = "$screenshotDir/live_streaming_markdown.png")
+    }
+
+    // ------------------------------------------------------------------
+    // 5. The ARTIFACT CANVAS (§10) — the scope-aware preview surface
+    // ------------------------------------------------------------------
+
+    @Test
+    fun chat_artifact_canvas_markdown() {
+        val artifact = ChatArtifactRef(
+            artifactId = "art_canvas",
+            name = "تقرير-المراجعة-الفنية.md",
+            type = "DOCUMENT",
+            mimeType = "text/markdown",
+            sizeBytes = 18_432,
+            storageUri = "file://sandbox/art_canvas"
+        )
+        val content = """
+            **الخلاصة التنفيذية**: الأثر يُعاين عبر مسار القراءة الحقيقي بالنطاق.
+
+            - البند الأول مع **تأكيد**
+            - البند الثاني مع *تفصيل*
+
+            ```kotlin
+            // مقتطف من الأثر
+            fun render(artifact: String): String = "معاينة: ${'$'}artifact"
+            ```
+        """.trimIndent()
+        rtl {
+            SmartArtifactCanvas(
+                artifact = artifact,
+                content = content,
+                isLoading = false,
+                error = null,
+                onEdit = {},
+                onClose = {},
+                modifier = Modifier
+                    .fillMaxSize()
+            )
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onRoot().captureRoboImage(filePath = "$screenshotDir/artifact_canvas_markdown.png")
     }
 }

@@ -147,6 +147,13 @@ fun ChatWorkspace(
     onRetryAfterApproval: (String) -> Unit,
     /** §13: "allow always" — the standing EXECUTE grant path (§12: confirmed). */
     onGrantAlways: (String) -> Unit,
+    /** ---- ARTIFACT CANVAS (§10) wiring ---- */
+    /** Opens a conversation artifact in the scope-aware preview surface. */
+    onOpenArtifact: (com.example.presentation.state.ChatArtifactRef) -> Unit = {},
+    /** Closes the artifact preview without changing conversation history. */
+    onCloseArtifact: () -> Unit = {},
+    /** Stages a reviewable edit request for the active artifact in the composer. */
+    onRequestArtifactEdit: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -210,7 +217,11 @@ fun ChatWorkspace(
     BoxWithConstraints(modifier = modifier.testTag("agent_studio_screen")) {
         val panePolicy = ChatAdaptiveLayout.panePolicyFor(
             widthClass = widthClass,
-            availableWidthDp = maxWidth.value.toInt()
+            availableWidthDp = maxWidth.value.toInt(),
+            // ARTIFACT CANVAS (§10): an active artifact claims the lowest-
+            // priority pane when the expanded topology can host it, and a
+            // sheet everywhere else (the policy decides, this shell obeys).
+            artifactActive = state.activeArtifact != null
         )
         Row(modifier = Modifier.fillMaxSize()) {
 
@@ -296,6 +307,10 @@ fun ChatWorkspace(
                 onReject = onReject,
                 onRetryAfterApproval = onRetryAfterApproval,
                 onGrantAlways = onGrantAlways,
+                // ARTIFACT CANVAS (§10): the timeline's artifact cards open the
+                // scope-aware preview through the ViewModel — never a local
+                // read, never a fabricated render.
+                onOpenArtifact = onOpenArtifact,
                 modifier = Modifier.weight(1f)
             )
 
@@ -354,9 +369,46 @@ fun ChatWorkspace(
                     .fillMaxHeight()
             )
         }
+
+        // ---- 4. The artifact pane — the LOWEST-priority side surface ----
+        // (CHAT FINAL CLOSURE §10): rendered only when the policy says the
+        // expanded topology can host it beside a USABLE chat column; every
+        // other topology opens the artifact as a sheet below instead.
+        if (panePolicy.panes.artifactPane && state.activeArtifact != null) {
+            SmartArtifactCanvas(
+                artifact = state.activeArtifact,
+                content = state.artifactContent,
+                isLoading = state.isArtifactLoading,
+                error = state.artifactError,
+                onEdit = onRequestArtifactEdit,
+                onClose = onCloseArtifact,
+                modifier = Modifier
+                    .width(panePolicy.artifactPaneWidthDp.coerceAtLeast(1).dp)
+                    .fillMaxHeight()
+            )
+        }
         }
 
         // ---- Secondary surfaces (§6: nothing stacks above the transcript) ----
+    // ARTIFACT CANVAS (§10): the artifact SHEET — the honest fallback for
+    // every topology the policy will not give a dedicated pane (compact,
+    // medium, or an expanded width that cannot host it beside a usable
+    // chat column). Same canvas, same scope invariant, smaller frame.
+    if (panePolicy.panes.artifactSheet && state.activeArtifact != null) {
+        ModalBottomSheet(onDismissRequest = onCloseArtifact) {
+            SmartArtifactCanvas(
+                artifact = state.activeArtifact,
+                content = state.artifactContent,
+                isLoading = state.isArtifactLoading,
+                error = state.artifactError,
+                onEdit = onRequestArtifactEdit,
+                onClose = onCloseArtifact,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 720.dp)
+            )
+        }
+    }
     if (contextSheetOpen) {
         ChatContextSheet(
             chatMode = state.chatMode,

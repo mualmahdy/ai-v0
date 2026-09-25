@@ -180,6 +180,44 @@ data class ChatArtifactRef(
 )
 
 /**
+ * ARTIFACT CANVAS (§10): the ONE textual-preview read policy — a pure
+ * function of the reference's own metadata, shared by the ViewModel (the
+ * read decision) and the canvas (the honest "no preview path" message).
+ * A single definition on purpose: the duplicated-markdown-parsers defect
+ * (unified in the frontier series) started exactly as two "similar"
+ * policies drifting apart. Binary/unknown artifacts stay explicitly
+ * unpreviewed — never decoded, never represented as fabricated content
+ * (honest degradation).
+ */
+fun ChatArtifactRef.isTextuallyPreviewable(): Boolean {
+    val mime = mimeType.substringBefore(';').trim().lowercase()
+    if (mime.startsWith("text/")) return true
+    if (mime in setOf(
+            "application/json", "application/xml", "application/javascript",
+            "text/javascript", "application/x-yaml", "text/yaml"
+        )
+    ) return true
+    val extension = name.substringAfterLast('.', "").lowercase()
+    return extension in setOf(
+        "md", "markdown", "txt", "csv", "json", "xml", "yaml", "yml",
+        "js", "mjs", "ts", "tsx", "jsx", "kt", "kts", "java", "py", "go",
+        "rs", "c", "h", "cpp", "hpp", "sql", "gradle", "toml", "properties"
+    )
+}
+
+/**
+ * ARTIFACT CANVAS (§10): honest human size for artifact cards — one
+ * decimal from 1 KB upward, never a raw "1048576 بايت" dump.
+ */
+fun formatArtifactSize(bytes: Long): String {
+    if (bytes < 0) return "0 بايت"
+    if (bytes < 1_024) return "$bytes بايت"
+    val kib = bytes / 1_024.0
+    if (kib < 1_024) return String.format(java.util.Locale.US, "%.1f ك.ب", kib)
+    return String.format(java.util.Locale.US, "%.1f م.ب", kib / 1_024.0)
+}
+
+/**
  * The user-facing execution lifecycle phases, projected STRICTLY from the
  * real [ExecutionEvent]s the governed kernel emits. Every phase below maps to
  * at least one real event type — nothing invented, no chain-of-thought.
