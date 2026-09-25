@@ -149,6 +149,34 @@ class ConversationTimelineTest {
         assertEquals(ExecutionPhase.COMPLETED, done.phase)
     }
 
+    // ------------------------------------------------------------------
+    // D-11 ALIGNMENT — only a FATAL error fails the phase; the kernel's
+    // non-fatal (replan/retry) errors stay in the run with an honest step.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `fatal error projects to FAILED`() {
+        val next = ExecutionLifecycleProjection.apply(
+            base,
+            ExecutionEvent.Error("exec_1", "X", "خطأ قاتل", isFatal = true)
+        )
+        assertEquals(ExecutionPhase.FAILED, next.phase)
+    }
+
+    @Test
+    fun `non-fatal error keeps the current phase and records an honest step`() {
+        val executing = ExecutionLifecycleProjection.apply(base, started())
+        val next = ExecutionLifecycleProjection.apply(
+            executing,
+            ExecutionEvent.Error("exec_1", "RETRY", "خطأ غير قاتل — إعادة تخطيط", isFatal = false)
+        )
+        assertEquals("The run is still going — FAILED would be a lie", ExecutionPhase.EXECUTING, next.phase)
+        assertTrue(
+            "The recovery attempt lands in the step history",
+            next.steps.any { it.label.contains("خطأ غير قاتل") }
+        )
+    }
+
     @Test
     fun `Cancelled projects to CANCELLED`() {
         val next = ExecutionLifecycleProjection.apply(base, ExecutionEvent.Cancelled("exec_1", "بواسطة المستخدم"))

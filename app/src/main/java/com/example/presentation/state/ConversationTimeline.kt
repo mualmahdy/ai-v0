@@ -385,10 +385,19 @@ object ExecutionLifecycleProjection {
                 degradedMessage = event.message
             ).withStep(prefix = "نمط تراجعي:", content = event.message, nowMs = nowMs)
 
-            is ExecutionEvent.Error -> next = current.copy(
-                phase = ExecutionPhase.FAILED,
-                phaseDetail = event.message.take(48)
-            ).withStep(prefix = "فشل:", content = event.message, nowMs = nowMs)
+            // D-11 ALIGNMENT: only a FATAL error is a failed phase. A
+            // non-fatal error (the kernel's replan/retry verdict —
+            // ExecutionService emits isFatal=false for step errors inside
+            // the retry budget) keeps the CURRENT phase and lands as an
+            // honest step: the run is still going, "فشل" would be a lie.
+            is ExecutionEvent.Error -> next = if (event.isFatal) {
+                current.copy(
+                    phase = ExecutionPhase.FAILED,
+                    phaseDetail = event.message.take(48)
+                ).withStep(prefix = "فشل:", content = event.message, nowMs = nowMs)
+            } else {
+                current.withStep(prefix = "خطأ غير قاتل:", content = event.message, nowMs = nowMs)
+            }
 
             is ExecutionEvent.Completed -> next = current.copy(
                 phase = ExecutionPhase.COMPLETED

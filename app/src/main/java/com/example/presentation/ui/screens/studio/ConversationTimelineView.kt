@@ -488,7 +488,12 @@ private fun AssistantMessage(
                     )
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                if (failed) {
+                if (failed && entry.isDegraded) {
+                    // D-11 MERGE: one turn that erred then completed degraded —
+                    // the honest merged label, not a bare "فشل" that hides the
+                    // recovered output.
+                    StatusPill(text = "اكتمل جزئياً بعد خطأ", color = MaterialTheme.colorScheme.tertiary)
+                } else if (failed) {
                     StatusPill(text = "فشل التنفيذ", color = MaterialTheme.colorScheme.error)
                 } else if (entry.isDegraded) {
                     StatusPill(text = "اكتمل بنمط تراجعي", color = MaterialTheme.colorScheme.tertiary)

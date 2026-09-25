@@ -532,28 +532,44 @@ class StudioViewModelTest {
         // The provider error surfaces honestly as the feature error channel.
         assertNotNull(state.errorMessage)
 
-        // REAL pipeline event topology (pre-slice behaviour, preserved):
-        // the provider's Error passes THROUGH ExecutionService, then the
-        // loop emits its own terminal event (Completed with the fallback
-        // text "اكتملت معالجة المهمة."). One transcript turn per terminal
-        // event — the failure turn FIRST (honest ordering), then the loop's
-        // terminal turn. Documented as a pre-existing execution-contract
-        // quirk in UI-REDESIGN-TRACK.md (NOT changed by this slice).
+        // D-11 MERGE (the reopen this suite documented as pending): a
+        // provider Error + the loop's degraded Completed land as ONE turn —
+        // ONE timeline entry, ONE durable row. The pre-merge double-entry
+        // (a failed turn followed by a fallback turn) is gone; the single
+        // failed turn carries the provider's own failure message (never the
+        // kernel's generic fallback masking it).
         val terminalEvents = receivedSignals.filterIsInstance<StudioSignal.ExecutionEvent>()
             .map { it.event }
             .filter { it is ExecutionEvent.Error || it is ExecutionEvent.Completed }
-        assertEquals(terminalEvents.size, state.studioSession.size)
-        assertEquals("Every transcript turn is durable (honest history)", terminalEvents.size, repository.appendedTurns.size)
-
+        assertEquals(2, terminalEvents.size)
         val firstEvent = terminalEvents.first()
         assertTrue("The provider failure arrives first", firstEvent is ExecutionEvent.Error)
-        val firstTurn = state.studioSession.first()
-        assertFalse("The provider-failure turn records the failure", firstTurn.isSuccessful)
+
         assertEquals(
-            "The failed turn is persisted with the failure flag",
-            false,
-            repository.appendedTurns.first().isSuccessful
+            "The errored run renders as exactly ONE transcript turn",
+            1,
+            state.studioSession.size
         )
+        assertEquals(
+            "The errored run persists exactly ONE durable turn",
+            1,
+            repository.appendedTurns.size
+        )
+        val mergedTurn = state.studioSession.single()
+        assertFalse("The merged turn records the failure", mergedTurn.isSuccessful)
+        assertEquals(
+            "The merged turn carries the provider's failure message",
+            "فشل مزود الاختبار",
+            mergedTurn.answer
+        )
+        assertEquals(
+            "The persisted turn is the same merged truth",
+            false,
+            repository.appendedTurns.single().isSuccessful
+        )
+        val failedEntries = state.timeline.filterIsInstance<ChatEntry.Assistant>()
+            .filter { !it.isSuccessful }
+        assertEquals("ONE failed assistant entry in the timeline", 1, failedEntries.size)
     }
 
     @Test

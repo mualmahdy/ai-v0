@@ -1086,6 +1086,26 @@ class StudioViewModel(
     }
 
     /**
+     * D-11 MERGE: the ONE honest answer for a run's terminal event. A clean
+     * run keeps its final text (else the streamed partial). A run that
+     * ERRORED keeps its real partial output if any — else the provider's own
+     * failure message; the kernel's generic fallback («اكتملت معالجة المهمة.»)
+     * never masks a real error.
+     */
+    private fun mergedAnswer(
+        finalText: String,
+        executionStream: StringBuilder,
+        terminalError: ExecutionEvent.Error?
+    ): String {
+        val streamed = executionStream.toString()
+        return if (terminalError == null) {
+            finalText.ifBlank { streamed }
+        } else {
+            streamed.ifBlank { terminalError.message }
+        }
+    }
+
+    /**
      * Appends a finished conversational turn to the Studio session transcript.
      * Called from the terminal execution events (Completed / Error).
      */
@@ -1611,6 +1631,13 @@ class StudioViewModel(
             // FRONTIER REASONING: the thinking-text twin of executionStream —
             // accumulated for the Assistant entry, never persisted durably.
             val executionReasoning = StringBuilder()
+            // D-11 MERGE: a provider Error is recorded here and rendered
+            // ONCE — merged into the run's terminal Completed (ONE entry,
+            // ONE durable turn). The immediate-render path is gone; the
+            // finally-guard still lands the failed turn if the kernel dies
+            // before any terminal event.
+            var terminalError: ExecutionEvent.Error? = null
+            var terminalPersisted = false
             var executionTokens = 0
             var executionEventCount = 0
             // CHAT CAPABILITIES (Task 2 §11): the REAL citation chains the
@@ -1747,16 +1774,20 @@ class StudioViewModel(
                             is ExecutionEvent.Completed -> if (!approvalRequested) {
                                 // §2: the detached turn lands in ITS OWN pinned
                                 // session — with ITS OWN stream/usage/count.
+                                // D-11 MERGE: a preceding provider error folds
+                                // into this ONE turn (failed + degraded), never
+                                // a second entry.
+                                terminalPersisted = true
                                 persistTurnDurably(
                                     sessionId = sessionId,
                                     prompt = prompt,
-                                    answer = event.finalText.ifBlank { executionStream.toString() },
+                                    answer = mergedAnswer(event.finalText, executionStream, terminalError),
                                     agentName = resolvedAgent.identity.name,
                                     agentRole = resolvedAgent.identity.role.displayName,
                                     modelResourceId = effectiveModelId ?: selectedModelId,
                                     tokensConsumed = executionTokens,
                                     durationMs = System.currentTimeMillis() - turnStartedAt,
-                                    isSuccessful = true,
+                                    isSuccessful = terminalError == null,
                                     eventCount = executionEventCount,
                                     attachments = attachments,
                                     sources = collectedSources.map { it.toTurnSourceRef() },
@@ -1779,22 +1810,10 @@ class StudioViewModel(
                                     )
                                 }
                                 approvalRequested -> Unit // §8 cascade — nothing further
-                                else -> persistTurnDurably(
-                                    sessionId = sessionId,
-                                    prompt = prompt,
-                                    answer = executionStream.toString().ifBlank { event.message },
-                                    agentName = resolvedAgent.identity.name,
-                                    agentRole = resolvedAgent.identity.role.displayName,
-                                    modelResourceId = effectiveModelId ?: selectedModelId,
-                                    tokensConsumed = executionTokens,
-                                    durationMs = System.currentTimeMillis() - turnStartedAt,
-                                    isSuccessful = false,
-                                    eventCount = executionEventCount,
-                                    attachments = attachments,
-                                    pinnedWorkspaceId = pinnedWorkspaceId,
-                                    pinnedProjectId = pinnedProjectId,
-                                    executionTaskId = executionTaskId
-                                )
+                                // D-11 MERGE: the failure renders with the run's
+                                // terminal event (Completed folds it) or the
+                                // finally-guard — never twice, never alone.
+                                else -> terminalError = event
                             }
                             else -> Unit
                         }
@@ -1807,16 +1826,20 @@ class StudioViewModel(
                     // CAS contention and duplicate durable turns; the update
                     // lambda below is PURE).
                     if (event is ExecutionEvent.Completed && !approvalRequested) {
+                        // D-11 MERGE: the run's terminal event lands the ONE
+                        // turn — folding a preceding provider error (failed +
+                        // degraded) instead of appending a second entry.
+                        terminalPersisted = true
                         persistTurnDurably(
                             sessionId = sessionId,
                             prompt = prompt,
-                            answer = event.finalText.ifBlank { executionStream.toString() },
+                            answer = mergedAnswer(event.finalText, executionStream, terminalError),
                             agentName = resolvedAgent.identity.name,
                             agentRole = resolvedAgent.identity.role.displayName,
                             modelResourceId = effectiveModelId ?: selectedModelId,
                             tokensConsumed = executionTokens,
                             durationMs = System.currentTimeMillis() - turnStartedAt,
-                            isSuccessful = true,
+                            isSuccessful = terminalError == null,
                             eventCount = executionEventCount,
                             attachments = attachments,
                             sources = collectedSources.map { it.toTurnSourceRef() },
@@ -1828,22 +1851,10 @@ class StudioViewModel(
                     if (event is ExecutionEvent.Error &&
                         event.failureCode != APPROVAL_REQUIRED_CODE && !approvalRequested
                     ) {
-                        persistTurnDurably(
-                            sessionId = sessionId,
-                            prompt = prompt,
-                            answer = executionStream.toString().ifBlank { event.message },
-                            agentName = resolvedAgent.identity.name,
-                            agentRole = resolvedAgent.identity.role.displayName,
-                            modelResourceId = effectiveModelId ?: selectedModelId,
-                            tokensConsumed = executionTokens,
-                            durationMs = System.currentTimeMillis() - turnStartedAt,
-                            isSuccessful = false,
-                            eventCount = executionEventCount,
-                            attachments = attachments,
-                            pinnedWorkspaceId = pinnedWorkspaceId,
-                            pinnedProjectId = pinnedProjectId,
-                            executionTaskId = executionTaskId
-                        )
+                        // D-11 MERGE: record only — the terminal Completed (or
+                        // the finally-guard, if the kernel dies first) lands the
+                        // single failed turn. The banner feedback is immediate.
+                        terminalError = event
                     }
                     // CHAT FINAL CLOSURE (nested-update purity — the CAS-retry
                     // race): the consent request's side effects (the durable
@@ -1954,7 +1965,13 @@ class StudioViewModel(
                                     // P1: the persist ran ABOVE (outside the
                                     // state-update lambda); the update itself
                                     // is PURE view mutation.
-                                    val answer = event.finalText.ifBlank { executionStream.toString() }
+                                    // D-11 MERGE: when a provider error
+                                    // preceded this completion, the run lands
+                                    // as ONE entry — failed + degraded, with
+                                    // the best honest output — never two
+                                    // turns for one question.
+                                    val answer = mergedAnswer(event.finalText, executionStream, terminalError)
+                                    val failed = terminalError != null
                                     val honestModelId = effectiveModelId ?: selectedModelId
                                     // P0-D: the finished text has EXACTLY ONE
                                     // display path — the assistant entry. The
@@ -1972,7 +1989,7 @@ class StudioViewModel(
                                             text = answer,
                                             agentName = resolvedAgent.identity.name,
                                             agentRole = resolvedAgent.identity.role.displayName,
-                                            isSuccessful = true,
+                                            isSuccessful = !failed,
                                             // §5: the model that ACTUALLY served
                                             // the request (decision-layer truth),
                                             // falling back to the user's pin.
@@ -1995,7 +2012,7 @@ class StudioViewModel(
                                             agentName = resolvedAgent.identity.name,
                                             agentRole = resolvedAgent.identity.role.displayName,
                                             answer = answer,
-                                            isSuccessful = true,
+                                            isSuccessful = !failed,
                                             modelResourceId = honestModelId,
                                             tokensConsumed = executionTokens,
                                             eventCount = executionEventCount,
@@ -2005,7 +2022,6 @@ class StudioViewModel(
                                 }
                             }
                             is ExecutionEvent.Error -> {
-                                terminalSeq++
                                 // --------------------------------------------------
                                 // FUNCTIONAL CLOSURE (§8): a consent-blocked
                                 // execution is an AWAITING_APPROVAL state, NOT
@@ -2043,43 +2059,19 @@ class StudioViewModel(
                                         )
                                     )
                                 } else {
-                                    // P1: the persist ran ABOVE (outside the
-                                    // state-update lambda).
-                                    val answer = executionStream.toString().ifBlank { event.message }
+                                    // D-11 MERGE: a NON-approval provider error
+                                    // is recorded (terminalError, ABOVE, outside
+                                    // this PURE lambda) — the run's terminal
+                                    // Completed folds it into ONE failed entry.
+                                    // The banner feedback is immediate; the
+                                    // execution stays live (the kernel's
+                                    // terminal event is still coming); the
+                                    // finally-guard lands the failed turn if
+                                    // the kernel dies before any terminal event.
                                     state.copy(
-                                        isExecuting = false,
                                         errorMessage = event.message,
                                         executionLog = updatedLogs,
-                                        liveExecution = null,
-                                        streamText = "",
-                                        reasoningText = "",
-                                        timeline = state.timeline + ChatEntry.Assistant(
-                                            id = "asst_${executionTaskId}_$terminalSeq",
-                                            text = answer,
-                                            agentName = resolvedAgent.identity.name,
-                                            agentRole = resolvedAgent.identity.role.displayName,
-                                            isSuccessful = false,
-                                            modelResourceId = effectiveModelId ?: selectedModelId,
-                                            tokensConsumed = executionTokens,
-                                            durationMs = System.currentTimeMillis() - sentAtMs,
-                                            eventCount = executionEventCount,
-                                            // FRONTIER REASONING: what the model
-                                            // thought before failing is part of the
-                                            // honest record of that failed turn.
-                                            reasoning = executionReasoning.toString()
-                                        ),
-                                        studioSession = appendStudioTurn(
-                                            state = state,
-                                            prompt = prompt,
-                                            agentName = resolvedAgent.identity.name,
-                                            agentRole = resolvedAgent.identity.role.displayName,
-                                            answer = answer,
-                                            isSuccessful = false,
-                                            modelResourceId = effectiveModelId ?: selectedModelId,
-                                            tokensConsumed = executionTokens,
-                                            eventCount = executionEventCount,
-                                            turnId = "turn_${executionTaskId}_$terminalSeq"
-                                        )
+                                        liveExecution = updatedLive
                                     )
                                 }
                             }
@@ -2118,6 +2110,57 @@ class StudioViewModel(
                     }
                 }
             } finally {
+                // ----------------------------------------------------------
+                // D-11 MERGE FAIL-SAFE: a provider error whose terminal
+                // Completed NEVER arrived (kernel death / cancellation
+                // mid-run) still lands its ONE failed turn — the merge
+                // never costs durability. Mirrors the old immediate-render
+                // path exactly: one entry, composer freed, live block
+                // cleared (an attached execution only).
+                // ----------------------------------------------------------
+                if (terminalError != null && !terminalPersisted) {
+                    terminalPersisted = true
+                    val failedAnswer = executionStream.toString()
+                        .ifBlank { terminalError?.message.orEmpty() }
+                    persistTurnDurably(
+                        sessionId = sessionId,
+                        prompt = prompt,
+                        answer = failedAnswer,
+                        agentName = resolvedAgent.identity.name,
+                        agentRole = resolvedAgent.identity.role.displayName,
+                        modelResourceId = effectiveModelId ?: selectedModelId,
+                        tokensConsumed = executionTokens,
+                        durationMs = System.currentTimeMillis() - turnStartedAt,
+                        isSuccessful = false,
+                        eventCount = executionEventCount,
+                        attachments = attachments,
+                        pinnedWorkspaceId = pinnedWorkspaceId,
+                        pinnedProjectId = pinnedProjectId,
+                        executionTaskId = executionTaskId
+                    )
+                    if (currentExecutionTaskId == executionTaskId && !approvalRequested) {
+                        terminalSeq++
+                        _state.update { state ->
+                            state.copy(
+                                isExecuting = false,
+                                streamText = "",
+                                reasoningText = "",
+                                liveExecution = null,
+                                timeline = state.timeline + ChatEntry.Assistant(
+                                    id = "asst_${executionTaskId}_$terminalSeq",
+                                    text = failedAnswer,
+                                    agentName = resolvedAgent.identity.name,
+                                    agentRole = resolvedAgent.identity.role.displayName,
+                                    isSuccessful = false,
+                                    modelResourceId = effectiveModelId ?: selectedModelId,
+                                    tokensConsumed = executionTokens,
+                                    durationMs = System.currentTimeMillis() - sentAtMs,
+                                    eventCount = executionEventCount
+                                )
+                            )
+                        }
+                    }
+                }
                 // DEFENSIVE HONESTY: if this execution is still shown as
                 // live WITHOUT a terminal event ever arriving (an unexpected
                 // kernel gap), free the composer instead of leaving a
