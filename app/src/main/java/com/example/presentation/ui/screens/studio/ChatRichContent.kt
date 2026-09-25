@@ -353,27 +353,71 @@ private fun RichCodeBlock(language: String?, code: String) {
                     }
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                Row(modifier = Modifier.horizontalScroll(rememberScrollState()).padding(10.dp)) {
-                    SelectionContainer {
-                        Column {
-                            code.lines().forEachIndexed { index, line ->
-                                Row {
-                                    Text(
-                                        text = (index + 1).toString().padStart(3, ' '),
-                                        color = MaterialTheme.colorScheme.outline,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 11.sp
-                                    )
-                                    Spacer(Modifier.width(10.dp))
-                                    Text(
-                                        text = line,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 12.5.sp,
-                                        lineHeight = 18.sp
-                                    )
-                                }
-                            }
+                CodeBlockBody(language, code)
+            }
+        }
+    }
+}
+
+/**
+ * The scrollable, selectable body of a code fence. Known language families
+ * render through the dependency-free [ChatSyntaxHighlighting] tokenizer with
+ * a palette derived from the ACTIVE theme (never hard-coded colors, correct
+ * in light and dark); an unknown/absent label degrades to the exact plain
+ * rendering that existed before highlighting — honest degradation, and no
+ * pointless spans on prose-like fences.
+ */
+@Composable
+private fun CodeBlockBody(language: String?, code: String) {
+    val family = remember(language) { ChatSyntaxHighlighting.familyOf(language) }
+    val highlight = family != CodeLanguageFamily.PLAIN
+    val scheme = MaterialTheme.colorScheme
+    // Tokenize ONCE per code payload (streaming recompositions reuse it).
+    val tokenizedLines = remember(code, family) {
+        if (highlight) ChatSyntaxHighlighting.tokenize(code, family) else emptyList()
+    }
+    val palette = if (highlight) {
+        remember(scheme) {
+            CodeHighlightPalette(
+                keyword = scheme.primary,
+                string = scheme.tertiary,
+                number = scheme.secondary,
+                comment = scheme.outline,
+                annotation = scheme.tertiary,
+                plain = scheme.onSurface
+            )
+        }
+    } else {
+        null
+    }
+    Row(modifier = Modifier.horizontalScroll(rememberScrollState()).padding(10.dp)) {
+        SelectionContainer {
+            Column {
+                code.lines().forEachIndexed { index, line ->
+                    Row {
+                        Text(
+                            text = (index + 1).toString().padStart(3, ' '),
+                            color = MaterialTheme.colorScheme.outline,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        if (highlight && palette != null) {
+                            Text(
+                                text = tokenizedLines.getOrElse(index) { emptyList() }
+                                    .toHighlightAnnotatedString(palette),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.5.sp,
+                                lineHeight = 18.sp
+                            )
+                        } else {
+                            Text(
+                                text = line,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 12.5.sp,
+                                lineHeight = 18.sp
+                            )
                         }
                     }
                 }
