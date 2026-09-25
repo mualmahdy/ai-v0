@@ -104,6 +104,40 @@ class ChatMarkdownTest {
     }
 
     // ------------------------------------------------------------------
+    // FRONTIER unification: strike + inline math (carried from the rich
+    // renderer into the ONE shared inline parser)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `strikethrough parses and unclosed tildes stay literal`() {
+        val spans = parser.parseInline("هذا ~~ملغى~~ ونص ~ مفرد")
+        assertEquals(
+            listOf(
+                MdSpan.Text("هذا "),
+                MdSpan.Strike("ملغى"),
+                MdSpan.Text(" ونص ~ مفرد")
+            ),
+            spans
+        )
+    }
+
+    @Test
+    fun `dollar inline math parses and a lone dollar stays literal`() {
+        val source = "المعادلة " + '$' + "x^2+1" + '$' + " وسعره 5" + '$'
+        val spans = parser.parseInline(source)
+        val math = spans.filterIsInstance<MdSpan.Math>().single()
+        assertEquals("x^2+1", math.text)
+        // The trailing lone '$' never pairs backwards across the math span.
+        assertTrue(spans.last() is MdSpan.Text)
+    }
+
+    @Test
+    fun `backslash-paren inline math parses`() {
+        val spans = parser.parseInline("يكتب \\(a+b\\) كصيغة")
+        assertEquals(MdSpan.Math("a+b"), spans.filterIsInstance<MdSpan.Math>().single())
+    }
+
+    // ------------------------------------------------------------------
     // Lists
     // ------------------------------------------------------------------
 

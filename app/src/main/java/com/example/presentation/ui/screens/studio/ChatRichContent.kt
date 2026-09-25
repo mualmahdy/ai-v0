@@ -32,16 +32,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.LinkAnnotation
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLinkStyles
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.withLink
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,10 +41,18 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalLayoutDirection
 
 /**
- * Conversation-first rich renderer. It stays dependency-free and deterministic
- * while adding first-class treatment for technical content that a model often
- * emits: math, wide tables, charts, Mermaid-like flows, quotes, and code.
- * Basic Markdown is rendered by the same lightweight, dependency-free surface.
+ * ============================================================================
+ * RichMarkdownContent — the conversation-first RICH renderer (single
+ * renderer over the UNIFIED parser — FRONTIER unification 2026)
+ * ============================================================================
+ *
+ * Dependency-free and deterministic, with first-class treatment for the
+ * technical content a model often emits: math blocks, wide tables, charts,
+ * Mermaid-like flows, quotes, and code. Basic Markdown (paragraphs,
+ * headings, lists, inline styles, links, inline math) is parsed by the ONE
+ * shared [ChatMarkdownParser] — the duplicated per-line scanner and inline
+ * parser this file used to carry are gone; every message surface now shares
+ * one tolerance contract and one test suite.
  */
 @Composable
 fun RichMarkdownContent(
@@ -60,11 +60,18 @@ fun RichMarkdownContent(
     modifier: Modifier = Modifier
 ) {
     val blocks = remember(markdown) { RichChatParser.parse(markdown) }
+    // Theme reads happen OUTSIDE remember (CompositionLocal reads are
+    // composable-only); the style object is the rememberable value.
+    val codeBackground = MaterialTheme.colorScheme.surfaceVariant
+    val linkColor = MaterialTheme.colorScheme.primary
+    val spanStyles = remember(codeBackground, linkColor) {
+        MdSpanStyles(codeBackground = codeBackground, linkColor = linkColor)
+    }
     Column(modifier = modifier.fillMaxWidth()) {
         blocks.forEach { block ->
             when (block) {
-                is RichChatBlock.Markdown -> MarkdownWithInlineMath(block.text)
-                is RichChatBlock.Quote -> QuoteBlock(block.text)
+                is RichChatBlock.Markdown -> MarkdownBlocks(block.blocks, spanStyles)
+                is RichChatBlock.Quote -> QuoteBlock(block.text, spanStyles)
                 is RichChatBlock.MathBlock -> MathBlock(block.formula)
                 is RichChatBlock.Code -> RichCodeBlock(block.language, block.code)
                 is RichChatBlock.Table -> RichTable(block)
@@ -76,7 +83,12 @@ fun RichMarkdownContent(
 }
 
 sealed interface RichChatBlock {
-    data class Markdown(val text: String) : RichChatBlock
+    /**
+     * A stretch of basic Markdown, now carried as TYPED [MdBlock]s (parsed
+     * once by the shared [ChatMarkdownParser] at flush time) instead of the
+     * old raw-text + per-line re-parse — one parse, one rendering path.
+     */
+    data class Markdown(val blocks: List<MdBlock>) : RichChatBlock
     data class Quote(val text: String) : RichChatBlock
     data class MathBlock(val formula: String) : RichChatBlock
     data class Code(val language: String?, val code: String) : RichChatBlock
@@ -88,11 +100,15 @@ sealed interface RichChatBlock {
 data class ChartPoint(val label: String, val value: Float)
 data class DiagramEdge(val from: String, val to: String)
 
+/**
+ * The rich BLOCK scanner: routes fenced code (incl. chart/mermaid fences),
+ * display-math and quote/table blocks to their dedicated renderers, and
+ * delegates everything else to the SHARED [ChatMarkdownParser] as typed
+ * [MdBlock]s. Fence/table row splitting reuses the parser's helpers — the
+ * duplicated scanners are gone.
+ */
 object RichChatParser {
     private val fenceRegex = Regex("^```(.*)$")
-    private val headingRegex = Regex("^#{1,6}\\s+(.*)$")
-    private val unorderedRegex = Regex("^[-*+]\\s+(.*)$")
-    private val orderedRegex = Regex("^(\\d{1,3})\\.\\s+(.*)$")
 
     fun parse(source: String): List<RichChatBlock> {
         val lines = source.replace("\r", "").lines()
@@ -102,7 +118,11 @@ object RichChatParser {
         fun flushMarkdown() {
             val text = markdown.toString().trim('\n')
             markdown.setLength(0)
-            if (text.isNotBlank()) blocks += RichChatBlock.Markdown(text)
+            if (text.isNotBlank()) {
+                // ONE shared parser: the same tolerant block/inline contract
+                // as the plain renderer (headings, lists, inline styles…).
+                blocks += RichChatBlock.Markdown(ChatMarkdownParser.parse(text))
+            }
         }
 
         var i = 0
@@ -147,13 +167,15 @@ object RichChatParser {
                 continue
             }
 
-            if (i + 1 < lines.size && trimmed.contains('|') && isTableSeparator(lines[i + 1].trim())) {
+            if (i + 1 < lines.size && trimmed.contains('|') &&
+                ChatMarkdownParser.isTableSeparator(lines[i + 1].trim())
+            ) {
                 flushMarkdown()
-                val header = splitTableRow(trimmed)
+                val header = ChatMarkdownParser.splitTableRow(trimmed)
                 i += 2
                 val rows = mutableListOf<List<String>>()
                 while (i < lines.size && lines[i].trim().contains('|')) {
-                    rows += splitTableRow(lines[i].trim())
+                    rows += ChatMarkdownParser.splitTableRow(lines[i].trim())
                     i++
                 }
                 blocks += RichChatBlock.Table(header, rows)
@@ -178,14 +200,6 @@ object RichChatParser {
         return blocks
     }
 
-    private fun isTableSeparator(line: String): Boolean =
-        line.contains('-') &&
-            line.all { it == '|' || it == '-' || it == ':' || it == ' ' } &&
-            line.count { it == '-' } >= 2
-
-    private fun splitTableRow(line: String): List<String> =
-        line.removePrefix("|").removeSuffix("|").split('|').map { it.trim() }
-
     fun parseChart(source: String): List<ChartPoint> = source.lines()
         .mapNotNull { line ->
             val clean = line.trim()
@@ -206,190 +220,63 @@ object RichChatParser {
     }
 }
 
-private data class RichInlineSpan(
-    val text: String,
-    val kind: Kind,
-    val url: String? = null
-) {
-    enum class Kind { TEXT, BOLD, ITALIC, STRIKE, CODE, MATH, LINK }
-}
-
-private fun parseRichInline(text: String): List<RichInlineSpan> {
-    val spans = mutableListOf<RichInlineSpan>()
-    val plain = StringBuilder()
-
-    fun flushPlain() {
-        if (plain.isNotEmpty()) {
-            spans += RichInlineSpan(plain.toString(), RichInlineSpan.Kind.TEXT)
-            plain.setLength(0)
-        }
-    }
-
-    var i = 0
-    while (i < text.length) {
-        when {
-            text.startsWith("**", i) || text.startsWith("__", i) -> {
-                val marker = text.substring(i, i + 2)
-                val end = text.indexOf(marker, i + 2)
-                if (end > i + 2) {
-                    flushPlain()
-                    spans += RichInlineSpan(text.substring(i + 2, end), RichInlineSpan.Kind.BOLD)
-                    i = end + 2
-                } else {
-                    plain.append(marker)
-                    i += 2
-                }
-            }
-            text.startsWith("~~", i) -> {
-                val end = text.indexOf("~~", i + 2)
-                if (end > i + 2) {
-                    flushPlain()
-                    spans += RichInlineSpan(text.substring(i + 2, end), RichInlineSpan.Kind.STRIKE)
-                    i = end + 2
-                } else {
-                    plain.append("~~")
-                    i += 2
-                }
-            }
-            text[i] == '`' -> {
-                val end = text.indexOf('`', i + 1)
-                if (end > i) {
-                    flushPlain()
-                    spans += RichInlineSpan(text.substring(i + 1, end), RichInlineSpan.Kind.CODE)
-                    i = end + 1
-                } else {
-                    plain.append('`')
-                    i++
-                }
-            }
-            text[i] == '$' -> {
-                val end = text.indexOf('$', i + 1)
-                if (end > i + 1) {
-                    flushPlain()
-                    spans += RichInlineSpan(text.substring(i + 1, end), RichInlineSpan.Kind.MATH)
-                    i = end + 1
-                } else {
-                    plain.append('$')
-                    i++
-                }
-            }
-            text.startsWith("\\(", i) -> {
-                val end = text.indexOf("\\)", i + 2)
-                if (end > i + 2) {
-                    flushPlain()
-                    spans += RichInlineSpan(text.substring(i + 2, end), RichInlineSpan.Kind.MATH)
-                    i = end + 2
-                } else {
-                    plain.append("\\(")
-                    i += 2
-                }
-            }
-            text[i] == '[' -> {
-                val labelEnd = text.indexOf(']', i + 1)
-                if (labelEnd > i && labelEnd + 1 < text.length && text[labelEnd + 1] == '(') {
-                    val urlEnd = text.indexOf(')', labelEnd + 2)
-                    if (urlEnd > labelEnd + 1) {
-                        flushPlain()
-                        spans += RichInlineSpan(
-                            text.substring(i + 1, labelEnd),
-                            RichInlineSpan.Kind.LINK,
-                            text.substring(labelEnd + 2, urlEnd)
-                        )
-                        i = urlEnd + 1
-                        continue
-                    }
-                }
-                plain.append('[')
-                i++
-            }
-            text[i] == '*' || text[i] == '_' -> {
-                val marker = text[i]
-                val end = text.indexOf(marker, i + 1)
-                if (end > i + 1) {
-                    flushPlain()
-                    spans += RichInlineSpan(text.substring(i + 1, end), RichInlineSpan.Kind.ITALIC)
-                    i = end + 1
-                } else {
-                    plain.append(marker)
-                    i++
-                }
-            }
-            else -> {
-                plain.append(text[i])
-                i++
-            }
-        }
-    }
-    flushPlain()
-    return spans
-}
-
+/**
+ * Renders the typed basic-Markdown blocks of one rich chunk — the shared
+ * pipeline's visual twin of the plain renderer: annotated spans, M3
+ * typography, primary-tinted list markers. Code/table blocks are routed to
+ * the SAME dedicated renderers the rich scanner uses (defensive tolerance:
+ * the scanner normally consumes them first).
+ */
 @Composable
-private fun MarkdownWithInlineMath(text: String) {
-    val lines = text.lines()
+private fun MarkdownBlocks(blocks: List<MdBlock>, spanStyles: MdSpanStyles) {
     Column(modifier = Modifier.fillMaxWidth()) {
-        lines.forEach { line ->
-            when {
-                line.isBlank() -> Spacer(Modifier.height(4.dp))
-                line.matches(Regex("^#{1,6}\\s+.*$")) -> {
-                    val level = line.takeWhile { it == '#' }.length
-                    val content = line.drop(level).trimStart()
+        blocks.forEach { block ->
+            when (block) {
+                is MdBlock.Paragraph -> {
                     Text(
-                        text = richAnnotated(content),
+                        text = block.spans.toAnnotatedString(spanStyles),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                    )
+                }
+
+                is MdBlock.Heading -> {
+                    Text(
+                        text = block.spans.toAnnotatedString(spanStyles),
                         style = when {
-                            level <= 1 -> MaterialTheme.typography.titleLarge
-                            level == 2 -> MaterialTheme.typography.titleMedium
+                            block.level <= 1 -> MaterialTheme.typography.titleLarge
+                            block.level == 2 -> MaterialTheme.typography.titleMedium
                             else -> MaterialTheme.typography.titleSmall
                         },
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.padding(top = 7.dp, bottom = 3.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 7.dp, bottom = 3.dp)
                     )
                 }
-                line.matches(Regex("^[-*+]\\s+.*$")) -> {
-                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                        Text("•", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.width(8.dp))
-                        Text(richAnnotated(line.drop(2)), style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-                line.matches(Regex("^\\d{1,3}\\.\\s+.*$")) -> {
-                    val prefix = line.takeWhile { it != ' ' }
-                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                        Text(prefix, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.width(8.dp))
-                        Text(richAnnotated(line.drop(prefix.length + 1)), style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-                else -> Text(
-                    text = richAnnotated(line),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
-                )
-            }
-        }
-    }
-}
 
-@Composable
-private fun richAnnotated(text: String): AnnotatedString = buildAnnotatedString {
-    parseRichInline(text).forEach { span ->
-        when (span.kind) {
-            RichInlineSpan.Kind.TEXT -> append(span.text)
-            RichInlineSpan.Kind.BOLD -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(span.text) }
-            RichInlineSpan.Kind.ITALIC -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(span.text) }
-            RichInlineSpan.Kind.STRIKE -> withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) { append(span.text) }
-            RichInlineSpan.Kind.CODE -> withStyle(
-                SpanStyle(fontFamily = FontFamily.Monospace, background = MaterialTheme.colorScheme.surfaceVariant)
-            ) { append(span.text) }
-            RichInlineSpan.Kind.MATH -> withStyle(
-                SpanStyle(fontFamily = FontFamily.Monospace, fontSize = 15.sp)
-            ) { append(normalizeMath(span.text)) }
-            RichInlineSpan.Kind.LINK -> withStyle(
-                SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = TextDecoration.Underline)
-            ) {
-                withLink(LinkAnnotation.Url(url = span.url.orEmpty(), styles = TextLinkStyles())) { append(span.text) }
+                is MdBlock.ListItem -> {
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                        Text(
+                            text = if (block.ordered) "${block.ordinal}." else "•",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = block.spans.toAnnotatedString(spanStyles),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                }
+
+                is MdBlock.CodeBlock -> RichCodeBlock(block.language, block.code)
+                is MdBlock.Table -> RichTable(RichChatBlock.Table(block.header, block.rows))
             }
         }
     }
@@ -417,7 +304,7 @@ private fun MathBlock(formula: String) {
 }
 
 @Composable
-private fun QuoteBlock(text: String) {
+private fun QuoteBlock(text: String, spanStyles: MdSpanStyles) {
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
@@ -426,7 +313,7 @@ private fun QuoteBlock(text: String) {
         Row(verticalAlignment = Alignment.Top) {
             Box(Modifier.width(4.dp).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
             Text(
-                text = richAnnotated(text),
+                text = parseQuoteSpans(text).toAnnotatedString(spanStyles),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(10.dp)
@@ -434,6 +321,17 @@ private fun QuoteBlock(text: String) {
         }
     }
 }
+
+/**
+ * Quote content keeps MULTI-LINE structure: each line is inline-parsed
+ * independently (a marker can never pair across quote lines), matching the
+ * historical quote rendering exactly.
+ */
+private fun parseQuoteSpans(text: String): List<MdSpan> =
+    text.lines().flatMapIndexed { index, line ->
+        val spans = ChatMarkdownParser.parseInline(line)
+        if (index == 0) spans else listOf(MdSpan.Text("\n")) + spans
+    }
 
 @Composable
 private fun RichCodeBlock(language: String?, code: String) {
@@ -582,80 +480,3 @@ private fun RichDiagram(block: RichChatBlock.Diagram) {
         }
     }
 }
-
-private fun normalizeMath(source: String): String {
-    var value = source
-        .replace("\\left", "")
-        .replace("\\right", "")
-        .replace("\\cdot", "·")
-        .replace("\\times", "×")
-        .replace("\\div", "÷")
-        .replace("\\leq", "≤")
-        .replace("\\le", "≤")
-        .replace("\\geq", "≥")
-        .replace("\\ge", "≥")
-        .replace("\\neq", "≠")
-        .replace("\\approx", "≈")
-        .replace("\\infty", "∞")
-        .replace("\\alpha", "α")
-        .replace("\\beta", "β")
-        .replace("\\gamma", "γ")
-        .replace("\\delta", "δ")
-        .replace("\\epsilon", "ε")
-        .replace("\\lambda", "λ")
-        .replace("\\mu", "μ")
-        .replace("\\pi", "π")
-        .replace("\\rho", "ρ")
-        .replace("\\sigma", "σ")
-        .replace("\\tau", "τ")
-        .replace("\\phi", "φ")
-        .replace("\\omega", "ω")
-        .replace("\\sum", "Σ")
-        .replace("\\prod", "Π")
-        .replace("\\int", "∫")
-        .replace("\\nabla", "∇")
-        .replace("\\to", "→")
-        .replace("\\rightarrow", "→")
-        .replace("\\in", "∈")
-        .replace("\\notin", "∉")
-        .replace("\\pm", "±")
-        .replace("\\sqrt", "√")
-
-    value = value.replace(Regex("\\\\frac\\{([^{}]+)\\}\\{([^{}]+)\\}")) { match ->
-        "(${match.groupValues[1]})/(${match.groupValues[2]})"
-    }
-    value = value.replace(Regex("\\\\sqrt\\{([^{}]+)\\}")) { match ->
-        "√(${match.groupValues[1]})"
-    }
-    value = replaceSimpleScript(value, '^', superscriptMap)
-    value = replaceSimpleScript(value, '_', subscriptMap)
-    return value.replace("{", "").replace("}", "").trim()
-}
-
-private fun replaceSimpleScript(value: String, marker: Char, map: Map<Char, Char>): String {
-    val out = StringBuilder()
-    var i = 0
-    while (i < value.length) {
-        if (value[i] == marker && i + 1 < value.length && value[i + 1].isDigit()) {
-            i++
-            while (i < value.length && value[i].isDigit()) {
-                out.append(map[value[i]] ?: value[i])
-                i++
-            }
-        } else {
-            out.append(value[i])
-            i++
-        }
-    }
-    return out.toString()
-}
-
-private val superscriptMap = mapOf(
-    '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
-    '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹'
-)
-
-private val subscriptMap = mapOf(
-    '0' to '₀', '1' to '₁', '2' to '₂', '3' to '₃', '4' to '₄',
-    '5' to '₅', '6' to '₆', '7' to '₇', '8' to '₈', '9' to '₉'
-)

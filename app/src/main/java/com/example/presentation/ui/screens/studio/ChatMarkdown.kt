@@ -1,28 +1,6 @@
 package com.example.presentation.ui.screens.studio
 
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -34,24 +12,31 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
  * ============================================================================
- * ChatMarkdown — the conversation message renderer (Chat Workspace Task 1
- * §11)
+ * ChatMarkdown — THE unified, dependency-free markdown model (Chat Workspace
+ * Task 1 §11; FRONTIER unification 2026)
  * ============================================================================
  *
- * A dependency-free, MALFORMED-TOLERANT markdown renderer for assistant
- * messages: paragraphs, headings, bold/italic/inline-code, ordered and
- * unordered lists, links, fenced code blocks (language label + copy), and
- * basic pipe tables. Unknown syntax degrades to literal text — never a
- * crash, never silent loss.
+ * One PURE Kotlin model now owns everything message rendering parses:
+ * paragraphs, headings, ordered/unordered lists, fenced code, pipe tables,
+ * and the tolerant inline set — **bold**, *italic*, ~~strike~~, `code`,
+ * $math$, \(math\) and [links](url). It is the single parser behind BOTH the
+ * plain [MarkdownContent] path and the rich conversation renderer
+ * ([RichMarkdownContent] — math blocks, quotes, charts, diagrams, wide
+ * tables); the previously DUPLICATED table/fence/inline scanners of the two
+ * files are gone (one parser, one tolerance contract, one test suite).
  *
- * The PARSER half ([MdBlock]/[MdSpan]/[ChatMarkdownParser]) is PURE Kotlin
- * with zero Compose dependencies so it is unit-testable on the JVM.
+ * The parser half is deliberately free of Compose dependencies so it is
+ * unit-testable on the JVM ([ChatMarkdownParser], [MdBlock], [MdSpan]);
+ * the only Compose-aware piece is the pure [toAnnotatedString] span
+ * renderer, parameterized by theme colors ([MdSpanStyles]).
+ *
+ * Malformed input NEVER crashes and never silently loses text: unclosed
+ * markers degrade to their literal form, unclosed fences run to the end of
+ * the message, and unknown syntax stays plain text.
  */
 
 /** One inline-styled span of a text block. */
@@ -59,7 +44,13 @@ sealed interface MdSpan {
     data class Text(val text: String) : MdSpan
     data class Bold(val text: String) : MdSpan
     data class Italic(val text: String) : MdSpan
+
+    /** FRONTIER (unification): ~~strike~~ — carried from the rich renderer. */
+    data class Strike(val text: String) : MdSpan
     data class Code(val text: String) : MdSpan
+
+    /** FRONTIER (unification): $…$ / \(…\) inline math (Unicode-normalized). */
+    data class Math(val text: String) : MdSpan
     data class Link(val label: String, val url: String) : MdSpan
 }
 
@@ -199,18 +190,21 @@ object ChatMarkdownParser {
         return blocks
     }
 
-    private fun isTableSeparator(line: String): Boolean {
+    internal fun isTableSeparator(line: String): Boolean {
         if (!line.contains('-')) return false
         return line.all { it == '|' || it == '-' || it == ':' || it == ' ' } &&
             line.count { it == '-' } >= 2
     }
 
-    private fun splitTableRow(line: String): List<String> =
+    internal fun splitTableRow(line: String): List<String> =
         line.removePrefix("|").removeSuffix("|").split('|').map { it.trim() }
 
     /**
-     * Tolerant inline parsing: **bold**, *italic*, `code`,
-     * [label](url). Unclosed markers degrade to literal text.
+     * Tolerant inline parsing: **bold**, *italic*, ~~strike~~, `code`,
+     * $math$, \(math\) and [label](url). Unclosed markers degrade to
+     * literal text. Marker precedence mirrors the historical rich renderer
+     * exactly (bold before italic, strike/links/code before single markers)
+     * so unified rendering never pairs markers the old surface would not.
      */
     fun parseInline(text: String): List<MdSpan> {
         val spans = mutableListOf<MdSpan>()
@@ -240,6 +234,19 @@ object ChatMarkdownParser {
                         // full literal form (both chars consumed, so a lone
                         // leftover marker can't pair across it as italic).
                         plain.append(marker)
+                        i += 2
+                    }
+                }
+
+                // Strike: ~~x~~
+                c == '~' && text.startsWith("~~", i) -> {
+                    val close = text.indexOf("~~", i + 2)
+                    if (close > i + 2) {
+                        flushPlain()
+                        spans += MdSpan.Strike(text.substring(i + 2, close))
+                        i = close + 2
+                    } else {
+                        plain.append("~~")
                         i += 2
                     }
                 }
@@ -276,6 +283,32 @@ object ChatMarkdownParser {
                     }
                 }
 
+                // Inline math: $x$
+                c == '$' -> {
+                    val close = text.indexOf('$', i + 1)
+                    if (close > i + 1) {
+                        flushPlain()
+                        spans += MdSpan.Math(text.substring(i + 1, close))
+                        i = close + 1
+                    } else {
+                        plain.append(c)
+                        i++
+                    }
+                }
+
+                // Inline math: \(x\)
+                c == '\\' && text.startsWith("\\(", i) -> {
+                    val close = text.indexOf("\\)", i + 2)
+                    if (close > i + 2) {
+                        flushPlain()
+                        spans += MdSpan.Math(text.substring(i + 2, close))
+                        i = close + 2
+                    } else {
+                        plain.append("\\(")
+                        i += 2
+                    }
+                }
+
                 // Italic: *x* or _x_ (single markers, never part of bold)
                 c == '*' || c == '_' -> {
                     val close = text.indexOf(c, i + 1)
@@ -306,13 +339,15 @@ object ChatMarkdownParser {
  * function of (spans, styles)).
  */
 data class MdSpanStyles(
-    val codeBackground: androidx.compose.ui.graphics.Color,
-    val linkColor: androidx.compose.ui.graphics.Color
+    val codeBackground: Color,
+    val linkColor: Color
 )
 
 /**
- * PURE spans → [AnnotatedString] (links are REAL [LinkAnnotation.Link]s the
- * Text framework resolves and opens through the platform handler).
+ * PURE spans → [AnnotatedString] (links are REAL [LinkAnnotation.Url]s the
+ * Text framework resolves and opens through the platform handler). Math
+ * spans are Unicode-normalized through [normalizeMath] (no LaTeX engine —
+ * an honest, readable approximation).
  */
 fun List<MdSpan>.toAnnotatedString(styles: MdSpanStyles): AnnotatedString =
     buildAnnotatedString {
@@ -321,9 +356,15 @@ fun List<MdSpan>.toAnnotatedString(styles: MdSpanStyles): AnnotatedString =
                 is MdSpan.Text -> append(span.text)
                 is MdSpan.Bold -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(span.text) }
                 is MdSpan.Italic -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(span.text) }
+                is MdSpan.Strike -> withStyle(
+                    SpanStyle(textDecoration = TextDecoration.LineThrough)
+                ) { append(span.text) }
                 is MdSpan.Code -> withStyle(
                     SpanStyle(fontFamily = FontFamily.Monospace, background = styles.codeBackground)
                 ) { append(span.text) }
+                is MdSpan.Math -> withStyle(
+                    SpanStyle(fontFamily = FontFamily.Monospace, fontSize = 15.sp)
+                ) { append(normalizeMath(span.text)) }
                 is MdSpan.Link -> withStyle(
                     SpanStyle(color = styles.linkColor, textDecoration = TextDecoration.Underline)
                 ) {
@@ -336,185 +377,84 @@ fun List<MdSpan>.toAnnotatedString(styles: MdSpanStyles): AnnotatedString =
     }
 
 /**
- * The RENDERER half: block list → composables. Code blocks are forced LTR
- * (source code reads left-to-right even inside the app's RTL surfaces).
+ * Unicode-normalizes a LaTeX-ish formula into readable text (moved verbatim
+ * from the old rich renderer — the single math approximation of the app):
+ * common commands → their Unicode twins, \frac{a}{b} → (a)/(b), simple
+ * super/subscripts → Unicode scripts, remaining braces dropped.
  */
-@Composable
-fun MarkdownContent(
-    markdown: String,
-    modifier: Modifier = Modifier
-) {
-    val blocks = remember(markdown) { ChatMarkdownParser.parse(markdown) }
-    // Theme reads happen OUTSIDE remember (CompositionLocal reads are
-    // composable-only); the style object is the rememberable value.
-    val codeBackground = MaterialTheme.colorScheme.surfaceVariant
-    val linkColor = MaterialTheme.colorScheme.primary
-    val spanStyles = remember(codeBackground, linkColor) {
-        MdSpanStyles(codeBackground = codeBackground, linkColor = linkColor)
+internal fun normalizeMath(source: String): String {
+    var value = source
+        .replace("\\left", "")
+        .replace("\\right", "")
+        .replace("\\cdot", "·")
+        .replace("\\times", "×")
+        .replace("\\div", "÷")
+        .replace("\\leq", "≤")
+        .replace("\\le", "≤")
+        .replace("\\geq", "≥")
+        .replace("\\ge", "≥")
+        .replace("\\neq", "≠")
+        .replace("\\approx", "≈")
+        .replace("\\infty", "∞")
+        .replace("\\alpha", "α")
+        .replace("\\beta", "β")
+        .replace("\\gamma", "γ")
+        .replace("\\delta", "δ")
+        .replace("\\epsilon", "ε")
+        .replace("\\lambda", "λ")
+        .replace("\\mu", "μ")
+        .replace("\\pi", "π")
+        .replace("\\rho", "ρ")
+        .replace("\\sigma", "σ")
+        .replace("\\tau", "τ")
+        .replace("\\phi", "φ")
+        .replace("\\omega", "ω")
+        .replace("\\sum", "Σ")
+        .replace("\\prod", "Π")
+        .replace("\\int", "∫")
+        .replace("\\nabla", "∇")
+        .replace("\\to", "→")
+        .replace("\\rightarrow", "→")
+        .replace("\\in", "∈")
+        .replace("\\notin", "∉")
+        .replace("\\pm", "±")
+        .replace("\\sqrt", "√")
+
+    value = value.replace(Regex("\\\\frac\\{([^{}]+)\\}\\{([^{}]+)\\}")) { match ->
+        "(${match.groupValues[1]})/(${match.groupValues[2]})"
     }
-    Column(modifier = modifier) {
-        blocks.forEach { block ->
-            when (block) {
-                is MdBlock.Paragraph -> {
-                    val annotated = remember(block, spanStyles) { block.spans.toAnnotatedString(spanStyles) }
-                    Text(
-                        text = annotated,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 3.dp)
-                    )
-                }
-
-                is MdBlock.Heading -> {
-                    val annotated = remember(block, spanStyles) { block.spans.toAnnotatedString(spanStyles) }
-                    val style = when {
-                        block.level <= 1 -> MaterialTheme.typography.titleLarge
-                        block.level == 2 -> MaterialTheme.typography.titleMedium
-                        else -> MaterialTheme.typography.titleSmall
-                    }
-                    Text(
-                        text = annotated,
-                        style = style,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp, bottom = 3.dp)
-                    )
-                }
-
-                is MdBlock.ListItem -> {
-                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                        Text(
-                            text = if (block.ordered) "${block.ordinal}." else "•",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(start = 4.dp, end = 6.dp)
-                        )
-                        val annotated = remember(block, spanStyles) { block.spans.toAnnotatedString(spanStyles) }
-                        Text(
-                            text = annotated,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-
-                is MdBlock.CodeBlock -> CodeBlockView(block)
-
-                is MdBlock.Table -> TableView(block)
-            }
-        }
+    value = value.replace(Regex("\\\\sqrt\\{([^{}]+)\\}")) { match ->
+        "√(${match.groupValues[1]})"
     }
+    value = replaceSimpleScript(value, '^', superscriptMap)
+    value = replaceSimpleScript(value, '_', subscriptMap)
+    return value.replace("{", "").replace("}", "").trim()
 }
 
-@Composable
-private fun CodeBlockView(block: MdBlock.CodeBlock) {
-    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
-    // Code reads left-to-right even inside the app's RTL surfaces.
-    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-        Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp)
-        ) {
-            Column {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 10.dp, end = 4.dp, top = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = block.language ?: "كود",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(onClick = { clipboard.setText(AnnotatedString(block.code)) }) {
-                        Icon(
-                            Icons.Default.ContentCopy,
-                            contentDescription = "نسخ الكود",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                // Horizontal scroll protects the message column from wide
-                // lines (code is never force-wrapped).
-                Column(
-                    modifier = Modifier
-                        .horizontalScroll(rememberScrollState())
-                        .padding(10.dp)
-                ) {
-                    SelectionContainer {
-                        Text(
-                            text = block.code,
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 12.5.sp,
-                                lineHeight = 18.sp
-                            ),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                }
+private fun replaceSimpleScript(value: String, marker: Char, map: Map<Char, Char>): String {
+    val out = StringBuilder()
+    var i = 0
+    while (i < value.length) {
+        if (value[i] == marker && i + 1 < value.length && value[i + 1].isDigit()) {
+            i++
+            while (i < value.length && value[i].isDigit()) {
+                out.append(map[value[i]] ?: value[i])
+                i++
             }
+        } else {
+            out.append(value[i])
+            i++
         }
     }
+    return out.toString()
 }
 
-@Composable
-private fun TableView(block: MdBlock.Table) {
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-    ) {
-        Column(modifier = Modifier.padding(vertical = 6.dp)) {
-            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp)) {
-                block.header.forEach { cell ->
-                    Text(
-                        text = cell,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-            HorizontalDivider(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
-            )
-            block.rows.forEach { row ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 2.dp)
-                ) {
-                    // Column-count tolerance: pad/truncate to the header.
-                    val cells = row + List((block.header.size - row.size).coerceAtLeast(0)) { "" }
-                    cells.take(block.header.size).forEach { cell ->
-                        Text(
-                            text = cell,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
+private val superscriptMap = mapOf(
+    '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
+    '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹'
+)
+
+private val subscriptMap = mapOf(
+    '0' to '₀', '1' to '₁', '2' to '₂', '3' to '₃', '4' to '₄',
+    '5' to '₅', '6' to '₆', '7' to '₇', '8' to '₈', '9' to '₉'
+)
