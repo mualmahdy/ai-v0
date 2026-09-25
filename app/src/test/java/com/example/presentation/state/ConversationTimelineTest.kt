@@ -177,8 +177,45 @@ class ConversationTimelineTest {
         )
     }
 
+    // ------------------------------------------------------------------
+    // FRONTIER CONTEXT WINDOW — the honest token gauge contract.
+    // ------------------------------------------------------------------
+
     @Test
-    fun `Cancelled projects to CANCELLED`() {
+    fun `unknown budgets hide the gauge entirely`() {
+        // No usage yet / governance could not resolve a remaining figure.
+        assertFalse(ContextWindowGauge.isKnown(0, 0))
+        assertFalse(ContextWindowGauge.isKnown(0, -1)) // REMAINING_UNKNOWN sentinel
+        assertFalse(ContextWindowGauge.isKnown(-1, -1))
+        assertEquals(0f, ContextWindowGauge.fraction(0, -1))
+        assertEquals("", ContextWindowGauge.label(0, -1))
+    }
+
+    @Test
+    fun `real budgets compute the honest fraction and label`() {
+        assertTrue(ContextWindowGauge.isKnown(4_200, 25_800))
+        assertEquals(0.14f, ContextWindowGauge.fraction(4_200, 25_800), 0.01f)
+        assertEquals("4.2k / 30.0k توكن", ContextWindowGauge.label(4_200, 25_800))
+    }
+
+    @Test
+    fun `severity escalates honestly with the used fraction`() {
+        assertEquals(
+            ContextWindowGauge.Severity.NORMAL,
+            ContextWindowGauge.severity(3_000, 27_000)
+        )
+        assertEquals(
+            ContextWindowGauge.Severity.NEAR_FULL,
+            ContextWindowGauge.severity(22_000, 8_000) // 73%
+        )
+        assertEquals(
+            ContextWindowGauge.Severity.CRITICAL,
+            ContextWindowGauge.severity(28_000, 2_000) // 93%
+        )
+    }
+
+    @Test
+    fun `cancelled projects to CANCELLED`() {
         val next = ExecutionLifecycleProjection.apply(base, ExecutionEvent.Cancelled("exec_1", "بواسطة المستخدم"))
         assertEquals(ExecutionPhase.CANCELLED, next.phase)
     }

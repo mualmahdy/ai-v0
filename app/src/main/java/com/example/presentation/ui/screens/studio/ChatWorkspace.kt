@@ -335,7 +335,12 @@ fun ChatWorkspace(
                 isImportingAttachment = capabilityState.isImportingAttachment,
                 // FUNCTIONAL CLOSURE (§14): the attachment layer's honest
                 // error channel — VISIBLE in the composer, never swallowed.
-                attachmentError = capabilityState.attachmentError
+                attachmentError = capabilityState.attachmentError,
+                // FRONTIER CONTEXT WINDOW: the REAL session usage + the
+                // governance layer's remaining budget (REMAINING_UNKNOWN
+                // hides the gauge — never a fabricated bar).
+                contextTokensUsed = state.sessionTotalTokens,
+                contextTokensRemaining = state.remainingBudget
             )
         }
 

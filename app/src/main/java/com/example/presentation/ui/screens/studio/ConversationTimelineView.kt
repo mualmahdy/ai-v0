@@ -1281,11 +1281,25 @@ fun ExecutionLifecycleView(
             if (streamText.isNotBlank()) {
                 Spacer(modifier = Modifier.height(6.dp))
                 SelectionContainer {
-                    Text(
-                        text = streamText + if (!cancelled) " ▌" else "",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (cancelled) 0.7f else 1f)
-                    )
+                    Column {
+                        // STREAMING POLISH: the live answer renders through the
+                        // SAME rich pipeline as the finished message — code
+                        // fences, bold, tables format AS they complete, never
+                        // a wall of monochrome text that snaps into shape at
+                        // the end. The tolerant parser degrades half-written
+                        // markdown honestly (an unclosed fence is text until
+                        // it closes).
+                        RichMarkdownContent(markdown = streamText)
+                        if (!cancelled) {
+                            // The streaming cursor — its own line under the
+                            // last completed block, primary-tinted.
+                            Text(
+                                text = "▌",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
                 }
                 if (cancelled) {
                     Spacer(modifier = Modifier.height(2.dp))

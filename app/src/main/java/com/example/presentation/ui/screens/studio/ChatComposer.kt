@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -53,6 +54,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
 import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.TurnAttachment
+import com.example.presentation.state.ContextWindowGauge
 
 /**
  * ============================================================================
@@ -111,7 +113,14 @@ fun ChatComposer(
      * FUNCTIONAL CLOSURE (§14): the attachment layer's honest error channel
      * (import failures, cleanup failures) — VISIBLE here, never swallowed.
      */
-    attachmentError: String? = null
+    attachmentError: String? = null,
+    /**
+     * FRONTIER CONTEXT WINDOW: the conversation's real token gauge —
+     * measured usage + the governance layer's REAL remaining budget.
+     * Unknown figures hide the gauge entirely (never a fabricated bar).
+     */
+    contextTokensUsed: Int = 0,
+    contextTokensRemaining: Int = 0
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -259,6 +268,46 @@ fun ChatComposer(
                     tag = "chip_composer_agent_model",
                     modifier = Modifier.weight(1f, fill = false)
                 )
+                // ---- FRONTIER CONTEXT WINDOW: the honest token gauge —
+                // hidden until REAL numbers exist, tinted by severity as
+                // the window fills (NORMAL → NEAR_FULL → CRITICAL).
+                if (ContextWindowGauge.isKnown(contextTokensUsed, contextTokensRemaining)) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    val severity = ContextWindowGauge.severity(contextTokensUsed, contextTokensRemaining)
+                    val gaugeColor = when (severity) {
+                        ContextWindowGauge.Severity.NORMAL -> MaterialTheme.colorScheme.primary
+                        ContextWindowGauge.Severity.NEAR_FULL -> MaterialTheme.colorScheme.tertiary
+                        ContextWindowGauge.Severity.CRITICAL -> MaterialTheme.colorScheme.error
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier
+                            .heightIn(min = 44.dp)
+                            .testTag("context_window_gauge")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = ContextWindowGauge.label(contextTokensUsed, contextTokensRemaining),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            LinearProgressIndicator(
+                                progress = {
+                                    ContextWindowGauge.fraction(contextTokensUsed, contextTokensRemaining)
+                                },
+                                color = gaugeColor,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier
+                                    .width(72.dp)
+                                    .padding(top = 2.dp)
+                            )
+                        }
+                    }
+                }
             }
 
             // ---- §7: the INPUT ROW — quick attach | field | voice | send ----

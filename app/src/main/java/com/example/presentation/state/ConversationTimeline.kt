@@ -446,3 +446,48 @@ object ChatAutoScrollPolicy {
     fun shouldShowUnreadAffordance(following: Boolean, hasNewContent: Boolean): Boolean =
         !following && hasNewContent
 }
+
+/**
+ * FRONTIER CONTEXT WINDOW: the pure contract of the conversation's context
+ * gauge — how full the task's token budget is, as an honest compact
+ * fraction. UNKNOWN budgets (no measured usage yet, or the governance
+ * layer could not resolve a remaining figure) render NOTHING — never a
+ * fabricated 0%, never a fake bar.
+ */
+object ContextWindowGauge {
+
+    /** True when a REAL gauge can be drawn (measured usage + real budget). */
+    fun isKnown(usedTokens: Int, remainingTokens: Int): Boolean =
+        usedTokens >= 0 && remainingTokens >= 0 && (usedTokens + remainingTokens) > 0
+
+    /** The used fraction in [0,1]; 0f when unknown. */
+    fun fraction(usedTokens: Int, remainingTokens: Int): Float {
+        if (!isKnown(usedTokens, remainingTokens)) return 0f
+        return (usedTokens.toFloat() / (usedTokens + remainingTokens)).coerceIn(0f, 1f)
+    }
+
+    /** Compact human label: «4.2k / 30k توكن». */
+    fun label(usedTokens: Int, remainingTokens: Int): String {
+        if (!isKnown(usedTokens, remainingTokens)) return ""
+        val budget = usedTokens + remainingTokens
+        return "${compact(usedTokens)} / ${compact(budget)} توكن"
+    }
+
+    private fun compact(v: Int): String = when {
+        v >= 1_000_000 -> "%.1fM".format(v / 1_000_000.0)
+        v >= 1_000 -> "%.1fk".format(v / 1_000.0)
+        else -> v.toString()
+    }
+
+    /** The severity lane: NORMAL / NEAR_FULL / CRITICAL — honest thresholds. */
+    enum class Severity { NORMAL, NEAR_FULL, CRITICAL }
+
+    fun severity(usedTokens: Int, remainingTokens: Int): Severity {
+        val f = fraction(usedTokens, remainingTokens)
+        return when {
+            f >= 0.9f -> Severity.CRITICAL
+            f >= 0.7f -> Severity.NEAR_FULL
+            else -> Severity.NORMAL
+        }
+    }
+}
