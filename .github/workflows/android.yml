@@ -49,6 +49,68 @@ jobs:
       run: |
         ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
 
+    # DIAGNOSTIC (Sep 2026 — added while triaging a red "Unit tests" step):
+    # this job's failures were previously visible ONLY by signing in to
+    # GitHub — the raw step logs and the "test-reports" artifact both
+    # require an authenticated session, and the public REST API is
+    # rate-limited for unauthenticated callers. That made a failing run
+    # effectively undiagnosable to anyone without repo access at the
+    # keyboard. This step parses the JUnit XML Gradle already writes and
+    # prints the failing class/test/message to the run's own Summary tab,
+    # which renders for signed-out visitors too. It changes NOTHING about
+    # whether tests pass — it only makes a red run legible without a login.
+    - name: Summarize test failures (visible without signing in)
+      if: failure()
+      run: |
+        python3 - <<'PY'
+        import glob
+        import os
+        import xml.etree.ElementTree as ET
+
+        failures = []
+        for path in glob.glob("app/build/test-results/**/*.xml", recursive=True):
+            try:
+                root = ET.parse(path).getroot()
+            except ET.ParseError:
+                continue
+            suite = root.get("name", path)
+            for testcase in root.findall("testcase"):
+                for tag in ("failure", "error"):
+                    node = testcase.find(tag)
+                    if node is None:
+                        continue
+                    classname = testcase.get("classname", suite)
+                    name = testcase.get("name", "?")
+                    message = (node.get("message") or node.text or "").strip()
+                    message = " ".join(message.split())[:300]
+                    failures.append((classname, name, tag, message))
+
+        lines = []
+        if failures:
+            lines.append("### Failing tests (" + str(len(failures)) + ")")
+            lines.append("")
+            lines.append("| Class | Test | Type | Message |")
+            lines.append("|---|---|---|---|")
+            for classname, name, tag, message in failures:
+                message = message.replace("|", "\\|")
+                lines.append("| `" + classname + "` | `" + name + "` | " + tag + " | " + message + " |")
+        else:
+            lines.append(
+                "No JUnit XML under app/build/test-results/ -- the failure is "
+                "most likely in an earlier step (wrapper check, compile, or "
+                "a Gradle configuration error) rather than a test assertion. "
+                "Check the job's Annotations for the failing step name."
+            )
+
+        report = "\n".join(lines) + "\n"
+        print(report)
+
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            with open(summary_path, "a", encoding="utf-8") as handle:
+                handle.write(report)
+        PY
+
     - name: Build APK (assemble app module)
       run: |
         ./gradlew :app:assembleDebug --no-daemon --stacktrace
