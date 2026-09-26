@@ -44,6 +44,16 @@ class ProjectRuntimeService(
     private val projectDao = database.projectDao()
     private val workspaceDao = database.workspaceDao()
 
+    /**
+     * CLOSURE §4.1 (single Move semantics): the transfer coordinator — the
+     * ONE authority for Move. Late-bound by the composition root (avoids a
+     * constructor cycle: the coordinator owns the package service which owns
+     * the same database). When UNBOUND the move fails CLOSED — the legacy
+     * row-only rebind (which orphaned every scoped row in the source) is
+     * GONE and must never silently return.
+     */
+    var transferCoordinator: com.example.application.transfer.ProjectTransferCoordinator? = null
+
     private val mutex = Mutex()
 
     private val _lastError = MutableStateFlow<String?>(null)
@@ -255,42 +265,44 @@ class ProjectRuntimeService(
     }
 
     /**
-     * MOVE (§11): moves the project to [targetWorkspaceId]. VERIFIED
-     * transfer: the project row + scoped rows are rebound and the sandbox
-     * directory renamed in one coordinator step; only on full success is
-     * the source binding released. Delegates the heavy lifting to
-     * [ProjectTransferCoordinator] when wired; the row-level operation is
-     * here.
+     * MOVE (§4.1): IDENTITY-PRESERVING verified transfer to
+     * [targetWorkspaceId]. Delegates to the [ProjectTransferCoordinator]
+     * (Stage → Transfer → Verify → Commit → Cleanup) — the coordinator
+     * rebinds the project row AND every scoped row (sessions + turns +
+     * timeline, knowledge + chunks, tasks, artifacts) inside ONE verified
+     * transaction; a rebind that would miss rows rolls back completely.
+     *
+     * The old row-only rebind (which left sessions/knowledge/tasks
+     * orphaned in the source workspace and invisible in the target) was
+     * REMOVED — there is exactly ONE Move implementation now.
      */
     suspend fun moveProject(projectId: Long, sourceWorkspaceId: String, targetWorkspaceId: String): Boolean = mutex.withLock {
         _lastError.value = null
-        if (sourceWorkspaceId == targetWorkspaceId) {
-            _lastError.value = "المشروع موجود بالفعل في المساحة الهدف."
-            return false
-        }
-        if (workspaceDao.getWorkspaceById(targetWorkspaceId) == null) {
-            _lastError.value = "مساحة العمل الهدف غير موجودة."
-            return false
-        }
-        val moved = database.withTransaction {
-            projectDao.moveProjectToWorkspace(projectId, sourceWorkspaceId, targetWorkspaceId, System.currentTimeMillis())
-        }
-        if (moved == 0) {
-            _lastError.value = "فشل نقل المشروع — الملكية لم تتغير."
-            return false
-        }
-        // Clear a stale active pin in the SOURCE workspace (inside same audit step).
-        val ws = workspaceDao.getWorkspaceById(sourceWorkspaceId)
-        if (ws?.lastActiveProjectId == projectId) {
-            database.withTransaction {
-                workspaceDao.setActiveProject(sourceWorkspaceId, null, System.currentTimeMillis())
+        val coordinator = transferCoordinator
+            ?: run {
+                _lastError.value = "منسّق النقل غير مهيأ — رُفض النقل بأمان بدلاً من تنفيذ نقل جزئي."
+                return false
+            }
+        when (val outcome = coordinator.moveProjectVerifiedIdentity(projectId, sourceWorkspaceId, targetWorkspaceId)) {
+            is com.example.application.transfer.ProjectTransferCoordinator.MoveOutcome.IdentityPreserved -> {
+                audit(
+                    AuditActions.PROJECT_MOVED, targetWorkspaceId, projectId, AuditResult.SUCCESS,
+                    reason = "identity-preserving from=$sourceWorkspaceId " +
+                            "sessions=${outcome.verifiedCounts.sessions} docs=${outcome.verifiedCounts.knowledgeDocuments} " +
+                            "tasks=${outcome.verifiedCounts.tasks} artifacts=${outcome.verifiedCounts.artifacts}"
+                )
+                true
+            }
+            is com.example.application.transfer.ProjectTransferCoordinator.MoveOutcome.NewIdentity -> true
+            is com.example.application.transfer.ProjectTransferCoordinator.MoveOutcome.Failed -> {
+                _lastError.value = "[${outcome.code}] ${outcome.message}"
+                audit(
+                    AuditActions.PROJECT_MOVED, sourceWorkspaceId, projectId, AuditResult.FAILURE,
+                    reason = "${outcome.code}: ${outcome.message}"
+                )
+                false
             }
         }
-        audit(
-            AuditActions.PROJECT_MOVED, targetWorkspaceId, projectId, AuditResult.SUCCESS,
-            reason = "from=$sourceWorkspaceId"
-        )
-        true
     }
 
     // ------------------------------------------------------------------

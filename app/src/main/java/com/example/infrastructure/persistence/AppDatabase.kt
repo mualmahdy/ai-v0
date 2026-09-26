@@ -185,7 +185,9 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.ArtifactEntity::class,
         com.example.infrastructure.persistence.entities.ProjectDependencyEntity::class,
         com.example.infrastructure.persistence.entities.ProjectSnapshotEntity::class,
-        com.example.infrastructure.persistence.entities.AuditEventEntity::class
+        com.example.infrastructure.persistence.entities.AuditEventEntity::class,
+        // v20 — CLOSURE §8: append-only artifact version history
+        com.example.infrastructure.persistence.entities.ArtifactVersionEntity::class
     ],
     version = AppDatabase.SCHEMA_VERSION,
     // GAP-01 (Design Closure 2026, ADR-1): schema export is now enabled and
@@ -285,6 +287,9 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun projectSnapshotDao(): com.example.infrastructure.persistence.dao.ProjectSnapshotDao
     abstract fun auditEventDao(): com.example.infrastructure.persistence.dao.AuditEventDao
 
+    // v20 — CLOSURE §8: artifact version history
+    abstract fun artifactVersionDao(): com.example.infrastructure.persistence.dao.ArtifactVersionDao
+
     companion object {
         /**
          * SINGLE SOURCE OF TRUTH for the Room schema version (ADR-6 slice 1:
@@ -292,7 +297,7 @@ abstract class AppDatabase : RoomDatabase() {
          * database had already reached v17 — a stale honesty violation. UI
          * surfaces read this constant instead of a literal).
          */
-        const val SCHEMA_VERSION = 19
+        const val SCHEMA_VERSION = 20
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -1861,6 +1866,41 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * CLOSURE §8 (DB v20) — artifact versioning:
+         *   - new append-only `artifact_versions` table;
+         *   - `artifacts.currentVersion` pointer (default 1).
+         * Purely additive — no existing column is altered.
+         */
+        private val MIGRATION_19_TO_20: Migration = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `artifact_versions` (" +
+                            "`id` TEXT NOT NULL, " +
+                            "`artifactId` TEXT NOT NULL, " +
+                            "`version` INTEGER NOT NULL, " +
+                            "`storageUri` TEXT NOT NULL, " +
+                            "`sizeBytes` INTEGER NOT NULL, " +
+                            "`contentHash` TEXT, " +
+                            "`note` TEXT, " +
+                            "`createdBy` TEXT, " +
+                            "`createdAtEpochMs` INTEGER NOT NULL, " +
+                            "PRIMARY KEY(`id`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_artifact_versions_artifactId` " +
+                            "ON `artifact_versions` (`artifactId`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_artifact_versions_createdAtEpochMs` " +
+                            "ON `artifact_versions` (`createdAtEpochMs`)"
+                )
+                db.execSQL(
+                    "ALTER TABLE artifacts ADD COLUMN currentVersion INTEGER NOT NULL DEFAULT 1"
+                )
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1882,6 +1922,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_16_TO_17,
             MIGRATION_17_TO_18,
             MIGRATION_18_TO_19,
+            MIGRATION_19_TO_20,
         )
 
         fun getInstance(context: Context): AppDatabase {

@@ -139,6 +139,9 @@ class StudioViewModelTest {
 
     @Before
     fun setUp() = runBlocking {
+        com.example.application.execution.ExecutionHost.durableScopeOverride =
+            CoroutineScope(dispatcher + SupervisorJob())
+
         Dispatchers.setMain(dispatcher)
 
         // --- REAL governed execution kernel (mock only at the LLM port) ---
@@ -313,6 +316,8 @@ class StudioViewModelTest {
 
     @After
     fun tearDown() {
+                com.example.application.execution.ExecutionHost.durableScopeOverride = null
+
         if (::viewModel.isInitialized) viewModel.viewModelScope.cancel()
         signalCollectorScope.cancel()
         Dispatchers.resetMain()
@@ -1315,6 +1320,8 @@ class FakePermissionGrantDaoForVm : com.example.infrastructure.persistence.dao.P
     override suspend fun revoke(id: Long) {
         rows.removeAll { it.id == id }
     }
+        override suspend fun all(limit: Int): List<com.example.infrastructure.persistence.entities.PermissionGrantEntity> = emptyList()
+        override suspend fun activeGrants(limit: Int): List<com.example.infrastructure.persistence.entities.PermissionGrantEntity> = emptyList()
 }
 
 /** No-op telemetry port (audit writes land nowhere — the grants are the assertion). */

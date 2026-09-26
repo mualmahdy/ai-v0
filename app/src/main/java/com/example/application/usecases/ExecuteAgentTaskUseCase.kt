@@ -24,6 +24,12 @@ import java.util.UUID
  * admissible action set — Quick Chat is a legitimate generation-only mode),
  * and [constraints] may now be supplied from an AUTHORITATIVE source
  * (workspace policy); the default remains honest SUPERVISED.
+ *
+ * CLOSURE P0 (immutable invocation scope): [pinnedWorkspaceId],
+ * [pinnedProjectId] and [sessionId] are the acceptance-time capture — they
+ * travel through to the kernel's CanonicalExecutionContext + ExecutionScope
+ * so NO execution layer re-reads the live workspace/project providers after
+ * acceptance (the acceptance→kernel-start race window is closed).
  */
 class ExecuteAgentTaskUseCase(
     private val orchestrator: AgentOrchestrator
@@ -41,7 +47,13 @@ class ExecuteAgentTaskUseCase(
         /** ChatMode.name — QUICK_CHAT binds the generation-only contract. */
         chatMode: String? = null,
         /** Task constraints sourced from the authoritative workspace policy. */
-        constraints: TaskConstraints? = null
+        constraints: TaskConstraints? = null,
+        /** CLOSURE P0: workspace pinned at invocation acceptance. */
+        pinnedWorkspaceId: String? = null,
+        /** CLOSURE P0: project pinned at invocation acceptance. */
+        pinnedProjectId: Long? = null,
+        /** CLOSURE P0: the governed chat session the turn belongs to. */
+        sessionId: String? = null
     ): Flow<ExecutionEvent> {
         // REPAIR (defect family 3 — canonical identity & reproducibility):
         // `assignedModelId` previously fell back to `preferredProviderId`,
@@ -73,6 +85,9 @@ class ExecuteAgentTaskUseCase(
             preferredProviderId = preferredProviderId,
             networkPolicy = networkPolicy,
             isNetworkAvailable = isNetworkAvailable,
+            pinnedWorkspaceId = pinnedWorkspaceId,
+            pinnedProjectId = pinnedProjectId,
+            pinnedSessionId = sessionId
         )
     }
 }

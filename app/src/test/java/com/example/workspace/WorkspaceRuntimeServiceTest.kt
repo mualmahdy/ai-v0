@@ -154,7 +154,11 @@ class WorkspaceRuntimeServiceTest {
         override suspend fun archiveProject(id: Long) {
             stored[id]?.let { stored[id] = it.copy(isArchived = true) }
         }
-    }
+            override suspend fun countSessionsForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+        override suspend fun countKnowledgeForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+        override suspend fun countTasksForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+        override suspend fun countArtifactsForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+}
 
     private fun newService(dao: FakeWorkspaceDao): WorkspaceRuntimeService {
         return WorkspaceRuntimeService(
@@ -280,7 +284,11 @@ class WorkspaceRuntimeServiceTest {
             override suspend fun moveProjectToWorkspace(id: Long, sourceWorkspaceId: String, targetWorkspaceId: String, now: Long): Int = 0
             override suspend fun countByNameForWorkspace(workspaceId: String, name: String): Int = 0
             override suspend fun deleteProjectRow(id: Long) {}
-        }
+                override suspend fun countSessionsForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+        override suspend fun countKnowledgeForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+        override suspend fun countTasksForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+        override suspend fun countArtifactsForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+}
         val service = WorkspaceRuntimeService(
             workspaceDao = dao,
             projectDao = projectDao,

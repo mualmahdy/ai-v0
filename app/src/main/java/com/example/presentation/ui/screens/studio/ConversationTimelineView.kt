@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SettingsEthernet
@@ -125,6 +126,8 @@ fun ConversationTimeline(
      * approval id — the callback carries the tapped block's identity.
      */
     onRetryAfterApproval: (String) -> Unit = {},
+    /** CLOSURE §8: persist an assistant entry as a versioned artifact. */
+    onSaveAsArtifact: (String) -> Unit = {},
     /** §13: "allow always" — the standing EXECUTE grant path (§12: confirmed). */
     onGrantAlways: (String) -> Unit = {},
     /**
@@ -236,8 +239,9 @@ fun ConversationTimeline(
                         onReject = onReject,
                         onRetryAfterApproval = onRetryAfterApproval,
                         onGrantAlways = onGrantAlways,
-                        onOpenArtifact = onOpenArtifact
-                    )
+                        onOpenArtifact = onOpenArtifact,
+            onSaveAsArtifact = onSaveAsArtifact
+        )
                 }
 
                 if (showLiveBlock) {
@@ -324,7 +328,8 @@ private fun RenderTimelineEntry(
     onReject: (String) -> Unit,
     onRetryAfterApproval: (String) -> Unit,
     onGrantAlways: (String) -> Unit,
-    onOpenArtifact: (ChatArtifactRef) -> Unit
+    onOpenArtifact: (ChatArtifactRef) -> Unit,
+    onSaveAsArtifact: (String) -> Unit = {}
 ) {
     when (entry) {
         is ChatEntry.User -> UserMessage(
@@ -340,6 +345,8 @@ private fun RenderTimelineEntry(
             // targeted message is regenerated/retried, never "the last one".
             onRegenerate = { onRegenerate(entry.id) },
             onRetry = { onRetry(entry.id) },
+            // CLOSURE §8: the exact entry is saved — not "the last one".
+            onSaveAsArtifact = { onSaveAsArtifact(entry.id) },
             onOpenArtifact = onOpenArtifact
         )
 
@@ -467,6 +474,8 @@ private fun AssistantMessage(
     onCopy: () -> Unit,
     onRegenerate: () -> Unit,
     onRetry: () -> Unit,
+    /** CLOSURE §8: persist this result as a versioned artifact. */
+    onSaveAsArtifact: () -> Unit = {},
     /** ARTIFACT CANVAS (§10): opens one of this message's artifacts. */
     onOpenArtifact: (ChatArtifactRef) -> Unit
 ) {
@@ -576,6 +585,16 @@ private fun AssistantMessage(
                     contentDescription = "نسخ الإجابة",
                     onClick = onCopy,
                     tag = "btn_copy_asst_${entry.id}"
+                )
+                // CLOSURE §8 (Result → Artifact): persist this result as a
+                // REAL versioned project artifact (v1) — the entry's card
+                // opens in the artifact canvas for edit/diff/rollback.
+                MessageAction(
+                    label = "حفظ كمخرج",
+                    icon = Icons.Default.Save,
+                    contentDescription = "حفظ هذه النتيجة كمخرج داخل المشروع",
+                    onClick = onSaveAsArtifact,
+                    tag = "btn_save_artifact_${entry.id}"
                 )
                 if (failed) {
                     MessageAction(

@@ -32,6 +32,9 @@ object WorkspaceRoutes {
     const val EXTENSIONS = "extensions"
     const val SETTINGS = "settings"
 
+    /** CLOSURE §11 — System Health (repair / recovery surface). */
+    const val HEALTH = "health"
+
     /** UNIFIED OBJECT EXPLORER (report gap: discoverability). */
     const val EXPLORER = "explorer"
 

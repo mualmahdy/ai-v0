@@ -247,6 +247,11 @@ class StudioViewModel(
         val isArtifactLoading: Boolean = false,
         /** ARTIFACT CANVAS (§10): the honest read/preview failure channel. */
         val artifactError: String? = null,
+        /**
+         * CLOSURE §8 (version lifecycle): the active artifact's append-only
+         * version history (the versions sheet's data; empty = not loaded).
+         */
+        val artifactVersions: List<com.example.application.artifacts.ArtifactService.ArtifactVersionInfo> = emptyList(),
         val errorMessage: String? = null
     )
 
@@ -468,6 +473,132 @@ class StudioViewModel(
             it.copy(
                 promptInput = "أريد تعديل الأثر «${artifact.name}». أعطني التعديل المقترح، وسأراجعه قبل الإرسال."
             )
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // CLOSURE §8 — Result → Artifact lifecycle (user-facing surface)
+    // ------------------------------------------------------------------
+
+    /**
+     * RESULT → ARTIFACT: persists one assistant entry's text as a REAL,
+     * versioned, project-scoped artifact (v1) — the entry can then be
+     * previewed/edited/versioned through the artifact canvas.
+     */
+    fun saveEntryAsArtifact(entryId: String) {
+        val service = artifactService ?: return
+        val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: run {
+            _state.update { it.copy(errorMessage = "لا مساحة عمل نشطة لحفظ النتيجة كمخرج.") }
+            return
+        }
+        val projectId = workspaceRuntimeService.activeProjectIdOrNull() ?: run {
+            _state.update { it.copy(errorMessage = "حفظ النتائج يتطلب مشروعاً نشطاً — المخرجات ذات نطاق مشروع.") }
+            return
+        }
+        val entry = _state.value.timeline.firstOrNull { it.id == entryId }
+            as? com.example.presentation.state.ChatEntry.Assistant ?: return
+        val text = entry.text
+        if (text.isBlank()) {
+            _state.update { it.copy(errorMessage = "لا يوجد نص لحفظه كمخرج في هذه الرسالة.") }
+            return
+        }
+        viewModelScope.launch {
+            val name = "نتيجة " + java.text.SimpleDateFormat("yyyyMMdd_HHmm", java.util.Locale.US)
+                .format(java.util.Date())
+            val descriptor = runCatching {
+                service.saveAssistantResultAsArtifact(
+                    workspaceId = workspaceId,
+                    projectId = projectId,
+                    sessionId = _state.value.activeSessionId,
+                    executionId = null,
+                    name = name,
+                    content = text.toByteArray(),
+                    createdBy = "user"
+                )
+            }.getOrNull()
+            if (descriptor == null) {
+                _state.update { it.copy(errorMessage = "تعذر حفظ النتيجة كمخرج.") }
+            } else {
+                _state.update {
+                    it.copy(diagnosticBanner = "حُفظت النتيجة كمخرج «${descriptor.name}» (النسخة 1) داخل المشروع.")
+                }
+            }
+        }
+    }
+
+    /** Loads the ACTIVE artifact's version history (the versions sheet). */
+    fun loadArtifactVersions() {
+        val service = artifactService ?: return
+        val artifact = _state.value.activeArtifact ?: return
+        viewModelScope.launch {
+            val versions = runCatching { service.listVersions(artifact.artifactId) }
+                .getOrDefault(emptyList())
+            _state.update { it.copy(artifactVersions = versions) }
+        }
+    }
+
+    /**
+     * EDIT → VERSION: persists new content as the artifact's NEXT version
+     * (append-only — previous versions stay readable/rollbackable).
+     */
+    fun saveArtifactCanvasVersion(content: String, note: String? = null) {
+        val service = artifactService ?: return
+        val artifact = _state.value.activeArtifact ?: return
+        val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return
+        val projectId = workspaceRuntimeService.activeProjectIdOrNull()
+        val accessorScope = projectId?.let { ResourceScope.Project(workspaceId, it) }
+            ?: ResourceScope.Workspace(workspaceId)
+        viewModelScope.launch {
+            val created = runCatching {
+                service.createVersion(
+                    accessorScope = accessorScope,
+                    artifactId = artifact.artifactId,
+                    content = content.toByteArray(),
+                    note = note ?: "تعديل من لوحة المخرجات",
+                    createdBy = "user"
+                )
+            }.getOrNull()
+            if (created == null) {
+                _state.update { it.copy(errorMessage = "تعذر حفظ النسخة الجديدة للمخرج.") }
+            } else {
+                _state.update {
+                    it.copy(
+                        diagnosticBanner = "حُفظت النسخة ${created.version} من «${artifact.name}».",
+                        artifactContent = content
+                    )
+                }
+                loadArtifactVersions()
+            }
+        }
+    }
+
+    /** ROLLBACK: returns the artifact to an older version's content (a NEW
+     *  auditable version — history is never rewritten). */
+    fun rollbackArtifactVersion(targetVersion: Int) {
+        val service = artifactService ?: return
+        val artifact = _state.value.activeArtifact ?: return
+        val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: return
+        val projectId = workspaceRuntimeService.activeProjectIdOrNull()
+        val accessorScope = projectId?.let { ResourceScope.Project(workspaceId, it) }
+            ?: ResourceScope.Workspace(workspaceId)
+        viewModelScope.launch {
+            val created = runCatching {
+                service.rollbackToVersion(
+                    accessorScope = accessorScope,
+                    artifactId = artifact.artifactId,
+                    targetVersion = targetVersion,
+                    createdBy = "user"
+                )
+            }.getOrNull()
+            if (created == null) {
+                _state.update { it.copy(errorMessage = "تعذر الرجوع إلى النسخة $targetVersion.") }
+            } else {
+                _state.update {
+                    it.copy(diagnosticBanner = "رُجِع «${artifact.name}» إلى محتوى النسخة $targetVersion (كسجّلت كنسخة ${created.version}).")
+                }
+                loadArtifactVersions()
+                _state.value.activeArtifact?.let { openArtifact(it) }
+            }
         }
     }
 
@@ -1143,7 +1274,11 @@ class StudioViewModel(
         executionTaskId: String
     ) {
         val id = sessionId ?: return
-        viewModelScope.launch {
+        // CLOSURE P0: the durable write runs on the app-wide durable scope —
+        // it must survive ViewModel destruction (a screen left mid-execution
+        // previously KILLED the turn's persistence; the user saw an answer
+        // that never landed in the session).
+        com.example.application.execution.ExecutionHost.durableScope.launch {
             try {
                 // CHAT FINAL CLOSURE (P1 appendTurn result): the service's
                 // null return is an AUTHORIZATION/SESSION FAILURE (nothing
@@ -1845,7 +1980,15 @@ class StudioViewModel(
                     // AUTHORITATIVE workspace policy (never UI-local state).
                     // FUNCTIONAL CLOSURE (§2): the PINNED policy (captured at
                     // launch), never the current workspace state.
-                    constraints = pinnedConstraints
+                    constraints = pinnedConstraints,
+                    // CLOSURE P0 (immutable invocation scope): the COMPLETE
+                    // acceptance-time tuple travels to the kernel — the
+                    // orchestrator never re-reads the live workspace/project
+                    // providers for a chat execution (the acceptance→kernel
+                    // race window is closed).
+                    pinnedWorkspaceId = pinnedWorkspaceId,
+                    pinnedProjectId = pinnedProjectId,
+                    sessionId = sessionId?.value
                 ).collect { event ->
                     // RESIDUAL CLOSURE (P1): execution-OWNED mirrors first —
                     // they advance for EVERY event of THIS execution,
@@ -2469,7 +2612,9 @@ class StudioViewModel(
         val resolveTimeMode = _state.value.chatMode
         val resolveTimeModelId = _state.value.selectedModelResourceId
         val resolveTimeModelName = _state.value.selectedModelDisplayName
-        viewModelScope.launch {
+        // CLOSURE P0: durable-scope write — the capability result outlives
+        // the ViewModel that rendered it.
+        com.example.application.execution.ExecutionHost.durableScope.launch {
             runCatching {
                 var targetSessionId = scope?.sessionId
                 if (targetSessionId == null) {
@@ -2586,7 +2731,10 @@ class StudioViewModel(
         pinnedWorkspaceId: String?
     ) {
         val gate = humanApprovalGate ?: return
-        viewModelScope.launch {
+        // CLOSURE P0: durable-scope write — the approval request must land
+        // in the session's timeline even if the screen is destroyed before
+        // the block renders.
+        com.example.application.execution.ExecutionHost.durableScope.launch {
             val pending = runCatching { gate.pendingApprovals() }.getOrDefault(emptyList())
                 .firstOrNull { it.executionId == kernelExecutionId } ?: return@launch
             // §9 + P1: the approval block is conversation history — the
@@ -2855,7 +3003,9 @@ class StudioViewModel(
         }
         val mirrorSessionId = mirrorScope.sessionId
         val mirrorWorkspaceId = mirrorScope.workspaceId
-        viewModelScope.launch {
+        // CLOSURE P0: durable-scope write — the approval-state mirror must
+        // land even when the screen is gone by decision time.
+        com.example.application.execution.ExecutionHost.durableScope.launch {
             try {
                 val mirrored = conversationSessionService.updateTimelineEventApprovalState(
                     sessionId = ConversationSessionId(mirrorSessionId),

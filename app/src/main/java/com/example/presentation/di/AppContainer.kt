@@ -268,7 +268,11 @@ class AppContainer(context: Context) {
                 java.io.File(sandboxProjectsDir, "proj_$projectId")
             },
             auditTrail = auditTrailService
-        )
+        ).also { service ->
+            // CLOSURE §4.1: the ONE Move authority (identity-preserving
+            // verified rebind — never the legacy row-only move).
+            service.transferCoordinator = projectTransferCoordinator
+        }
     }
 
     /** §24/§25 — project readiness + dependency resolution. */
@@ -305,6 +309,14 @@ class AppContainer(context: Context) {
         com.example.infrastructure.content.AndroidContentPort(appContext)
     }
 
+    /** CLOSURE §7 — folder understanding + the §6 add-to-knowledge act. */
+    val folderUnderstandingService: com.example.application.attachment.FolderUnderstandingService by lazy {
+        com.example.application.attachment.FolderUnderstandingService(
+            fileStore = sandboxFileStore,
+            ragPipeline = ragPipelineService
+        )
+    }
+
     /**
      * CHAT CAPABILITIES (Task 2 §5/§6): the chat attachment coordinator —
      * SAF → (real transfer path) sandbox → (real artifact registration) →
@@ -317,15 +329,29 @@ class AppContainer(context: Context) {
             workspaceRuntimeService = workspaceRuntimeService,
             fileStore = sandboxFileStore,
             contentPort = androidContentPort,
-            folderZipSource = { treeUri -> androidContentPort.openTreeAsZipStream(treeUri) }
+            folderZipSource = { treeUri -> androidContentPort.openTreeAsZipStream(treeUri) },
+            folderUnderstanding = folderUnderstandingService
         )
     }
 
-    /** §10-§12 — versioned portable project packages + clone/move. */
+    /** §10-§12 — versioned portable project packages + clone/move.
+     * CLOSURE §5: wired with the RAG pipeline (the trusted chunk-rebuild
+     * source for imported documents). */
     val projectPackageService: com.example.application.transfer.ProjectPackageService by lazy {
         com.example.application.transfer.ProjectPackageService(
             database = database,
             fileStore = sandboxFileStore,
+            auditTrail = auditTrailService,
+            ragPipeline = ragPipelineService
+        )
+    }
+
+    /** CLOSURE §4.1 — the SINGLE authority for Move semantics. */
+    val projectTransferCoordinator: com.example.application.transfer.ProjectTransferCoordinator by lazy {
+        com.example.application.transfer.ProjectTransferCoordinator(
+            database = database,
+            fileStore = sandboxFileStore,
+            packageService = projectPackageService,
             auditTrail = auditTrailService
         )
     }
@@ -674,10 +700,16 @@ class AppContainer(context: Context) {
      */
     private val inProcessMcpTools: Map<String, suspend (Map<String, Any?>) -> com.example.domain.core.Outcome<com.example.domain.core.tools.ToolOutput, com.example.domain.core.tools.ToolFailure>> = mapOf(
         "workspace_summary" to { _ ->
+            // CLOSURE P0: agent-invoked tools resolve their project from the
+            // PINNED ExecutionScope ONLY — the live active-project fallback
+            // could read a DIFFERENT workspace's project when the user
+            // switches between acceptance and the tool call. No scope = no
+            // agent execution context = honest refusal (the user-driven
+            // surface goes through executeStandaloneTool, which provides a
+            // scope).
             val mcpProjectId = kotlin.coroutines.coroutineContext[
                 com.example.domain.core.execution.ExecutionScope.Key
             ]?.projectId?.takeIf { it > 0 }
-                ?: workspaceRuntimeService.activeProjectIdOrNull()
             if (mcpProjectId == null) {
                 // Fail honestly: no project bound to the active workspace —
                 // NEVER fall back to the legacy shared project 1L.
@@ -1262,10 +1294,15 @@ class AppContainer(context: Context) {
                 if (evaluation.isAllowed) {
                     evaluation
                 } else if (evaluation.requireHumanConsent && !action.targetId.isNullOrBlank()) {
-                    // An explicit EXECUTE grant IS recorded consent (resolved
-                    // against the PINNED execution workspace, not the active one).
+                    // An explicit EXECUTE grant IS recorded consent. CLOSURE
+                    // P0: resolved against the PINNED execution scope ONLY —
+                    // never the live active workspace (a mid-execution
+                    // switch must not change the governing authority, and an
+                    // execution without a scope has no workspace authority
+                    // at all: null restricts the check to GLOBAL grants,
+                    // which is fail-closed by construction).
                     val workspaceId = com.example.domain.core.execution.ExecutionScope
-                        .currentWorkspaceIdOrNull() ?: workspaceRuntimeService.activeWorkspaceIdOrNull()
+                        .currentWorkspaceIdOrNull()
                     val granted = runCatching {
                         // GAP-02 part 2: device-user-aware standing consent —
                         // the USER-principal "allow always" grant covers the
@@ -1525,10 +1562,11 @@ class AppContainer(context: Context) {
 
     val telemetryService: TelemetryService by lazy {
         TelemetryService(telemetryPort).also { service ->
-            // GOVERNANCE PHASE: every metric row carries the real workspace
-            // attribution (previously always NULL — global metrics).
-            // GAP-CLOSURE P0-03: null = honestly UNATTRIBUTED.
-            service.workspaceIdProvider = { workspaceRuntimeService.activeWorkspaceIdOrNull() }
+            // CLOSURE P0: telemetry attribution is EXECUTION-BINDING ONLY.
+            // The old live-workspace fallback (mis-attributing late events of
+            // unbound executions to whatever workspace was active at landing
+            // time) was removed — an event with no binding is honestly
+            // UNATTRIBUTED (null), never a fabricated active-workspace id.
         }
     }
 
@@ -2243,7 +2281,9 @@ class FilesViewModelFactory(
             return com.example.presentation.viewmodel.FilesViewModel(
                 manageWorkspaceFilesUseCase = appContainer.manageWorkspaceFilesUseCase,
                 activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace,
-                bootstrapState = appContainer.workspaceRuntimeService.bootstrapState
+                bootstrapState = appContainer.workspaceRuntimeService.bootstrapState,
+                // CLOSURE §9: governed file saves land as artifact versions.
+                artifactService = appContainer.artifactService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
@@ -2373,8 +2413,13 @@ class ProjectsViewModelFactory(
             return com.example.presentation.viewmodel.ProjectsViewModel(
                 projectRuntimeService = appContainer.projectRuntimeService,
                 workspaceRuntimeService = appContainer.workspaceRuntimeService,
-                conversationSessionService = appContainer.conversationSessionService
-            ) as T
+                conversationSessionService = appContainer.conversationSessionService,
+                // CLOSURE §4.4: the transfer workflows are user-facing now.
+                projectPackageService = appContainer.projectPackageService,
+                projectTransferCoordinator = appContainer.projectTransferCoordinator
+            ).also { vm ->
+                vm.appDatabaseForSnapshots = appContainer.database
+            } as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
     }
@@ -2453,6 +2498,25 @@ class ProvidersViewModelFactory(
             return com.example.presentation.viewmodel.ProvidersViewModel(
                 providerControlPlaneService = appContainer.providerControlPlaneService,
                 connectProviderUseCase = appContainer.connectProviderUseCase
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * CLOSURE §11 — the SYSTEM HEALTH feature factory: the repair/recovery
+ * surface's ViewModel (RepairCenterService + the real orchestrator resume).
+ */
+class SystemHealthViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.SystemHealthViewModel::class.java)) {
+            return com.example.presentation.viewmodel.SystemHealthViewModel(
+                repairCenterService = appContainer.repairCenterService,
+                agentOrchestrator = appContainer.agentOrchestrator
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

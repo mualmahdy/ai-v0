@@ -58,8 +58,23 @@ import kotlinx.coroutines.launch
 class ProjectsViewModel(
     private val projectRuntimeService: ProjectRuntimeService,
     private val workspaceRuntimeService: WorkspaceRuntimeService,
-    private val conversationSessionService: ConversationSessionService
+    private val conversationSessionService: ConversationSessionService,
+    /**
+     * CLOSURE §4.4: the transfer workflow surface (export/import/move/clone/
+     * snapshot/restore). Null ⇒ the transfer UI is honestly UNAVAILABLE
+     * (no fake buttons — the previous state was a fully hidden backend).
+     */
+    private val projectPackageService: com.example.application.transfer.ProjectPackageService? = null,
+    private val projectTransferCoordinator: com.example.application.transfer.ProjectTransferCoordinator? = null
 ) : ViewModel() {
+
+    /** CLOSURE §4.4: a snapshot the user can restore. */
+    data class SnapshotEntry(
+        val id: String,
+        val label: String,
+        val reason: String,
+        val createdAtEpochMs: Long
+    )
 
     data class ProjectsUiState(
         /** Honest loading flag until the first active-workspace landing. */
@@ -75,7 +90,16 @@ class ProjectsViewModel(
         /** Honest rejection/error channel (dismissed by the screen). */
         val errorMessage: String? = null,
         /** Success confirmation channel (dismissed by the screen). */
-        val successMessage: String? = null
+        val successMessage: String? = null,
+        // ---- CLOSURE §4.4: transfer workflow state ----
+        /** True while ANY transfer workflow is in flight (progress surface). */
+        val isTransferring: Boolean = false,
+        /** What is in flight (rendered inside the progress surface). */
+        val transferProgressLabel: String? = null,
+        /** The other workspaces a project may MOVE to. */
+        val availableWorkspaces: List<com.example.domain.core.workspace.Workspace> = emptyList(),
+        /** The current project's snapshots (restore surface). */
+        val projectSnapshots: List<SnapshotEntry> = emptyList()
     )
 
     private val _state = MutableStateFlow(ProjectsUiState())
@@ -310,4 +334,236 @@ class ProjectsViewModel(
     fun dismissSuccess() {
         _state.update { it.copy(successMessage = null) }
     }
+
+    // ------------------------------------------------------------------
+    // CLOSURE §4.4 — the transfer workflows (Export / Import / Move / Clone
+    // / Snapshot / Restore) — previously hidden backend capabilities with
+    // ZERO production callers.
+    // ------------------------------------------------------------------
+
+    /** Loads the move-target workspaces (all but the active one). */
+    fun loadAvailableWorkspaces() {
+        viewModelScope.launch {
+            val workspaces = runCatching {
+                workspaceRuntimeService.allWorkspaces.value ?: emptyList()
+            }.getOrDefault(emptyList())
+            val activeId = workspaceRuntimeService.activeWorkspace.value?.id
+            _state.update {
+                it.copy(availableWorkspaces = workspaces.filter { ws -> ws.id != activeId })
+            }
+        }
+    }
+
+    /** Loads the current project's snapshots (the restore surface). */
+    fun loadSnapshots() {
+        val packages = projectPackageService ?: return
+        val workspace = workspaceRuntimeService.activeWorkspace.value ?: return
+        val projectId = _state.value.currentProject?.id ?: return
+        viewModelScope.launch {
+            runCatching {
+                // Snapshots live in the package service's snapshot store —
+                // surfaced through the Room entity list.
+                val db = appDatabaseForSnapshots ?: return@launch
+                val entities = db.projectSnapshotDao().forProject(projectId)
+                _state.update {
+                    it.copy(
+                        projectSnapshots = entities.map { e ->
+                            SnapshotEntry(e.id, e.label, e.reason, e.createdAtEpochMs)
+                        }
+                    )
+                }
+                // Keep the workspace reference honest (unused var guard).
+                workspace.id
+            }
+        }
+    }
+
+    /** EXPORT: streams the project package to [destination] (SAF stream). */
+    fun exportProjectTo(projectId: Long, destination: java.io.OutputStream, onFinished: () -> Unit = {}) {
+        val packages = projectPackageService ?: run {
+            _state.update { it.copy(errorMessage = "التصدير غير متاح في هذا التكوين.") }
+            return
+        }
+        val workspace = workspaceRuntimeService.activeWorkspace.value ?: return
+        _state.update { it.copy(isTransferring = true, transferProgressLabel = "جارٍ تصدير المشروع…") }
+        viewModelScope.launch {
+            val outcome = runCatching {
+                packages.exportProject(workspace.id, projectId, destination)
+            }.getOrElse { e ->
+                com.example.application.transfer.TransferOutcome.Failure(
+                    "EXPORT_EXCEPTION", "فشل التصدير: ${e.localizedMessage}", true
+                )
+            }
+            _state.update { it.copy(isTransferring = false, transferProgressLabel = null) }
+            when (outcome) {
+                is com.example.application.transfer.TransferOutcome.Success ->
+                    _state.update { it.copy(successMessage = outcome.message) }
+                is com.example.application.transfer.TransferOutcome.Failure ->
+                    _state.update { it.copy(errorMessage = outcome.message) }
+            }
+            onFinished()
+        }
+    }
+
+    /** IMPORT: imports a package from [source] (SAF stream) into the ACTIVE workspace. */
+    fun importProjectFrom(source: java.io.InputStream) {
+        val packages = projectPackageService ?: run {
+            _state.update { it.copy(errorMessage = "الاستيراد غير متاح في هذا التكوين.") }
+            return
+        }
+        val workspace = workspaceRuntimeService.activeWorkspace.value ?: return
+        _state.update { it.copy(isTransferring = true, transferProgressLabel = "جارٍ استيراد المشروع…") }
+        viewModelScope.launch {
+            // The stream is consumed inside the IO dispatcher by the package
+            // service; buffer it first so the SAF pipe doesn't close mid-read.
+            val buffered = runCatching { source.readBytes() }.getOrNull()
+            if (buffered == null) {
+                _state.update {
+                    it.copy(isTransferring = false, transferProgressLabel = null, errorMessage = "تعذر قراءة الحزمة المحددة.")
+                }
+                return@launch
+            }
+            val (newId, report) = runCatching {
+                packages.importProject(
+                    targetWorkspaceId = workspace.id,
+                    packageStream = java.io.ByteArrayInputStream(buffered),
+                    conflictPolicy = com.example.application.transfer.ImportConflictPolicy.RENAME
+                )
+            }.getOrElse { e ->
+                null to com.example.application.transfer.ProjectPackageService.ImportReport.error(
+                    "IMPORT_EXCEPTION", "فشل الاستيراد: ${e.localizedMessage}"
+                )
+            }
+            _state.update { it.copy(isTransferring = false, transferProgressLabel = null) }
+            if (newId != null && report.ok) {
+                val details = buildString {
+                    append(report.message)
+                    append(" — ملفات: ${report.importedFiles}، جلسات: ${report.importedSessions}")
+                    append("، دورات: ${report.importedTurns}، مستندات: ${report.importedKnowledge}")
+                    append("، مهام: ${report.importedTasks}، مخرجات: ${report.importedArtifacts}")
+                    if (report.reingestedDocuments > 0) {
+                        append("، مقاطع معرفة مُعاد بناؤها: ${report.reingestedChunks}")
+                    }
+                    report.degradedNotes.forEach { append("\n• $it") }
+                }
+                _state.update { it.copy(successMessage = details) }
+            } else {
+                _state.update { it.copy(errorMessage = report.message) }
+            }
+        }
+    }
+
+    /** MOVE: identity-preserving verified move to another workspace. */
+    fun moveProjectToWorkspace(projectId: Long, targetWorkspaceId: String) {
+        val coordinator = projectTransferCoordinator ?: run {
+            _state.update { it.copy(errorMessage = "النقل غير متاح في هذا التكوين.") }
+            return
+        }
+        val workspace = workspaceRuntimeService.activeWorkspace.value ?: return
+        _state.update { it.copy(isTransferring = true, transferProgressLabel = "جارٍ نقل المشروع…") }
+        viewModelScope.launch {
+            val outcome = coordinator.moveProjectVerifiedIdentity(projectId, workspace.id, targetWorkspaceId)
+            _state.update { it.copy(isTransferring = false, transferProgressLabel = null) }
+            when (outcome) {
+                is com.example.application.transfer.ProjectTransferCoordinator.MoveOutcome.IdentityPreserved -> {
+                    _state.update {
+                        it.copy(
+                            successMessage = "نُقل المشروع بنجاح مع الحفاظ على هويته " +
+                                    "(${outcome.verifiedCounts.sessions} جلسة، ${outcome.verifiedCounts.knowledgeDocuments} مستنداً، " +
+                                    "${outcome.verifiedCounts.tasks} مهمة، ${outcome.verifiedCounts.artifacts} مخرجاً — كلها مثبتة ومتحقق منها)."
+                        )
+                    }
+                    loadAvailableWorkspaces()
+                }
+                is com.example.application.transfer.ProjectTransferCoordinator.MoveOutcome.NewIdentity ->
+                    _state.update { it.copy(successMessage = "نُقل المشروع بهوية جديدة في المساحة الهدف.") }
+                is com.example.application.transfer.ProjectTransferCoordinator.MoveOutcome.Failed ->
+                    _state.update { it.copy(errorMessage = "[${outcome.code}] ${outcome.message}") }
+            }
+        }
+    }
+
+    /** CLONE: same-workspace copy through the real package pipeline. */
+    fun cloneProject(projectId: Long) {
+        val packages = projectPackageService ?: run {
+            _state.update { it.copy(errorMessage = "الاستنساخ غير متاح في هذا التكوين.") }
+            return
+        }
+        val workspace = workspaceRuntimeService.activeWorkspace.value ?: return
+        _state.update { it.copy(isTransferring = true, transferProgressLabel = "جارٍ استنساخ المشروع…") }
+        viewModelScope.launch {
+            val (newId, outcome) = runCatching {
+                packages.cloneProject(workspace.id, projectId)
+            }.getOrElse { e ->
+                null to com.example.application.transfer.TransferOutcome.Failure(
+                    "CLONE_EXCEPTION", "فشل الاستنساخ: ${e.localizedMessage}", true
+                )
+            }
+            _state.update { it.copy(isTransferring = false, transferProgressLabel = null) }
+            if (newId != null) {
+                _state.update { it.copy(successMessage = (outcome as com.example.application.transfer.TransferOutcome.Success).message) }
+            } else {
+                val message = (outcome as? com.example.application.transfer.TransferOutcome.Failure)?.message
+                    ?: "فشل الاستنساخ."
+                _state.update { it.copy(errorMessage = message) }
+            }
+        }
+    }
+
+    /** SNAPSHOT: creates a REAL restorable snapshot (payload persisted). */
+    fun snapshotProject(projectId: Long, label: String) {
+        val packages = projectPackageService ?: run {
+            _state.update { it.copy(errorMessage = "اللقطات غير متاحة في هذا التكوين.") }
+            return
+        }
+        val workspace = workspaceRuntimeService.activeWorkspace.value ?: return
+        _state.update { it.copy(isTransferring = true, transferProgressLabel = "جارٍ إنشاء اللقطة…") }
+        viewModelScope.launch {
+            val snapshotId = runCatching {
+                packages.createSnapshot(
+                    workspaceId = workspace.id,
+                    projectId = projectId,
+                    label = label.ifBlank { "لقطة يدوية" },
+                    reason = "USER_INITIATED"
+                )
+            }.getOrNull()
+            _state.update { it.copy(isTransferring = false, transferProgressLabel = null) }
+            if (snapshotId != null) {
+                _state.update { it.copy(successMessage = "أُنشئت اللقطة «$label» — يمكن استعادتها من قائمة اللقطات.") }
+                loadSnapshots()
+            } else {
+                _state.update { it.copy(errorMessage = "تعذر إنشاء اللقطة.") }
+            }
+        }
+    }
+
+    /** RESTORE: replaces the current project state with the snapshot's payload. */
+    fun restoreSnapshot(snapshotId: String) {
+        val packages = projectPackageService ?: run {
+            _state.update { it.copy(errorMessage = "الاستعادة غير متاحة في هذا التكوين.") }
+            return
+        }
+        _state.update { it.copy(isTransferring = true, transferProgressLabel = "جارٍ استعادة اللقطة…") }
+        viewModelScope.launch {
+            val (newId, outcome) = runCatching { packages.restoreSnapshot(snapshotId) }.getOrElse { e ->
+                null to com.example.application.transfer.TransferOutcome.Failure(
+                    "RESTORE_EXCEPTION", "فشل الاستعادة: ${e.localizedMessage}", true
+                )
+            }
+            _state.update { it.copy(isTransferring = false, transferProgressLabel = null) }
+            if (newId != null) {
+                _state.update { it.copy(successMessage = (outcome as com.example.application.transfer.TransferOutcome.Success).message) }
+                loadSnapshots()
+            } else {
+                val message = (outcome as? com.example.application.transfer.TransferOutcome.Failure)?.message
+                    ?: "فشل الاستعادة."
+                _state.update { it.copy(errorMessage = message) }
+            }
+        }
+    }
+
+    /** CLOSURE §4.4: the database handle for the snapshot list (composition
+     *  root wires the package service's database — the ViewModel reads the
+     *  same snapshot DAO). */
+    var appDatabaseForSnapshots: com.example.infrastructure.persistence.AppDatabase? = null
 }

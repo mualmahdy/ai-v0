@@ -17,7 +17,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MoveDown
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -49,6 +54,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.example.domain.core.project.Project
 import com.example.presentation.ui.components.ConfirmDialog
 import com.example.presentation.ui.components.EmptyState
@@ -94,6 +101,46 @@ fun ProjectsScreen(
     var renameTarget by rememberSaveable { mutableStateOf<Long?>(null) }
     var archiveTarget by rememberSaveable { mutableStateOf<Long?>(null) }
     var trashTarget by rememberSaveable { mutableStateOf<Long?>(null) }
+    var moveTarget by rememberSaveable { mutableStateOf<Long?>(null) }
+    var snapshotTarget by rememberSaveable { mutableStateOf<Long?>(null) }
+    var exportTarget by rememberSaveable { mutableStateOf<Long?>(null) }
+
+    // CLOSURE §4.4 — SAF bridges for the real export/import workflows.
+    // The resolver seam is set per-composition (the activity context).
+    val context = androidx.compose.ui.platform.LocalContext.current
+    AppContextHolder.resolver = context.contentResolver
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        val projectId = exportTarget
+        val resolver = AppContextHolder.resolver
+        if (uri != null && projectId != null && resolver != null) {
+            val outputStream = runCatching { resolver.openOutputStream(uri) }.getOrNull()
+            if (outputStream != null) {
+                viewModel.exportProjectTo(projectId, outputStream) { exportTarget = null }
+                return@rememberLauncherForActivityResult
+            }
+        }
+        exportTarget = null
+    }
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val resolver = AppContextHolder.resolver
+        if (uri != null && resolver != null) {
+            val inputStream = runCatching { resolver.openInputStream(uri) }.getOrNull()
+            if (inputStream != null) {
+                viewModel.importProjectFrom(inputStream)
+            }
+        }
+    }
+
+    // Load the move-target workspaces + snapshots when the screen opens
+    // (CLOSURE §4.4 surfaces).
+    LaunchedEffect(state.currentProject?.id) {
+        viewModel.loadAvailableWorkspaces()
+        viewModel.loadSnapshots()
+    }
 
     LaunchedEffect(state.errorMessage) {
         state.errorMessage?.let {
@@ -150,6 +197,16 @@ fun ProjectsScreen(
                         modifier = Modifier.weight(1f)
                     )
                     Spacer(modifier = Modifier.width(10.dp))
+                    OutlinedButton(
+                        onClick = { importLauncher.launch(arrayOf("*/*")) },
+                        enabled = !state.isTransferring,
+                        modifier = Modifier.testTag("btn_import_project")
+                    ) {
+                        Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(stringResource(com.example.R.string.projects_import))
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
                     Button(
                         onClick = { createOpen = true },
                         modifier = Modifier.testTag("btn_create_project")
@@ -157,6 +214,81 @@ fun ProjectsScreen(
                         Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(stringResource(com.example.R.string.projects_create))
+                    }
+                }
+            }
+
+            // ---- CLOSURE §4.4: transfer progress (honest in-flight state) ----
+            if (state.isTransferring) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .testTag("transfer_progress_card"),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = state.transferProgressLabel
+                                    ?: stringResource(com.example.R.string.projects_transfer_progress),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ---- CLOSURE §4.4: the current project's snapshots (restore) ----
+            if (state.projectSnapshots.isNotEmpty()) {
+                item {
+                    SectionHeader(
+                        icon = Icons.Default.PhotoCamera,
+                        title = "لقطات المشروع الحالي (${state.projectSnapshots.size})",
+                        subtitle = "استعادة كاملة ومتحقق منها — الفشل لا يمس الحالة الحالية",
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
+                }
+                items(
+                    state.projectSnapshots,
+                    key = { "snapshot_${it.id}" }
+                ) { snapshot ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .testTag("snapshot_card"),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(snapshot.label, style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    text = snapshot.reason + " • " +
+                                            SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault())
+                                                .format(Date(snapshot.createdAtEpochMs)),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = { viewModel.restoreSnapshot(snapshot.id) },
+                                enabled = !state.isTransferring,
+                                modifier = Modifier.testTag("btn_restore_snapshot")
+                            ) { Text(stringResource(com.example.R.string.projects_restore)) }
+                        }
                     }
                 }
             }
@@ -185,10 +317,18 @@ fun ProjectsScreen(
                         project = project,
                         isCurrent = project.id == state.currentProject?.id,
                         isSwitching = state.isSwitchingProjectId == project.id,
+                        isTransferring = state.isTransferring,
                         onOpen = { viewModel.openProject(project.id) },
                         onRename = { renameTarget = project.id },
                         onArchive = { archiveTarget = project.id },
-                        onTrash = { trashTarget = project.id }
+                        onTrash = { trashTarget = project.id },
+                        onExport = {
+                            exportTarget = project.id
+                            exportLauncher.launch("${project.name}.aiv0project")
+                        },
+                        onMove = { moveTarget = project.id },
+                        onClone = { viewModel.cloneProject(project.id) },
+                        onSnapshot = { snapshotTarget = project.id }
                     )
                 }
             }
@@ -251,6 +391,83 @@ fun ProjectsScreen(
             )
         }
     }
+
+    // CLOSURE §4.4 — MOVE: pick the target workspace (identity-preserving
+    // verified rebind with count witnesses).
+    moveTarget?.let { id ->
+        AlertDialog(
+            onDismissRequest = { moveTarget = null },
+            title = { Text(stringResource(com.example.R.string.projects_move)) },
+            text = {
+                Column {
+                    Text(
+                        "نقل يحافظ على الهوية: الجلسات والملفات والمعرفة والمهام تُربط كلها بالمساحة الهدف داخل معاملة واحدة متحقق منها.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (state.availableWorkspaces.isEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "لا توجد مساحات عمل أخرى — أنشئ مساحة أولاً من مبدّل المساحات.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    state.availableWorkspaces.forEach { ws ->
+                        TextButton(
+                            onClick = {
+                                viewModel.moveProjectToWorkspace(id, ws.id)
+                                moveTarget = null
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("btn_move_to_${ws.id}")
+                        ) { Text(ws.name) }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { moveTarget = null }) { Text("إلغاء") }
+            }
+        )
+    }
+
+    // CLOSURE §4.4 — SNAPSHOT: label prompt.
+    snapshotTarget?.let { id ->
+        var label by rememberSaveable { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { snapshotTarget = null },
+            title = { Text(stringResource(com.example.R.string.projects_snapshot)) },
+            text = {
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    label = { Text("تسمية اللقطة") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.snapshotProject(id, label)
+                        snapshotTarget = null
+                    },
+                    modifier = Modifier.testTag("btn_confirm_snapshot")
+                ) { Text("إنشاء") }
+            },
+            dismissButton = {
+                TextButton(onClick = { snapshotTarget = null }) { Text("إلغاء") }
+            }
+        )
+    }
+}
+
+/** CLOSURE §4.4: the SAF resolver holder (set by the composition — the
+ *  activity-context seam the launchers write streams through). */
+object AppContextHolder {
+    @Volatile
+    var resolver: android.content.ContentResolver? = null
 }
 
 // ---------------------------------------------------------------------------
@@ -349,10 +566,15 @@ private fun ProjectCard(
     project: Project,
     isCurrent: Boolean,
     isSwitching: Boolean,
+    isTransferring: Boolean = false,
     onOpen: () -> Unit,
     onRename: () -> Unit,
     onArchive: () -> Unit,
-    onTrash: () -> Unit
+    onTrash: () -> Unit,
+    onExport: () -> Unit = {},
+    onMove: () -> Unit = {},
+    onClone: () -> Unit = {},
+    onSnapshot: () -> Unit = {}
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Card(
@@ -433,9 +655,14 @@ private fun ProjectCard(
                 ProjectActionsMenu(
                     menuOpen = menuOpen,
                     setMenuOpen = { menuOpen = it },
+                    isTransferring = isTransferring,
                     onRename = onRename,
                     onArchive = onArchive,
-                    onTrash = onTrash
+                    onTrash = onTrash,
+                    onExport = onExport,
+                    onMove = onMove,
+                    onClone = onClone,
+                    onSnapshot = onSnapshot
                 )
             }
         }
@@ -446,11 +673,40 @@ private fun ProjectCard(
 private fun ProjectActionsMenu(
     menuOpen: Boolean,
     setMenuOpen: (Boolean) -> Unit,
+    isTransferring: Boolean = false,
     onRename: () -> Unit,
     onArchive: () -> Unit,
-    onTrash: () -> Unit
+    onTrash: () -> Unit,
+    onExport: () -> Unit = {},
+    onMove: () -> Unit = {},
+    onClone: () -> Unit = {},
+    onSnapshot: () -> Unit = {}
 ) {
     DropdownMenu(expanded = menuOpen, onDismissRequest = { setMenuOpen(false) }) {
+        DropdownMenuItem(
+            text = { Text(stringResource(com.example.R.string.projects_export)) },
+            leadingIcon = { Icon(Icons.Default.IosShare, contentDescription = null, modifier = Modifier.size(18.dp)) },
+            enabled = !isTransferring,
+            onClick = { setMenuOpen(false); onExport() }
+        )
+        DropdownMenuItem(
+            text = { Text(stringResource(com.example.R.string.projects_move)) },
+            leadingIcon = { Icon(Icons.Default.MoveDown, contentDescription = null, modifier = Modifier.size(18.dp)) },
+            enabled = !isTransferring,
+            onClick = { setMenuOpen(false); onMove() }
+        )
+        DropdownMenuItem(
+            text = { Text(stringResource(com.example.R.string.projects_clone)) },
+            leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp)) },
+            enabled = !isTransferring,
+            onClick = { setMenuOpen(false); onClone() }
+        )
+        DropdownMenuItem(
+            text = { Text(stringResource(com.example.R.string.projects_snapshot)) },
+            leadingIcon = { Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(18.dp)) },
+            enabled = !isTransferring,
+            onClick = { setMenuOpen(false); onSnapshot() }
+        )
         DropdownMenuItem(
             text = { Text(stringResource(com.example.R.string.projects_rename)) },
             onClick = { setMenuOpen(false); onRename() }

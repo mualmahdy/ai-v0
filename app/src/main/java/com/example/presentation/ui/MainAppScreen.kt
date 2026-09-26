@@ -169,6 +169,9 @@ fun MainAppScreen(
     // plugins + integrations) — owned here; the extensions screen composes
     // on it and its honest error channel surfaces in the global snackbar.
     extensionsViewModel: com.example.presentation.viewmodel.ExtensionsViewModel,
+    // CLOSURE §11: the SYSTEM HEALTH feature ViewModel (repair/recovery
+    // surface) — owned here; the health screen composes on it.
+    systemHealthViewModel: com.example.presentation.viewmodel.SystemHealthViewModel? = null,
     // ADR-6 slice 7: the ACTIVITY feature ViewModel (the unified activity
     // feed) — owned here; the activity screen composes on it (it collects
     // the studio bus's Started stake itself).
@@ -517,6 +520,7 @@ fun MainAppScreen(
                     // UI Design Closure (phase B): the projects feature VM —
                     // the HOME work center + PROJECTS screen compose on it.
                     projectsViewModel = projectsViewModel,
+                    systemHealthViewModel = systemHealthViewModel,
                     modifier = Modifier.weight(1f)
                 )
                 }
@@ -640,6 +644,8 @@ private fun WorkspaceNavHost(
     // UI Design Closure (phase B): the projects feature VM — the HOME
     // work center and the PROJECTS surface compose on it.
     projectsViewModel: com.example.presentation.viewmodel.ProjectsViewModel,
+    // CLOSURE §11: the system-health feature VM — the HEALTH surface.
+    systemHealthViewModel: com.example.presentation.viewmodel.SystemHealthViewModel? = null,
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
@@ -798,6 +804,14 @@ private fun WorkspaceNavHost(
                 viewModel = governanceViewModel,
                 modifier = Modifier.fillMaxSize()
             )
+        }
+        composable(WorkspaceRoutes.HEALTH) {
+            systemHealthViewModel?.let { healthVm ->
+                com.example.presentation.ui.screens.health.SystemHealthScreen(
+                    viewModel = healthVm,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         }
         composable(WorkspaceRoutes.EXTENSIONS) {
             ExtensionsScreen(

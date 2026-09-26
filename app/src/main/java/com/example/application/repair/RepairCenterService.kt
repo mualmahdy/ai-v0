@@ -106,16 +106,16 @@ class RepairCenterService(
 
         // 3. Dangling executions (RUNNING tasks with no live execution —
         //    process death leftovers the resume sweep did not reconcile).
+        //    CLOSURE §11: the staleness check is bound to the EXACT task
+        //    identity (the ExecutionHost key IS the taskId) — another live
+        //    execution in the SAME workspace can never mask one task's
+        //    staleness (the pre-closure check used workspace-level presence,
+        //    which hid stale tasks whenever ANY sibling execution ran).
         val dangling = runCatching {
-            val running = taskDao.getAllTasks().filter { it.lifecycleState == "RUNNING" }
-            running
+            taskDao.getAllTasks()
+                .filter { it.lifecycleState == "RUNNING" }
                 .filter { task ->
-                    // RUNNING with NO live handle in its (pinned) workspace:
-                    // the in-memory registry died with the process, so any
-                    // RUNNING row without a live ExecutionHost handle is stale.
-                    val wsId = task.workspaceId
-                    wsId == null || com.example.application.execution.ExecutionHost
-                        .executionsFor(wsId).isEmpty()
+                    !com.example.application.execution.ExecutionHost.isExecuting(task.id)
                 }
                 .map { it.id }
                 .take(50)
@@ -183,6 +183,46 @@ class RepairCenterService(
         val conditions = detectAll()
         return conditions.map { repair(it) }
     }
+
+    /**
+     * CLOSURE §11 — the INTERRUPTED EXECUTIONS surface: RUNNING tasks with
+     * no live execution, WITH the identity the user needs to decide
+     * (prompt, resumability via checkpoint + canonical context, and the
+     * execution's own workspace attribution).
+     */
+    data class InterruptedExecutionInfo(
+        val taskId: String,
+        val rawPrompt: String,
+        val workspaceId: String?,
+        val hasCheckpoint: Boolean,
+        val hasExecutionContext: Boolean
+    ) {
+        val isResumable: Boolean get() = hasCheckpoint || hasExecutionContext
+    }
+
+    suspend fun interruptedExecutions(limit: Int = 50): List<InterruptedExecutionInfo> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                taskDao.getAllTasks()
+                    .filter { it.lifecycleState == "RUNNING" }
+                    .filter { task ->
+                        // CLOSURE §11: EXACT task identity — another live
+                        // execution in the same workspace never masks this
+                        // task's staleness.
+                        !com.example.application.execution.ExecutionHost.isExecuting(task.id)
+                    }
+                    .take(limit)
+                    .map { task ->
+                        InterruptedExecutionInfo(
+                            taskId = task.id,
+                            rawPrompt = task.rawPrompt,
+                            workspaceId = task.workspaceId,
+                            hasCheckpoint = !task.checkpointJson.isNullOrBlank(),
+                            hasExecutionContext = !task.executionContextJson.isNullOrBlank()
+                        )
+                    }
+            }.getOrDefault(emptyList())
+        }
 
     // ------------------------------------------------------------------
     // Deterministic repairs

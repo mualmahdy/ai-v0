@@ -45,6 +45,7 @@ class ArtifactService(
     private val auditTrail: AuditTrailService? = null
 ) {
     private val artifactDao = database.artifactDao()
+    private val versionDao = database.artifactVersionDao()
 
     // ------------------------------------------------------------------
     // Registration / queries
@@ -214,6 +215,16 @@ class ArtifactService(
         if (projectId != null) {
             runCatching { fileStore.delete(fileStore.projectRoot(projectId), artifact.storageUri) }
         }
+        // CLOSURE §8: version history + payloads die WITH the artifact.
+        versionDao.deleteForArtifact(artifactId)
+        if (projectId != null) {
+            runCatching {
+                val versionsDir = fileStore.resolveContained(
+                    fileStore.projectRoot(projectId), "versions/$artifactId"
+                )
+                versionsDir.deleteRecursively()
+            }
+        }
         artifactDao.deleteById(artifactId)
         true
     }
@@ -224,6 +235,181 @@ class ArtifactService(
             artifactDao.updateIndexingState(artifactId, state.name, System.currentTimeMillis())
             true
         }
+
+    // ------------------------------------------------------------------
+    // CLOSURE §8 — Result → Artifact lifecycle (versioned)
+    // ------------------------------------------------------------------
+
+    /** The versioned view of one artifact. */
+    data class ArtifactVersionInfo(
+        val version: Int,
+        val sizeBytes: Long,
+        val contentHash: String?,
+        val note: String?,
+        val createdBy: String?,
+        val createdAtEpochMs: Long,
+        val isCurrent: Boolean
+    )
+
+    /**
+     * CLOSURE §8 (Result → Artifact): persists an ASSISTANT RESULT as a real,
+     * versioned, project-scoped artifact. The content lands in the project
+     * sandbox (`generated/…`), the artifacts row is created with version 1
+     * (both the row's storageUri AND the version's payload point at the SAME
+     * file for v1), and the artifact is immediately previewable/editable
+     * through the canvas.
+     */
+    suspend fun saveAssistantResultAsArtifact(
+        workspaceId: String,
+        projectId: Long,
+        sessionId: String?,
+        executionId: String?,
+        name: String,
+        content: ByteArray,
+        mimeType: String = "text/markdown",
+        createdBy: String? = null
+    ): ArtifactDescriptor = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val safeName = name.replace(Regex("[\\/:*?\"<>|]"), "_").ifBlank { "artifact_$now" }
+        val relativePath = "generated/${now}_${safeName}"
+        val root = fileStore.projectRoot(projectId)
+        fileStore.write(root, relativePath, content)
+        val entity = ArtifactEntity(
+            id = "art_${UUID.randomUUID().toString().take(16)}",
+            workspaceId = workspaceId,
+            projectId = projectId,
+            sessionId = sessionId,
+            executionId = executionId,
+            type = ArtifactType.GENERATED_ARTIFACT.name,
+            name = safeName,
+            mimeType = mimeType,
+            sizeBytes = content.size.toLong(),
+            contentHash = sha256(content),
+            storageUri = relativePath,
+            source = "USER",
+            indexingState = ArtifactIndexingState.NOT_INDEXED.name,
+            createdAtEpochMs = now,
+            updatedAtEpochMs = now,
+            currentVersion = 1
+        )
+        artifactDao.upsert(entity)
+        versionDao.upsert(
+            com.example.infrastructure.persistence.entities.ArtifactVersionEntity(
+                id = "artver_${UUID.randomUUID().toString().take(16)}",
+                artifactId = entity.id,
+                version = 1,
+                storageUri = relativePath,
+                sizeBytes = content.size.toLong(),
+                contentHash = sha256(content),
+                note = "النسخة الأولى من نتيجة المحادثة",
+                createdBy = createdBy,
+                createdAtEpochMs = now
+            )
+        )
+        audit(AuditActions.FILE_REGISTERED, "ARTIFACT", entity.id, workspaceId, projectId, AuditResult.SUCCESS)
+        entity.toDescriptor()
+    }
+
+    /**
+     * CLOSURE §8 (Edit → Version): persists NEW content as the artifact's
+     * NEXT version — append-only history. The artifact row's storageUri and
+     * currentVersion advance to the new version (the previous payloads stay
+     * on disk for [readVersion]/[rollbackToVersion]).
+     */
+    suspend fun createVersion(
+        accessorScope: ResourceScope,
+        artifactId: String,
+        content: ByteArray,
+        note: String?,
+        createdBy: String? = null
+    ): ArtifactVersionInfo? = withContext(Dispatchers.IO) {
+        val artifact = artifactDao.byId(artifactId) ?: return@withContext null
+        val resourceScope = artifactScope(artifact) ?: return@withContext null
+        if (!ScopeRules.canAccess(accessorScope, resourceScope, com.example.domain.core.context.ScopePermission.READ_WRITE)) {
+            audit(AuditActions.FILE_COPIED, "ARTIFACT", artifactId, artifact.workspaceId, artifact.projectId, AuditResult.DENIED)
+            return@withContext null
+        }
+        val projectId = artifact.projectId ?: return@withContext null
+        val nextVersion = (versionDao.maxVersion(artifactId) ?: 0) + 1
+        val now = System.currentTimeMillis()
+        val versionPath = "versions/$artifactId/v${nextVersion}_$now"
+        val root = fileStore.projectRoot(projectId)
+        fileStore.write(root, versionPath, content)
+        val hash = sha256(content)
+        versionDao.upsert(
+            com.example.infrastructure.persistence.entities.ArtifactVersionEntity(
+                id = "artver_${UUID.randomUUID().toString().take(16)}",
+                artifactId = artifactId,
+                version = nextVersion,
+                storageUri = versionPath,
+                sizeBytes = content.size.toLong(),
+                contentHash = hash,
+                note = note,
+                createdBy = createdBy,
+                createdAtEpochMs = now
+            )
+        )
+        artifactDao.advanceVersion(artifactId, nextVersion, versionPath, content.size.toLong(), hash, now)
+        ArtifactVersionInfo(nextVersion, content.size.toLong(), hash, note, createdBy, now, isCurrent = true)
+    }
+
+    /** The artifact's append-only version history (oldest first). */
+    suspend fun listVersions(artifactId: String): List<ArtifactVersionInfo> =
+        withContext(Dispatchers.IO) {
+            val current = artifactDao.byId(artifactId)?.currentVersion ?: 1
+            versionDao.forArtifact(artifactId).map {
+                ArtifactVersionInfo(
+                    version = it.version,
+                    sizeBytes = it.sizeBytes,
+                    contentHash = it.contentHash,
+                    note = it.note,
+                    createdBy = it.createdBy,
+                    createdAtEpochMs = it.createdAtEpochMs,
+                    isCurrent = it.version == current
+                )
+            }
+        }
+
+    /** Reads ONE version's payload (scope-authorized, containment-checked). */
+    suspend fun readVersion(
+        accessorScope: ResourceScope,
+        artifactId: String,
+        version: Int
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        val artifact = artifactDao.byId(artifactId) ?: return@withContext null
+        val resourceScope = artifactScope(artifact) ?: return@withContext null
+        if (!ScopeRules.canAccess(accessorScope, resourceScope)) {
+            audit(AuditActions.FILE_READ, "ARTIFACT", artifactId, artifact.workspaceId, artifact.projectId, AuditResult.DENIED)
+            return@withContext null
+        }
+        val projectId = artifact.projectId ?: return@withContext null
+        val versionRow = versionDao.byArtifactAndVersion(artifactId, version) ?: return@withContext null
+        runCatching {
+            fileStore.read(fileStore.projectRoot(projectId), versionRow.storageUri)
+        }.getOrNull()
+    }
+
+    /**
+     * CLOSURE §8 (Rollback): returns the artifact to an OLDER version's
+     * content by creating a NEW version with those bytes — the history is
+     * append-only and never rewritten; a rollback is itself auditable.
+     */
+    suspend fun rollbackToVersion(
+        accessorScope: ResourceScope,
+        artifactId: String,
+        targetVersion: Int,
+        createdBy: String? = null
+    ): ArtifactVersionInfo? = withContext(Dispatchers.IO) {
+        val bytes = readVersion(accessorScope, artifactId, targetVersion)
+            ?: return@withContext null
+        createVersion(
+            accessorScope = accessorScope,
+            artifactId = artifactId,
+            content = bytes,
+            note = "رجوع إلى النسخة $targetVersion",
+            createdBy = createdBy
+        )
+    }
 
     // ------------------------------------------------------------------
     // Internals
@@ -245,6 +431,10 @@ class ArtifactService(
         name.endsWith(".csv", true) -> "text/csv"
         else -> "application/octet-stream"
     }
+
+    private fun sha256(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
 
     private suspend fun audit(
         action: String,

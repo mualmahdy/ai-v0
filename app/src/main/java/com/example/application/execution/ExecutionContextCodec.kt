@@ -9,6 +9,10 @@ import org.json.JSONObject
 /**
  * CanonicalExecutionContext serialization (application layer; the domain model
  * stays pure Kotlin). Round-trips through `tasks.executionContextJson`.
+ *
+ * CLOSURE P0 (immutable invocation scope): the codec is ADDITIVE — a legacy
+ * payload without `sessionId` decodes to null (the honest "not a chat
+ * execution" value); encoding always writes the field when present.
  */
 object ExecutionContextCodec {
 
@@ -18,6 +22,7 @@ object ExecutionContextCodec {
         obj.put("taskId", context.taskId.value)
         obj.put("workspaceId", context.workspaceId)
         context.projectId?.let { obj.put("projectId", it) }
+        context.sessionId?.let { obj.put("sessionId", it) }
         obj.put("agentId", context.agentId.value)
         obj.put("agentRole", context.agentRole.name)
         context.modelId?.let { obj.put("modelId", it) }
@@ -37,6 +42,7 @@ object ExecutionContextCodec {
                 taskId = TaskId(obj.optString("taskId")),
                 workspaceId = obj.getString("workspaceId"),
                 projectId = if (obj.has("projectId") && !obj.isNull("projectId")) obj.getLong("projectId") else null,
+                sessionId = obj.optString("sessionId").takeIf { it.isNotBlank() },
                 agentId = AgentId(obj.getString("agentId")),
                 agentRole = runCatching { AgentRole.valueOf(obj.getString("agentRole")) }
                     .getOrDefault(AgentRole.GENERAL_ASSISTANT),

@@ -107,6 +107,9 @@ class HumanApprovalGate(
      */
     suspend fun pendingApprovals(limit: Int = 50): List<HumanApprovalRequest> = store.findPending(limit)
 
+    /** CLOSURE §10 (Governance Center): the full decision history. */
+    suspend fun approvalHistory(limit: Int = 200): List<HumanApprovalRequest> = store.recentHistory(limit)
+
     private suspend fun resolveInternal(
         approvalId: String,
         resolution: ApprovalResolution,

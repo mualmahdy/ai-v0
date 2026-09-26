@@ -488,7 +488,21 @@ class AgentOrchestrator(
         isNetworkAvailable: Boolean = true,
         restoredCheckpoint: TaskCheckpoint? = null,
         restoredContext: CanonicalExecutionContext? = null,
-        pinnedWorkspaceId: String? = null
+        pinnedWorkspaceId: String? = null,
+        /**
+         * CLOSURE P0 (immutable invocation scope): the project pinned at
+         * INVOCATION ACCEPTANCE. When present the kernel NEVER consults the
+         * live active-project provider — a project switch between
+         * acceptance and kernel start can no longer re-target file ops.
+         */
+        pinnedProjectId: Long? = null,
+        /**
+         * CLOSURE P0: the governed chat session pinned at acceptance —
+         * rides the canonical context + ExecutionScope so EVERY layer
+         * (egress session blocks, durable side-effects) sees the COMPLETE
+         * tuple without re-deriving it.
+         */
+        pinnedSessionId: String? = null
     ): Flow<ExecutionEvent> = channelFlow<ExecutionEvent> {
         // ProducerScope (1.10+) is a SendChannel, NOT a FlowCollector — bridge
         // the loop's emit() semantics onto the channel's send() (the channel
@@ -505,7 +519,9 @@ class AgentOrchestrator(
                 isNetworkAvailable = isNetworkAvailable,
                 restoredCheckpoint = restoredCheckpoint,
                 restoredContext = restoredContext,
-                pinnedWorkspaceId = pinnedWorkspaceId
+                pinnedWorkspaceId = pinnedWorkspaceId,
+                pinnedProjectId = pinnedProjectId,
+                pinnedSessionId = pinnedSessionId
             )
         } catch (e: CancellationException) {
             // Truthful cancellation (audit 2026 fix): persist CANCELLED so the
@@ -574,7 +590,9 @@ class AgentOrchestrator(
         isNetworkAvailable: Boolean,
         restoredCheckpoint: TaskCheckpoint?,
         restoredContext: CanonicalExecutionContext?,
-        pinnedWorkspaceId: String?
+        pinnedWorkspaceId: String?,
+        pinnedProjectId: Long? = null,
+        pinnedSessionId: String? = null
     ) {
         // ------------------------------------------------------------
         // CANONICAL CONTEXT BINDING (P0-02 / P0-03 / P1-01 / P1-03):
@@ -638,7 +656,20 @@ class AgentOrchestrator(
             executionId = "exec_" + UUID.randomUUID().toString(),
             taskId = task.id,
             workspaceId = resolvedWorkspaceId ?: "unattributed",
-            projectId = projectIdProvider?.invoke()?.takeIf { it > 0 },
+            // CLOSURE P0: the project pinned at INVOCATION ACCEPTANCE wins —
+            // when the WORKSPACE is pinned, the live provider is NEVER
+            // consulted (a project switch after acceptance cannot re-target
+            // this execution; an unbound project stays honestly NULL, never
+            // another workspace's project). The provider remains a fallback
+            // ONLY for legacy callers that predate acceptance-time pinning
+            // (no pinned workspace — pure-JVM tests).
+            projectId = when {
+                pinnedProjectId != null -> pinnedProjectId
+                pinnedWorkspaceId != null -> restoredContext?.projectId
+                else -> restoredContext?.projectId
+                    ?: projectIdProvider?.invoke()?.takeIf { it > 0 }
+            },
+            sessionId = pinnedSessionId,
             agentId = agent.identity.id,
             agentRole = agent.identity.role,
             modelId = task.assignedModelId,
@@ -720,7 +751,16 @@ class AgentOrchestrator(
         // point (memory writes, RAG retrieval, resource scoping) resolves the
         // workspace from THIS scope, not from the active-workspace StateFlow.
         // ------------------------------------------------------------
-        withContext(ExecutionScope(executionId = executionId, workspaceId = context.workspaceId, projectId = context.projectId)) {
+        withContext(ExecutionScope(
+            executionId = executionId,
+            workspaceId = context.workspaceId,
+            projectId = context.projectId,
+            // CLOSURE P0: the COMPLETE immutable tuple rides the coroutine
+            // scope — session-scoped consumers (egress session blocks,
+            // durable side-effect attribution) resolve it WITHOUT any
+            // live-provider read.
+            sessionId = context.sessionId
+        )) {
             executeClosedLoop(
                 collector = collector,
                 agent = agent,

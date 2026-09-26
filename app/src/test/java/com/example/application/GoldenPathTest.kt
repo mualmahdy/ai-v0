@@ -598,7 +598,9 @@ class GoldenPathTest {
         override suspend fun revoke(id: Long) {
             grants.removeAll { it.id == id }
         }
-    }
+            override suspend fun all(limit: Int): List<com.example.infrastructure.persistence.entities.PermissionGrantEntity> = emptyList()
+        override suspend fun activeGrants(limit: Int): List<com.example.infrastructure.persistence.entities.PermissionGrantEntity> = emptyList()
+}
 
     /** Minimal TelemetryPort capture for audit assertions. */
     private class CapturingTelemetryPort : com.example.domain.ports.observability.TelemetryPort {

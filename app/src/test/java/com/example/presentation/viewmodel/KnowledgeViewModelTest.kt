@@ -569,7 +569,9 @@ class KnowledgeViewModelTest {
         override suspend fun deleteAllForProject(projectId: Long) {}
         override suspend fun reassignProject(ids: List<String>, projectId: Long?) {}
         override suspend fun countForWorkspace(workspaceId: String): Int = 0
-    }
+            override suspend fun rebindWorkspaceForProject(projectId: Long, targetWorkspaceId: String) {}
+        override suspend fun documentIdsForProject(projectId: Long): List<String> = emptyList()
+}
 
     private class ThrowingDocDao : OkDocDao() {
         override suspend fun insertOrUpdate(document: KnowledgeDocumentEntity) {
@@ -578,7 +580,9 @@ class KnowledgeViewModelTest {
         override suspend fun insertAll(documents: List<KnowledgeDocumentEntity>) {
             throw IllegalStateException("DOC_WRITE_FAILED")
         }
-    }
+            override suspend fun rebindWorkspaceForProject(projectId: Long, targetWorkspaceId: String) {}
+        override suspend fun documentIdsForProject(projectId: Long): List<String> = emptyList()
+}
 
     private class OkChunkDao : DocumentChunkDao {
         override suspend fun getChunksForWorkspace(workspaceId: String): List<DocumentChunkEntity> = emptyList()
@@ -588,7 +592,10 @@ class KnowledgeViewModelTest {
         override suspend fun deleteChunksForDocument(documentId: String) {}
         override suspend fun deleteChunksForWorkspace(workspaceId: String) {}
         override suspend fun countForWorkspace(workspaceId: String): Int = 0
-    }
+            override suspend fun deleteChunksForProject(projectId: Long) {}
+        override suspend fun countChunksForProject(projectId: Long): Int = 0
+        override suspend fun rebindWorkspaceForProject(projectId: Long, targetWorkspaceId: String) {}
+}
 
     /** Deterministic lexical fallback for the REAL semantic router. */
     private class FakeLexicalEmbedding : EmbeddingProviderPort {

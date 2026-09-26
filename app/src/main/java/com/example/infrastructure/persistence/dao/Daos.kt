@@ -121,6 +121,21 @@ interface ProjectDao {
     @Query("UPDATE projects SET workspaceId = :targetWorkspaceId, updatedAtEpochMs = :now WHERE id = :id AND workspaceId = :sourceWorkspaceId")
     suspend fun moveProjectToWorkspace(id: Long, sourceWorkspaceId: String, targetWorkspaceId: String, now: Long): Int
 
+    /** CLOSURE P1 (transfer): scoped-row count witnesses for the verified
+     *  identity-preserving move (before/after comparison — a rebind that
+     *  misses rows is DETECTED, not silently accepted). */
+    @Query("SELECT COUNT(*) FROM chat_sessions WHERE projectId = :projectId AND workspaceId = :workspaceId")
+    suspend fun countSessionsForProjectInWorkspace(projectId: Long, workspaceId: String): Int
+
+    @Query("SELECT COUNT(*) FROM knowledge_documents WHERE projectId = :projectId AND workspaceId = :workspaceId")
+    suspend fun countKnowledgeForProjectInWorkspace(projectId: Long, workspaceId: String): Int
+
+    @Query("SELECT COUNT(*) FROM tasks WHERE projectId = :projectId AND workspaceId = :workspaceId")
+    suspend fun countTasksForProjectInWorkspace(projectId: Long, workspaceId: String): Int
+
+    @Query("SELECT COUNT(*) FROM artifacts WHERE projectId = :projectId AND workspaceId = :workspaceId")
+    suspend fun countArtifactsForProjectInWorkspace(projectId: Long, workspaceId: String): Int
+
     @Query("SELECT COUNT(*) FROM projects WHERE workspaceId = :workspaceId AND name = :name COLLATE NOCASE AND lifecycleState != 'PURGED'")
     suspend fun countByNameForWorkspace(workspaceId: String, name: String): Int
 
@@ -232,6 +247,15 @@ interface TaskDao {
     /** REPAIR ORDER §11: project cascade list. */
     @Query("SELECT * FROM tasks WHERE projectId = :projectId")
     suspend fun getTasksForProject(projectId: Long): List<TaskEntity>
+
+    /** CLOSURE P1 (transfer): task cascade for a project (move/replace cleanup). */
+    @Query("DELETE FROM tasks WHERE projectId = :projectId")
+    suspend fun deleteTasksForProject(projectId: Long)
+
+    /** CLOSURE P1 (transfer): identity-preserving workspace rebind for a
+     *  project's tasks (inside the verified-move transaction). */
+    @Query("UPDATE tasks SET workspaceId = :targetWorkspaceId WHERE projectId = :projectId")
+    suspend fun rebindTasksWorkspace(projectId: Long, targetWorkspaceId: String)
 
     @Query("SELECT * FROM tasks WHERE id = :id LIMIT 1")
     suspend fun getTaskById(id: String): TaskEntity?

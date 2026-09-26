@@ -59,6 +59,11 @@ interface ArtifactDao {
     @Query("DELETE FROM artifacts WHERE projectId = :projectId")
     suspend fun deleteForProject(projectId: Long)
 
+    /** CLOSURE P1 (transfer): identity-preserving workspace rebind for a
+     *  project's artifacts (inside the verified-move transaction). */
+    @Query("UPDATE artifacts SET workspaceId = :targetWorkspaceId WHERE projectId = :projectId")
+    suspend fun rebindWorkspaceForProject(projectId: Long, targetWorkspaceId: String)
+
     @Query("DELETE FROM artifacts WHERE workspaceId = :workspaceId")
     suspend fun deleteForWorkspace(workspaceId: String)
 
@@ -68,6 +73,10 @@ interface ArtifactDao {
     /** ID-collision check for import idempotency. */
     @Query("SELECT COUNT(*) FROM artifacts WHERE id = :id")
     suspend fun countById(id: String): Int
+
+    /** CLOSURE §8 (versioning): the artifact's current version pointer. */
+    @Query("UPDATE artifacts SET currentVersion = :version, storageUri = :storageUri, sizeBytes = :sizeBytes, contentHash = :contentHash, updatedAtEpochMs = :now WHERE id = :id")
+    suspend fun advanceVersion(id: String, version: Int, storageUri: String, sizeBytes: Long, contentHash: String?, now: Long)
 
     @Query("UPDATE artifacts SET indexingState = :state, updatedAtEpochMs = :now WHERE id = :id")
     suspend fun updateIndexingState(id: String, state: String, now: Long)
@@ -85,6 +94,30 @@ interface ArtifactDao {
         nameContains: String? = null,
         limit: Int = 200
     ): List<ArtifactEntity>
+}
+
+/**
+ * CLOSURE §8 (DB v20) — append-only artifact version history.
+ */
+@Dao
+interface ArtifactVersionDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(version: com.example.infrastructure.persistence.entities.ArtifactVersionEntity)
+
+    @Query("SELECT * FROM artifact_versions WHERE artifactId = :artifactId ORDER BY version ASC")
+    suspend fun forArtifact(artifactId: String): List<com.example.infrastructure.persistence.entities.ArtifactVersionEntity>
+
+    @Query("SELECT * FROM artifact_versions WHERE artifactId = :artifactId AND version = :version LIMIT 1")
+    suspend fun byArtifactAndVersion(artifactId: String, version: Int): com.example.infrastructure.persistence.entities.ArtifactVersionEntity?
+
+    @Query("SELECT MAX(version) FROM artifact_versions WHERE artifactId = :artifactId")
+    suspend fun maxVersion(artifactId: String): Int?
+
+    @Query("DELETE FROM artifact_versions WHERE artifactId = :artifactId")
+    suspend fun deleteForArtifact(artifactId: String)
+
+    @Query("DELETE FROM artifact_versions WHERE artifactId IN (SELECT id FROM artifacts WHERE projectId = :projectId)")
+    suspend fun deleteForProject(projectId: Long)
 }
 
 @Dao
@@ -115,6 +148,10 @@ interface ProjectSnapshotDao {
 
     @Query("SELECT * FROM project_snapshots WHERE projectId = :projectId ORDER BY createdAtEpochMs DESC")
     suspend fun forProject(projectId: Long): List<ProjectSnapshotEntity>
+
+    /** CLOSURE §4.4 (restore): bare-id lookup for snapshot restore. */
+    @Query("SELECT * FROM project_snapshots WHERE id = :id LIMIT 1")
+    suspend fun byId(id: String): ProjectSnapshotEntity?
 
     @Query("SELECT * FROM project_snapshots WHERE id = :id AND projectId = :projectId LIMIT 1")
     suspend fun byIdForProject(id: String, projectId: Long): ProjectSnapshotEntity?

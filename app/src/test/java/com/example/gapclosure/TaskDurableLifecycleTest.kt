@@ -157,7 +157,9 @@ class TaskDurableLifecycleTest {
         }
 
         fun seed(entity: TaskEntity) { rows[entity.id] = entity }
-    }
+            override suspend fun deleteTasksForProject(projectId: Long) {}
+        override suspend fun rebindTasksWorkspace(projectId: Long, targetWorkspaceId: String) {}
+}
 
     @Before
     fun setup() {

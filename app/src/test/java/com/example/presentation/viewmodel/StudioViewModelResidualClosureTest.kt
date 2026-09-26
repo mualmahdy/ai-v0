@@ -138,6 +138,9 @@ class StudioViewModelResidualClosureTest {
 
     @Before
     fun setUp() = runBlocking {
+        com.example.application.execution.ExecutionHost.durableScopeOverride =
+            CoroutineScope(dispatcher + SupervisorJob())
+
         Dispatchers.setMain(dispatcher)
 
         registry = ComponentRegistry()
@@ -284,6 +287,8 @@ class StudioViewModelResidualClosureTest {
 
     @After
     fun tearDown() {
+                com.example.application.execution.ExecutionHost.durableScopeOverride = null
+
         if (::viewModel.isInitialized) viewModel.viewModelScope.cancel()
         signalCollectorScope.cancel()
         Dispatchers.resetMain()

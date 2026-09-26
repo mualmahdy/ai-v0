@@ -286,8 +286,8 @@ class ProjectPackageTransferTest {
         )
         val manifest = org.json.JSONObject(entries["manifest.json"]!!.decodeToString())
         assertEquals(
-            "exported packages declare schema v2",
-            2,
+            "exported packages declare schema v3 (CLOSURE)",
+            3,
             manifest.getInt("packageSchemaVersion")
         )
         // The digest matches the manifest bytes (canonical serialization).

@@ -243,7 +243,7 @@ class MigrationChainValidationTest {
             // FUNCTIONAL CLOSURE Phase 1 §9).
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(19, c.getInt(0))
+                assertEquals(20, c.getInt(0))
             }
 
             // Room accepted the migrated schema: it wrote its identity hash.
@@ -327,7 +327,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(19, c.getInt(0))
+                assertEquals(20, c.getInt(0))
             }
             // Validation accepted → identity hash written.
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
@@ -375,7 +375,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(19, c.getInt(0))
+                assertEquals(20, c.getInt(0))
             }
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
                 assertTrue(c.moveToFirst())

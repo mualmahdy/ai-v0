@@ -88,8 +88,29 @@ data class TurnAttachment(
      * Honest provenance: how this attachment entered the conversation
      * ("SAF_FILE", "SAF_FOLDER_ZIP"…) — shown in diagnostics, not to regular users.
      */
-    val provenance: String = "SAF_FILE"
-)
+    val provenance: String = "SAF_FILE",
+    /**
+     * CLOSURE §6 (attachment hierarchy honesty): what the assistant ACTUALLY
+     * received from this attachment —
+     *   ATTACHMENT_ONLY      — a message-level reference; content NOT sent to
+     *                          the model (non-text or not grounded);
+     *   GROUNDED             — a bounded digest of the content rode the
+     *                          request as marked user evidence;
+     *   KNOWLEDGE_IMPORTED   — the content entered the project's knowledge
+     *                          corpus (RAG), not the message itself.
+     * The UI MUST render this state — a folder is never shown as "analyzed"
+     * without actual ingestion/grounding.
+     */
+    val groundingState: String = "ATTACHMENT_ONLY",
+    /**
+     * CLOSURE §7 (folder understanding): the serialized honest report of a
+     * FOLDER attachment — total/readable/grounded/ingested file counts
+     * (see FolderUnderstandingReport). Null for plain file attachments.
+     */
+    val folderReportJson: String? = null
+) {
+    enum class GroundingState { ATTACHMENT_ONLY, GROUNDED, KNOWLEDGE_IMPORTED }
+}
 
 /** One durable conversational turn (the real executed outcome). */
 data class ConversationTurn(

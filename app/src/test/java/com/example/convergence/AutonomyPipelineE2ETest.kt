@@ -316,5 +316,7 @@ class AutonomyPipelineE2ETest {
         override suspend fun updateCheckpoint(id: String, stepIndex: Int, checkpointJson: String, tokens: Int, now: Long) {
             stored[id]?.let { stored[id] = it.copy(currentStepIndex = stepIndex, checkpointJson = checkpointJson) }
         }
-    }
+            override suspend fun deleteTasksForProject(projectId: Long) {}
+        override suspend fun rebindTasksWorkspace(projectId: Long, targetWorkspaceId: String) {}
+}
 }

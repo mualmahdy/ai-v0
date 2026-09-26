@@ -99,6 +99,21 @@ fun ChatHeader(
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurface
                 )
+                // CLOSURE §12 (IA consolidation): the GLOBAL context surface
+                // shows workspace+project — the header carries ONLY the
+                // project binding of THIS conversation (previously the
+                // projectName parameter was threaded here and DROPPED — the
+                // chat never showed which project the session belongs to).
+                projectName?.takeIf { it.isNotBlank() }?.let { project ->
+                    Text(
+                        text = project,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("header_project_name")
+                    )
+                }
             }
             onOpenSessions?.let { openSessions ->
                 IconButton(onClick = openSessions, modifier = Modifier.testTag("btn_open_sessions")) {

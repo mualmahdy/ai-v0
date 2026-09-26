@@ -124,6 +124,15 @@ interface KnowledgeDocumentDao {
     @Query("DELETE FROM knowledge_documents WHERE projectId = :projectId")
     suspend fun deleteAllForProject(projectId: Long)
 
+    /** CLOSURE P1 (transfer): identity-preserving workspace rebind for a
+     *  project's private documents (inside the verified-move transaction). */
+    @Query("UPDATE knowledge_documents SET workspaceId = :targetWorkspaceId WHERE projectId = :projectId")
+    suspend fun rebindWorkspaceForProject(projectId: Long, targetWorkspaceId: String)
+
+    /** CLOSURE P1 (transfer): document ids of a project (chunk cascade). */
+    @Query("SELECT id FROM knowledge_documents WHERE projectId = :projectId")
+    suspend fun documentIdsForProject(projectId: Long): List<String>
+
     /** Rebind ownership (import/clone/move, inside transactions). */
     @Query("UPDATE knowledge_documents SET projectId = :projectId WHERE id IN (:ids)")
     suspend fun reassignProject(ids: List<String>, projectId: Long?)
@@ -156,6 +165,20 @@ interface DocumentChunkDao {
 
     @Query("DELETE FROM document_chunks WHERE documentId = :documentId")
     suspend fun deleteChunksForDocument(documentId: String)
+
+    /** CLOSURE P1 (transfer): chunk cascade for a project's documents
+     *  (move/replace cleanup — embeddings are rebuilt at the destination). */
+    @Query("DELETE FROM document_chunks WHERE documentId IN (SELECT id FROM knowledge_documents WHERE projectId = :projectId)")
+    suspend fun deleteChunksForProject(projectId: Long)
+
+    /** CLOSURE P1 (transfer): chunk count for a project's documents (verify witness). */
+    @Query("SELECT COUNT(*) FROM document_chunks WHERE documentId IN (SELECT id FROM knowledge_documents WHERE projectId = :projectId)")
+    suspend fun countChunksForProject(projectId: Long): Int
+
+    /** CLOSURE P1 (transfer): identity-preserving workspace rebind for a
+     *  project's document chunks (inside the verified-move transaction). */
+    @Query("UPDATE document_chunks SET workspaceId = :targetWorkspaceId WHERE documentId IN (SELECT id FROM knowledge_documents WHERE projectId = :projectId)")
+    suspend fun rebindWorkspaceForProject(projectId: Long, targetWorkspaceId: String)
 
     @Query("DELETE FROM document_chunks WHERE workspaceId = :workspaceId")
     suspend fun deleteChunksForWorkspace(workspaceId: String)

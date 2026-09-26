@@ -150,6 +150,12 @@ fun ChatWorkspace(
     /** ---- ARTIFACT CANVAS (§10) wiring ---- */
     /** Opens a conversation artifact in the scope-aware preview surface. */
     onOpenArtifact: (com.example.presentation.state.ChatArtifactRef) -> Unit = {},
+    /** CLOSURE §8: persist an assistant entry as a versioned artifact. */
+    onSaveAsArtifact: (String) -> Unit = {},
+    /** CLOSURE §8: the artifact canvas's version lifecycle surface. */
+    onLoadArtifactVersions: () -> Unit = {},
+    onSaveArtifactVersion: (String) -> Unit = {},
+    onRollbackArtifactVersion: (Int) -> Unit = {},
     /** Closes the artifact preview without changing conversation history. */
     onCloseArtifact: () -> Unit = {},
     /** Stages a reviewable edit request for the active artifact in the composer. */
@@ -311,6 +317,9 @@ fun ChatWorkspace(
                 // scope-aware preview through the ViewModel — never a local
                 // read, never a fabricated render.
                 onOpenArtifact = onOpenArtifact,
+                // CLOSURE §8: Result → Artifact — the message action persists
+                // the entry's text as a versioned project artifact.
+                onSaveAsArtifact = onSaveAsArtifact,
                 modifier = Modifier.weight(1f)
             )
 
@@ -382,6 +391,11 @@ fun ChatWorkspace(
                 error = state.artifactError,
                 onEdit = onRequestArtifactEdit,
                 onClose = onCloseArtifact,
+                // CLOSURE §8: the full version lifecycle surface.
+                versions = state.artifactVersions,
+                onLoadVersions = onLoadArtifactVersions,
+                onSaveVersion = onSaveArtifactVersion,
+                onRollbackVersion = onRollbackArtifactVersion,
                 modifier = Modifier
                     .width(panePolicy.artifactPaneWidthDp.coerceAtLeast(1).dp)
                     .fillMaxHeight()
@@ -403,6 +417,11 @@ fun ChatWorkspace(
                 error = state.artifactError,
                 onEdit = onRequestArtifactEdit,
                 onClose = onCloseArtifact,
+                // CLOSURE §8: the full version lifecycle surface.
+                versions = state.artifactVersions,
+                onLoadVersions = onLoadArtifactVersions,
+                onSaveVersion = onSaveArtifactVersion,
+                onRollbackVersion = onRollbackArtifactVersion,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = 720.dp)

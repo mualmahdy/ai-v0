@@ -64,7 +64,13 @@ data class ArtifactEntity(
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long,
     @ColumnInfo(defaultValue = "'{}'")
-    val metadataJson: String = "{}"
+    val metadataJson: String = "{}",
+    /**
+     * CLOSURE §8 (DB v20): the artifact's CURRENT version (1 = initial).
+     * Version history lives in `artifact_versions` (append-only).
+     */
+    @ColumnInfo(defaultValue = "1")
+    val currentVersion: Int = 1
 )
 
 /**
@@ -122,6 +128,40 @@ data class ProjectSnapshotEntity(
     /** Export-format manifest JSON (no secrets). */
     val manifestJson: String,
     val contentHash: String,
+    val createdAtEpochMs: Long
+)
+
+/**
+ * ============================================================================
+ * ARTIFACT VERSIONS — DB v20 (CLOSURE §8: Result → Artifact lifecycle)
+ * ============================================================================
+ * One row per immutable version of an artifact's payload. The lifecycle
+ *   Result → Create Artifact → Preview → Edit → Diff → Approve → Persist
+ *   → Version → Rollback
+ * lands here: every SAVE creates a NEW version (append-only history — a
+ * rollback is a new version whose bytes equal an older one, never a
+ * destructive rewrite). Version payloads live in the project sandbox under
+ * `versions/<artifactId>/…`; the artifact row's `currentVersion` +
+ * `storageUri` always point at the CURRENT content.
+ */
+@Entity(
+    tableName = "artifact_versions",
+    indices = [Index("artifactId"), Index("createdAtEpochMs")]
+)
+data class ArtifactVersionEntity(
+    @PrimaryKey
+    val id: String,
+    val artifactId: String,
+    /** 1-based, monotonically increasing per artifact. */
+    val version: Int,
+    /** Sandbox-relative payload path of THIS version. */
+    val storageUri: String,
+    val sizeBytes: Long,
+    val contentHash: String?,
+    /** Human-readable provenance ("initial", "user edit", "rollback to v2"). */
+    val note: String?,
+    /** Who created it: executionId / "user" / "import". */
+    val createdBy: String?,
     val createdAtEpochMs: Long
 )
 

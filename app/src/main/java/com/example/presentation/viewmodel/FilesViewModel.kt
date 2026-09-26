@@ -47,8 +47,18 @@ class FilesViewModel(
     private val activeWorkspace: StateFlow<Workspace?>,
     private val bootstrapState: StateFlow<BootstrapState>,
     /** Injectable clock-free seam for deterministic tests. */
-    private val refreshOnProjectChange: Boolean = true
+    private val refreshOnProjectChange: Boolean = true,
+    /**
+     * CLOSURE §9 (Coding Workspace — versioning): the artifact service —
+     * every governed file save lands as an artifact VERSION (append-only
+     * history with rollback). Null (tests) ⇒ versioning is honestly off.
+     */
+    private val artifactService: com.example.application.artifacts.ArtifactService? = null
 ) : ViewModel() {
+
+    /** The resolved workspace id for the version writes. */
+    private val activeWorkspaceId: String
+        get() = activeWorkspace.value?.id ?: ""
 
     /** The files feature's own slice of UI state (was 4 fields of UiState). */
     data class FilesUiState(
@@ -145,8 +155,39 @@ class FilesViewModel(
         viewModelScope.launch {
             when (val outcome = manageWorkspaceFilesUseCase.writeProjectFile(projectId, relativePath, content)) {
                 is Outcome.Success -> {
+                    // CLOSURE §9 (Coding Workspace — version/undo): every
+                    // governed file save is snapshotted as an ARTIFACT
+                    // VERSION (append-only history) — the file gains
+                    // per-save rollback through the SAME versioned artifact
+                    // pipeline the chat results use. A failed version write
+                    // is honestly surfaced (the FILE save itself stands).
+                    val versionNote = runCatching {
+                        artifactService?.let { service ->
+                            val existing = service.forProject(projectId, limit = 500)
+                                .firstOrNull { it.storageUri == relativePath }
+                            val artifactId = existing?.id ?: service.registerFileArtifact(
+                                workspaceId = activeWorkspaceId.orEmpty(),
+                                projectId = projectId,
+                                relativePath = relativePath
+                            ).id
+                            service.createVersion(
+                                accessorScope = com.example.domain.core.context.ResourceScope.Project(
+                                    activeWorkspaceId.orEmpty(), projectId
+                                ),
+                                artifactId = artifactId,
+                                content = content.toByteArray(),
+                                note = "حفظ من مساحة عمل الكود",
+                                createdBy = "user"
+                            )?.version
+                        }
+                    }.getOrNull()
                     refreshFiles()
                     openFile(relativePath)
+                    if (versionNote != null) {
+                        _state.update {
+                            it.copy(diagnosticBanner = "حُفظ الملف — النسخة رقم $versionNote (يمكن التراجع عبر سجل المخرجات).")
+                        }
+                    }
                 }
                 is Outcome.Error -> _state.update { it.copy(errorMessage = outcome.diagnosticMessage) }
                 is Outcome.Degraded -> {

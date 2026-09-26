@@ -503,6 +503,86 @@ class RagPipelineService(
     }
 
     /**
+     * CLOSURE P1 (RAG portability): rebuilds the chunk index (chunk + embed +
+     * persist) for an ALREADY-IMPORTED document row.
+     *
+     * Package import carries document METADATA + full CONTENT (the trusted
+     * rebuild source) but NOT chunk embeddings — embedding vectors are only
+     * valid for the embedding resource that produced them, which may not
+     * exist on the destination device. The honest portability contract:
+     *   - integrity: the document's content is the single source of truth;
+     *   - rebuild: chunks are re-split and re-embedded with THIS device's
+     *     active embedding resource (or the lexical fallback — honestly
+     *     labeled LEXICAL_FALLBACK in chunk metadata);
+     *   - the document row's totalChunks becomes the REAL persisted count
+     *     (never the exported device's count — that would be a claim with
+     *     no rows behind it).
+     *
+     * Returns the number of chunks persisted (0 + a diagnostic on failure —
+     * the caller surfaces the state honestly instead of a fake count).
+     */
+    suspend fun rebuildChunksForImportedDocument(
+        workspaceId: String,
+        document: KnowledgeDocument
+    ): Pair<Int, String?> = withContext(Dispatchers.Default) {
+        if (persistenceService == null) {
+            return@withContext 0 to "RAG_PERSISTENCE_UNAVAILABLE"
+        }
+        val splitChunks = splitIntoChunks(document)
+        if (splitChunks.isEmpty()) {
+            return@withContext 0 to "EMPTY_DOCUMENT"
+        }
+        val (embeddingProvider, usedResourceId) = resolveEmbeddingProvider()
+        activeEmbeddingResourceId = usedResourceId
+        val batchVectors: List<EmbeddingVector>? = if (embeddingProvider != null) {
+            when (val batchOutcome = embeddingProvider.generateEmbeddings(splitChunks.map { it.text })) {
+                is Outcome.Success -> batchOutcome.value
+                else -> null
+            }
+        } else null
+        val embeddedChunks = splitChunks.mapIndexed { index, chunk ->
+            val vector = batchVectors?.getOrNull(index) ?: generateLexicalVector(chunk.text)
+            chunk.copy(
+                vector = vector,
+                metadata = chunk.metadata + mapOf(
+                    "embeddingResourceId" to (usedResourceId?.value ?: "local_lexical"),
+                    "embeddingSemantic" to isProviderSemantic(embeddingProvider).toString(),
+                    "rebuiltByImport" to "true"
+                )
+            )
+        }
+        val completedDoc = document.copy(totalChunks = embeddedChunks.size)
+        val persisted = runCatching {
+            persistenceService.persistDocument(
+                workspaceId = workspaceId,
+                document = completedDoc,
+                chunks = embeddedChunks
+            )
+            true
+        }
+        if (persisted.getOrDefault(false)) {
+            // Keep the in-memory working set consistent when the import
+            // targets the active scope; a different scope reloads on next use.
+            if (currentWorkspaceId() == workspaceId) {
+                _documents.update { current ->
+                    current.filterNot { it.id == completedDoc.id } + completedDoc
+                }
+                chunksMutex.withLock {
+                    chunks.removeAll { it.documentId == completedDoc.id }
+                    chunks.addAll(embeddedChunks)
+                }
+                embeddedChunks.forEach { indexed ->
+                    indexedChunks.removeAll { it.chunk.documentId == completedDoc.id }
+                    indexedChunks.add(indexChunk(indexed))
+                }
+            }
+            embeddedChunks.size to null
+        } else {
+            0 to "RAG_REBUILD_FAILED: ${persisted.exceptionOrNull()?.localizedMessage ?: "unknown"}"
+        }
+    }
+
+    /**
      * Resolve the active embedding adapter via the resource pipeline.
      *
      * Returns (adapter, resourceId) where:

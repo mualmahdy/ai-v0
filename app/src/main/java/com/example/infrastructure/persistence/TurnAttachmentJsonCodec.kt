@@ -32,7 +32,9 @@ object TurnAttachmentJsonCodec {
                     .put("sizeBytes", attachment.sizeBytes)
                     .put("storageUri", attachment.storageUri)
                     .put("provenance", attachment.provenance)
+                    .put("groundingState", attachment.groundingState)
                     .apply { attachment.artifactId?.let { put("artifactId", it) } }
+                    .apply { attachment.folderReportJson?.let { put("folderReport", it) } }
             )
         }
         return array.toString()
@@ -56,7 +58,13 @@ object TurnAttachmentJsonCodec {
                     sizeBytes = obj.optLong("sizeBytes", 0L),
                     storageUri = storageUri,
                     artifactId = obj.optString("artifactId").takeIf { it.isNotBlank() },
-                    provenance = obj.optString("provenance", "SAF_FILE").ifBlank { "SAF_FILE" }
+                    provenance = obj.optString("provenance", "SAF_FILE").ifBlank { "SAF_FILE" },
+                    groundingState = runCatching {
+                        com.example.domain.core.session.TurnAttachment.GroundingState.valueOf(
+                            obj.optString("groundingState", "ATTACHMENT_ONLY").ifBlank { "ATTACHMENT_ONLY" }
+                        ).name
+                    }.getOrDefault(com.example.domain.core.session.TurnAttachment.GroundingState.ATTACHMENT_ONLY.name),
+                    folderReportJson = obj.optString("folderReport").takeIf { it.isNotBlank() }
                 )
             }
             result

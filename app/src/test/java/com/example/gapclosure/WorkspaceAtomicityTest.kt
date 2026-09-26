@@ -135,7 +135,11 @@ class WorkspaceAtomicityTest {
             stored[projectId] = entity.copy(workspaceId = targetWorkspaceId)
             return 1
         }
-    }
+            override suspend fun countSessionsForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+        override suspend fun countKnowledgeForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+        override suspend fun countTasksForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+        override suspend fun countArtifactsForProjectInWorkspace(projectId: Long, workspaceId: String): Int = 0
+}
 
     private lateinit var workspaceDao: FakeWorkspaceDao
     private lateinit var projectDao: FakeProjectDao

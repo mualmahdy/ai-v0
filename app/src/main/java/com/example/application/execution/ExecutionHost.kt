@@ -41,6 +41,30 @@ object ExecutionHost {
 
     val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * CLOSURE P0 (durable side-effect lifetime): app-wide supervisor scope
+     * for DURABLE WRITES that outlive an execution's kernel coroutine and must
+     * NEVER die with a ViewModel (turn persistence, approval-block writes,
+     * capability-event persistence). Previously these writes ran on
+     * `viewModelScope` — a screen destroyed mid-execution silently KILLED the
+     * persistence of a turn the user had already received. The scope is
+     * supervised (one failed write never cancels siblings) and IO-bound; the
+     * writes themselves already carry their execution's PINNED ids as
+     * explicit parameters, so no live-provider read is introduced here.
+     *
+     * TEST SEAM: [durableScopeOverride] lets deterministic tests run the
+     * durable writes on THEIR dispatcher (Robolectric classloaders isolate
+     * production from tests; production never sets it).
+     */
+    @Volatile
+    var durableScopeOverride: CoroutineScope? = null
+
+    val durableScope: CoroutineScope
+        get() = durableScopeOverride ?: defaultDurableScope
+
+    private val defaultDurableScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     // P1-10 (audit 2026 §20): the legacy `_events` SharedFlow
     // (extraBufferCapacity=256, DROP_OLDEST, tryEmit) had ZERO consumers —
     // it was dead wiring whose only possible behaviour under a burst was

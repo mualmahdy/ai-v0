@@ -25,6 +25,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Paid
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material.icons.filled.VerifiedUser
@@ -399,6 +401,151 @@ fun GovernanceScreen(
                                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)
                             ) { Text("رفض", style = MaterialTheme.typography.labelMedium) }
                         }
+                    }
+                }
+            }
+        }
+
+        // ===================== ACTIVE GRANTS (CLOSURE §10) =====================
+        // The discoverable standing-consent management surface: every ACTIVE
+        // grant with its scope/expiry/granter and a REAL revoke path (the
+        // "السماح دائماً" dialog always promised this surface; it now exists).
+        item {
+            SectionHeader(
+                icon = Icons.Default.Key,
+                title = "المنح النشطة (${state.activeGrants.size})",
+                subtitle = "الأذونات الدائمة الممنوحة — يمكنك سحب أي منح في أي وقت"
+            )
+        }
+        if (state.activeGrants.isEmpty()) {
+            item {
+                EmptyState(
+                    icon = Icons.Default.Key,
+                    title = "لا توجد منحات دائمة نشطة",
+                    hint = "كل أداة حساسة ستطلب موافقتك صراحة عند كل تنفيذ — لا ثقة مسبقة."
+                )
+            }
+        } else {
+            items(state.activeGrants, key = { "grant_${it.id}" }) { grant ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .testTag("active_grant_card"),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Key,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = grant.resourceId,
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.testTag("grant_resource")
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = grant.permission,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "النطاق: " + (grant.workspaceId ?: "عام (كل المساحات)") +
+                                    " • الممنوح لـ: ${grant.principalType}:${grant.principalId}" +
+                                    " • بواسطة: ${grant.grantedBy}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2
+                        )
+                        if (grant.expiresAtEpochMs != null) {
+                            Text(
+                                text = "ينتهي: " + java.text.SimpleDateFormat(
+                                    "yyyy/MM/dd HH:mm", java.util.Locale.getDefault()
+                                ).format(java.util.Date(grant.expiresAtEpochMs)),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.tertiary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { viewModel.revokeGrant(grant.id) },
+                            enabled = state.revokingGrantId != grant.id,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("btn_revoke_grant_${grant.id}"),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)
+                        ) {
+                            Text(
+                                if (state.revokingGrantId == grant.id) "جارٍ السحب…" else "سحب المنح",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // ===================== APPROVAL HISTORY (CLOSURE §10) =====================
+        item {
+            SectionHeader(
+                icon = Icons.Default.History,
+                title = "سجل قرارات الموافقة (${state.approvalHistory.size})",
+                subtitle = "كل طلب موافقة وقريره — الشفافية الكاملة لبوابة الحوكمة"
+            )
+        }
+        if (state.approvalHistory.isEmpty()) {
+            item {
+                EmptyState(
+                    icon = Icons.Default.History,
+                    title = "لا قرارات موافقة بعد",
+                    hint = "ستظهر هنا كل قرارات الموافقة/الرفض مع هوية التنفيذ المرتبطة."
+                )
+            }
+        } else {
+            items(state.approvalHistory, key = { "history_${it.approvalId}" }) { entry ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .testTag("approval_history_card"),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val (tint, label) = when (entry.resolution.name) {
+                                "APPROVED" -> MaterialTheme.colorScheme.primary to "مُوافَق"
+                                "REJECTED" -> MaterialTheme.colorScheme.error to "مرفوض"
+                                "EXPIRED" -> MaterialTheme.colorScheme.onSurfaceVariant to "منتهي"
+                                else -> MaterialTheme.colorScheme.tertiary to "بانتظار"
+                            }
+                            Icon(
+                                Icons.Default.GppMaybe,
+                                contentDescription = null,
+                                tint = tint,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "${entry.toolName} — $label",
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.testTag("history_tool")
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "التنفيذ: ${entry.executionId}" +
+                                    (entry.resolvedBy?.let { " • بواسطة: $it" } ?: ""),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2
+                        )
                     }
                 }
             }

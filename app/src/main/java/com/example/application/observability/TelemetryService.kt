@@ -41,13 +41,13 @@ import java.util.UUID
  */
 class TelemetryService(
     private val telemetryPort: TelemetryPort,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
-    /**
-     * GOVERNANCE PHASE FIX (workspace isolation): the active workspace id —
-     * previously `MetricDimensions.workspaceId` was NEVER populated, so all
-     * metric rows were globally scoped. Late-bound wiring (AppContainer).
-     */
-    var workspaceIdProvider: (() -> String?)? = null
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // CLOSURE P0: the late-bound live-workspace provider was REMOVED —
+    // attribution is execution-binding only (see resolveWorkspaceFor).
+    // An event with no binding is honestly UNATTRIBUTED; it is never
+    // attributed to whichever workspace happens to be active at landing
+    // time (a mid-run switch would silently move the metric row across
+    // workspaces).
 ) {
 
     /** Standard counter increment. */
@@ -217,6 +217,14 @@ class TelemetryService(
      * workspace — not to whichever workspace happens to be active when the
      * event lands (mid-run workspace switching no longer moves telemetry
      * attribution across workspaces).
+     *
+     * CLOSURE P0: an event with NO binding is attributed HONESTLY as
+     * unattributed (null) — never to the LIVE active workspace. The old
+     * live-provider fallback silently mis-attributed late events of an
+     * execution that never emitted `Started` (or emitted it before the
+     * collector subscribed) to whatever workspace was active at landing
+     * time; a missing binding is now an honest gap in the data, not a
+     * fabricated attribution.
      */
     private val executionWorkspaceBinding = java.util.concurrent.ConcurrentHashMap<String, String>()
 
@@ -228,7 +236,6 @@ class TelemetryService(
             }
         }
         return executionWorkspaceBinding[event.executionId]
-            ?: runCatching { workspaceIdProvider?.invoke() }.getOrNull()
     }
 
     private suspend fun handle(event: ExecutionEvent) {

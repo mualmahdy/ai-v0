@@ -59,4 +59,8 @@ interface HumanApprovalRequestDao {
 
     @Query("SELECT COUNT(*) FROM human_approval_requests")
     suspend fun countAll(): Int
+
+    /** CLOSURE §10 (Governance Center): the FULL decision history. */
+    @Query("SELECT * FROM human_approval_requests ORDER BY requestedAtEpochMs DESC LIMIT :limit")
+    suspend fun recentHistory(limit: Int = 200): List<HumanApprovalRequestEntity>
 }

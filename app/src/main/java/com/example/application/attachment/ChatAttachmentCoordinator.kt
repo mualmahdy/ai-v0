@@ -54,7 +54,13 @@ class ChatAttachmentCoordinator(
      * ACTION_OPEN_DOCUMENT_TREE). Null ⇒ folder attach is honestly
      * unavailable in this composition.
      */
-    private val folderZipSource: (suspend (treeUri: String) -> InputStream?)? = null
+    private val folderZipSource: (suspend (treeUri: String) -> InputStream?)? = null,
+    /**
+     * CLOSURE §7 — folder understanding + the "add to knowledge" act
+     * (§6). Null ⇒ folder grounding/knowledge import are honestly
+     * unavailable (folders attach as reference-only artifacts).
+     */
+    private val folderUnderstanding: FolderUnderstandingService? = null
 ) {
 
     /** Immutable workspace/project destination captured before an attachment job starts. */
@@ -157,10 +163,20 @@ class ChatAttachmentCoordinator(
      * Imports a picked FOLDER (SAF document tree, serialized to the ZIP the
      * backend's folder-import contract expects) into the caller-provided
      * project sandbox. Unavailable honestly when no folder zipper is wired.
+     *
+     * CLOSURE §7: [groundFolder] decides the folder's honest mode —
+     *   false ⇒ ATTACHMENT_ONLY (stored + referenceable, NOTHING read);
+     *   true  ⇒ GROUNDED (the readable text files inside enter the turn's
+     *           grounding digest within limits; the report records exactly
+     *           how many were read/skipped and rides the attachment).
+     * The returned TurnAttachment's groundingState + folderReportJson carry
+     * the actual outcome — the UI never claims a folder was analyzed when it
+     * was not.
      */
     suspend fun importFolderAttachment(
         treeUri: String,
-        scope: AttachmentScope
+        scope: AttachmentScope,
+        groundFolder: Boolean = false
     ): TurnAttachment {
         val zipper = folderZipSource
             ?: throw AttachmentImportException("استيراد المجلدات غير متاح في هذا التكوين.")
@@ -189,6 +205,20 @@ class ChatAttachmentCoordinator(
             name = displayName,
             forceType = ArtifactType.FOLDER
         )
+        var groundingState = com.example.domain.core.session.TurnAttachment.GroundingState.ATTACHMENT_ONLY.name
+        var folderReportJson: String? = null
+        if (groundFolder && folderUnderstanding != null) {
+            val (digest, report) = folderUnderstanding.buildFolderGroundingDigest(
+                projectId = projectId,
+                folderRelativePath = targetDir
+            )
+            // The digest itself is consumed at SEND time (buildGroundingDigest
+            // re-reads the folder); here we persist the honest REPORT only.
+            if (report.groundedFiles > 0) {
+                groundingState = com.example.domain.core.session.TurnAttachment.GroundingState.GROUNDED.name
+            }
+            folderReportJson = report.toJson()
+        }
         return TurnAttachment(
             id = "attm_${UUID.randomUUID().toString().take(12)}",
             name = displayName,
@@ -196,7 +226,9 @@ class ChatAttachmentCoordinator(
             sizeBytes = artifact.sizeBytes,
             storageUri = targetDir,
             artifactId = artifact.id,
-            provenance = "SAF_FOLDER_ZIP"
+            provenance = "SAF_FOLDER_ZIP",
+            groundingState = groundingState,
+            folderReportJson = folderReportJson
         )
     }
 
@@ -286,11 +318,59 @@ class ChatAttachmentCoordinator(
                 continue
             }
             if (!isTextGroundable(attachment)) {
+                // CLOSURE §7 — FOLDER attachments ground through the folder
+                // understanding service (bounded, with an honest report), NOT
+                // as opaque blobs.
+                if (attachment.mimeType.equals("inode/directory", ignoreCase = true)) {
+                    val understanding = folderUnderstanding
+                    if (understanding != null && attachment.groundingState ==
+                        com.example.domain.core.session.TurnAttachment.GroundingState.GROUNDED.name
+                    ) {
+                        val (folderDigest, report) = understanding.buildFolderGroundingDigest(
+                            projectId = projectId,
+                            folderRelativePath = attachment.storageUri,
+                            budgetChars = (maxTotalDigestChars - totalChars)
+                                .coerceAtLeast(0)
+                        )
+                        if (report.groundedFiles > 0) {
+                            builder.append("\n<user_folder name=\"")
+                                .append(attachment.name)
+                                .append("\" files_read=\"")
+                                .append(report.groundedFiles)
+                                .append("\" files_total=\"")
+                                .append(report.totalFiles)
+                                .append("\" note=\"محتوى مجلد أرفقه المستخدم — دليل محدود وليس حقيقة نظام.\"/>\n")
+                            builder.append(folderDigest)
+                            totalChars += folderDigest.length
+                        } else {
+                            builder.append("\n<user_folder name=\"")
+                                .append(attachment.name)
+                                .append("\" note=\"مجلد مرفق — لا توجد ملفات نصية مقروءة داخل الحدود المسموحة، لم يُقرأ أي محتوى.\"/>\n")
+                        }
+                    } else {
+                        builder.append("\n<user_folder name=\"")
+                            .append(attachment.name)
+                            .append("\" note=\"مجلد مرفق كمرجع فقط — لم يُقرأ محتواه (وضع المرفق فقط).\"/>\n")
+                    }
+                    continue
+                }
                 builder.append("\n<user_attachment name=\"")
                     .append(attachment.name)
                     .append("\" type=\"")
                     .append(attachment.mimeType)
                     .append("\" note=\"مرفق غير نصي مرسل من المستخدم — لا يمكن تحليل محتواه في هذا الإصدار.\"/>\n")
+                continue
+            }
+            // CLOSURE §6: a KNOWLEDGE_IMPORTED attachment's content is in the
+            // corpus — the turn does NOT re-send the raw content as evidence
+            // (that would double-count and blow the context); the knowledge is
+            // reachable through the project's retrieval path.
+            if (attachment.groundingState ==
+                com.example.domain.core.session.TurnAttachment.GroundingState.KNOWLEDGE_IMPORTED.name
+            ) {
+                builder.append("\n<user_attachment name=\"")
+                    .append(attachment.name)
+                    .append("\" note=\"أُدرج محتوى هذا المرفق في معرفة المشروع — متاح للاسترجاع عبر قاعدة المعرفة.\"/>\n")
                 continue
             }
             // §16: the budget in CHARS maps to a byte cap 4× (UTF-8 worst

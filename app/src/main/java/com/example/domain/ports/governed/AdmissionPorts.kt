@@ -78,6 +78,11 @@ interface HumanApprovalStorePort {
      * PENDING rows, so a retry minted a NEW request forever).
      */
     suspend fun findApprovedFor(executionId: String, toolName: String, nowEpochMs: Long): HumanApprovalRequest?
+    /**
+     * CLOSURE §10 (Governance Center — approval history): every decision the
+     * gate ever recorded, newest first (pending + resolved + expired).
+     */
+    suspend fun recentHistory(limit: Int = 200): List<HumanApprovalRequest> = emptyList()
     suspend fun resolve(approvalId: String, resolution: ApprovalResolution, resolvedBy: String): HumanApprovalRequest?
     suspend fun expireStale(nowEpochMs: Long): Int
     suspend fun markTokenConsumed(approvalId: String): Boolean

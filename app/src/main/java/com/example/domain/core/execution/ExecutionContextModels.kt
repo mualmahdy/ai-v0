@@ -28,12 +28,18 @@ import com.example.domain.core.task.TaskId
  *    agent with different prompts/capabilities/permissions.
  *  - [projectId] is the workspace-scoped sandbox project (nullable = not
  *    yet bound; NEVER an implicit 1L fallback).
+ *  - [sessionId] is the governed chat session this execution's durable
+ *    side-effects (turns, timeline events, approval blocks) belong to
+ *    (CLOSURE P0 — the immutable invocation scope is now the COMPLETE
+ *    tuple workspace/project/session; null = a non-chat execution such
+ *    as a workflow step, which has no conversation session).
  */
 data class CanonicalExecutionContext(
     val executionId: String,
     val taskId: TaskId,
     val workspaceId: String,
     val projectId: Long? = null,
+    val sessionId: String? = null,
     val agentId: AgentId,
     val agentRole: AgentRole,
     val modelId: String? = null,

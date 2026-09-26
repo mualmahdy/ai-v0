@@ -26,6 +26,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.History
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -66,9 +72,25 @@ internal fun SmartArtifactCanvas(
     error: String?,
     onEdit: () -> Unit,
     onClose: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** CLOSURE §8: the artifact's version history (empty = not loaded). */
+    versions: List<com.example.application.artifacts.ArtifactService.ArtifactVersionInfo> = emptyList(),
+    /** CLOSURE §8: opens/refreshes the version history. */
+    onLoadVersions: () -> Unit = {},
+    /** CLOSURE §8: persists edited content as the NEXT version. */
+    onSaveVersion: (String) -> Unit = {},
+    /** CLOSURE §8: rolls the artifact back to an older version. */
+    onRollbackVersion: (Int) -> Unit = {}
 ) {
     val clipboard = LocalClipboardManager.current
+    // CLOSURE §8: the editable edit surface (content + save-as-new-version).
+    var editing by rememberSaveable(artifact?.name ?: "") { mutableStateOf(false) }
+    var editBuffer by rememberSaveable(artifact?.name ?: "") { mutableStateOf("") }
+    var versionsOpen by rememberSaveable(artifact?.name ?: "") { mutableStateOf(false) }
+    // Load the version history when an artifact opens (once per artifact).
+    LaunchedEffect(artifact?.artifactId) {
+        if (artifact != null) onLoadVersions()
+    }
     Surface(
         tonalElevation = 2.dp,
         modifier = modifier.testTag("smart_artifact_canvas")
@@ -126,6 +148,14 @@ internal fun SmartArtifactCanvas(
                     ) {
                         Icon(Icons.Default.Edit, contentDescription = "طلب تعديل الأثر")
                     }
+                    // CLOSURE §8 (version lifecycle): the versions surface —
+                    // history + rollback for THIS artifact.
+                    IconButton(
+                        onClick = { versionsOpen = true },
+                        modifier = Modifier.testTag("artifact_versions")
+                    ) {
+                        Icon(Icons.Default.History, contentDescription = "سجل نسخ الأثر")
+                    }
                     IconButton(
                         onClick = onClose,
                         modifier = Modifier.testTag("artifact_close")
@@ -171,8 +201,54 @@ internal fun SmartArtifactCanvas(
                     selected.mimeType.substringBefore(';').trim().lowercase() == "text/markdown" ||
                         selected.name.endsWith(".md", ignoreCase = true) ||
                         selected.name.endsWith(".markdown", ignoreCase = true) -> {
-                        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                            RichMarkdownContent(markdown = content, modifier = Modifier.fillMaxWidth())
+                        if (editing) {
+                            // CLOSURE §8 (Edit → Version): a REVIEWABLE edit —
+                            // saving creates the NEXT version; nothing is
+                            // silently overwritten.
+                            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                androidx.compose.material3.OutlinedTextField(
+                                    value = editBuffer,
+                                    onValueChange = { newEditValue -> editBuffer = newEditValue },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 160.dp)
+                                        .testTag("artifact_edit_field"),
+                                    label = { androidx.compose.material3.Text("تعديل المحتوى (يُحفظ كنسخة جديدة)") }
+                                )
+                                androidx.compose.material3.Button(
+                                    onClick = {
+                                        onSaveVersion(editBuffer)
+                                        editing = false
+                                    },
+                                    enabled = editBuffer.isNotBlank(),
+                                    modifier = Modifier
+                                        .padding(top = 8.dp)
+                                        .testTag("artifact_save_version")
+                                ) { androidx.compose.material3.Text("حفظ كنسخة جديدة") }
+                            }
+                        } else {
+                            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                RichMarkdownContent(markdown = content, modifier = Modifier.fillMaxWidth())
+                                // CLOSURE §8: direct-edit entry — opens the
+                                // reviewable edit surface (save = NEW version).
+                                androidx.compose.material3.TextButton(
+                                    onClick = {
+                                        editBuffer = content ?: ""
+                                        editing = true
+                                    },
+                                    modifier = Modifier
+                                        .padding(top = 4.dp)
+                                        .testTag("artifact_inline_edit")
+                                ) {
+                                    Icon(
+                                        Icons.Default.Edit,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.size(4.dp))
+                                    androidx.compose.material3.Text("تحرير (يُحفظ كنسخة جديدة)")
+                                }
+                            }
                         }
                     }
                     else -> {
@@ -187,6 +263,65 @@ internal fun SmartArtifactCanvas(
                             }
                         }
                     }
+                }
+
+                // CLOSURE §8: the VERSIONS SHEET (history + rollback).
+                if (versionsOpen) {
+                    androidx.compose.material3.AlertDialog(
+                        onDismissRequest = { versionsOpen = false },
+                        title = { androidx.compose.material3.Text("نسخ الأثر") },
+                        text = {
+                            androidx.compose.foundation.lazy.LazyColumn {
+                                items(
+                                    versions.size,
+                                    key = { versions[it].version }
+                                ) { index ->
+                                    val version = versions[index]
+                                    androidx.compose.foundation.layout.Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 4.dp)
+                                    ) {
+                                        androidx.compose.foundation.layout.Row(
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            androidx.compose.foundation.layout.Column(
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                androidx.compose.material3.Text(
+                                                    "النسخة ${version.version}" +
+                                                            if (version.isCurrent) " (الحالية)" else "",
+                                                    fontWeight = FontWeight.Bold,
+                                                    style = MaterialTheme.typography.titleSmall
+                                                )
+                                                androidx.compose.material3.Text(
+                                                    text = (version.note ?: "") + " • " +
+                                                            formatArtifactSize(version.sizeBytes),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            if (!version.isCurrent) {
+                                                androidx.compose.material3.TextButton(
+                                                    onClick = {
+                                                        onRollbackVersion(version.version)
+                                                        versionsOpen = false
+                                                    },
+                                                    modifier = Modifier.testTag("artifact_rollback_${version.version}")
+                                                ) { androidx.compose.material3.Text("رجوع") }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        confirmButton = {},
+                        dismissButton = {
+                            androidx.compose.material3.TextButton(
+                                onClick = { versionsOpen = false }
+                            ) { androidx.compose.material3.Text("إغلاق") }
+                        }
+                    )
                 }
             }
         }

@@ -105,6 +105,16 @@ class GovernanceViewModel(
         // Null = not yet measured (the fetch runs with refreshGovernance).
         val measurementHealth: MeasurementHealth? = null,
         /**
+         * CLOSURE §10 (Governance Center — grant management): the ACTIVE
+         * standing grants (scope, expiry, granter) with a real REVOKE path —
+         * the discoverable surface the grant-always dialog always promised.
+         */
+        val activeGrants: List<com.example.infrastructure.persistence.entities.PermissionGrantEntity> = emptyList(),
+        /** CLOSURE §10: the approval gate's FULL decision history. */
+        val approvalHistory: List<HumanApprovalRequest> = emptyList(),
+        /** CLOSURE §10: whether a revoke is in flight (per-grant spinner). */
+        val revokingGrantId: Long? = null,
+        /**
          * DISPLAY MIRROR ONLY (ADR-6 slice 4): the SESSION network policy is
          * owned by StudioViewModel; this mirror is synced from the studio
          * signal bus so the radar snapshot reads ONE shared value. The
@@ -198,6 +208,9 @@ class GovernanceViewModel(
     fun refreshGovernance() {
         // GAP-02: the approval surface refreshes with the observatory.
         refreshPendingApprovals()
+        // CLOSURE §10: grants + decision history refresh with the
+        // observatory too — the governance center is one coherent surface.
+        refreshGrantsAndHistory()
         viewModelScope.launch {
             // P0-03: bootstrap-aware — skip honestly when no workspace yet.
             val wsId = workspaceRuntimeService.awaitActiveWorkspaceId() ?: run {
@@ -310,6 +323,46 @@ class GovernanceViewModel(
         viewModelScope.launch {
             val pending = runCatching { gate.pendingApprovals() }.getOrDefault(emptyList())
             _state.update { it.copy(pendingApprovals = pending) }
+        }
+    }
+
+    /**
+     * CLOSURE §10 (Governance Center): loads the ACTIVE standing grants and
+     * the approval gate's FULL decision history — the management surfaces
+     * behind "السماح دائماً" that previously existed only as a promise in
+     * the grant dialog.
+     */
+    fun refreshGrantsAndHistory() {
+        viewModelScope.launch {
+            val grants = runCatching { permissionGrantService?.listActiveGrants() }
+                .getOrNull() ?: emptyList()
+            val history = runCatching { humanApprovalGate?.approvalHistory() }
+                .getOrNull() ?: emptyList()
+            _state.update { it.copy(activeGrants = grants, approvalHistory = history) }
+        }
+    }
+
+    /**
+     * CLOSURE §10: revokes a standing grant THROUGH the real service (the
+     * same authorization path that granted it — audited, workspace-aware).
+     */
+    fun revokeGrant(grantId: Long) {
+        val grants = permissionGrantService ?: return
+        _state.update { it.copy(revokingGrantId = grantId) }
+        viewModelScope.launch {
+            runCatching { grants.revoke(grantId, localPrincipalId) }
+                .onSuccess {
+                    _state.update { it.copy(revokingGrantId = null) }
+                    refreshGrantsAndHistory()
+                }
+                .onFailure { failure ->
+                    _state.update {
+                        it.copy(
+                            revokingGrantId = null,
+                            errorMessage = "تعذر إلغاء المنح #$grantId: ${failure.localizedMessage}"
+                        )
+                    }
+                }
         }
     }
 

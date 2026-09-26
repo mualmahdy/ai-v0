@@ -205,7 +205,9 @@ class FailClosedSecurityTest {
         ): com.example.infrastructure.persistence.entities.PermissionGrantEntity? = null
         override suspend fun upsert(grant: com.example.infrastructure.persistence.entities.PermissionGrantEntity) = 1L
         override suspend fun revoke(id: Long) {}
-    }
+            override suspend fun all(limit: Int): List<com.example.infrastructure.persistence.entities.PermissionGrantEntity> = emptyList()
+        override suspend fun activeGrants(limit: Int): List<com.example.infrastructure.persistence.entities.PermissionGrantEntity> = emptyList()
+}
 
     private object NoopTelemetryPort : com.example.domain.ports.observability.TelemetryPort {
         override suspend fun record(sample: com.example.domain.core.observability.MetricSample) {}

@@ -131,6 +131,13 @@ class MainActivity : FragmentActivity() {
         GovernanceViewModelFactory(appContainer, studioSignalBus)
     }
 
+    // CLOSURE §11: the SYSTEM HEALTH feature ViewModel — the user-facing
+    // repair/recovery surface (interrupted executions + deterministic
+    // condition repairs with honest verification results).
+    private val systemHealthViewModel: com.example.presentation.viewmodel.SystemHealthViewModel by viewModels {
+        com.example.presentation.di.SystemHealthViewModelFactory(appContainer)
+    }
+
     // ADR-6 slice 5 (Design Closure 2026 UI-redesign track): the PROVIDERS
     // feature ViewModel — the provider & resource control room (control-
     // plane flows, first-run provider bootstrap seeding, connect wizard,
@@ -310,7 +317,8 @@ class MainActivity : FragmentActivity() {
                                 agentsViewModel = agentsViewModel,
                                 extensionsViewModel = extensionsViewModel,
                                 activityViewModel = activityViewModel,
-                                projectsViewModel = projectsViewModel
+                                projectsViewModel = projectsViewModel,
+                                systemHealthViewModel = systemHealthViewModel
                             )
                         }
                     }

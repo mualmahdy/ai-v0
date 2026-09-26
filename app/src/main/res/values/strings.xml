@@ -149,4 +149,35 @@
     <string name="component_token_usage">استهلاك الرموز</string>
     <string name="component_tokens_unit">%1$d رمز</string>
     <string name="component_token_budget">ميزانية الرموز</string>
+
+    <!-- CLOSURE §11 — System Health (repair / recovery) -->
+    <string name="health_title">صحة النظام</string>
+    <string name="health_rescan">إعادة الفحص</string>
+    <string name="health_scanning">جارٍ فحص صحة النظام…</string>
+    <string name="health_all_good">النظام سليم — لا حالات غير متسقة</string>
+    <string name="health_all_good_hint">تنفيذات مقاطعة، مساحات بمراجع مكسورة، ومشاريع يتيمة ستظهر هنا مع إجراء إصلاح حقيقي.</string>
+    <string name="health_issues_found">حالات تحتاج انتباهاً: %1$d</string>
+    <string name="health_summary_hint">كل إصلاح حتمي وقابل للتدقيق، ويُتحقق منه بإعادة الفحص بعد التنفيذ — لا نجاح زائف.</string>
+    <string name="health_interrupted_title">تنفيذات متوقفة (%1$d)</string>
+    <string name="health_interrupted_subtitle">مهام انقطعت بموت العملية — استئنافها من نقطة التوقف أو تسويتها بأمان</string>
+    <string name="health_task_no_prompt">مهمة بدون نص (استئناف من نقطة التوقف)</string>
+    <string name="health_task_identity">المهمة: %1$s</string>
+    <string name="health_resume">استئناف</string>
+    <string name="health_reconcile">تسوية إلى فاشلة</string>
+    <string name="health_conditions_title">حالات عدم الاتساق</string>
+    <string name="health_conditions_subtitle">كشف حتمي: مراجع مكسورة، مشاريع يتيمة، موارد غير صالحة</string>
+    <string name="health_repair">إصلاح</string>
+
+    <!-- CLOSURE §4.4 — Projects transfer workflows -->
+    <string name="more_health_title">صحة النظام والإصلاح</string>
+    <string name="more_health_desc">تنفيذات متوقفة، حالات غير متسقة، وإصلاح حتمي موثق</string>
+    <string name="projects_export">تصدير المشروع</string>
+    <string name="projects_import">استيراد مشروع</string>
+    <string name="projects_move">نقل المشروع</string>
+    <string name="projects_clone">استنساخ المشروع</string>
+    <string name="projects_snapshot">لقطة</string>
+    <string name="projects_restore">استعادة لقطة</string>
+    <string name="projects_transfer_progress">جارٍ نقل المشروع…</string>
+    <string name="projects_export_progress">جارٍ التصدير…</string>
+    <string name="projects_import_progress">جارٍ الاستيراد…</string>
 </resources>

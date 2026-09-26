@@ -113,6 +113,15 @@ class PermissionGrantService(
     }
 
     /**
+     * CLOSURE §10 (Governance Center — grant management): the ACTIVE grants
+     * list (the discoverable "standing consents" surface the grant-always
+     * dialog promises). Every row exposes its scope (GLOBAL vs workspace),
+     * expiry and granter so the user can revoke an informed decision.
+     */
+    suspend fun listActiveGrants(limit: Int = 500): List<PermissionGrantEntity> =
+        withContext(Dispatchers.IO) { permissionGrantDao.activeGrants(limit) }
+
+    /**
      * WORKSPACE-SCOPED check (defect family 2): a grant authorizes only
      * when it is explicitly GLOBAL or scoped to the SAME workspace as the
      * execution. A grant scoped to another workspace can never authorize

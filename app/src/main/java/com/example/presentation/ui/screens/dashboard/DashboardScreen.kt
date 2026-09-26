@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Healing
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Settings
@@ -182,6 +183,7 @@ fun DashboardScreen(
                 listOf(
                     DashboardEntry(WorkspaceRoutes.GOVERNANCE, Icons.Default.Verified, R.string.more_governance_title, R.string.more_governance_desc, "more_tab_governance"),
                     DashboardEntry(WorkspaceRoutes.EXTENSIONS, Icons.Default.Extension, R.string.more_extensions_title, R.string.more_extensions_desc, "more_tab_extensions"),
+                    DashboardEntry(WorkspaceRoutes.HEALTH, Icons.Default.Healing, R.string.more_health_title, R.string.more_health_desc, "more_tab_health"),
                     DashboardEntry(WorkspaceRoutes.SETTINGS, Icons.Default.Settings, R.string.more_settings_title, R.string.more_settings_desc, "more_tab_settings")
                 ),
                 key = { it.route }

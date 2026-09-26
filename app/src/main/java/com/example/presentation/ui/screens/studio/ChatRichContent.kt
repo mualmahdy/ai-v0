@@ -59,7 +59,13 @@ fun RichMarkdownContent(
     markdown: String,
     modifier: Modifier = Modifier
 ) {
-    val blocks = remember(markdown) { RichChatParser.parse(markdown) }
+    // CLOSURE §17 (Bidi correctness): mixed Arabic + technical content is
+    // sanitized BEFORE parsing — LTR technical runs (paths, URLs,
+    // identifiers) are isolated with LRI/PDI so they keep their visual
+    // order inside RTL prose ("افتح src/main/... ثم احسب ∫f(x)dx" keeps
+    // the path's characters in order).
+    val sanitized = remember(markdown) { BidiSanitizer.isolateTechnicalRuns(markdown) }
+    val blocks = remember(markdown) { RichChatParser.parse(sanitized) }
     // Theme reads happen OUTSIDE remember (CompositionLocal reads are
     // composable-only); the style object is the rememberable value.
     val codeBackground = MaterialTheme.colorScheme.surfaceVariant
@@ -290,13 +296,34 @@ private fun MathBlock(formula: String) {
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
             modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp)
         ) {
-            Row(modifier = Modifier.horizontalScroll(rememberScrollState()).padding(12.dp)) {
+            // CLOSURE §16 — REAL mathematical typesetting: the supported
+            // subset renders as a LAYOUT TREE (stacked fractions with a rule,
+            // radical + overline roots, baseline-shifted scripts); anything
+            // outside the subset falls back to the Unicode approximation
+            // WITH an honest notice — never a fake render.
+            val (tree, structural) = runCatching { MathTypesetter.parse(formula) }
+                .getOrElse { MathNode.Atom("?") to false }
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()).padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 SelectionContainer {
-                    Text(
-                        text = normalizeMath(formula),
-                        style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
-                        modifier = Modifier.widthIn(min = 160.dp)
-                    )
+                    if (structural) {
+                        MathNodeView(tree)
+                    } else {
+                        Column {
+                            Text(
+                                text = normalizeMath(formula),
+                                style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+                                modifier = Modifier.widthIn(min = 160.dp)
+                            )
+                            Text(
+                                text = "تقريب يونيكود — البنية خارج المجموعة المدعومة للصف الحقيقي",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -466,26 +493,32 @@ private fun RichChart(block: RichChatBlock.Chart) {
         RichCodeBlock("chart", block.raw)
         return
     }
-    val max = block.points.maxOf { it.value }.takeIf { it > 0f } ?: 1f
+    // CLOSURE §16 — REAL chart renderers: the source's first line may
+    // declare `chart:line`; anything else renders as a real BAR chart
+    // (axes + gridlines + labels). Not-plottable data degrades to the
+    // honest data-table fallback (never a blank box).
+    val isLine = block.raw.lines().firstOrNull()?.trim()
+        ?.startsWith("chart:line", ignoreCase = true) == true
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
     ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.AccountTree, contentDescription = "مخطط بياني", tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(8.dp))
-                Text("مخطط بياني", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Text(
+                    if (isLine) "مخطط خطي" else "مخطط أعمدة",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
             }
-            block.points.forEach { point ->
-                Column {
-                    Text("${point.label}: ${point.value}", style = MaterialTheme.typography.labelSmall)
-                    LinearProgressIndicator(
-                        progress = (point.value / max).coerceIn(0f, 1f),
-                        modifier = Modifier.fillMaxWidth().padding(top = 3.dp)
-                    )
-                }
+            Spacer(Modifier.height(8.dp))
+            if (isLine) {
+                LineChartRenderer(block.points)
+            } else {
+                BarChartRenderer(block.points)
             }
         }
     }
@@ -493,34 +526,16 @@ private fun RichChart(block: RichChatBlock.Chart) {
 
 @Composable
 private fun RichDiagram(block: RichChatBlock.Diagram) {
-    if (block.edges.isEmpty()) {
-        RichCodeBlock("mermaid", block.raw)
+    // CLOSURE §16 — the REAL layered diagram renderer (topological levels,
+    // Unicode/Arabic node ids, edge labels); unparseable sources render as
+    // RAW SOURCE with an explicit notice — never a fake graph.
+    val parsedEdges = DiagramParser.parse(block.raw)
+    if (parsedEdges.isEmpty() && block.edges.isEmpty()) {
+        DiagramRenderer(emptyList(), block.raw)
         return
     }
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-    ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.AccountTree, contentDescription = "مخطط تدفق", tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(8.dp))
-                Text("مخطط تدفق", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-            }
-            block.edges.forEach { edge ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)) {
-                        Text(edge.from, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp), fontWeight = FontWeight.SemiBold)
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Text("→", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.width(8.dp))
-                    Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f)) {
-                        Text(edge.to, modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp), fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            }
-        }
+    val edges = if (parsedEdges.isNotEmpty()) parsedEdges else block.edges.map {
+        DiagramEdgeLabeled(it.from, null, it.to)
     }
+    DiagramRenderer(edges, block.raw)
 }

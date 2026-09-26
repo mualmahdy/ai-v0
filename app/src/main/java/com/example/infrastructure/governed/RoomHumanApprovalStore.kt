@@ -53,6 +53,10 @@ class RoomHumanApprovalStore(
     override suspend fun findApprovedFor(executionId: String, toolName: String, nowEpochMs: Long): HumanApprovalRequest? =
         withContext(Dispatchers.IO) { dao.findApprovedFor(executionId, toolName, nowEpochMs)?.toDomain() }
 
+    /** CLOSURE §10: the FULL decision history. */
+    override suspend fun recentHistory(limit: Int): List<HumanApprovalRequest> =
+        withContext(Dispatchers.IO) { dao.recentHistory(limit).map { it.toDomain() } }
+
     override suspend fun resolve(
         approvalId: String,
         resolution: ApprovalResolution,

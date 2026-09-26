@@ -284,6 +284,13 @@ fun StudioScreen(
         // ARTIFACT CANVAS (§10): the conversation's artifact cards open the
         // scope-aware preview surface (pane at expanded width, sheet below).
         onOpenArtifact = studioViewModel::openArtifact,
+        // CLOSURE §8: the message action routes through the ViewModel's
+        // REAL artifact pipeline (versioned, project-scoped).
+        onSaveAsArtifact = studioViewModel::saveEntryAsArtifact,
+        // CLOSURE §8: the artifact canvas's full version lifecycle.
+        onLoadArtifactVersions = studioViewModel::loadArtifactVersions,
+        onSaveArtifactVersion = { studioViewModel.saveArtifactCanvasVersion(it) },
+        onRollbackArtifactVersion = studioViewModel::rollbackArtifactVersion,
         onCloseArtifact = studioViewModel::closeArtifact,
         onRequestArtifactEdit = studioViewModel::requestArtifactEdit,
         modifier = modifier

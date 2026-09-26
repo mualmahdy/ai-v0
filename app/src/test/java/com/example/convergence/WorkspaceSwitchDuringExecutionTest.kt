@@ -100,7 +100,8 @@ class WorkspaceSwitchDuringExecutionTest {
         val service = TelemetryService(
             port,
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
-        ).also { it.workspaceIdProvider = { activeWorkspace } }
+        ) // CLOSURE P0: no live-workspace provider exists anymore — attribution
+        // is execution-binding only (Started pins it; unbound = unattributed).
 
         // The execution's events, with the MID-RUN SWITCH between emissions.
         val events = flow {

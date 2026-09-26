@@ -67,6 +67,11 @@ interface ConversationSessionDao {
     @Query("DELETE FROM chat_sessions WHERE projectId = :projectId")
     suspend fun deleteForProject(projectId: Long)
 
+    /** CLOSURE P1 (transfer): identity-preserving workspace rebind for a
+     *  project's private sessions (inside the verified-move transaction). */
+    @Query("UPDATE chat_sessions SET workspaceId = :targetWorkspaceId WHERE projectId = :projectId")
+    suspend fun rebindWorkspaceForProject(projectId: Long, targetWorkspaceId: String)
+
     @Query("UPDATE chat_sessions SET modelResourceId = :modelId, modelDisplayName = :modelDisplayName, lastActiveAtEpochMs = :now WHERE sessionId = :id")
     suspend fun updateModel(id: String, modelId: String?, modelDisplayName: String?, now: Long)
 
@@ -110,11 +115,27 @@ interface ConversationTurnDao {
     @Query("SELECT * FROM chat_turns WHERE sessionId = :sessionId ORDER BY createdAtEpochMs ASC")
     suspend fun forSessionOnce(sessionId: String): List<ConversationTurnEntity>
 
+    /** CLOSURE P1 (transfer): all turns of a set of sessions (package export). */
+    @Query("SELECT * FROM chat_turns WHERE sessionId IN (:sessionIds) ORDER BY createdAtEpochMs ASC")
+    suspend fun forSessionsOnce(sessionIds: List<String>): List<ConversationTurnEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(turn: ConversationTurnEntity)
 
+    /** CLOSURE P1 (transfer): bulk turn import inside the import transaction. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(turns: List<ConversationTurnEntity>)
+
     @Query("DELETE FROM chat_turns WHERE sessionId = :sessionId")
     suspend fun deleteForSession(sessionId: String)
+
+    /** CLOSURE P1 (transfer): turn cascade for a project's sessions (move/replace cleanup). */
+    @Query("DELETE FROM chat_turns WHERE sessionId IN (SELECT sessionId FROM chat_sessions WHERE projectId = :projectId)")
+    suspend fun deleteForProjectSessions(projectId: Long)
+
+    /** CLOSURE P1 (transfer): identity-preserving workspace rebind for a project's sessions' turns. */
+    @Query("UPDATE chat_turns SET sessionId = :newSessionId WHERE sessionId = :oldSessionId")
+    suspend fun reassignSession(oldSessionId: String, newSessionId: String)
 }
 
 /**
@@ -129,8 +150,16 @@ interface ChatTimelineEventDao {
     @Query("SELECT * FROM chat_timeline_events WHERE sessionId = :sessionId ORDER BY createdAtEpochMs ASC")
     suspend fun forSessionOnce(sessionId: String): List<ChatTimelineEventEntity>
 
+    /** CLOSURE P1 (transfer): all timeline events of a set of sessions (package export). */
+    @Query("SELECT * FROM chat_timeline_events WHERE sessionId IN (:sessionIds) ORDER BY createdAtEpochMs ASC")
+    suspend fun forSessionsOnce(sessionIds: List<String>): List<ChatTimelineEventEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(event: ChatTimelineEventEntity)
+
+    /** CLOSURE P1 (transfer): bulk timeline import inside the import transaction. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(events: List<ChatTimelineEventEntity>)
 
     /**
      * Approval-state transition (the conversation-visible mirror of the REAL
@@ -152,6 +181,10 @@ interface ChatTimelineEventDao {
 
     @Query("DELETE FROM chat_timeline_events WHERE sessionId = :sessionId")
     suspend fun deleteForSession(sessionId: String)
+
+    /** CLOSURE P1 (transfer): timeline cascade for a project's sessions (move/replace cleanup). */
+    @Query("DELETE FROM chat_timeline_events WHERE sessionId IN (SELECT sessionId FROM chat_sessions WHERE projectId = :projectId)")
+    suspend fun deleteForProjectSessions(projectId: Long)
 
     /** Existence check for the idempotent append (no duplicate blocks). */
     @Query("SELECT COUNT(*) FROM chat_timeline_events WHERE eventId = :eventId")

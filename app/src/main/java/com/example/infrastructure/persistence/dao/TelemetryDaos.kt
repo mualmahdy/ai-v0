@@ -195,6 +195,14 @@ interface PermissionGrantDao {
 
     @Query("DELETE FROM permission_grants WHERE id = :id")
     suspend fun revoke(id: Long)
+
+    /** CLOSURE §10 (Governance Center): ALL grants — the management list. */
+    @Query("SELECT * FROM permission_grants ORDER BY grantedAtEpochMs DESC LIMIT :limit")
+    suspend fun all(limit: Int = 500): List<PermissionGrantEntity>
+
+    /** CLOSURE §10: grants that still authorize (not revoked). */
+    @Query("SELECT * FROM permission_grants WHERE isAllowed = 1 ORDER BY grantedAtEpochMs DESC LIMIT :limit")
+    suspend fun activeGrants(limit: Int = 500): List<PermissionGrantEntity>
 }
 
 @Dao

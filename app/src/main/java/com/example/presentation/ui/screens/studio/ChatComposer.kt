@@ -242,9 +242,14 @@ fun ChatComposer(
                 )
             }
 
-            // ---- §7: the CONTEXT STRIP — the command row under the drafts.
-            // Two compact chips, two EXISTING surfaces: the capability hub
-            // and the conversation-context (agent/model) sheet.
+            // ---- CLOSURE §13 (Composer Redesign): the composer shows
+            // INPUT + PRIMARY ACTIONS permanently; context is NOT duplicated
+            // here — the conversation-context chip (agent/model) lives in the
+            // HEADER and the editable surface in the CONTEXT SHEET (§14:
+            // one Conversation Context concept, summary in the header,
+            // details in a sheet). The gauge is TRANSIENT: it appears only
+            // when the window fills (NEAR_FULL/CRITICAL) or an execution is
+            // live — the composer never becomes a permanent control panel.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -259,19 +264,14 @@ fun ChatComposer(
                     tag = "btn_open_capabilities",
                     modifier = Modifier.weight(1f, fill = false)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
-                CommandChip(
-                    icon = if (chatMode == ChatMode.AGENT) Icons.Default.Psychology
-                    else Icons.Default.AutoAwesome,
-                    text = contextChipLabel(chatMode, selectedModelDisplayName, activeAgentName),
-                    onClick = onOpenContext,
-                    tag = "chip_composer_agent_model",
-                    modifier = Modifier.weight(1f, fill = false)
-                )
-                // ---- FRONTIER CONTEXT WINDOW: the honest token gauge —
-                // hidden until REAL numbers exist, tinted by severity as
-                // the window fills (NORMAL → NEAR_FULL → CRITICAL).
-                if (ContextWindowGauge.isKnown(contextTokensUsed, contextTokensRemaining)) {
+                // ---- FRONTIER CONTEXT WINDOW (TRANSIENT per §13): the honest
+                // token gauge — only while numbers exist AND the window is
+                // filling (or an execution is live); tinted by severity.
+                val gaugeVisible = ContextWindowGauge
+                    .isKnown(contextTokensUsed, contextTokensRemaining) &&
+                        (ContextWindowGauge.severity(contextTokensUsed, contextTokensRemaining) !=
+                                ContextWindowGauge.Severity.NORMAL || isExecuting)
+                if (gaugeVisible) {
                     Spacer(modifier = Modifier.width(6.dp))
                     val severity = ContextWindowGauge.severity(contextTokensUsed, contextTokensRemaining)
                     val gaugeColor = when (severity) {

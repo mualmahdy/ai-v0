@@ -274,7 +274,7 @@ class GovernancePersistenceTest {
         // GAP-08 (Design Closure 2026, ADR-7) v17: the three dead tables
         // (provider_configs, policy_versions, health_probes) are DROPPED.
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(19, dbVersion)
+        assertEquals(20, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))

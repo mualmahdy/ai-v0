@@ -243,11 +243,15 @@ class ChatInputAcceptanceTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `the composer context strip carries the hub and agent-model chips`() {
+    fun `the composer context strip carries the hub chip - context is NOT duplicated per CLOSURE 13`() {
         openChatScreen()
         composeRule.onNodeWithTag("composer_context_strip").assertIsDisplayed()
         composeRule.onNodeWithTag("btn_open_capabilities").assertIsDisplayed()
-        composeRule.onNodeWithTag("chip_composer_agent_model").assertIsDisplayed()
+        // CLOSURE §13 (IA consolidation): the agent/model chip NO LONGER
+        // lives in the composer — it is in the CHAT HEADER and the context
+        // sheet (one Conversation Context — §14). The composer stays
+        // INPUT + primary actions; the token gauge is transient.
+        composeRule.onNodeWithTag("chip_composer_agent_model").assertDoesNotExist()
     }
 
     @Test
