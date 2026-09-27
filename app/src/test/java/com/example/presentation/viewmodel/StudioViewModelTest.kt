@@ -628,23 +628,43 @@ class StudioViewModelTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `startNewSession binds a NEW project-scoped session and resets the transcript`() {
+    fun `startNewSession opens a TRANSIENT conversation - no durable row until the first accepted turn`() {
         runPrompt("دورة قديمة")
         awaitExecutionSettled()
         assertEquals(1, viewModel.state.value.studioSession.size)
+        val upsertsBefore = repository.upsertCount
 
         viewModel.startNewSession(agent = null)
 
-        awaitUntil { viewModel.state.value.activeSessionId != null }
+        // CLOSURE P0-2 (B1 — transient session lifecycle): the reset is
+        // synchronous and writes NOTHING durable — opening the composer no
+        // longer creates a historical "محادثة جديدة" row.
         val state = viewModel.state.value
+        assertNull("TRANSIENT: no durable binding yet", state.activeSessionId)
         assertTrue(state.studioSession.isEmpty())
         assertTrue(state.executionLog.isEmpty())
-
-        val session = runBlocking { repository.getSession(ConversationSessionId(state.activeSessionId!!)) }!!
         assertEquals(
-            "GAP-14: new sessions are project-scoped from creation",
+            "opening the composer writes NOTHING durable",
+            upsertsBefore,
+            repository.upsertCount
+        )
+
+        // ESTABLISHING → ACTIVE/DURABLE happens only when the first user
+        // turn is ACCEPTED (the execution path owns the establishment).
+        runPrompt("أول رسالة في الجلسة العابرة")
+        awaitExecutionSettled()
+        val establishedId = viewModel.state.value.activeSessionId
+        assertNotNull("the durable session is established by the first turn", establishedId)
+        val session = runBlocking { repository.getSession(ConversationSessionId(establishedId!!)) }!!
+        assertEquals(
+            "GAP-14 preserved: the ESTABLISHED session is project-scoped",
             activeWorkspace.activeProjectId.takeIf { it > 0L },
             session.projectId
+        )
+        assertEquals(
+            "the established session belongs to the acceptance workspace",
+            activeWorkspace.id,
+            session.workspaceId
         )
     }
 

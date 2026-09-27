@@ -1107,11 +1107,22 @@ class DecisionService(
 
     /**
      * Updates CBR-MDP transition beliefs and case memory upon receiving an execution observation.
+     *
+     * CLOSURE P0-7 (audit §5.7/D2): [nextStateAdmissibleActions] is passed
+     * straight to the engine so the TD target's max Q(next state) sweeps
+     * ONLY the admissible cells of the next state. The PRODUCTION loop
+     * (AgentOrchestrator) supplies the governing task contract's set; null
+     * keeps the legacy all-cells sweep for contract-less callers.
      */
     suspend fun recordObservation(
         state: DecisionState,
-        observation: EnvironmentObservation
-    ): DecisionState = cbrMdpEngine.processObservationAndUpdateBelief(state, observation)
+        observation: EnvironmentObservation,
+        nextStateAdmissibleActions: Set<com.example.domain.core.decision.DecisionActionType>? = null
+    ): DecisionState = cbrMdpEngine.processObservationAndUpdateBelief(
+        state,
+        observation,
+        nextStateAdmissibleActions
+    )
 
     fun getCbrMdpEngine(): CbrMdpEngine = cbrMdpEngine
 }

@@ -247,12 +247,22 @@ class FakeConversationSessionRepositoryForVm : ConversationSessionRepositoryPort
         return true
     }
 
+    /** When set, deleteSessionForWorkspace throws AFTER recording the attempt. */
+    var deleteFailure: RuntimeException? = null
+
+    /** Number of deleteSession attempts that FAILED (the injected failure ran). */
+    var failedDeleteAttempts = 0
+
     override suspend fun deleteSessionForWorkspace(
         id: ConversationSessionId,
         workspaceId: String
     ): Boolean {
         val session = getSessionForWorkspace(id, workspaceId) ?: return false
         deleteCount++
+        deleteFailure?.let { failure ->
+            failedDeleteAttempts++
+            throw failure
+        }
         sessionsFlow.value = sessionsFlow.value - session
         turns.removeAll { it.sessionId == id }
         return true

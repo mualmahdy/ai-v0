@@ -80,8 +80,16 @@ class CbrMdpEngine(
          * filtering introduced (task contract + agent-capability binding);
          * action families now have different admissibility conditions, so
          * legacy v1 scores are INVALID and dropped at load.
+         *
+         * v3 (asv3-2026-09, CLOSURE P0-7 / audit §5.7/D2-D4): the TD
+         * target's max Q(next state) is now restricted to the next state's
+         * ADMISSIBLE action set, and the UCB exploration total counts the
+         * SUM of cell visit counts (not the number of cells). Both change
+         * what the learned values MEAN — v2 rows are INVALID under the new
+         * semantics and are dropped honestly at load instead of silently
+         * contaminating the corrected learner.
          */
-        const val ACTION_SPACE_VERSION = "asv2-2026-09"
+        const val ACTION_SPACE_VERSION = "asv3-2026-09"
     }
     // Discount factor gamma for MDP
     private val gamma: Float = 0.9f
@@ -438,11 +446,16 @@ class CbrMdpEngine(
         var finalScore = (cbrWeight * cbrScore + mdpWeight * normalizedMdp).coerceIn(0.0f, 1.0f)
 
         // ------------------------------------------------------------------
-        // FIX D-1 (exploration): UCB-style bonus — favors under-visited actions
-        // so the engine keeps learning instead of locking onto the heuristic
-        // optimum. Deterministic and bounded (no test flakiness).
+        // CLOSURE P0-7 (exploration, audit §5.7/D4): the UCB region total is
+        // the SUM of cell VISIT COUNTS — real experience in the region — not
+        // the NUMBER of cells (states/actions ≠ visits: a region with two
+        // cells visited 500 times is far more explored than one with eight
+        // cells visited once; the old cell-count numerator grew with
+        // resource-axis DIVERSITY instead of with experience).
         // ------------------------------------------------------------------
-        val regionVisitTotal = qTable.keys.count { it.startsWith("$regionKey|") }
+        val regionVisitTotal = qTable.entries
+            .filter { it.key.startsWith("$regionKey|") }
+            .sumOf { it.value.visitCount }
         if (regionVisitTotal > 0) {
             val pairVisits = cell?.visitCount ?: 0
             val explorationBonus = explorationCoefficient *
@@ -482,10 +495,20 @@ class CbrMdpEngine(
      *     Q(r,a) ← Q(r,a) + α·(reward + γ·maxQ(r') − Q(r,a))
      * on the (region, action) cell, increments visit/success counts (the real
      * transition rate), and marks the cell dirty for persistence (FIX D-4).
+     *
+     * CLOSURE P0-7 (audit §5.7/D2): [nextStateAdmissibleActions] restricts
+     * the TD target's max Q(r′) to the next state's ADMISSIBLE action set.
+     * The default `null` keeps the LEGACY all-cells sweep for callers that
+     * genuinely cannot know the next contract (pure unit tests) — the
+     * PRODUCTION loop (AgentOrchestrator) always passes the governing task
+     * contract's admissible set, so an inadmissible cell (an action the next
+     * state does not even allow) can no longer inflate the TD target and
+     * leak its value into the learned policy.
      */
     suspend fun processObservationAndUpdateBelief(
         state: DecisionState,
-        observation: EnvironmentObservation
+        observation: EnvironmentObservation,
+        nextStateAdmissibleActions: Set<DecisionActionType>? = null
     ): DecisionState {
         val regionKey = stateRegionKey(state)
 
@@ -534,12 +557,18 @@ class CbrMdpEngine(
         // ------------------------------------------------------------------
         // FIX D-1: tabular TD update on Q(r, a).
         // r  = region BEFORE the action; r' = region AFTER (from updatedState).
+        //
+        // CLOSURE P0-7 (audit §5.7/D2): maxQ(r') sweeps ONLY the cells whose
+        // action type is ADMISSIBLE in the next state when the caller
+        // supplied [nextStateAdmissibleActions] — previously EVERY cell in
+        // the next region was swept, so an inadmissible action's high Q
+        // inflated the TD target of whatever action was actually taken.
         // ------------------------------------------------------------------
         val nextRegionKey = stateRegionKey(updatedState)
-        val maxNextQ = qTable.keys
-            .filter { it.startsWith("$nextRegionKey|") }
-            .mapNotNull { qTable[it]?.qValue }
-            .maxOrNull() ?: 0f
+        val maxNextQ = qTable.entries
+            .filter { it.key.startsWith("$nextRegionKey|") }
+            .filter { nextStateAdmissibleActions == null || it.value.actionType in nextStateAdmissibleActions }
+            .maxOfOrNull { it.value.qValue } ?: 0f
 
         val reward = observation.feedbackReward
         val resourceAxis = resourceAxisKey(observation.action)
@@ -573,4 +602,15 @@ class CbrMdpEngine(
     }
 
     fun getCaseBase(): CaseBase = caseBase
+
+    /**
+     * CLOSURE P0-7 (D4 test observability): the UCB exploration total for a
+     * region — the SUM of visit counts across the region's cells. Exposed
+     * so the invariant tests can pin the visits-not-cells semantics
+     * directly (the scoring path itself stays private).
+     */
+    fun regionExplorationVisitTotal(regionKey: String): Int =
+        qTable.entries
+            .filter { it.key.startsWith("$regionKey|") }
+            .sumOf { it.value.visitCount }
 }

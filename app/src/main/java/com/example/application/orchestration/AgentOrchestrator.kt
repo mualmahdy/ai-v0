@@ -955,7 +955,12 @@ class AgentOrchestrator(
                     task = currentTask,
                     accumulatedEvidence = accumulatedEvidence,
                     finalOutputText = accumulatedOutputText.toString(),
-                    lastAction = chosenAction
+                    lastAction = chosenAction,
+                    // CLOSURE P0-6: the TYPED error signal — an execution that
+                    // ends with unrecovered step failures CANNOT verify,
+                    // regardless of how the accumulated text reads (the old
+                    // startsWith("Error:") wording probe is gone).
+                    terminalErrorObserved = consecutiveFailures > 0
                 )
                 // ------------------------------------------------------------
                 // FIX D-2 (audit c03919d): the verification result is the REAL
@@ -984,7 +989,14 @@ class AgentOrchestrator(
                     taskVerificationQuality = quality
                 )
                 observationHistory.add(terminalObservation)
-                currentDecisionState = decisionService.recordObservation(currentDecisionState, terminalObservation)
+                currentDecisionState = decisionService.recordObservation(
+                    currentDecisionState,
+                    terminalObservation,
+                    // CLOSURE P0-7 (audit §5.7/D2): the TD target's max Q over
+                    // the next state is restricted to the contract's
+                    // ADMISSIBLE action set — never every Q-table cell.
+                    nextStateAdmissibleActions = (taskContract ?: effectiveContract).admissibleActions
+                )
                 collector.emit(
                     ExecutionEvent.ObservationRecorded(
                         executionId = executionId,
@@ -1078,7 +1090,12 @@ class AgentOrchestrator(
                             taskVerificationQuality = -0.5f
                         )
                         observationHistory.add(blockedObservation)
-                        currentDecisionState = decisionService.recordObservation(currentDecisionState, blockedObservation)
+                        currentDecisionState = decisionService.recordObservation(
+                            currentDecisionState,
+                            blockedObservation,
+                            // CLOSURE P0-7: admissible-set-restricted TD target.
+                            nextStateAdmissibleActions = (taskContract ?: effectiveContract).admissibleActions
+                        )
 
                         collector.emit(
                             ExecutionEvent.BudgetGateDecision(
@@ -1436,7 +1453,16 @@ class AgentOrchestrator(
             observationHistory.add(observation)
 
             // 7. Feed Observation into CBR-MDP Engine -> updates belief state and retains case
-            currentDecisionState = decisionService.recordObservation(currentDecisionState, observation)
+            currentDecisionState = decisionService.recordObservation(
+                currentDecisionState,
+                observation,
+                // CLOSURE P0-7 (audit §5.7/D2): the Q-update's max Q(next
+                // state) considers ONLY the admissible actions of the
+                // governing task contract — inadmissible cells can no longer
+                // inflate the TD target (previously EVERY cell in the next
+                // region was swept, regardless of admissibility).
+                nextStateAdmissibleActions = (taskContract ?: effectiveContract).admissibleActions
+            )
             collector.emit(
                 ExecutionEvent.ObservationRecorded(
                     executionId = executionId,
@@ -1474,7 +1500,9 @@ class AgentOrchestrator(
                 task = currentTask,
                 accumulatedEvidence = accumulatedEvidence,
                 finalOutputText = accumulatedOutputText.toString(),
-                lastAction = chosenAction
+                lastAction = chosenAction,
+                // CLOSURE P0-6: unrecovered step failures block verification.
+                terminalErrorObserved = consecutiveFailures > 0
             )
 
             stepIndex++
@@ -1567,7 +1595,9 @@ class AgentOrchestrator(
             task = currentTask,
             accumulatedEvidence = accumulatedEvidence,
             finalOutputText = accumulatedOutputText.toString(),
-            lastAction = decisionHistory.lastOrNull()?.chosenAction ?: DecisionAction(DecisionActionType.STOP)
+            lastAction = decisionHistory.lastOrNull()?.chosenAction ?: DecisionAction(DecisionActionType.STOP),
+            // CLOSURE P0-6: the loop's LAST word on errors is typed truth.
+            terminalErrorObserved = consecutiveFailures > 0
         )
 
         val totalDuration = System.currentTimeMillis() - startTime

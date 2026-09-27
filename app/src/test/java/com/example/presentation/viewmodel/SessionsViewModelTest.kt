@@ -14,6 +14,8 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -173,7 +175,7 @@ class SessionsViewModelTest {
     }
 
     @Test
-    fun `deleteSession goes through the service and fires the callback AFTER the deletion`() {
+    fun `deleteSession goes through the service and fires the callback only AFTER a REAL deletion`() {
         activateWorkspace("ws_a")
         repository.seed(session("s_a1", "ws_a"))
         val deleted = mutableListOf<String>()
@@ -189,7 +191,7 @@ class SessionsViewModelTest {
     }
 
     @Test
-    fun `the deletion callback fires even when the session does not exist (honest no-op)`() {
+    fun `INVARIANT - a no-op deletion does NOT fire the callback (UI projection never advances ahead of durable truth)`() {
         activateWorkspace("ws_a")
         val deleted = mutableListOf<String>()
 
@@ -197,9 +199,43 @@ class SessionsViewModelTest {
 
         assertEquals(0, repository.deleteCount)
         assertEquals(
-            "The callback contract is unconditional — the studio-side effect checks its own binding",
-            listOf("s_missing"),
+            "Nothing was deleted — no studio-side effect may run (CLOSURE P0-2/B2)",
+            emptyList<String>(),
             deleted
         )
+        assertNull("A silent no-op is not an error the user must dismiss", viewModel.state.value.errorMessage)
+    }
+
+    @Test
+    fun `INVARIANT - a FAILED deletion does NOT fire the callback and surfaces the honest error`() {
+        activateWorkspace("ws_a")
+        repository.seed(session("s_a1", "ws_a"))
+        repository.deleteFailure = java.lang.RuntimeException("database is locked")
+        val deleted = mutableListOf<String>()
+
+        viewModel.deleteSession("s_a1") { deleted += it }
+
+        assertEquals("The failure path RAN (not silently skipped)", 1, repository.failedDeleteAttempts)
+        assertTrue("No callback — durable truth still owns the row", deleted.isEmpty())
+        assertNotNull("The failure is surfaced honestly", viewModel.state.value.errorMessage)
+        // The row itself is STILL THERE: nothing advanced ahead of durable truth.
+        val stillPresent = viewModel.state.value.sessions.any { it.id.value == "s_a1" }
+        assertTrue("The session row survived the failed deletion", stillPresent)
+    }
+
+    @Test
+    fun `INVARIANT - a workspace-A delete can never touch workspace-B's session`() {
+        activateWorkspace("ws_a")
+        repository.seed(session("s_b1", "ws_b"))
+        val deleted = mutableListOf<String>()
+
+        viewModel.deleteSession("s_b1") { deleted += it }
+
+        assertEquals("The workspace-authorized boundary refused the cross-workspace delete", 0, repository.deleteCount)
+        assertTrue(deleted.isEmpty())
+        val bRowSurvives = kotlinx.coroutines.runBlocking {
+            repository.getSession(com.example.domain.core.session.ConversationSessionId("s_b1"))
+        }
+        assertNotNull("B's durable row is untouched", bRowSurvives)
     }
 }

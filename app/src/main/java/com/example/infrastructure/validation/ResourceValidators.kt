@@ -25,7 +25,10 @@ import java.util.concurrent.TimeUnit
  * ============================================================================
  *
  * Each validator runs a REAL protocol operation against the resource:
- *   - LLM        → GET /models (or Gemini models endpoint / Firebase readiness)
+ *   - LLM        → GET /models (or Gemini models endpoint / Firebase
+ *                  readiness) AND — CLOSURE P0-4 — a bounded REAL generation
+ *                  round-trip through the resource's own adapter when one is
+ *                  wired (reachability alone no longer yields HEALTHY).
  *   - Embedding  → real embedding round-trip (local) or POST /embeddings (remote)
  *   - SEARCH     → IN_PROCESS wiring check (no network by definition) or tiny query
  *
@@ -164,7 +167,7 @@ class LlmResourceValidator(
         apiKeyProvider: suspend () -> String?
     ): ServiceValidationResult {
         val key = apiKeyProvider()
-        return when (protocolId) {
+        val reachability = when (protocolId) {
             ServiceProtocolId.GEMINI_NATIVE -> {
                 if (key.isNullOrBlank()) {
                     // No stored user key — validate via Firebase AI SDK readiness
@@ -199,7 +202,8 @@ class LlmResourceValidator(
                 { null }
             )
             ServiceProtocolId.IN_PROCESS, ServiceProtocolId.NATIVE_SDK -> {
-                // In-process LLM: presence of a real adapter is the validation.
+                // In-process LLM: presence of a real adapter is the reachability
+                // floor.
                 if (adapter != null) {
                     ServiceValidationResult.success(0L, "In-process adapter present")
                 } else {
@@ -211,6 +215,29 @@ class LlmResourceValidator(
             else -> ServiceValidationResult.failure(
                 ServiceHealthClassification.UNKNOWN, 0L,
                 "No LLM validation path for protocol $protocolId"
+            )
+        }
+
+        // ------------------------------------------------------------------
+        // CLOSURE P0-4 (audit §5.5/C1): reachability is NOT generation. When
+        // the endpoint floor passed and a REAL LLM adapter exists, run the
+        // bounded generation round-trip through the resource's OWN adapter —
+        // HEALTHY for an LLM resource now MEANS "this model can generate",
+        // not merely "GET /models returned 200".
+        //
+        // The probe reuses the exact adapter + model + auth path production
+        // executes with, bounded to a single-digit-token request. If no
+        // adapter is present (test/legacy wiring), the reachability verdict
+        // stands and its message says HONESTLY that generation was not
+        // probed — it never claims more than was tested.
+        // ------------------------------------------------------------------
+        val llmAdapter = adapter as? com.example.domain.ports.llm.LlmProviderPort
+        return when {
+            !reachability.isSuccess -> reachability
+            llmAdapter != null -> GenerationProbe.probe(llmAdapter)
+            else -> ServiceValidationResult.success(
+                reachability.latencyMs,
+                reachability.message + " (generation NOT probed — no LLM adapter wired)"
             )
         }
     }

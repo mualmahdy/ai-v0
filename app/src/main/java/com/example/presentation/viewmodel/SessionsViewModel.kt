@@ -2,7 +2,10 @@ package com.example.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.application.operation.OperationPhase
+import com.example.application.operation.OperationRegistry
 import com.example.application.session.ConversationSessionService
+import com.example.domain.core.execution.ScopeSnapshot
 import com.example.domain.core.session.ConversationSession
 import com.example.domain.core.session.ConversationSessionId
 import com.example.domain.core.workspace.Workspace
@@ -49,7 +52,9 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalCoroutinesApi::class)
 class SessionsViewModel(
     private val conversationSessionService: ConversationSessionService,
-    private val activeWorkspace: StateFlow<Workspace?>
+    private val activeWorkspace: StateFlow<Workspace?>,
+    /** CLOSURE P0-1: the app-wide operation registry (nullable = test seam). */
+    private val operationRegistry: OperationRegistry? = null
 ) : ViewModel() {
 
     /** The sessions feature's own slice of UI state (was 3 fields of UiState). */
@@ -95,13 +100,26 @@ class SessionsViewModel(
         _state.update { it.copy(searchQuery = query) }
     }
 
-    /** FRONTIER RENAME: renames a durable session through the REAL service. */
+    /**
+     * FRONTIER RENAME: renames a durable session through the REAL service.
+     *
+     * CLOSURE P0-1 (scope pinning): the workspace is captured SYNCHRONOUSLY
+     * at acceptance — the rename is workspace-authorized under the scope
+     * the user acted in, never the live one a mid-flight switch could
+     * change (previously the service fell back to its live
+     * workspaceIdProvider when no explicit id was passed).
+     */
     fun renameSession(sessionId: String, title: String) {
         val clean = title.trim()
         if (clean.isEmpty()) return // blank rename is an honest no-op
+        val pinnedWorkspaceId = activeWorkspace.value?.id
         viewModelScope.launch {
             runCatching {
-                conversationSessionService.renameSession(ConversationSessionId(sessionId), clean)
+                conversationSessionService.renameSession(
+                    ConversationSessionId(sessionId),
+                    clean,
+                    workspaceId = pinnedWorkspaceId
+                )
             }.onFailure { e ->
                 _state.update { it.copy(errorMessage = "تعذّرت إعادة التسمية: ${e.localizedMessage}") }
             }
@@ -149,18 +167,64 @@ class SessionsViewModel(
     }
 
     /**
-     * Deletes a durable session (cascades to its turns). [onDeleted] fires
-     * AFTER the service call settles (success or failure) so the caller can
-     * run the studio-side effect — clearing the active conversation binding
-     * when the deleted session was the active one — with deterministic
-     * ordering (the deletion result is known before the callback runs).
+     * Deletes a durable session (cascades to its turns).
+     *
+     * CLOSURE P0-2 (audit §5.4/B2 — UI projection never advances ahead of
+     * durable truth): [onDeleted] fires ONLY when the service reports a REAL
+     * deletion (rows removed). A thrown failure surfaces as an honest
+     * error message and the callback does NOT fire — the studio binding and
+     * the list stay untouched, exactly as durable truth left them. A no-op
+     * (session already gone / wrong workspace) is silent and callback-free:
+     * the Room flow refreshes the list on its own.
+     *
+     * CLOSURE P0-1 (scope pinning): the deletion is workspace-authorized
+     * under the workspace captured at acceptance — a mid-flight workspace
+     * switch can no longer retarget the delete at another workspace's
+     * live provider resolution (previously NO workspaceId was passed, so
+     * the service resolved the CURRENT workspace at execution time).
      */
     fun deleteSession(sessionId: String, onDeleted: (String) -> Unit = {}) {
+        val pinnedWorkspaceId = activeWorkspace.value?.id
+        val pinnedProjectId = activeWorkspace.value?.activeProjectId?.takeIf { it > 0L }
+        val operationId = OperationRegistry.newOperationId("session_delete")
+        val snapshot = ScopeSnapshot.capture(
+            operationId = operationId,
+            workspaceId = pinnedWorkspaceId,
+            projectId = pinnedProjectId,
+            sessionId = sessionId
+        )
+        operationRegistry?.register(
+            type = "SESSION_DELETE",
+            scope = snapshot,
+            owner = "SessionsViewModel"
+        )
         viewModelScope.launch {
-            runCatching {
-                conversationSessionService.deleteSession(ConversationSessionId(sessionId))
+            operationRegistry?.transition(operationId, OperationPhase.RUNNING)
+            val deleted = runCatching {
+                conversationSessionService.deleteSession(
+                    ConversationSessionId(sessionId),
+                    workspaceId = pinnedWorkspaceId
+                )
+            }.onFailure { e ->
+                operationRegistry?.fail(operationId, e.localizedMessage)
+                _state.update {
+                    it.copy(errorMessage = "تعذّر حذف الجلسة: ${e.localizedMessage} — لم يُحذف شيء.")
+                }
+            }.getOrDefault(false)
+            if (deleted) {
+                operationRegistry?.transition(
+                    operationId,
+                    OperationPhase.SUCCEEDED,
+                    resultSummary = "session $sessionId deleted under ${pinnedWorkspaceId ?: "<unpinned>"}"
+                )
+                operationRegistry?.transition(operationId, OperationPhase.FINALIZED)
+                onDeleted(sessionId)
+            } else if (operationRegistry?.get(operationId)?.phase != OperationPhase.FAILED) {
+                // Honest no-op (nothing was deleted): finalize without the
+                // success transition and WITHOUT advancing any UI projection.
+                operationRegistry?.transition(operationId, OperationPhase.CANCELLED)
+                operationRegistry?.transition(operationId, OperationPhase.FINALIZED)
             }
-            onDeleted(sessionId)
         }
     }
 

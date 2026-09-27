@@ -66,20 +66,43 @@ class GeminiLlmAdapter(
         .addInterceptor(egressControl.interceptor())
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(180, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    /**
+     * CLOSURE P0-5 (audit §5.5/C2): the thinking capability verdict for
+     * [defaultModelName] — resolved ONCE from the curated capability table
+     * (see [GeminiThinkingCapability]). `thinkingConfig` is attached ONLY
+     * for SUPPORTED models; UNSUPPORTED/UNKNOWN models get a clean request
+     * the provider will not reject. The advertised `reasoning` capability
+     * follows the SAME verdict — the adapter no longer advertises what the
+     * model family does not have.
+     */
+    private val thinkingSupport: GeminiThinkingSupport =
+        GeminiThinkingCapability.forModel(defaultModelName)
 ) : LlmProviderPort {
 
     override val metadata: SafeProviderMetadata
-        get() = SafeProviderMetadata(
-            id = providerId,
-            name = "Google Gemini (REST)",
-            providerType = "GEMINI_REST",
-            defaultModel = defaultModelName,
-            isConfigured = true,
-            isOnline = true,
-            isLocal = false,
-            supportedCapabilities = listOf("llm_generation", "streaming", "reasoning", "tool_calling", "function_calling")
-        )
+        get() {
+            // CLOSURE P0-5: `reasoning` is advertised ONLY for models the
+            // capability gate resolved as SUPPORTED — the metadata never
+            // claims a capability the request builder will not use.
+            val reasoning = if (thinkingSupport == GeminiThinkingSupport.SUPPORTED) {
+                listOf("reasoning")
+            } else {
+                emptyList<String>()
+            }
+            return SafeProviderMetadata(
+                id = providerId,
+                name = "Google Gemini (REST)",
+                providerType = "GEMINI_REST",
+                defaultModel = defaultModelName,
+                isConfigured = true,
+                isOnline = true,
+                isLocal = false,
+                supportedCapabilities = listOf("llm_generation", "streaming") +
+                    reasoning +
+                    listOf("tool_calling", "function_calling")
+            )
+        }
 
     // ------------------------------------------------------------------
     // Request building (shared by generate + stream)
@@ -170,21 +193,34 @@ class GeminiLlmAdapter(
         return JSONArray().put(JSONObject().put("functionDeclarations", declarations))
     }
 
-    private fun buildRequestBody(request: LlmRequest, stream: Boolean): String {
-        // FRONTIER REASONING: includeThoughts makes Gemini 2.5-family models
-        // stream their OWN thinking as dedicated `thought: true` parts — the
-        // honest capability the adapter already ADVERTISED in its metadata.
-        // For a model without thinking support the provider rejects the
-        // config; the adapter degrades honestly through its normal error
-        // path (never fabricated reasoning).
+    /**
+     * CLOSURE P0-5 test-observability seam: `internal` (same-module unit
+     * tests) so the capability-gating invariant tests can assert the EXACT
+     * request body — thinkingConfig present ONLY for SUPPORTED models.
+     */
+    internal fun buildRequestBody(request: LlmRequest, stream: Boolean): String {
+        // CLOSURE P0-5 (audit §5.5/C2 — capability gating): `thinkingConfig`
+        // is attached ONLY when the model's thinking capability was resolved
+        // as SUPPORTED by [GeminiThinkingCapability]. Previously it was
+        // attached UNCONDITIONALLY — a model without thinking support had the
+        // WHOLE request rejected by the provider, surfacing as a fake
+        // "generation failure" of a perfectly usable model. UNSUPPORTED and
+        // UNKNOWN models now get a clean request (an unproven capability is
+        // never sent; thought parts are simply never emitted for them).
         val generationConfig = JSONObject()
             .put("temperature", request.config.temperature.toDouble())
             .put("topP", 0.95)
             .put("maxOutputTokens", request.config.maxOutputTokens)
-            .put(
+        if (thinkingSupport == GeminiThinkingSupport.SUPPORTED) {
+            // FRONTIER REASONING: includeThoughts makes thinking-capable
+            // Gemini models stream their OWN thinking as dedicated
+            // `thought: true` parts — collected separately from the answer,
+            // never fabricated when absent.
+            generationConfig.put(
                 "thinkingConfig",
                 JSONObject().put("includeThoughts", true)
             )
+        }
         val body = JSONObject()
             .put("contents", buildContents(request.messages))
             .put("generationConfig", generationConfig)

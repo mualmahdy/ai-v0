@@ -33,7 +33,70 @@ enum class VerificationOutcomeStatus {
 }
 
 /**
+ * CLOSURE P0-6 (audit §5.5/C3): the TYPED reason a verification requirement
+ * is not satisfied. Strategy evaluation compares THESE kinds — never the
+ * wording of the human-readable messages (the previous
+ * `missing.none { it.contains("evidence") }` / `contains("Criterion")`
+ * matching was wording-decides-semantic-state: a reworded or translated
+ * message could flip a VERIFIED verdict).
+ */
+enum class VerificationGapKind {
+    /** A terminal routing action (SELECT_AGENT/SELECT_TOOL) claimed completion. */
+    INTERMEDIATE_ROUTING_ACTION,
+
+    /** An unrecovered execution error was observed (typed signal, not text prefix). */
+    UNRECOVERED_EXECUTION_ERROR,
+
+    /** Final output below the required minimum length with no evidence. */
+    OUTPUT_LENGTH_BELOW_MINIMUM,
+
+    /** A required output key is absent from the evidence map. */
+    MISSING_REQUIRED_OUTPUT_KEY,
+
+    /** A required evidence key is absent from the evidence map. */
+    MISSING_REQUIRED_EVIDENCE_KEY,
+
+    /** A required capability's evidence contract is not satisfied. */
+    MISSING_CAPABILITY_EVIDENCE,
+
+    /** A structured acceptance criterion is not met. */
+    ACCEPTANCE_CRITERION_NOT_MET
+}
+
+/** One typed, machine-comparable verification gap. */
+data class VerificationGap(
+    val kind: VerificationGapKind,
+    /** The key / capability / criterion id the gap refers to. */
+    val ref: String,
+    /** Human-readable description — for DISPLAY only, never for matching. */
+    val message: String
+)
+
+/** Typed per-criterion verdict (audit C3: criteria must be typed results). */
+data class CriterionVerification(
+    val criterionId: String,
+    val description: String,
+    val met: Boolean,
+    /** The evidence key the criterion was evaluated against (null = final text). */
+    val evidenceKey: String?
+)
+
+/** Typed evidence pointer — what was actually consulted, not prose. */
+data class EvidenceReference(
+    val key: String,
+    /** Kotlin type name of the evidence value (e.g. String, List, Map). */
+    val valueType: String
+)
+
+/**
  * Structured verification report for objective evaluation (Rule 14, 15).
+ *
+ * CLOSURE P0-6: the report now carries the TYPED semantic result —
+ * [gaps] (machine-comparable), [criterionResults] (per-criterion verdicts)
+ * and [evidenceRefs] (what was consulted). [missingCriteria]/
+ * [satisfiedCriteria] remain as the human-readable PROJECTION of the same
+ * result (back-compat for existing consumers) — they are derived, never
+ * the decision input.
  */
 data class TaskVerificationReport(
     val isSatisfied: Boolean,
@@ -41,6 +104,12 @@ data class TaskVerificationReport(
     val isDegradedAcceptable: Boolean = false,
     val missingCriteria: List<String> = emptyList(),
     val satisfiedCriteria: List<String> = emptyList(),
+    /** Typed gap list — the strategy-evaluation input (CLOSURE P0-6). */
+    val gaps: List<VerificationGap> = emptyList(),
+    /** Typed per-criterion verdicts. */
+    val criterionResults: List<CriterionVerification> = emptyList(),
+    /** Typed evidence pointers actually consulted during verification. */
+    val evidenceRefs: List<EvidenceReference> = emptyList(),
     val confidence: Float = 1.0f,
     val summary: String = ""
 )
@@ -84,38 +153,76 @@ class OutcomeService {
 
     /**
      * Performs strict, objective verification of task criteria against gathered evidence and outputs (Rule 13, 14, 15).
+     *
+     * CLOSURE P0-6 (audit §5.5/C3) — TWO structural changes:
+     *
+     *  1. TYPED GAPS: every unmet requirement is recorded as a
+     *     [VerificationGap] with a machine-comparable [VerificationGapKind].
+     *     Strategy evaluation compares KINDS (see step 8) — the previous
+     *     `contains("evidence")` / `contains("Criterion")` matching against
+     *     the human-readable missing MESSAGES was removed: wording (or
+     *     translation) can no longer flip a VERIFIED verdict.
+     *
+     *  2. TYPED ERROR SIGNAL: [terminalErrorObserved] is the caller's TYPED
+     *     knowledge that the execution ended with unrecovered failures
+     *     (e.g. consecutiveFailures > 0 in the agent loop). The previous
+     *     `finalOutputText.startsWith("Error:")` wording probe was REMOVED —
+     *     text wording no longer decides semantic state. An execution that
+     *     observed terminal errors CANNOT verify, regardless of how the
+     *     accumulated text reads.
      */
     fun verifyTaskCompletion(
         task: TaskDefinition,
         accumulatedEvidence: Map<String, Any?>,
         finalOutputText: String,
-        lastAction: DecisionAction
+        lastAction: DecisionAction,
+        terminalErrorObserved: Boolean = false
     ): TaskVerificationReport {
         val missing = mutableListOf<String>()
         val satisfied = mutableListOf<String>()
+        val gaps = mutableListOf<VerificationGap>()
+        val criterionResults = mutableListOf<CriterionVerification>()
+        val evidenceRefs = mutableListOf<EvidenceReference>()
 
         val requirements = task.requirements
         val successCriteria = task.successCriteria
         val strategy = successCriteria.verificationStrategy
 
+        fun gap(kind: VerificationGapKind, ref: String, message: String) {
+            gaps += VerificationGap(kind, ref, message)
+            missing += message
+        }
+
         // 1. Validate intermediate routing actions cannot claim completion
         if (lastAction.type == DecisionActionType.SELECT_AGENT ||
             lastAction.type == DecisionActionType.SELECT_TOOL) {
-            missing.add("Intermediate routing action (${lastAction.type.name}) does not satisfy task objective.")
+            gap(
+                VerificationGapKind.INTERMEDIATE_ROUTING_ACTION,
+                lastAction.type.name,
+                "Intermediate routing action (${lastAction.type.name}) does not satisfy task objective."
+            )
         }
 
-        // 2. Validate unrecovered error strings in final output
-        if (finalOutputText.startsWith("Error:", ignoreCase = true) ||
-            finalOutputText.startsWith("فشل:", ignoreCase = true) ||
-            finalOutputText.startsWith("BLOCKED:", ignoreCase = true)) {
-            missing.add("Final output indicates an unrecovered execution error.")
+        // 2. Unrecovered execution errors — TYPED signal (CLOSURE P0-6): the
+        //    caller reports whether the loop ended with failures; the
+        //    "Error:"/"فشل:" text-prefix heuristic is gone.
+        if (terminalErrorObserved) {
+            gap(
+                VerificationGapKind.UNRECOVERED_EXECUTION_ERROR,
+                "execution",
+                "Execution ended with unrecovered errors — the output cannot verify."
+            )
         }
 
         // 3. Minimum output length check (if applicable)
         val minChars = successCriteria.minOutputLengthChars.coerceAtLeast(1)
         val hasEvidence = accumulatedEvidence.isNotEmpty()
         if (finalOutputText.trim().length < minChars && !hasEvidence) {
-            missing.add("Output length (${finalOutputText.length}) is below required minimum ($minChars).")
+            gap(
+                VerificationGapKind.OUTPUT_LENGTH_BELOW_MINIMUM,
+                "minOutputLength",
+                "Output length (${finalOutputText.length}) is below required minimum ($minChars)."
+            )
         } else {
             satisfied.add("Output length meets minimum constraint.")
         }
@@ -129,20 +236,32 @@ class OutcomeService {
         // allow the permissive path through the strategy evaluation in step 8 instead.
         val allRequiredKeys = (successCriteria.requiredOutputKeys + requirements.requiredResourceTypes).distinct()
         for (requiredKey in allRequiredKeys) {
-            if (accumulatedEvidence.containsKey(requiredKey)) {
+            val value = accumulatedEvidence[requiredKey]
+            if (value != null) {
+                evidenceRefs += EvidenceReference(requiredKey, value::class.simpleName ?: "Any")
                 satisfied.add("Found required output: $requiredKey")
             } else {
-                missing.add("Missing required output key: $requiredKey")
+                gap(
+                    VerificationGapKind.MISSING_REQUIRED_OUTPUT_KEY,
+                    requiredKey,
+                    "Missing required output key: $requiredKey"
+                )
             }
         }
 
         // 5. Verify explicit Required Evidence Keys
         val allEvidenceKeys = (successCriteria.requiredEvidenceKeys + requirements.requiredEvidenceKeys).distinct()
         for (evidenceKey in allEvidenceKeys) {
-            if (accumulatedEvidence.containsKey(evidenceKey)) {
+            val value = accumulatedEvidence[evidenceKey]
+            if (value != null) {
+                evidenceRefs += EvidenceReference(evidenceKey, value::class.simpleName ?: "Any")
                 satisfied.add("Evidence verified: $evidenceKey")
             } else {
-                missing.add("Required evidence key missing from context: $evidenceKey")
+                gap(
+                    VerificationGapKind.MISSING_REQUIRED_EVIDENCE_KEY,
+                    evidenceKey,
+                    "Required evidence key missing from context: $evidenceKey"
+                )
             }
         }
 
@@ -168,45 +287,66 @@ class OutcomeService {
                 if (requiredCap == CapabilityType.LLM_GENERATION && finalOutputText.isNotBlank()) {
                     satisfied.add("Capability LLM_GENERATION text output verified.")
                 } else if (strategy == VerificationStrategy.STRICT || requirements.requiredCapabilities.size > 1) {
-                    missing.add("Task required capability ${requiredCap.name} but missing evidence keys: ${contract.requiredEvidenceKeys.joinToString()}")
+                    gap(
+                        VerificationGapKind.MISSING_CAPABILITY_EVIDENCE,
+                        requiredCap.name,
+                        "Task required capability ${requiredCap.name} but missing evidence keys: ${contract.requiredEvidenceKeys.joinToString()}"
+                    )
                 }
             }
         }
 
-        // 7. Verify Structured Acceptance Criteria
+        // 7. Verify Structured Acceptance Criteria — TYPED per-criterion verdicts
         val allAcceptanceCriteria = (successCriteria.acceptanceCriteria + requirements.acceptanceCriteria).distinctBy { it.id }
         for (criterion in allAcceptanceCriteria) {
             val isMet = evaluateAcceptanceCriterion(criterion, accumulatedEvidence, finalOutputText)
+            criterionResults += CriterionVerification(
+                criterionId = criterion.id,
+                description = criterion.description,
+                met = isMet,
+                evidenceKey = criterion.requiredKey
+            )
             if (isMet) {
                 satisfied.add("Criterion met: ${criterion.description}")
             } else {
-                missing.add("Criterion not satisfied: ${criterion.description} [${criterion.id}]")
+                gap(
+                    VerificationGapKind.ACCEPTANCE_CRITERION_NOT_MET,
+                    criterion.id,
+                    "Criterion not satisfied: ${criterion.description} [${criterion.id}]"
+                )
             }
         }
 
-        // 8. Strategy Evaluation
+        // 8. Strategy Evaluation — TYPED KIND comparison (CLOSURE P0-6):
+        //    the strategy inspects the gap KINDS, never the message wording.
+        //    A translated/reworded missing message cannot flip the verdict.
         val isSatisfied = when (strategy) {
-            VerificationStrategy.STRICT -> missing.isEmpty()
-            VerificationStrategy.PERMISSIVE -> missing.isEmpty() || (finalOutputText.isNotBlank() && requirements.requiredCapabilities.isEmpty())
-            VerificationStrategy.EVIDENCE_BASED -> missing.none { it.contains("evidence", ignoreCase = true) || it.contains("Capability", ignoreCase = true) }
-            VerificationStrategy.CRITERIA_MATCH -> missing.none { it.contains("Criterion", ignoreCase = true) }
+            VerificationStrategy.STRICT -> gaps.isEmpty()
+            VerificationStrategy.PERMISSIVE -> gaps.isEmpty() || (finalOutputText.isNotBlank() && requirements.requiredCapabilities.isEmpty())
+            VerificationStrategy.EVIDENCE_BASED -> gaps.none {
+                it.kind == VerificationGapKind.MISSING_REQUIRED_EVIDENCE_KEY ||
+                    it.kind == VerificationGapKind.MISSING_CAPABILITY_EVIDENCE
+            }
+            VerificationStrategy.CRITERIA_MATCH -> gaps.none {
+                it.kind == VerificationGapKind.ACCEPTANCE_CRITERION_NOT_MET
+            }
         }
 
         val verificationStatus = when {
             isSatisfied -> VerificationOutcomeStatus.VERIFIED
-            satisfied.isNotEmpty() && missing.isNotEmpty() -> VerificationOutcomeStatus.PARTIALLY_VERIFIED
-            missing.isNotEmpty() -> VerificationOutcomeStatus.FAILED
+            satisfied.isNotEmpty() && gaps.isNotEmpty() -> VerificationOutcomeStatus.PARTIALLY_VERIFIED
+            gaps.isNotEmpty() -> VerificationOutcomeStatus.FAILED
             else -> VerificationOutcomeStatus.INCONCLUSIVE
         }
 
-        val confidence = if (isSatisfied) 1.0f else (1.0f - (missing.size * 0.25f)).coerceAtLeast(0.0f)
+        val confidence = if (isSatisfied) 1.0f else (1.0f - (gaps.size * 0.25f)).coerceAtLeast(0.0f)
         val isDegradedAcceptable = !isSatisfied && task.constraints.allowDegradedExecution &&
                 (satisfied.isNotEmpty() || finalOutputText.isNotBlank())
 
         val summary = if (isSatisfied) {
             "تم التحقق بنجاح من كافة معايير إنجاز المهمة (${satisfied.size} معايير مكتملة)."
         } else {
-            "فشل التحقق الموضوعي: ${missing.joinToString("; ")}"
+            "فشل التحقق الموضوعي: ${missing.joinToString("; "))}"
         }
 
         return TaskVerificationReport(
@@ -215,6 +355,9 @@ class OutcomeService {
             isDegradedAcceptable = isDegradedAcceptable,
             missingCriteria = missing,
             satisfiedCriteria = satisfied,
+            gaps = gaps,
+            criterionResults = criterionResults,
+            evidenceRefs = evidenceRefs,
             confidence = confidence,
             summary = summary
         )
@@ -259,9 +402,10 @@ class OutcomeService {
         task: TaskDefinition,
         accumulatedEvidence: Map<String, Any?>,
         finalOutputText: String,
-        lastAction: DecisionAction
+        lastAction: DecisionAction,
+        terminalErrorObserved: Boolean = false
     ): Boolean {
-        return verifyTaskCompletion(task, accumulatedEvidence, finalOutputText, lastAction).isSatisfied
+        return verifyTaskCompletion(task, accumulatedEvidence, finalOutputText, lastAction, terminalErrorObserved).isSatisfied
     }
 
     /**

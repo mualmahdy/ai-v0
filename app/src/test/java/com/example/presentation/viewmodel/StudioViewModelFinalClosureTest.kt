@@ -586,7 +586,7 @@ class StudioViewModelFinalClosureTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `startNewSession binds the session to the scope captured at acceptance`() {
+    fun `the session established after startNewSession binds to the scope captured at acceptance`() {
         // The conversation's shape at acceptance…
         viewModel.updatePromptInput("مسودة")
         runPrompt("رسالة لتثبيت الجلسة الأولى")
@@ -594,16 +594,29 @@ class StudioViewModelFinalClosureTest {
         val sessionId = viewModel.state.value.activeSessionId
         assertNotNull(sessionId)
 
-        // …and a NEW session started in the CURRENT workspace: the created
-        // row must carry THIS workspace (the acceptance capture), whatever
-        // the live scope does afterwards.
+        // …and a NEW (transient) conversation started in the CURRENT
+        // workspace: no durable row exists yet (CLOSURE P0-2/B1), and the
+        // session established by the NEXT accepted turn must carry THIS
+        // workspace (the acceptance capture), whatever the live scope does
+        // afterwards.
+        val upsertsBefore = repository.upsertCount
         viewModel.startNewSession(agent = null)
-        awaitUntil { viewModel.state.value.activeSessionId != null && viewModel.state.value.activeSessionId != sessionId }
+        assertNull(
+            "TRANSIENT: startNewSession leaves no durable binding",
+            viewModel.state.value.activeSessionId
+        )
+        assertEquals("no durable row was created by the transient open", upsertsBefore, repository.upsertCount)
+
+        runPrompt("أول رسالة بعد الجلسة الجديدة")
+        awaitUntil {
+            viewModel.state.value.activeSessionId != null &&
+                viewModel.state.value.activeSessionId != sessionId
+        }
         val newSessionId = viewModel.state.value.activeSessionId!!
         val created = runBlocking {
             sessionService.getSession(ConversationSessionId(newSessionId), activeWorkspace.id)
         }
-        assertNotNull("the new session must be workspace-authorized under the acceptance workspace", created)
+        assertNotNull("the established session must be workspace-authorized under the acceptance workspace", created)
         assertEquals(ChatMode.QUICK_CHAT, created?.mode)
         // The fresh conversation is BOUND to it (not just the durable row).
         assertEquals(newSessionId, viewModel.state.value.activeSessionId)

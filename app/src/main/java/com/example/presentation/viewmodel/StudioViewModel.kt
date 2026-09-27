@@ -191,6 +191,12 @@ class StudioViewModel(
      */
     private val detachedPersistenceFailureSink: (String) -> Unit = { System.err.println(it) },
     /**
+     * CLOSURE P0-1: the app-wide operation registry — meaningful UI
+     * mutations register their lifecycle here (nullable = documented test
+     * seam; production wiring passes the shared AppContainer instance).
+     */
+    private val operationRegistry: com.example.application.operation.OperationRegistry? = null,
+    /**
      * CHAT FINAL CLOSURE (session-binding race probe — the
      * detachedPersistenceFailureSink convention): invoked at the START of
      * every durable-session establishment so the race between send
@@ -775,10 +781,21 @@ class StudioViewModel(
     }
 
     /**
-     * Starts a NEW durable conversation session (bound to the active
-     * workspace + current mode/model) and clears the transcript. The agent
-     * binding is passed by the screen (the catalog selection is shared
-     * state — ADR-6 slice 2 seam).
+     * Starts a NEW conversation WITHOUT creating a durable session yet
+     * (CLOSURE P0-2 / audit §5.4/B1 — transient session lifecycle):
+     *
+     *   NEW → TRANSIENT (this call: NO Room row, only cleared UI state)
+     *       → first ACCEPTED user turn
+     *       → ESTABLISHING (ensureActiveSession under the execution-pinned
+     *          scope)
+     *       → ACTIVE/DURABLE (turn + title persisted)
+     *
+     * Previously opening the composer INSERTed a historical row titled
+     * "محادثة جديدة" immediately — an empty session the user may never
+     * write to became a permanent history record. The durable row is now
+     * created only when the first turn is accepted (the execution path
+     * already owns that establishment), carrying the mode/model/agent
+     * captured at SEND acceptance.
      *
      * FUNCTIONAL CLOSURE (§1): any execution still running for the previous
      * binding is DETACHED (not killed) — its pinned persistence (§2) is
@@ -786,54 +803,53 @@ class StudioViewModel(
      */
     fun startNewSession(agent: AgentDefinition?) {
         detachRunningExecution(banner = null)
-        // CHAT FINAL CLOSURE (§6 scope race): the workspace/project AND the
-        // conversation shape are captured SYNCHRONOUSLY at acceptance — the
-        // coroutine never re-reads the live active scope (a rapid switch
-        // between tap and coroutine dispatch can neither bind the session to
-        // the wrong scope nor record the wrong mode/model).
-        val accepted = _state.value
-        val acceptedChatMode = accepted.chatMode
-        val acceptedModelId = accepted.selectedModelResourceId
-        val acceptedModelName = accepted.selectedModelDisplayName
+        // The accepted conversation shape stays in the UI STATE (chatMode /
+        // selected model / catalog agent) — it travels into the durable row
+        // at first-turn establishment, never re-read from a live scope.
         val pinnedWorkspaceId = runCatching {
             workspaceRuntimeService.activeWorkspaceIdOrNull()
         }.getOrNull()
         val pinnedProjectId = runCatching {
             workspaceRuntimeService.activeProjectIdOrNull()
         }.getOrNull()
-        viewModelScope.launch {
-            runCatching {
-                val session = conversationSessionService.createSession(
-                    mode = acceptedChatMode,
-                    agentId = agent?.identity?.id?.value,
-                    agentName = agent?.identity?.name,
-                    modelResourceId = acceptedModelId,
-                    modelDisplayName = acceptedModelName,
-                    // GAP-14: new sessions are project-scoped from creation —
-                    // bound to the PINNED project (null = shared workspace
-                    // session when no project is bound).
-                    projectId = pinnedProjectId,
-                    // CHAT FINAL CLOSURE (§6): the pinned workspace — passed
-                    // EXPLICITLY so the service's live workspaceIdProvider is
-                    // never consulted after a scope switch.
-                    workspaceId = pinnedWorkspaceId
-                )
-                _state.update {
-                    it.copy(
-                        activeSessionId = session.id.value,
-                        studioSession = emptyList(),
-                        timeline = emptyList(),
-                        executionLog = emptyList(),
-                        streamText = "",
-                        reasoningText = "",
-                        liveExecution = null,
-                        restoredAgentId = null
-                    )
-                }
-            }.onFailure { failure ->
-                _state.update { it.copy(errorMessage = "تعذر إنشاء جلسة جديدة: ${failure.localizedMessage}") }
-            }
+        // CLOSURE P0-1: the transient-open is itself a registered operation
+        // under the canonical acceptance-time scope snapshot.
+        val operationId = com.example.application.operation.OperationRegistry
+            .newOperationId("session_transient_open")
+        operationRegistry?.register(
+            type = "SESSION_TRANSIENT_OPEN",
+            scope = com.example.domain.core.execution.ScopeSnapshot.capture(
+                operationId = operationId,
+                workspaceId = pinnedWorkspaceId,
+                projectId = pinnedProjectId,
+                sessionId = null
+            ),
+            owner = "StudioViewModel"
+        )
+        // The TRANSIENT reset itself is synchronous — no coroutine, no DB
+        // write, nothing that can fail into a half-open state.
+        _state.update {
+            it.copy(
+                // TRANSIENT: no durable binding until the first accepted turn.
+                activeSessionId = null,
+                studioSession = emptyList(),
+                timeline = emptyList(),
+                executionLog = emptyList(),
+                streamText = "",
+                reasoningText = "",
+                liveExecution = null,
+                restoredAgentId = null
+            )
         }
+        operationRegistry?.transition(
+            operationId,
+            com.example.application.operation.OperationPhase.SUCCEEDED,
+            resultSummary = "transient conversation opened (no durable row)"
+        )
+        operationRegistry?.transition(
+            operationId,
+            com.example.application.operation.OperationPhase.FINALIZED
+        )
     }
 
     /**

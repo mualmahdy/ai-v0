@@ -352,8 +352,31 @@ class AppContainer(context: Context) {
             database = database,
             fileStore = sandboxFileStore,
             packageService = projectPackageService,
-            auditTrail = auditTrailService
+            auditTrail = auditTrailService,
+            // CLOSURE P0-3: the durable operation journal — interrupted moves
+            // become real recovery work items (see reconcileInterruptedOperations).
+            journal = projectOperationJournal
         )
+    }
+
+    /**
+     * CLOSURE P0-3 (audit §5.4/B4): the app-wide durable project-operation
+     * journal (append-only JSONL under the app's private files dir — the
+     * substrate must survive the very database commits it witnesses).
+     */
+    val projectOperationJournal: com.example.application.project.ProjectOperationJournal by lazy {
+        com.example.application.project.ProjectOperationJournal(
+            journalFile = java.io.File(appContext.filesDir, "operations/project-operation-journal.jsonl")
+        )
+    }
+
+    /**
+     * CLOSURE P0-1 (audit §5.3/A2): the app-wide operation registry — the
+     * ONE lifecycle reference for meaningful UI mutations (bounded, in-memory
+     * runtime state; durability stays with the owning subsystems).
+     */
+    val operationRegistry: com.example.application.operation.OperationRegistry by lazy {
+        com.example.application.operation.OperationRegistry()
     }
 
     /** §14 — session transcript export (canonical → TXT/MD/JSON). */
@@ -2340,7 +2363,9 @@ class StudioViewModelFactory(
                 // path behind the conversation's preview surface.
                 artifactService = appContainer.artifactService,
                 localPrincipalId = appContainer.localPrincipalId,
-                permissionGrantService = appContainer.permissionGrantService
+                permissionGrantService = appContainer.permissionGrantService,
+                // CLOSURE P0-1: the app-wide operation registry.
+                operationRegistry = appContainer.operationRegistry
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
@@ -2390,7 +2415,10 @@ class SessionsViewModelFactory(
         if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.SessionsViewModel::class.java)) {
             return com.example.presentation.viewmodel.SessionsViewModel(
                 conversationSessionService = appContainer.conversationSessionService,
-                activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace
+                activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace,
+                // CLOSURE P0-1: the app-wide operation registry (session
+                // mutations register their lifecycle here).
+                operationRegistry = appContainer.operationRegistry
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
