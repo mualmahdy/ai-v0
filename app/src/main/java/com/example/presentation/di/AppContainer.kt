@@ -649,6 +649,16 @@ class AppContainer(context: Context) {
      * writes go through the SAME DurableResourceRegistryService used by
      * ComponentRegistry (Section 21: single write authority).
      */
+    /**
+     * CLOSURE P1-1 (audit §5/D1): the operational capability snapshot store —
+     * the runtime's single truth surface for "what each resource PROVED it
+     * can do". validateResource (via the injected control plane) is its only
+     * writer; later consumers read from here.
+     */
+    val operationalResourceSnapshotStore by lazy {
+        com.example.application.provider.OperationalResourceSnapshotStore()
+    }
+
     val providerControlPlaneService: ProviderControlPlaneService by lazy {
         ProviderControlPlaneService(
             providerRepository = generalizedProviderRepository,
@@ -664,7 +674,10 @@ class AppContainer(context: Context) {
             egressControl = egressControl,
             // FIX F-1: bridge materialized/validated adapters into the SAME
             // RuntimeAdapterResolver consumed by ExecutionService & RAG.
-            runtimeAdapterResolver = componentRegistry.runtimeAdapterResolver
+            runtimeAdapterResolver = componentRegistry.runtimeAdapterResolver,
+            // CLOSURE P1-1: validation runs record their operational
+            // capability snapshots here (generation + thinking probes).
+            operationalSnapshotStore = operationalResourceSnapshotStore
         ).also { controlPlane ->
             // GOVERNANCE PHASE: provider/resource lifecycle transitions emit
             // REAL radar evidence through the late-bound sink (no second bus).

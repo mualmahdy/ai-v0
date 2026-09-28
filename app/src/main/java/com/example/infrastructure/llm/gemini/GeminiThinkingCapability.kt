@@ -23,11 +23,20 @@ package com.example.infrastructure.llm.gemini
  *     `thinkingConfig` entirely (the safe default — an unproven capability
  *     is never sent to the provider).
  *
- * HONEST BOUNDARY (this stage): static curation is the floor, not the
- * ceiling. The audit's full design — a per-(model × request-mode) runtime
- * probe whose verdict overrides this table — lands with the capability-
- * probe stage (OperationalResourceSnapshot / D1); the runtime override
- * hook is [forModel]'s single seam.
+ * HONEST BOUNDARY → CLOSED (P1-1 / audit §5 D1): static curation is the
+ * floor, not the ceiling. The runtime probe now EXISTS: validation runs a
+ * bounded thinking-config acceptance probe through the resource's own
+ * adapter (LlmCapabilityProbePort) and registers its verdict here via
+ * [registerRuntimeVerdict]. [forModel] consults the RUNTIME override
+ * registry FIRST — a probe-verified verdict beats the table in BOTH
+ * directions:
+ *
+ *   - endpoint REJECTS thinkingConfig for a documented-SUPPORTED family
+ *     (proxy stripping, API version drift) → runtime UNSUPPORTED wins;
+ *   - endpoint ACCEPTS it for an UNKNOWN family → runtime SUPPORTED wins.
+ *
+ * Transient probe failures never register anything (INCONCLUSIVE keeps the
+ * static floor — a network blip must not manufacture capability truth).
  */
 enum class GeminiThinkingSupport {
     /** Thinking config MAY be attached (documented, curated families only). */
@@ -42,14 +51,46 @@ enum class GeminiThinkingSupport {
 
 object GeminiThinkingCapability {
 
+    // ------------------------------------------------------------------
+    // P1-1 — the RUNTIME OVERRIDE registry (per normalized model id).
+    // Written ONLY by the validation path's acceptance probe; consulted
+    // FIRST by [forModel]. Test seam: [clearRuntimeVerdicts] restores the
+    // pure static floor.
+    // ------------------------------------------------------------------
+    private val runtimeVerdicts =
+        java.util.concurrent.ConcurrentHashMap<String, GeminiThinkingSupport>()
+
+    /** Normalizes a model id to the registry's key form. */
+    fun normalize(modelName: String): String = modelName.trim().lowercase()
+
     /**
-     * Resolves the thinking support of a Gemini model id. Matching is
-     * prefix/substring-based on the NORMALIZED id (lowercased, trimmed) so
-     * versioned variants (`gemini-2.5-flash-001`, `gemini-2.5-pro-preview`)
-     * inherit their family's verdict.
+     * Registers a RUNTIME probe verdict for a model id. This is the ONLY
+     * write path, and it is reserved for probe outcomes (ACCEPTED →
+     * SUPPORTED, REJECTED → UNSUPPORTED); INCONCLUSIVE probes must NOT
+     * register anything.
+     */
+    fun registerRuntimeVerdict(modelName: String, support: GeminiThinkingSupport) {
+        val key = normalize(modelName)
+        if (key.isNotEmpty()) runtimeVerdicts[key] = support
+    }
+
+    /** The registered runtime verdict for a model id, if any. */
+    fun runtimeVerdict(modelName: String): GeminiThinkingSupport? =
+        runtimeVerdicts[normalize(modelName)]
+
+    /** Test seam: drops every runtime override (back to the static floor). */
+    fun clearRuntimeVerdicts() = runtimeVerdicts.clear()
+
+    /**
+     * Resolves the thinking support of a Gemini model id: the RUNTIME
+     * override first (probe evidence beats curation), then the static
+     * curated table. Matching is prefix/substring-based on the NORMALIZED
+     * id (lowercased, trimmed) so versioned variants (`gemini-2.5-flash-001`,
+     * `gemini-2.5-pro-preview`) inherit their family's verdict.
      */
     fun forModel(modelName: String): GeminiThinkingSupport {
-        val model = modelName.trim().lowercase()
+        runtimeVerdict(modelName)?.let { return it }
+        val model = normalize(modelName)
         if (model.isEmpty()) return GeminiThinkingSupport.UNKNOWN
         return when {
             // 2.5 family (flash / pro / flash-lite and variants): thinking

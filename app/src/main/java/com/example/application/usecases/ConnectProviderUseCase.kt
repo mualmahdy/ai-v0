@@ -7,9 +7,12 @@ import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.provider.Provider
 import com.example.domain.core.provider.ProviderService
 import com.example.domain.core.provider.ServiceConfiguration
+import com.example.domain.core.provider.ServiceProtocolId
 import com.example.domain.core.provider.ServiceType
 import com.example.domain.core.provider.offering.OfferingType
 import com.example.domain.core.provider.offering.ServiceOffering
+import com.example.infrastructure.llm.gemini.GeminiThinkingCapability
+import com.example.infrastructure.llm.gemini.GeminiThinkingSupport
 
 /**
  * ============================================================================
@@ -131,19 +134,27 @@ class ConnectProviderUseCase(
             name = modelName.ifBlank { preset.displayName },
             description = preset.description,
             contextWindowTokens = preset.contextWindowTokens,
-            // GAP-25 (Design Closure 2026, honest capability declarations):
-            // REASONING + STREAMING are UNVERIFIED defaults for LLM presets —
-            // the wizard's validation step proves endpoint reachability +
-            // auth via GET /models ONLY; it never probes streaming (SSE) or
-            // reasoning behavior. The discovery path already declares only
-            // verified capabilities; these provisional defaults stay because
-            // decision-engine contracts filter offerings by them — capability
-            // VERIFICATION is deferred to the ADR-6 redesign track.
+            // ------------------------------------------------------------------
+            // GAP-25 → CLOSED (CLOSURE P1-1, audit §5 item 8): capability
+            // declarations are now EVIDENCE-DERIVED, never assumed.
+            //
+            // The OLD behavior declared REASONING + STREAMING for EVERY LLM
+            // offering as unverified defaults — gemini-2.0-flash received
+            // REASONING even though the curated thinking table itself says
+            // that family has no thinkingConfig.
+            //
+            // The NEW behavior declares the DOCUMENTED FLOOR at registration
+            // (LLM_GENERATION always; STREAMING documented by both adapter
+            // families' implemented SSE paths; REASONING documented ONLY by
+            // the curated Gemini thinking table — never for OpenAI-compatible
+            // presets, whose reasoning support this stage simply does not
+            // know), and step 6's validation UPGRADES the declaration with
+            // the runtime snapshot (floor ∪ verified − runtime-rejected) via
+            // [OperationalResourceSnapshot.declaredCapabilities].
+            // ------------------------------------------------------------------
             supportedCapabilities = when (preset.serviceType) {
-                ServiceType.LLM -> setOf(
-                    CapabilityType.LLM_GENERATION,
-                    CapabilityType.REASONING,
-                    CapabilityType.STREAMING
+                ServiceType.LLM -> documentedLlmCapabilityFloor(
+                    preset.protocolId, modelName
                 )
                 ServiceType.EMBEDDING -> setOf(
                     CapabilityType.EMBEDDING,
@@ -177,10 +188,36 @@ class ConnectProviderUseCase(
             is Outcome.Success -> {
                 val result = r.value
                 if (result.isSuccess) {
+                    // ----------------------------------------------------------
+                    // CLOSURE P1-1: upgrade the offering's capability
+                    // declarations with the validation run's RUNTIME
+                    // snapshot — floor ∪ verified − runtime-rejected. A
+                    // REJECTED thinking probe REMOVES REASONING from a
+                    // statically-documented model; a VERIFIED probe ADDS it
+                    // to an undocumented one. No snapshot (no adapter /
+                    // failed floor) keeps the documented floor — the honest
+                    // registration-time declaration.
+                    // ----------------------------------------------------------
+                    var upgradeNote = ""
+                    val snapshot = result.operationalSnapshot
+                    if (snapshot != null && preset.serviceType == ServiceType.LLM) {
+                        val floor = documentedLlmCapabilityFloor(preset.protocolId, modelName)
+                        val declared = snapshot.declaredCapabilities(floor)
+                        if (declared != offering.supportedCapabilities) {
+                            when (val up = providerControlPlaneService.registerOffering(
+                                offering.copy(supportedCapabilities = declared)
+                            )) {
+                                is Outcome.Error -> upgradeNote =
+                                    " (تعذّر تحديث إعلانات القدرات: ${up.diagnosticMessage})"
+                                else -> Unit
+                            }
+                        }
+                    }
                     // validateResource auto-promoted the record to ENABLED.
                     Result.Connected(
                         resourceId = resourceId.value,
-                        message = "تم ربط «${preset.displayName}» بنجاح — المورد مُفعّل وجاهز للاستخدام (${result.message})"
+                        message = "تم ربط «${preset.displayName}» بنجاح — المورد مُفعّل وجاهز للاستخدام (${result.message})" +
+                            upgradeNote
                     )
                 } else {
                     Result.SavedUnverified(
@@ -192,5 +229,38 @@ class ConnectProviderUseCase(
             is Outcome.Error -> Result.Failed(6, "فشل التحقق: ${r.diagnosticMessage}")
             is Outcome.Degraded -> Result.Failed(6, "فشل التحقق: ${r.diagnosticMessage}")
         }
+    }
+
+    /**
+     * CLOSURE P1-1 (audit §5 item 8): the DOCUMENTED capability floor for an
+     * LLM offering — what may be declared BEFORE any runtime probe ran.
+     *
+     *  - LLM_GENERATION — every wizard LLM preset speaks a generation
+     *    protocol; the validation floor (P0-4) then PROVES it per resource.
+     *  - STREAMING — documented-by-implementation for every wizard protocol
+     *    (the Gemini REST adapter and the OpenAI-compatible adapter both
+     *    implement the SSE stream path); it stays a documented claim until a
+     *    future stage's streaming probe verifies it per resource.
+     *  - REASONING — documented ONLY by the curated Gemini thinking table
+     *    ([GeminiThinkingCapability] — the runtime override registry makes
+     *    this consult PROBE evidence first when it exists). OpenAI-compatible
+     *    presets get NO reasoning declaration this stage: nothing documents
+     *    per-model reasoning for them, so claiming it would be exactly the
+     *    fabricated capability the audit rejected.
+     */
+    private fun documentedLlmCapabilityFloor(
+        protocolId: ServiceProtocolId,
+        modelName: String
+    ): Set<CapabilityType> {
+        val floor = mutableSetOf(
+            CapabilityType.LLM_GENERATION,
+            CapabilityType.STREAMING
+        )
+        if (protocolId == ServiceProtocolId.GEMINI_NATIVE &&
+            GeminiThinkingCapability.forModel(modelName) == GeminiThinkingSupport.SUPPORTED
+        ) {
+            floor += CapabilityType.REASONING
+        }
+        return floor
     }
 }

@@ -5,6 +5,7 @@ import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
 import com.example.domain.core.decision.DecisionCase
 import com.example.domain.core.decision.DecisionState
+import com.example.domain.core.decision.StandardActionSpace
 import com.example.domain.core.evolution.runtime.PolicyEvaluationReport
 import com.example.domain.core.evolution.runtime.PolicyKind
 import com.example.infrastructure.persistence.dao.DecisionCaseDao
@@ -82,15 +83,30 @@ class DecisionIntelligenceService(
             engineCells = cbrMdpEngine.qTableSize()
             val latency = System.currentTimeMillis() - start
             latencies.add(latency)
-            val reward = if (predictedAction == expectedAction) {
-                success++
-                1.0f
-            } else if (predictedAction.startsWith(expectedAction.substringBefore("_"))) {
-                degraded++
-                0.5f
-            } else {
-                failure++
-                -0.2f
+            // CLOSURE P1-2 (audit §5 item 5): TYPED family credit replaces
+            // the old `predictedAction.startsWith(expectedAction.substringBefore("_"))`
+            // — string shape no longer decides semantic credit. Degraded
+            // credit now means: the engine picked an action of the SAME
+            // ActionFamily as the expected one (a renamed/reworded action
+            // can no longer flip the metric). An unparseable expected label
+            // is an honest FAILURE (we said it expected something the action
+            // space does not contain — no partial credit for noise).
+            val expectedType = runCatching { DecisionActionType.valueOf(expectedAction) }.getOrNull()
+            val predictedType = runCatching { DecisionActionType.valueOf(predictedAction) }.getOrNull()
+            val reward = when {
+                predictedAction == expectedAction -> {
+                    success++
+                    1.0f
+                }
+                expectedType != null && predictedType != null &&
+                    StandardActionSpace.familyOf(predictedType) == StandardActionSpace.familyOf(expectedType) -> {
+                    degraded++
+                    0.5f
+                }
+                else -> {
+                    failure++
+                    -0.2f
+                }
             }
             totalReward += reward
         }
@@ -126,21 +142,16 @@ class DecisionIntelligenceService(
         return decision.chosenAction.type.name
     }
 
-    /** The standard candidate set mirroring DecisionService's planner space. */
+    /**
+     * CLOSURE P1-2 (audit §5 item 5): the standard candidate set is now THE
+     * canonical single definition — [StandardActionSpace.candidates] — the
+     * SAME object the admissibility filter and its family sets live in.
+     * The private static mirror that used to live here (and silently
+     * drifted from the real action space) is gone: the measurement layer
+     * feeds the engine the shared skeleton, never a hand-copied one.
+     */
     internal fun standardCandidateActions(): List<DecisionAction> =
-        listOf(
-            DecisionAction(DecisionActionType.EXECUTE_STEP, targetId = "current"),
-            DecisionAction(DecisionActionType.SELECT_MODEL, targetId = "auto"),
-            DecisionAction(DecisionActionType.SEARCH, targetId = "web"),
-            DecisionAction(DecisionActionType.RETRIEVE_KNOWLEDGE, targetId = "rag"),
-            DecisionAction(DecisionActionType.RETRIEVE_MEMORY, targetId = "memory"),
-            DecisionAction(DecisionActionType.DELEGATE, targetId = "sub_agent"),
-            DecisionAction(DecisionActionType.CREATE_PLAN, targetId = "dag_workflow_planner"),
-            DecisionAction(DecisionActionType.REPLAN, targetId = "self"),
-            DecisionAction(DecisionActionType.COMPLETE, targetId = "terminal_complete"),
-            DecisionAction(DecisionActionType.STOP, targetId = "terminal_stop"),
-            DecisionAction(DecisionActionType.ASK_USER, targetId = "guidance")
-        )
+        StandardActionSpace.candidates()
 
     /**
      * Multi-step lookahead (P0-08 — REAL Q-table values).

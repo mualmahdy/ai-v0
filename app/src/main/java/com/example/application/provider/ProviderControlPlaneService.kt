@@ -91,6 +91,15 @@ class ProviderControlPlaneService(
      * search / embedding execution failed with AdapterNotFound.
      */
     private val runtimeAdapterResolver: RuntimeAdapterResolver? = null,
+    /**
+     * CLOSURE P1-1 (audit §5/D1): the operational capability snapshot store.
+     * validateResource is its ONLY writer — validation is the only place
+     * runtime capability evidence exists (generation round-trip + optional-
+     * feature acceptance probe). When null (legacy/test wiring), snapshots
+     * still ride the ServiceValidationResult back to the caller but are not
+     * retained for later readers — an honest degradation, never a fabrication.
+     */
+    private val operationalSnapshotStore: OperationalResourceSnapshotStore? = null,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + Job())
 ) {
 
@@ -536,6 +545,13 @@ class ProviderControlPlaneService(
         val result = withContext(Dispatchers.IO) {
             validator.validate(service, config.protocolId, config, adapter, apiKeyProvider)
         }
+
+        // CLOSURE P1-1: record the operational capability snapshot (the
+        // run's PROVEN capability evidence) on the store — keyed to THIS
+        // resource, merged with any previous run's verdicts.
+        result.operationalSnapshot
+            ?.withResourceId(resourceId.value)
+            ?.let { keyed -> operationalSnapshotStore?.record(keyed) }
 
         // Update ResourceRecord per validation result
         val newLifecycle = if (result.isSuccess) ResourceLifecycleState.ENABLED

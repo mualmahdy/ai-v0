@@ -1,8 +1,10 @@
 package com.example.application.decision
 
 import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.decision.AdmissibleActionSet
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
+import com.example.domain.core.decision.StandardActionSpace
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.core.task.TaskContracts
 import com.example.domain.core.task.TaskIntentCategory
@@ -155,7 +157,15 @@ class AdmissibleActionSetTest {
     }
 
     // ------------------------------------------------------------------
-    // The admissible-set filter semantics (mirrors DecisionService's filter)
+    // The admissible-set filter semantics — THE PRODUCTION FILTER
+    // (AdmissibleActionSet), not a local mirror.
+    //
+    // CLOSURE P1-2 (audit §5 item 5): this suite previously re-implemented
+    // DecisionService's PRIVATE filter locally (`isAdmissibleUnderFilters`)
+    // because the original was inaccessible — tests asserting a copy of the
+    // semantics instead of the semantics themselves. The filter is now the
+    // public domain object [AdmissibleActionSet]; these tests call THE SAME
+    // implementation the decision runtime delegates to.
     // ------------------------------------------------------------------
 
     private fun isAdmissibleUnderFilters(
@@ -163,27 +173,12 @@ class AdmissibleActionSetTest {
         contract: com.example.domain.core.task.TaskContract,
         agentCaps: Set<CapabilityType>?,
         policy: AutonomyPolicy?
-    ): Boolean {
-        val agentLacksToolExecution = agentCaps != null &&
-                CapabilityType.TOOL_EXECUTION !in agentCaps
-        val sensitiveFamilyExcluded = policy == AutonomyPolicy.ASSISTED
-        val toolFamily = setOf(
-            DecisionActionType.EXECUTE_TOOL,
-            DecisionActionType.EXECUTE_MCP,
-            DecisionActionType.EXECUTE_SKILL,
-            DecisionActionType.USE_INTEGRATION,
-            DecisionActionType.SELECT_TOOL
-        )
-        val sensitiveFamily = setOf(
-            DecisionActionType.EXECUTE_TOOL,
-            DecisionActionType.EXECUTE_MCP,
-            DecisionActionType.EXECUTE_SKILL,
-            DecisionActionType.USE_INTEGRATION
-        )
-        return contract.isAdmissible(action) &&
-                !(agentLacksToolExecution && action in toolFamily) &&
-                !(sensitiveFamilyExcluded && action in sensitiveFamily)
-    }
+    ): Boolean = AdmissibleActionSet.isAdmissible(
+        action = action,
+        contract = contract,
+        agentAllowedCapabilities = agentCaps,
+        effectiveAutonomyPolicy = policy
+    )
 
     @Test
     fun `ordinary chat with quick-chat agent cannot execute tools under ANY policy`() {

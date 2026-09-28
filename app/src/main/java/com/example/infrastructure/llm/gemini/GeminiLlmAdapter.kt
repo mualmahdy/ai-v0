@@ -68,24 +68,40 @@ class GeminiLlmAdapter(
         .readTimeout(180, TimeUnit.SECONDS)
         .build(),
     /**
-     * CLOSURE P0-5 (audit §5.5/C2): the thinking capability verdict for
+     * CLOSURE P0-5 (audit §5.5/C2): the STATIC thinking capability verdict for
      * [defaultModelName] — resolved ONCE from the curated capability table
      * (see [GeminiThinkingCapability]). `thinkingConfig` is attached ONLY
      * for SUPPORTED models; UNSUPPORTED/UNKNOWN models get a clean request
      * the provider will not reject. The advertised `reasoning` capability
      * follows the SAME verdict — the adapter no longer advertises what the
      * model family does not have.
+     *
+     * P1-1 (audit §5/D1): this field is now the STATIC FLOOR only —
+     * [effectiveThinkingSupport] consults the runtime override registry
+     * FIRST, so a probe-verified verdict (validation path) beats the table
+     * at REQUEST time, not just at construction time.
      */
     private val thinkingSupport: GeminiThinkingSupport =
         GeminiThinkingCapability.forModel(defaultModelName)
-) : LlmProviderPort {
+) : LlmProviderPort, com.example.domain.ports.llm.LlmCapabilityProbePort {
+
+    /**
+     * P1-1: the EFFECTIVE thinking verdict — the runtime probe override
+     * (registered by the validation path's acceptance probe) first, the
+     * static curated floor otherwise. This is the single seam P0-5
+     * promised: the runtime probe overrides the static table by going
+     * through HERE, not by patching the table.
+     */
+    private fun effectiveThinkingSupport(): GeminiThinkingSupport =
+        GeminiThinkingCapability.runtimeVerdict(defaultModelName) ?: thinkingSupport
 
     override val metadata: SafeProviderMetadata
         get() {
-            // CLOSURE P0-5: `reasoning` is advertised ONLY for models the
-            // capability gate resolved as SUPPORTED — the metadata never
-            // claims a capability the request builder will not use.
-            val reasoning = if (thinkingSupport == GeminiThinkingSupport.SUPPORTED) {
+            // CLOSURE P0-5 (+P1-1 runtime override): `reasoning` is advertised
+            // ONLY when the EFFECTIVE verdict (runtime probe first, static
+            // floor otherwise) is SUPPORTED — the metadata never claims a
+            // capability the request builder will not use.
+            val reasoning = if (effectiveThinkingSupport() == GeminiThinkingSupport.SUPPORTED) {
                 listOf("reasoning")
             } else {
                 emptyList<String>()
@@ -197,21 +213,33 @@ class GeminiLlmAdapter(
      * CLOSURE P0-5 test-observability seam: `internal` (same-module unit
      * tests) so the capability-gating invariant tests can assert the EXACT
      * request body — thinkingConfig present ONLY for SUPPORTED models.
+     *
+     * P1-1: [forceThinkingConfig] exists for the RUNTIME acceptance probe
+     * (see [probeOptionalFeatureAcceptance]) — the probe must exercise the
+     * provider's reaction to thinkingConfig REGARDLESS of what the static
+     * gate would attach; production paths never set it.
      */
-    internal fun buildRequestBody(request: LlmRequest, stream: Boolean): String {
+    internal fun buildRequestBody(
+        request: LlmRequest,
+        stream: Boolean,
+        forceThinkingConfig: Boolean = false
+    ): String {
         // CLOSURE P0-5 (audit §5.5/C2 — capability gating): `thinkingConfig`
-        // is attached ONLY when the model's thinking capability was resolved
-        // as SUPPORTED by [GeminiThinkingCapability]. Previously it was
-        // attached UNCONDITIONALLY — a model without thinking support had the
+        // is attached ONLY when the model's EFFECTIVE thinking verdict
+        // (P1-1: runtime probe override first, static curated floor
+        // otherwise) resolved as SUPPORTED. Previously it was attached
+        // UNCONDITIONALLY — a model without thinking support had the
         // WHOLE request rejected by the provider, surfacing as a fake
         // "generation failure" of a perfectly usable model. UNSUPPORTED and
         // UNKNOWN models now get a clean request (an unproven capability is
         // never sent; thought parts are simply never emitted for them).
+        val attachThinking = forceThinkingConfig ||
+            effectiveThinkingSupport() == GeminiThinkingSupport.SUPPORTED
         val generationConfig = JSONObject()
             .put("temperature", request.config.temperature.toDouble())
             .put("topP", 0.95)
             .put("maxOutputTokens", request.config.maxOutputTokens)
-        if (thinkingSupport == GeminiThinkingSupport.SUPPORTED) {
+        if (attachThinking) {
             // FRONTIER REASONING: includeThoughts makes thinking-capable
             // Gemini models stream their OWN thinking as dedicated
             // `thought: true` parts — collected separately from the answer,
@@ -346,6 +374,81 @@ class GeminiLlmAdapter(
                 )
             }
         }
+
+    // ------------------------------------------------------------------
+    // P1-1 — runtime capability acceptance probe (LlmCapabilityProbePort)
+    // ------------------------------------------------------------------
+
+    /**
+     * PURE verdict mapping for the acceptance probe (test-observable):
+     *
+     *  - 2xx                       → ACCEPTED   (feature survived a REAL round-trip)
+     *  - 400 INVALID_ARGUMENT / 422 → REJECTED  (the provider refused the FEATURE itself)
+     *  - anything else (401/403/429/5xx/404) → INCONCLUSIVE — auth, quota,
+     *    server, or model-resolution failures say NOTHING about the feature;
+     *    a verdict must never be flipped by a condition the feature did not
+     *    cause. (404 is INCONCLUSIVE deliberately: the generation probe that
+     *    just SUCCEEDED proves the model resolves, so a 404 HERE indicates
+     *    endpoint drift, not feature rejection.)
+     */
+    internal fun probeOutcomeFor(httpCode: Int): com.example.domain.ports.llm.CapabilityProbeOutcome = when {
+        httpCode in 200..299 -> com.example.domain.ports.llm.CapabilityProbeOutcome.ACCEPTED
+        httpCode == 400 || httpCode == 422 -> com.example.domain.ports.llm.CapabilityProbeOutcome.REJECTED
+        else -> com.example.domain.ports.llm.CapabilityProbeOutcome.INCONCLUSIVE
+    }
+
+    /**
+     * CLOSURE P1-1 (audit §5/D1): the bounded runtime acceptance probe that
+     * OVERRIDES the static capability table. Sends the SAME single-digit-
+     * token probe request [GenerationProbe] uses, but with `thinkingConfig`
+     * FORCED on — bypassing the static gate, because measuring the gate is
+     * the probe's purpose. The round-trip goes through this adapter's OWN
+     * protocol path (model + auth + endpoint + egress governance).
+     *
+     * Honest cost: ONE tiny paid request per validation run (the same price
+     * the audit already accepted for the generation probe). Transient
+     * failures return INCONCLUSIVE and register NOTHING — a network blip
+     * must not manufacture capability truth.
+     */
+    override suspend fun probeOptionalFeatureAcceptance():
+        com.example.domain.ports.llm.CapabilityProbeOutcome = withContext(Dispatchers.IO) {
+        val outcome = try {
+            val url = "$baseUrl/v1beta/models/$defaultModelName:generateContent"
+            val body = buildRequestBody(
+                com.example.infrastructure.validation.GenerationProbe.request(),
+                stream = false,
+                forceThinkingConfig = true
+            )
+            val call = client.newCall(requestWithKey(url, body, stream = false))
+            call.execute().use { response -> probeOutcomeFor(response.code) }
+        } catch (e: MissingGeminiKeyException) {
+            // No key → the probe could not run — never a verdict.
+            com.example.domain.ports.llm.CapabilityProbeOutcome.INCONCLUSIVE
+        } catch (e: java.io.IOException) {
+            // Transport/timeout/egress-denied → INCONCLUSIVE, no override.
+            com.example.domain.ports.llm.CapabilityProbeOutcome.INCONCLUSIVE
+        } catch (e: Exception) {
+            com.example.domain.ports.llm.CapabilityProbeOutcome.INCONCLUSIVE
+        }
+        // P1-1 override registration — THE seam P0-5 documented: the probe's
+        // verdict is registered on the capability table so [forModel] (and
+        // therefore this adapter's OWN request gate, via
+        // [effectiveThinkingSupport]) honors runtime evidence over curation.
+        // ACCEPTED → SUPPORTED, REJECTED → UNSUPPORTED; INCONCLUSIVE
+        // registers NOTHING (a transient failure must not flip verdicts).
+        when (outcome) {
+            com.example.domain.ports.llm.CapabilityProbeOutcome.ACCEPTED ->
+                GeminiThinkingCapability.registerRuntimeVerdict(
+                    defaultModelName, GeminiThinkingSupport.SUPPORTED
+                )
+            com.example.domain.ports.llm.CapabilityProbeOutcome.REJECTED ->
+                GeminiThinkingCapability.registerRuntimeVerdict(
+                    defaultModelName, GeminiThinkingSupport.UNSUPPORTED
+                )
+            com.example.domain.ports.llm.CapabilityProbeOutcome.INCONCLUSIVE -> Unit
+        }
+        outcome
+    }
 
     // ------------------------------------------------------------------
     // stream (SSE)

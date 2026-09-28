@@ -230,11 +230,67 @@ class LlmResourceValidator(
         // adapter is present (test/legacy wiring), the reachability verdict
         // stands and its message says HONESTLY that generation was not
         // probed — it never claims more than was tested.
+        //
+        // CLOSURE P1-1 (audit §5/D1 + item 8): a SUCCESSFUL generation probe
+        // additionally triggers the OPTIONAL-FEATURE ACCEPTANCE probe (when
+        // the adapter implements LlmCapabilityProbePort) and the run's
+        // evidence is captured as an OperationalResourceSnapshot riding the
+        // result. The snapshot is the surface the connect wizard uses to
+        // correct its offering's capability declarations (floor ∪ verified −
+        // runtime-rejected), and the adapter's acceptance verdict is
+        // REGISTERED on the static capability table's override seam — the
+        // runtime probe now overrides the curated table, exactly as P0-5's
+        // honest boundary promised. Transient probe outcomes (INCONCLUSIVE)
+        // register nothing and leave the snapshot's thinking field UNPROBED.
         // ------------------------------------------------------------------
         val llmAdapter = adapter as? com.example.domain.ports.llm.LlmProviderPort
         return when {
             !reachability.isSuccess -> reachability
-            llmAdapter != null -> GenerationProbe.probe(llmAdapter)
+            llmAdapter != null -> {
+                val generationResult = GenerationProbe.probe(llmAdapter)
+                if (!generationResult.isSuccess) {
+                    generationResult
+                } else {
+                    val thinkingOutcome =
+                        (llmAdapter as? com.example.domain.ports.llm.LlmCapabilityProbePort)
+                            ?.probeOptionalFeatureAcceptance()
+                    val thinkingVerdict = when (thinkingOutcome) {
+                        com.example.domain.ports.llm.CapabilityProbeOutcome.ACCEPTED ->
+                            com.example.domain.core.resource.CapabilityVerdict.VERIFIED
+                        com.example.domain.ports.llm.CapabilityProbeOutcome.REJECTED ->
+                            com.example.domain.core.resource.CapabilityVerdict.UNSUPPORTED
+                        else -> com.example.domain.core.resource.CapabilityVerdict.UNPROBED
+                    }
+                    val snapshot = com.example.domain.core.resource.OperationalResourceSnapshot(
+                        modelName = config.defaultOfferingId,
+                        protocolId = protocolId,
+                        generation = com.example.domain.core.resource.CapabilityVerdict.VERIFIED,
+                        thinking = thinkingVerdict,
+                        streaming = com.example.domain.core.resource.CapabilityVerdict.UNPROBED,
+                        probedAtEpochMs = System.currentTimeMillis(),
+                        probeLatencyMs = generationResult.latencyMs,
+                        evidence = buildString {
+                            append("generation round-trip verified")
+                            append(
+                                when (thinkingVerdict) {
+                                    com.example.domain.core.resource.CapabilityVerdict.VERIFIED ->
+                                        "; thinking config runtime-ACCEPTED"
+                                    com.example.domain.core.resource.CapabilityVerdict.UNSUPPORTED ->
+                                        "; thinking config runtime-REJECTED (override)"
+                                    com.example.domain.core.resource.CapabilityVerdict.UNPROBED ->
+                                        if (thinkingOutcome == null) {
+                                            "; thinking not probed (no probe port)"
+                                        } else {
+                                            "; thinking inconclusive (transient)"
+                                        }
+                                }
+                            )
+                            append("; streaming not probed (documented floor only)")
+                        }
+                    )
+                    generationResult.copy(operationalSnapshot = snapshot)
+                }
+            }
             else -> ServiceValidationResult.success(
                 reachability.latencyMs,
                 reachability.message + " (generation NOT probed — no LLM adapter wired)"

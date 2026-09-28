@@ -134,11 +134,14 @@ class TaskContractResolver {
     }
 }
 
-/** Action types that require the agent to declare TOOL_EXECUTION capability. */
-val TOOL_FAMILY_ACTIONS: Set<DecisionActionType> = setOf(
-    DecisionActionType.EXECUTE_TOOL,
-    DecisionActionType.EXECUTE_MCP,
-    DecisionActionType.EXECUTE_SKILL,
-    DecisionActionType.USE_INTEGRATION,
-    DecisionActionType.SELECT_TOOL
-)
+/**
+ * Action types that require the agent to declare TOOL_EXECUTION capability.
+ *
+ * CLOSURE P1-2 (audit §5 item 5): the canonical home is now
+ * [com.example.domain.core.decision.StandardActionSpace.TOOL_FAMILY_ACTIONS]
+ * (consolidated with the other admissibility family sets); this top-level
+ * val remains as a compatibility re-export so existing references keep
+ * compiling against one shared definition.
+ */
+val TOOL_FAMILY_ACTIONS: Set<DecisionActionType>
+    get() = com.example.domain.core.decision.StandardActionSpace.TOOL_FAMILY_ACTIONS

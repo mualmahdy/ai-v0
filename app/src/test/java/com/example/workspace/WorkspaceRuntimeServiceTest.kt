@@ -496,14 +496,28 @@ class WorkspaceRuntimeServiceTest {
         // A live execution attributed to the workspace being deleted —
         // it suspends until cancelled (cooperative).
         var completionObserved = false
+        // REPAIR ORDER (test stability — same pattern as the REFUSES test
+        // below): a CountDownLatch guarantees the coroutine has STARTED and
+        // suspended at awaitCancellation before deletion is attempted.
+        // Without it, cancel-before-start skips the body entirely (the
+        // finally included), failing the join-observed assertion for
+        // reasons unrelated to the drain behavior under test (observed on
+        // a memory/CPU-constrained provisioned runner where Default
+        // dispatch is slower than the test's path into the drain).
+        val started = java.util.concurrent.CountDownLatch(1)
         val key = "p114-drain-" + java.util.UUID.randomUUID()
         val job = com.example.application.execution.ExecutionHost.launch(key, "ws_active") {
+            started.countDown()
             try {
                 kotlinx.coroutines.awaitCancellation()
             } finally {
                 completionObserved = true
             }
         }
+        org.junit.Assert.assertTrue(
+            "test precondition: the execution must be started before deletion",
+            started.await(2, java.util.concurrent.TimeUnit.SECONDS)
+        )
 
         val result = service.deleteWorkspace("ws_active")
 

@@ -26,7 +26,18 @@ data class ServiceValidationResult(
     val isSuccess: Boolean,
     val classification: ServiceHealthClassification,
     val latencyMs: Long,
-    val message: String
+    val message: String,
+    /**
+     * CLOSURE P1-1 (audit §5/D1 + item 8): the operational capability
+     * snapshot produced by the validation run's probes — what this resource
+     * PROVED at runtime (generation round-trip, optional-feature acceptance).
+     * `null` when no probe ran (reachability-only paths, adapters without a
+     * probe port, or a failed validation floor) — a null snapshot never
+     * implies capability; it implies NO NEW EVIDENCE. The control plane
+     * records it in the OperationalResourceSnapshotStore; the connect
+     * wizard consumes it to correct its offering's declarations.
+     */
+    val operationalSnapshot: com.example.domain.core.resource.OperationalResourceSnapshot? = null
 ) {
     companion object {
         fun success(latencyMs: Long, message: String) = ServiceValidationResult(
