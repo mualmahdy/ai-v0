@@ -165,6 +165,11 @@ class ChatAttachmentCoordinatorTest {
         contentFiles["content://saf/pinned.txt"] = "pinned.txt" to "أدلة المشروع الأصلي".toByteArray()
 
         val originalScope = coordinator.captureActiveScope()
+        // CLOSURE P0-1/§5-item 1: the capture is the CANONICAL ScopeSnapshot now
+        // — its fail-fast contract guarantees an attributed (non-null) project
+        // here, which this test pins explicitly.
+        assertNotNull("captureActiveScope must refuse an unattributed scope", originalScope.projectId)
+        val pinnedProjectId = originalScope.projectId!!
         val siblingProjectId = createSiblingProject()
         workspaceService.setActiveProject(siblingProjectId)
 
@@ -176,7 +181,7 @@ class ChatAttachmentCoordinatorTest {
 
         assertTrue(
             fileStore.stat(
-                fileStore.projectRoot(originalScope.projectId),
+                fileStore.projectRoot(pinnedProjectId),
                 attachment.storageUri
             ).exists
         )
@@ -187,7 +192,7 @@ class ChatAttachmentCoordinatorTest {
             ).exists
         )
         assertTrue(
-            artifactService.forProject(originalScope.projectId)
+            artifactService.forProject(pinnedProjectId)
                 .any { it.id == attachment.artifactId }
         )
         assertTrue(

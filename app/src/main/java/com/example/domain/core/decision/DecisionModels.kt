@@ -55,6 +55,19 @@ data class DecisionState(
     val hasToolExecutionEvidence: Boolean = false,
     val lastActionType: DecisionActionType? = null,
     val lastActionSuccess: Boolean? = null,
+    /**
+     * CLOSURE P1-3 (audit §5/item 6 — resource-aware CBR): the identity of
+     * the resource the run is CURRENTLY bound to (the last decision record's
+     * selected resource; null = honestly unbound, e.g. before the first
+     * selection). This is NOMINAL IDENTITY, not a metric dimension: it
+     * participates in case retrieval as an exact identity match (see
+     * [CaseBase.findSimilarCases]) and is persisted per-case via the
+     * decision-record columns — it is deliberately NEVER hashed into
+     * [toFeatureVector], because an arbitrary hash of a nominal id would
+     * poison cosine similarity with pseudo-metric noise (the length-15
+     * vector contract is test-pinned by Phase1FixVerificationTest).
+     */
+    val activeResourceId: ResourceId? = null,
     val contextFeatures: Map<String, Float> = emptyMap()
 ) {
     /**
@@ -147,6 +160,21 @@ data class DecisionCase(
 
     override fun hashCode(): Int = id.hashCode()
 }
+
+/**
+ * CLOSURE P1-3 (audit §5/item 6): the measured per-resource reward prior —
+ * the honest aggregate of every stored case whose decision record selected
+ * [resourceId]. Cold-start scoring for a resource-targeted action consults
+ * this MEASURED prior instead of the neutral 0.5, so a resource that has
+ * historically failed on similar tasks starts honestly discounted (and a
+ * historically successful one starts honestly favored) even before any
+ * same-type similar case exists.
+ */
+data class ResourceRewardPrior(
+    val resourceId: ResourceId,
+    val meanReward: Float,
+    val caseCount: Int
+)
 
 /**
  * Scored action alternative for observability and auditing.

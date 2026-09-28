@@ -165,6 +165,16 @@ data class DecisionContext(
             hasToolExecutionEvidence = hasTool,
             lastActionType = lastAction?.type,
             lastActionSuccess = lastObservation?.isSuccess,
+            // CLOSURE P1-3 (audit §5/item 6): the state carries the ACTIVE
+            // resource identity — projected from the decision history's last
+            // authoritative record (the resource the run is bound to RIGHT
+            // NOW), not re-read from any live registry. Null before the first
+            // selection = honestly unbound. This closes the audit gap "the
+            // resource axis exists in Q-cells only; the state carries no
+            // resource identity" — retrieval (CaseBase) and cold-start
+            // priors (CbrMdpEngine) now see the SAME identity the Q-cells do.
+            activeResourceId = decisionHistory.lastOrNull()
+                ?.chosenAction?.decisionRecord?.selectedResourceId,
             contextFeatures = mapOf(
                 "memoriesCount" to retrievedMemoriesCount.toFloat(),
                 "historyCount" to conversationHistoryCount.toFloat(),

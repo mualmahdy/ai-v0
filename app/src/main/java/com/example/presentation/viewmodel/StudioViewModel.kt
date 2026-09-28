@@ -1373,6 +1373,19 @@ class StudioViewModel(
      * failure message; the kernel's generic fallback («اكتملت معالجة المهمة.»)
      * never masks a real error.
      */
+    /**
+     * CLOSURE §5/item 9 (P1-4 content verification, chat surface): a chat
+     * turn is successful ONLY when it (a) ended without a terminal error AND
+     * (b) produced actual content — a blank answer (no final text, no
+     * streamed text) is an empty shell, not an achievement. "No error" alone
+     * was the P0-era honest boundary; this closes the honest-success gap
+     * for BOTH the durable turn row and the in-UI assistant entry.
+     */
+    private fun chatTurnVerifiedSuccess(
+        terminalError: ExecutionEvent.Error?,
+        answer: String
+    ): Boolean = terminalError == null && answer.isNotBlank()
+
     private fun mergedAnswer(
         finalText: String,
         executionStream: StringBuilder,
@@ -2067,16 +2080,20 @@ class StudioViewModel(
                                 // into this ONE turn (failed + degraded), never
                                 // a second entry.
                                 terminalPersisted = true
+                                // CLOSURE §5/item 9: the turn's honest success = no
+                                // terminal error AND real content (a blank answer
+                                // is an empty shell, not an achievement).
+                                val turnAnswer = mergedAnswer(event.finalText, executionStream, terminalError)
                                 persistTurnDurably(
                                     sessionId = sessionId,
                                     prompt = prompt,
-                                    answer = mergedAnswer(event.finalText, executionStream, terminalError),
+                                    answer = turnAnswer,
                                     agentName = resolvedAgent.identity.name,
                                     agentRole = resolvedAgent.identity.role.displayName,
                                     modelResourceId = effectiveModelId ?: selectedModelId,
                                     tokensConsumed = executionTokens,
                                     durationMs = System.currentTimeMillis() - turnStartedAt,
-                                    isSuccessful = terminalError == null,
+                                    isSuccessful = chatTurnVerifiedSuccess(terminalError, turnAnswer),
                                     eventCount = executionEventCount,
                                     attachments = attachments,
                                     sources = collectedSources.map { it.toTurnSourceRef() },
@@ -2119,16 +2136,19 @@ class StudioViewModel(
                         // turn — folding a preceding provider error (failed +
                         // degraded) instead of appending a second entry.
                         terminalPersisted = true
+                        // CLOSURE §5/item 9: same honest-success rule as the
+                        // detached path — content presence is part of success.
+                        val turnAnswer = mergedAnswer(event.finalText, executionStream, terminalError)
                         persistTurnDurably(
                             sessionId = sessionId,
                             prompt = prompt,
-                            answer = mergedAnswer(event.finalText, executionStream, terminalError),
+                            answer = turnAnswer,
                             agentName = resolvedAgent.identity.name,
                             agentRole = resolvedAgent.identity.role.displayName,
                             modelResourceId = effectiveModelId ?: selectedModelId,
                             tokensConsumed = executionTokens,
                             durationMs = System.currentTimeMillis() - turnStartedAt,
-                            isSuccessful = terminalError == null,
+                            isSuccessful = chatTurnVerifiedSuccess(terminalError, turnAnswer),
                             eventCount = executionEventCount,
                             attachments = attachments,
                             sources = collectedSources.map { it.toTurnSourceRef() },
@@ -2260,7 +2280,6 @@ class StudioViewModel(
                                     // the best honest output — never two
                                     // turns for one question.
                                     val answer = mergedAnswer(event.finalText, executionStream, terminalError)
-                                    val failed = terminalError != null
                                     val honestModelId = effectiveModelId ?: selectedModelId
                                     // P0-D: the finished text has EXACTLY ONE
                                     // display path — the assistant entry. The
@@ -2278,7 +2297,7 @@ class StudioViewModel(
                                             text = answer,
                                             agentName = resolvedAgent.identity.name,
                                             agentRole = resolvedAgent.identity.role.displayName,
-                                            isSuccessful = !failed,
+                                            isSuccessful = chatTurnVerifiedSuccess(terminalError, answer),
                                             // §5: the model that ACTUALLY served
                                             // the request (decision-layer truth),
                                             // falling back to the user's pin.
@@ -2301,7 +2320,7 @@ class StudioViewModel(
                                             agentName = resolvedAgent.identity.name,
                                             agentRole = resolvedAgent.identity.role.displayName,
                                             answer = answer,
-                                            isSuccessful = !failed,
+                                            isSuccessful = chatTurnVerifiedSuccess(terminalError, answer),
                                             modelResourceId = honestModelId,
                                             tokensConsumed = executionTokens,
                                             eventCount = executionEventCount,

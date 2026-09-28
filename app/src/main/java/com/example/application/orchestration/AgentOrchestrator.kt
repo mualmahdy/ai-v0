@@ -1629,7 +1629,18 @@ class AgentOrchestrator(
         )
 
         val totalDuration = System.currentTimeMillis() - startTime
-        val finalOutput = if (finalResultText.isNotBlank()) finalResultText else accumulatedOutputText.toString().ifBlank { "اكتملت معالجة المهمة." }
+        // CLOSURE §5/item 9 (honest final text): the Completed event and the
+        // task summary carry the loop's REAL final output — blank when the
+        // loop produced nothing. The previous generic placeholder
+        // («اكتملت معالجة المهمة.») lived INSIDE the durable truth (the
+        // persisted turn answer and task summary), which masked blank
+        // completions and made the ViewModel's content-presence success rule
+        // unreachable — an empty shell persisted as a "successful" turn. A
+        // friendly placeholder for a genuinely blank completion is a
+        // RENDERING concern (the UI layer), never a truth concern. The
+        // error-masking protection is untouched: the error path still
+        // substitutes the provider's own failure message (mergedAnswer).
+        val finalOutput = if (finalResultText.isNotBlank()) finalResultText else accumulatedOutputText.toString()
 
         if (!isFinalObjectiveMet && !currentTask.constraints.allowDegradedExecution) {
             val failureMsg = "فشلت المهمة في استيفاء معايير القبول المحددة بعد $stepIndex خطوات."

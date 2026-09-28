@@ -5,6 +5,7 @@ import com.example.application.transfer.FileTransferService
 import com.example.application.transfer.TransferOutcome
 import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.artifact.ArtifactType
+import com.example.domain.core.execution.ScopeSnapshot
 import com.example.domain.core.session.TurnAttachment
 import com.example.infrastructure.storage.SandboxProjectFileStore
 import java.io.InputStream
@@ -63,18 +64,24 @@ class ChatAttachmentCoordinator(
     private val folderUnderstanding: FolderUnderstandingService? = null
 ) {
 
-    /** Immutable workspace/project destination captured before an attachment job starts. */
-    data class AttachmentScope(
-        val workspaceId: String,
-        val projectId: Long
-    )
+    /**
+     * CLOSURE P0-1/§5-item 1 (scope unification): the attachment destination
+     * is the CANONICAL [ScopeSnapshot] — the same immutable acceptance-time
+     * value the session lifecycle and the operation registry pin. The old
+     * local `AttachmentScope` shape is gone: one operation → one canonical
+     * scope value. Each capture mints a fresh operation id (every import IS
+     * an operation); the snapshot's nullable fields admit honest
+     * un-attribution at the TYPE level, while [captureActiveScope] and every
+     * import entry keep the strict fail-fast REQUIREMENT (an import without
+     * an attributed workspace+project is refused, never defaulted).
+     */
 
     /**
      * Captures the currently active attachment destination synchronously.
      * Callers must capture this BEFORE launching an asynchronous import so a
      * later workspace/project switch cannot retarget the import.
      */
-    fun captureActiveScope(): AttachmentScope {
+    fun captureActiveScope(): ScopeSnapshot {
         val workspaceId = runCatching {
             workspaceRuntimeService.requireActiveWorkspaceId()
         }.getOrElse { throw AttachmentImportException("لا توجد مساحة عمل نشطة.") }
@@ -82,7 +89,11 @@ class ChatAttachmentCoordinator(
             ?: throw AttachmentImportException(
                 "إرفاق الملفات يتطلب مشروعاً نشطاً — مخزن الرمل ذو نطاق المشروع. اختر مشروعاً أو أنشئ واحداً ثم أعد المحاولة."
             )
-        return AttachmentScope(workspaceId = workspaceId, projectId = projectId)
+        return ScopeSnapshot.capture(
+            operationId = "attachment_${UUID.randomUUID()}",
+            workspaceId = workspaceId,
+            projectId = projectId
+        )
     }
 
     /** Per-attachment digest cap — keeps grounding bounded for context windows. */
@@ -111,10 +122,15 @@ class ChatAttachmentCoordinator(
     suspend fun importFileAttachment(
         uri: String,
         reportedMimeType: String?,
-        scope: AttachmentScope
+        scope: ScopeSnapshot
     ): TurnAttachment {
+        // CLOSURE P0-1/§5-item 1: the canonical snapshot admits honest
+        // un-attribution at the type level; the IMPORT OPERATION does not —
+        // an import without an attributed workspace+project is refused.
         val workspaceId = scope.workspaceId
+            ?: throw AttachmentImportException("استيراد المرفقات يتطلب مساحة عمل مُسندة (نطاق غير مُسند).")
         val projectId = scope.projectId
+            ?: throw AttachmentImportException("استيراد المرفقات يتطلب مشروعاً مُسنداً (نطاق غير مُسند).")
         val displayName = contentPort.queryDisplayName(uri)
             ?: uri.substringAfterLast('/').ifBlank { "attachment" }
         val stream = contentPort.openRead(uri)
@@ -175,13 +191,17 @@ class ChatAttachmentCoordinator(
      */
     suspend fun importFolderAttachment(
         treeUri: String,
-        scope: AttachmentScope,
+        scope: ScopeSnapshot,
         groundFolder: Boolean = false
     ): TurnAttachment {
         val zipper = folderZipSource
             ?: throw AttachmentImportException("استيراد المجلدات غير متاح في هذا التكوين.")
+        // CLOSURE P0-1/§5-item 1: same fail-fast attribution requirement as
+        // the file import — the canonical shape never defaults an import.
         val workspaceId = scope.workspaceId
+            ?: throw AttachmentImportException("استيراد المجلد يتطلب مساحة عمل مُسندة (نطاق غير مُسند).")
         val projectId = scope.projectId
+            ?: throw AttachmentImportException("استيراد المجلد يتطلب مشروعاً مُسنداً (نطاق غير مُسند).")
         val zipStream = zipper(treeUri)
             ?: throw AttachmentImportException("تعذر قراءة المجلد المحدد.")
         val displayName = contentPort.queryDisplayName(treeUri)
@@ -464,16 +484,21 @@ class ChatAttachmentCoordinator(
      */
     suspend fun deleteImportedAttachment(
         attachment: TurnAttachment,
-        scope: AttachmentScope? = null
+        scope: ScopeSnapshot? = null
     ): Boolean {
         val resolvedScope = scope ?: captureActiveScope()
+        // CLOSURE P0-1/§5-item 1: cleanup is an operation too — it refuses an
+        // un-attributed snapshot instead of guessing a live one (the caller
+        // that passed a snapshot owns its attribution).
         val workspaceId = resolvedScope.workspaceId
+            ?: throw AttachmentImportException("تنظيف المرفق يتطلب مساحة عمل مُسندة (نطاق غير مُسند).")
         val projectId = resolvedScope.projectId
+            ?: throw AttachmentImportException("تنظيف المرفق يتطلب مشروعاً مُسنداً (نطاق غير مُسند).")
         var deleted = false
         val artifactId = attachment.artifactId
         if (artifactId != null) {
-            val scope = com.example.domain.core.context.ResourceScope.Project(workspaceId, projectId)
-            runCatching { artifactService.delete(scope, artifactId) }
+            val artifactScope = com.example.domain.core.context.ResourceScope.Project(workspaceId, projectId)
+            runCatching { artifactService.delete(artifactScope, artifactId) }
             // VERIFICATION decides, not the call's return: a row that is GONE
             // (deleted now, or already absent — an idempotent cleanup target)
             // is clean; a row that is STILL THERE is the real failure the

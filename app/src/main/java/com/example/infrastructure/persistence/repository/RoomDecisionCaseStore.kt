@@ -4,6 +4,8 @@ import com.example.domain.core.decision.DecisionCase
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
 import com.example.domain.core.decision.DecisionCaseStore
+import com.example.domain.core.decision.DecisionRecord
+import com.example.domain.core.resource.ResourceId
 import com.example.infrastructure.persistence.dao.DecisionCaseDao
 import com.example.infrastructure.persistence.entities.DecisionCaseEntity
 import org.json.JSONArray
@@ -49,6 +51,10 @@ class RoomDecisionCaseStore(
     private fun DecisionCase.toEntity(): DecisionCaseEntity {
         val arr = JSONArray()
         problemFeatures.forEach { arr.put(it.toDouble()) }
+        // CLOSURE P1-3 (DB v21): the decision record's resource-identity
+        // projection rides the case row — a reloaded case base can rank by
+        // resource identity and compute per-resource priors.
+        val record = chosenAction.decisionRecord
         return DecisionCaseEntity(
             id = id,
             featuresJson = arr.toString(),
@@ -56,7 +62,13 @@ class RoomDecisionCaseStore(
             targetId = chosenAction.targetId,
             outcomeReward = outcomeReward,
             taskType = taskType,
-            timestampEpochMs = timestampMs
+            timestampEpochMs = timestampMs,
+            selectedResourceId = record?.selectedResourceId?.value,
+            providerId = record?.providerId,
+            serviceId = record?.serviceId,
+            configurationVersion = record?.configurationVersion,
+            governanceState = record?.governanceState,
+            recordConfidence = record?.confidence
         )
     }
 
@@ -71,10 +83,27 @@ class RoomDecisionCaseStore(
         } catch (_: Exception) {
             DecisionActionType.EXECUTE_STEP
         }
+        // CLOSURE P1-3: reconstruct the record ONLY when the row carries a
+        // selected resource — a legacy/record-less row stays honestly
+        // UNATTRIBUTED (null record), never a synthetic one.
+        val record = if (selectedResourceId != null) {
+            DecisionRecord(
+                selectedResourceId = ResourceId(selectedResourceId),
+                providerId = providerId.orEmpty(),
+                serviceId = serviceId.orEmpty(),
+                configurationVersion = configurationVersion ?: 0L,
+                requiredCapabilities = emptySet(),
+                rationale = "سجل مستعاد من تخزين الحالات (إسقاط الهوية، P1-3)",
+                confidence = recordConfidence ?: 0.5f,
+                governanceState = governanceState ?: "APPROVED"
+            )
+        } else {
+            null
+        }
         return DecisionCase(
             id = id,
             problemFeatures = floats,
-            chosenAction = DecisionAction(type, targetId),
+            chosenAction = DecisionAction(type, targetId, decisionRecord = record),
             outcomeReward = outcomeReward,
             timestampMs = timestampEpochMs,
             taskType = taskType

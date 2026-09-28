@@ -1,6 +1,7 @@
 package com.example.domain.core.decision
 
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.resource.ResourceId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -106,6 +107,22 @@ class CbrMdpEngine(
     // FIX D-1 (shrinkage): visits/(visits + VISIT_CONFIDENCE) — weight given
     // to the LEARNED Q value vs. the heuristic prior for a (region, action).
     private val VISIT_CONFIDENCE = 5
+
+    // CLOSURE P1-3 (audit §5/item 6): the same-resource weight bonus for
+    // CBR credit aggregation — a matching case that ran on the candidate's
+    // OWN resource weighs 25% heavier than an identical-similarity case that
+    // ran on another (or an unattributed) resource. Nominal identity is a
+    // MATCH TERM here, never a vector dimension.
+    private val RESOURCE_MATCH_WEIGHT_BONUS = 0.25f
+
+    // CLOSURE P1-3 (confidence shrinkage): the per-resource prior is blended
+    // with the neutral 0.5 by caseCount/(caseCount + PRIOR_CONFIDENCE) — the
+    // SAME shrinkage philosophy as the Q-cell VISIT_CONFIDENCE. One bad
+    // case (e.g. a consent PAUSE recorded as a failed step) must SOFTLY dip
+    // the prior, never cliff it: an unshrunk prior let a single negative
+    // case flip the engine's action selection and stall the approval-retry
+    // choreography (a governed pause is not a resource verdict).
+    private val PRIOR_CONFIDENCE = 5
 
     // P1 (EVOI gate): ASK_USER is only valuable when uncertainty is at least
     // this high, or after this many consecutive failures.
@@ -276,11 +293,23 @@ class CbrMdpEngine(
         candidateActions: List<DecisionAction>
     ): DecisionResult {
         val queryFeatures = state.toFeatureVector()
-        val similarCases = caseBase.findSimilarCases(queryFeatures, k = 5, minSimilarity = 0.4f)
+        // CLOSURE P1-3: retrieval is resource-aware — the state's ACTIVE
+        // resource identity (projected from the decision history) earns the
+        // identity-match bonus for cases that ran on the same resource.
+        val similarCases = caseBase.findSimilarCases(
+            queryFeatures,
+            k = 5,
+            minSimilarity = 0.4f,
+            activeResourceId = state.activeResourceId
+        )
+        // CLOSURE P1-3: the measured per-resource reward priors — computed
+        // ONCE per decision step (never per candidate) and consulted by
+        // scoreAction for resource-targeted cold-start candidates.
+        val resourcePriors = caseBase.resourceRewardPriors()
         val regionKey = stateRegionKey(state)
 
         val scoredCandidates = candidateActions.map { action ->
-            scoreAction(action, state, regionKey, similarCases)
+            scoreAction(action, state, regionKey, similarCases, resourcePriors)
         }.sortedByDescending { it.finalScore }
 
         val bestCandidate = scoredCandidates.firstOrNull() ?: ScoredActionCandidate(
@@ -306,15 +335,59 @@ class CbrMdpEngine(
         action: DecisionAction,
         state: DecisionState,
         regionKey: String,
-        similarCases: List<Pair<DecisionCase, Float>>
+        similarCases: List<Pair<DecisionCase, Float>>,
+        resourcePriors: Map<ResourceId, ResourceRewardPrior>
     ): ScoredActionCandidate {
+        // CLOSURE P1-3: the resource this candidate targets — the decision
+        // record's selected resource when present, else the action's own
+        // targetId wrapped as a resource id (SELECT_MODEL/SELECT_PROVIDER
+        // carry the resource id as targetId). Null = honestly untargeted
+        // (no resource prior applies).
+        val actionResourceId: ResourceId? = action.decisionRecord?.selectedResourceId
+            ?: action.targetId?.let { ResourceId(it) }
         // 1. CBR Score: Aggregate rewards of similar historical cases that took matching action
         var cbrScore = 0.5f // Neutral prior
         val matchingCases = similarCases.filter { it.first.chosenAction.type == action.type }
         if (matchingCases.isNotEmpty()) {
-            val totalWeight = matchingCases.sumOf { it.second.toDouble() }.toFloat()
-            val weightedReward = matchingCases.sumOf { (it.first.outcomeReward * it.second).toDouble() }.toFloat()
+            // CLOSURE P1-3: a matching case that ran on the SAME resource as
+            // this candidate weighs heavier (identity match — see CaseBase's
+            // resourceIdentityMatchBonus for the retrieval-side counterpart).
+            val totalWeight = matchingCases.sumOf { (case, similarity) ->
+                val weight = if (
+                    actionResourceId != null &&
+                    case.chosenAction.decisionRecord?.selectedResourceId == actionResourceId
+                ) {
+                    similarity * (1.0f + RESOURCE_MATCH_WEIGHT_BONUS)
+                } else {
+                    similarity
+                }
+                weight.toDouble()
+            }.toFloat()
+            val weightedReward = matchingCases.sumOf { (case, similarity) ->
+                val weight = if (
+                    actionResourceId != null &&
+                    case.chosenAction.decisionRecord?.selectedResourceId == actionResourceId
+                ) {
+                    similarity * (1.0f + RESOURCE_MATCH_WEIGHT_BONUS)
+                } else {
+                    similarity
+                }
+                (case.outcomeReward * weight).toDouble()
+            }.toFloat()
             cbrScore = (weightedReward / totalWeight.coerceAtLeast(0.01f)).coerceIn(0.0f, 1.0f)
+        } else if (actionResourceId != null) {
+            // CLOSURE P1-3 (cold-start): a resource-TARGETED candidate with no
+            // same-type similar case consults the MEASURED per-resource prior
+            // instead of the neutral 0.5 — a resource that has historically
+            // failed starts honestly discounted; an unmeasured one keeps the
+            // neutral prior. The prior is SHRINKAGE-BLENDED with the neutral
+            // (see PRIOR_CONFIDENCE): cold evidence nudges, warm evidence
+            // decides. The ACTION SPACE is untouched (no asv bump): this is
+            // credit assignment over the SAME space, not a new space.
+            cbrScore = resourcePriors[actionResourceId]?.let { prior ->
+                val weight = prior.caseCount.toFloat() / (prior.caseCount + PRIOR_CONFIDENCE).toFloat()
+                ((1.0f - weight) * 0.5f + weight * prior.meanReward).coerceIn(0.0f, 1.0f)
+            } ?: 0.5f
         }
 
         // 2. MDP Expected Utility: Q(s, a) = Immediate Reward - Cost/Latency Penalty + Transition Value

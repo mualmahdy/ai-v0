@@ -212,7 +212,28 @@ data class DecisionCaseEntity(
     val targetId: String?,
     val outcomeReward: Float,
     val taskType: String,
-    val timestampEpochMs: Long
+    val timestampEpochMs: Long,
+    // ------------------------------------------------------------------
+    // CLOSURE P1-3 (audit §5/item 6, DB v21): the decision record's
+    // RESOURCE-IDENTITY projection — the fields that answer "which resource
+    // actually served this case". Previously the record was dropped at
+    // persistence time, so a reloaded case base could neither rank by
+    // resource identity nor compute per-resource reward priors. Null on all
+    // six columns = a legacy (pre-v21) or record-less case — honestly
+    // unattributed, never implicitly re-assigned.
+    //
+    // HONEST BOUNDARY: this is the IDENTITY projection of DecisionRecord
+    // (selectedResourceId/providerId/serviceId/configurationVersion/
+    // governanceState/confidence). The rationale text and candidate
+    // evaluations remain runtime trace only — they are NOT needed for CBR
+    // and are deliberately not duplicated into the case store.
+    // ------------------------------------------------------------------
+    val selectedResourceId: String? = null,
+    val providerId: String? = null,
+    val serviceId: String? = null,
+    val configurationVersion: Long? = null,
+    val governanceState: String? = null,
+    val recordConfidence: Float? = null
 )
 
 @Entity(tableName = "radar_items")

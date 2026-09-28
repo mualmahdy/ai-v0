@@ -297,7 +297,7 @@ abstract class AppDatabase : RoomDatabase() {
          * database had already reached v17 — a stale honesty violation. UI
          * surfaces read this constant instead of a literal).
          */
-        const val SCHEMA_VERSION = 20
+        const val SCHEMA_VERSION = 21
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -1901,6 +1901,26 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * CLOSURE P1-3 (audit §5/item 6): decision_cases gains the decision
+         * record's RESOURCE-IDENTITY projection — six nullable columns so a
+         * reloaded case base can rank by resource identity and compute
+         * per-resource reward priors. All six default to NULL for legacy
+         * rows: a pre-v21 case is honestly UNATTRIBUTED, never implicitly
+         * re-assigned (the same convention as the workspaceId/projectId
+         * ownership columns introduced in v15/v16).
+         */
+        private val MIGRATION_20_TO_21: Migration = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE decision_cases ADD COLUMN selectedResourceId TEXT")
+                db.execSQL("ALTER TABLE decision_cases ADD COLUMN providerId TEXT")
+                db.execSQL("ALTER TABLE decision_cases ADD COLUMN serviceId TEXT")
+                db.execSQL("ALTER TABLE decision_cases ADD COLUMN configurationVersion INTEGER")
+                db.execSQL("ALTER TABLE decision_cases ADD COLUMN governanceState TEXT")
+                db.execSQL("ALTER TABLE decision_cases ADD COLUMN recordConfidence REAL")
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1923,6 +1943,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_17_TO_18,
             MIGRATION_18_TO_19,
             MIGRATION_19_TO_20,
+            MIGRATION_20_TO_21,
         )
 
         fun getInstance(context: Context): AppDatabase {

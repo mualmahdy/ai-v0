@@ -1,5 +1,6 @@
 package com.example.domain.core.decision
 
+import com.example.domain.core.resource.ResourceId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.sqrt
@@ -185,19 +186,74 @@ class CaseBase(
     fun getAllCases(): List<DecisionCase> = cases.toList()
 
     /**
+     * CLOSURE P1-3 (audit §5/item 6): the resource-identity match bonus.
+     * NOMINAL identity is a MATCH TERM, not a metric dimension — a case that
+     * ran on the SAME resource as the query gets its cosine similarity
+     * boosted by this constant (capped at 1.0). A case with NO decision
+     * record (legacy rows, record-less actions) earns NOTHING: "unknown"
+     * never masquerades as "same resource".
+     */
+    private val resourceIdentityMatchBonus = 0.15f
+
+    /**
      * Finds the k-nearest historical cases using weighted cosine similarity over state feature vectors.
+     *
+     * CLOSURE P1-3: when [activeResourceId] is provided (the run's currently
+     * bound resource), a case whose persisted decision record selected the
+     * SAME resource receives the identity-match bonus on top of its cosine
+     * similarity — "same task shape, same resource" outranks "same task
+     * shape, unknown/other resource". Callers that cannot know the active
+     * resource pass null (the default) and get the legacy ranking untouched.
      */
     @Synchronized
-    fun findSimilarCases(queryFeatures: FloatArray, k: Int = 5, minSimilarity: Float = 0.4f): List<Pair<DecisionCase, Float>> {
+    fun findSimilarCases(
+        queryFeatures: FloatArray,
+        k: Int = 5,
+        minSimilarity: Float = 0.4f,
+        activeResourceId: ResourceId? = null
+    ): List<Pair<DecisionCase, Float>> {
         if (cases.isEmpty()) return emptyList()
 
         return cases.map { case ->
-            val similarity = computeCosineSimilarity(queryFeatures, case.problemFeatures)
+            val base = computeCosineSimilarity(queryFeatures, case.problemFeatures)
+            val sameResource = activeResourceId != null &&
+                case.chosenAction.decisionRecord?.selectedResourceId == activeResourceId
+            val similarity = if (sameResource) {
+                (base + resourceIdentityMatchBonus).coerceAtMost(1.0f)
+            } else {
+                base
+            }
             case to similarity
         }
             .filter { it.second >= minSimilarity }
             .sortedByDescending { it.second }
             .take(k)
+    }
+
+    /**
+     * CLOSURE P1-3 (audit §5/item 6): the measured per-resource reward priors —
+     * the mean stored outcome reward per [com.example.domain.core.decision.DecisionRecord.selectedResourceId]
+     * over every case that carries a decision record. Cases WITHOUT records
+     * contribute to NOTHING (an unattributed reward must never tilt a named
+     * resource's prior). The result feeds cold-start action scoring in
+     * [CbrMdpEngine] (see scoreAction's per-resource prior).
+     */
+    @Synchronized
+    fun resourceRewardPriors(): Map<ResourceId, ResourceRewardPrior> {
+        return cases
+            .mapNotNull { case ->
+                val rid = case.chosenAction.decisionRecord?.selectedResourceId ?: return@mapNotNull null
+                rid to case.outcomeReward
+            }
+            .groupBy(keySelector = { it.first }, valueTransform = { it.second })
+            .map { (rid, rewards) ->
+                rid to ResourceRewardPrior(
+                    resourceId = rid,
+                    meanReward = rewards.sum() / rewards.size.toFloat(),
+                    caseCount = rewards.size
+                )
+            }
+            .toMap()
     }
 
     /**

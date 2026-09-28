@@ -18,6 +18,7 @@ import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.session.TurnAttachment
 import com.example.domain.core.tools.ToolDeclaration
 import com.example.domain.core.execution.ExecutionScope
+import com.example.domain.core.execution.ScopeSnapshot
 import com.example.infrastructure.network.NetworkMonitor
 import com.example.presentation.state.CapabilityKind
 import com.example.presentation.state.ChatCapabilityFacts
@@ -161,17 +162,21 @@ class ChatCapabilitiesViewModel(
      * per invocation — the long-running call may never re-read the live
      * active scope (adapters fall back to it only when no ExecutionScope is
      * present, which the pinned [ExecutionScope] now guarantees here).
+     *
+     * CLOSURE P0-1/§5-item 1 (scope unification): the private
+     * `InvocationScopeSnapshot` shape is GONE — the canonical domain
+     * [ScopeSnapshot] is captured instead (same acceptance-time semantics,
+     * one shape across the session lifecycle, attachments, and capability
+     * invocations), and [ScopeSnapshot.toExecutionScope] projects it into
+     * the coroutine-context element the services resolve.
      */
-    private data class InvocationScopeSnapshot(
-        val workspaceId: String?,
-        val projectId: Long?
-    )
-
-    /** Captured at acceptance — see [InvocationScopeSnapshot]. */
-    private fun captureInvocationScope(): InvocationScopeSnapshot = InvocationScopeSnapshot(
-        workspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull(),
-        projectId = runCatching { workspaceRuntimeService.activeProjectIdOrNull() }.getOrNull()
-    )
+    private fun captureInvocationScope(operationId: String, sessionId: String? = null): ScopeSnapshot =
+        ScopeSnapshot.capture(
+            operationId = operationId,
+            workspaceId = runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull(),
+            projectId = runCatching { workspaceRuntimeService.activeProjectIdOrNull() }.getOrNull(),
+            sessionId = sessionId
+        )
 
     /**
      * UI POLISH (§4 — Creation group honesty): the LLM connection fact —
@@ -207,8 +212,14 @@ class ChatCapabilitiesViewModel(
         if (drafts.isEmpty()) return
         viewModelScope.launch {
             var failure: String? = null
+            // CLOSURE P0-1/§5-item 1: the stale draft cleanup rides the CANONICAL
+            // ScopeSnapshot (the coordinator's local scope shape is gone).
             val cleanupScope = staleScope?.second?.let { projectId ->
-                ChatAttachmentCoordinator.AttachmentScope(staleScope.first, projectId)
+                ScopeSnapshot.capture(
+                    operationId = "draft_cleanup_${UUID.randomUUID()}",
+                    workspaceId = staleScope.first,
+                    projectId = projectId
+                )
             }
             drafts.forEach { draft ->
                 runCatching {
@@ -520,17 +531,12 @@ class ChatCapabilitiesViewModel(
         // captured AT ACCEPTANCE and pinned for the whole pipeline — the
         // MultiSourceSearchAdapter's local-workspace fallback resolves the
         // pinned project (never the live one at fan-out time).
-        val scope = captureInvocationScope()
+        // CLOSURE P0-1/§5-item 1: the canonical ScopeSnapshot — its
+        // toExecutionScope() projection IS the pinned coroutine element.
+        val scope = captureInvocationScope("capsearch_${UUID.randomUUID()}", sessionId)
         viewModelScope.launch {
             val result = runCatching {
-                kotlinx.coroutines.withContext(
-                    ExecutionScope(
-                        executionId = "capsearch_${UUID.randomUUID()}",
-                        workspaceId = scope.workspaceId ?: "unattributed",
-                        projectId = scope.projectId,
-                        sessionId = sessionId
-                    )
-                ) {
+                kotlinx.coroutines.withContext(scope.toExecutionScope()) {
                     searchIntelligenceService.searchIntelligent(trimmed)
                 }
             }
@@ -613,17 +619,12 @@ class ChatCapabilitiesViewModel(
         // CHAT FINAL CLOSURE (§5 scope snapshot): pinned at acceptance — the
         // RAG pipeline's retrieval scope (workspace/project filter and stale
         // working-set repair) resolves the PINNED scope, never the live one.
-        val scope = captureInvocationScope()
+        // CLOSURE P0-1/§5-item 1: the canonical ScopeSnapshot — its
+        // toExecutionScope() projection IS the pinned coroutine element.
+        val scope = captureInvocationScope("caprag_${UUID.randomUUID()}", sessionId)
         viewModelScope.launch {
             val outcome = runCatching {
-                kotlinx.coroutines.withContext(
-                    ExecutionScope(
-                        executionId = "caprag_${UUID.randomUUID()}",
-                        workspaceId = scope.workspaceId ?: "unattributed",
-                        projectId = scope.projectId,
-                        sessionId = sessionId
-                    )
-                ) {
+                kotlinx.coroutines.withContext(scope.toExecutionScope()) {
                     ragPipelineService.retrieveRelevantContext(trimmed)
                 }
             }
@@ -700,9 +701,12 @@ class ChatCapabilitiesViewModel(
         // and execution dispatch can neither re-target the tool's sandbox
         // (FileSystemTool resolves the PINNED projectId first) nor re-attribute
         // the invocation to another workspace.
-        val scope = captureInvocationScope()
+        // CLOSURE P0-1/§5-item 1: the canonical ScopeSnapshot (the private
+        // invocation shape is gone); its fields ride the standalone-tool
+        // admission exactly as the old capture did.
+        val invocationId = "capexec_${UUID.randomUUID()}"
+        val scope = captureInvocationScope(invocationId, sessionId)
         viewModelScope.launch {
-            val invocationId = "capexec_${UUID.randomUUID()}"
             val resolvedAgent = resolveInvocationAgent(agent)
             val result = runCatching {
                 executionService.executeStandaloneTool(

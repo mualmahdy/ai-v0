@@ -88,6 +88,16 @@ class StudioViewModelFinalClosureTest {
     /** LLM requests captured from the mock provider (fail-closed proofs). */
     private val capturedRequests = mutableListOf<LlmRequest>()
 
+    /**
+     * CLOSURE §5/item 9 coverage: switchable stream texts — the default pair
+     * reproduces the historical behavior exactly; the blank-answer contract
+     * test drives a completion with NO content (blank final text AND no
+     * chunk) to pin that content presence is part of honest success.
+     */
+    @Volatile private var streamChunkText: String = "جزء "
+    @Volatile private var streamCompletedText: String = "الجواب الكامل"
+    @Volatile private var generateText: String = "جواب فوري"
+
     private val approvalStore = com.example.infrastructure.governed.InMemoryHumanApprovalStore()
     private val gate = com.example.application.governed.HumanApprovalGate(approvalStore)
 
@@ -148,7 +158,7 @@ class StudioViewModelFinalClosureTest {
             override suspend fun generate(request: LlmRequest): Outcome<LlmResponse, LlmFailure> =
                 Outcome.Success(
                     LlmResponse(
-                        text = "جواب فوري",
+                        text = generateText,
                         toolCalls = emptyList(),
                         usage = TokenUsage(10, 20),
                         finishReason = "STOP",
@@ -158,7 +168,12 @@ class StudioViewModelFinalClosureTest {
 
             override fun stream(request: LlmRequest, executionId: String): Flow<ExecutionEvent> = flow {
                 capturedRequests += request
-                emit(ExecutionEvent.ContentChunk(executionId, "جزء ", sequenceIndex = 0))
+                // CLOSURE §5/item 9 coverage: the stream's chunk + completion
+                // texts are switchable so the blank-answer contract test can
+                // drive a completion that carries NO content at all.
+                if (streamChunkText.isNotBlank()) {
+                    emit(ExecutionEvent.ContentChunk(executionId, streamChunkText, sequenceIndex = 0))
+                }
                 emit(
                     ExecutionEvent.UsageBudgetUpdate(
                         executionId = executionId,
@@ -171,7 +186,7 @@ class StudioViewModelFinalClosureTest {
                 emit(
                     ExecutionEvent.Completed(
                         executionId,
-                        "الجواب الكامل",
+                        streamCompletedText,
                         totalDurationMs = 40
                     )
                 )
@@ -533,6 +548,61 @@ class StudioViewModelFinalClosureTest {
             ApprovalBlockState.PENDING,
             blockAfter.state
         )
+    }
+
+    // ------------------------------------------------------------------
+    // CLOSURE §5/item 9 — honest turn success REQUIRES content
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `a blank completed answer persists and renders as NOT successful`() {
+        // Drive a completion that carries NO content at all: blank final text
+        // AND no streamed chunk — no terminal error either. The old contract
+        // (isSuccessful = terminalError == null) would mark this turn
+        // successful; the honest contract refuses: an empty shell is not an
+        // achievement.
+        streamChunkText = ""
+        streamCompletedText = ""
+        generateText = ""
+        try {
+            runPrompt("سؤال سيعود بلا محتوى")
+            awaitUntil { repository.appendedTurns.size >= 1 }
+
+            val turn = repository.appendedTurns.last()
+            assertFalse(
+                "a blank answer must NEVER persist as a successful turn (§5/item 9)",
+                turn.isSuccessful
+            )
+            assertTrue("the blank turn's answer must indeed be content-free", turn.answer.isBlank())
+
+            awaitUntil {
+                viewModel.state.value.timeline.any { it is ChatEntry.Assistant }
+            }
+            val entry = viewModel.state.value.timeline
+                .filterIsInstance<ChatEntry.Assistant>()
+                .last()
+            assertFalse(
+                "the in-UI assistant entry must carry the same honest verdict",
+                entry.isSuccessful
+            )
+        } finally {
+            streamChunkText = "جزء "
+            streamCompletedText = "الجواب الكامل"
+            generateText = "جواب فوري"
+        }
+    }
+
+    @Test
+    fun `a normal answered turn persists as successful (content rule does not overreach)`() {
+        runPrompt("سؤال عادي بجواب كامل")
+        awaitUntil { repository.appendedTurns.size >= 1 }
+
+        val turn = repository.appendedTurns.last()
+        assertTrue(
+            "a real answer keeps the successful verdict (the rule only refuses EMPTY shells)",
+            turn.isSuccessful
+        )
+        assertTrue("the answered turn carries real content", turn.answer.isNotBlank())
     }
 
     // ------------------------------------------------------------------
