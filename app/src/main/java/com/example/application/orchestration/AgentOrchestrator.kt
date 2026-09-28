@@ -1009,6 +1009,26 @@ class AgentOrchestrator(
                     finalResultText = summaryText
                     isTerminal = true
                     break
+                } else if (verification.isBarredSolelyByTerminalError) {
+                    // --------------------------------------------------------
+                    // CLOSURE P0-6 (loop integration): the strategy criteria are
+                    // all met and the ONLY barrier is the unrecovered-error
+                    // bar. A retry cannot lift that bar — the failure already
+                    // happened — so re-deciding would spin the loop on
+                    // COMPLETE with a permanently-barred verification (extra
+                    // terminal events, repeated-failure banners, a live
+                    // lifecycle that never settles). Exit HONESTLY now: the
+                    // post-loop verification still reports isSuccess=false
+                    // with the typed UNRECOVERED_EXECUTION_ERROR gap, and the
+                    // UI lands the run as ONE failed/degraded turn (the
+                    // D-11 merge contract) or as AWAITING_APPROVAL when the
+                    // errors were consent cascades (§8).
+                    // --------------------------------------------------------
+                    finalResultText = accumulatedOutputText.toString().ifBlank {
+                        chosenAction.payload["summary"] ?: "انتهى التنفيذ بأخطاء غير مستعادة."
+                    }
+                    isTerminal = true
+                    break
                 } else {
                     consecutiveFailures++
                     accumulatedOutputText.append("\n[حوكمة]: لم تُستوفَ معايير الاكتمال: ${verification.missingCriteria.joinToString(", ")}")
@@ -1496,13 +1516,21 @@ class AgentOrchestrator(
             }
 
             // 8. Outcome & Objective Verification
+            // CLOSURE P0-6 (loop integration): the STEP-LEVEL objective
+            // check evaluates the OBJECTIVE ONLY (criteria / evidence /
+            // text) — it must NOT carry the terminal-error bar. This call
+            // feeds isTerminalConditionReached's EXIT decision, and the
+            // bounded-retry path (consecutiveFailures > maxRetries) is the
+            // honest failure exit here; barring the objective on historical
+            // errors would send the loop into a retry storm that no retry
+            // can lift (the bar is permanent once an error happened). The
+            // error bar lives where the verdict is FINAL: the COMPLETE/STOP
+            // branch above and the post-loop verification below.
             val isObjectiveSatisfied = outcomeService.isTaskObjectiveSatisfied(
                 task = currentTask,
                 accumulatedEvidence = accumulatedEvidence,
                 finalOutputText = accumulatedOutputText.toString(),
-                lastAction = chosenAction,
-                // CLOSURE P0-6: unrecovered step failures block verification.
-                terminalErrorObserved = consecutiveFailures > 0
+                lastAction = chosenAction
             )
 
             stepIndex++

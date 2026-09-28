@@ -111,7 +111,14 @@ data class TaskVerificationReport(
     /** Typed evidence pointers actually consulted during verification. */
     val evidenceRefs: List<EvidenceReference> = emptyList(),
     val confidence: Float = 1.0f,
-    val summary: String = ""
+    val summary: String = "",
+    /**
+     * CLOSURE P0-6 (loop integration): true when every strategy criterion
+     * is satisfied and the ONLY verification barrier is the unrecovered
+     * terminal-error bar — a retry cannot lift that bar, so the caller
+     * must exit honestly rather than re-decide.
+     */
+    val isBarredSolelyByTerminalError: Boolean = false
 )
 
 /**
@@ -320,7 +327,14 @@ class OutcomeService {
         // 8. Strategy Evaluation — TYPED KIND comparison (CLOSURE P0-6):
         //    the strategy inspects the gap KINDS, never the message wording.
         //    A translated/reworded missing message cannot flip the verdict.
-        val isSatisfied = when (strategy) {
+        //    UNRECOVERED_EXECUTION_ERROR bars verification under EVERY
+        //    strategy — an execution that ended with failures cannot verify
+        //    (the typed replacement for the legacy "Error:" text-prefix
+        //    probe must be strategy-independent, exactly like the probe was).
+        val terminalErrorBarsVerification = gaps.any {
+            it.kind == VerificationGapKind.UNRECOVERED_EXECUTION_ERROR
+        }
+        val strategySatisfied = when (strategy) {
             VerificationStrategy.STRICT -> gaps.isEmpty()
             VerificationStrategy.PERMISSIVE -> gaps.isEmpty() || (finalOutputText.isNotBlank() && requirements.requiredCapabilities.isEmpty())
             VerificationStrategy.EVIDENCE_BASED -> gaps.none {
@@ -331,6 +345,7 @@ class OutcomeService {
                 it.kind == VerificationGapKind.ACCEPTANCE_CRITERION_NOT_MET
             }
         }
+        val isSatisfied = !terminalErrorBarsVerification && strategySatisfied
 
         val verificationStatus = when {
             isSatisfied -> VerificationOutcomeStatus.VERIFIED
@@ -346,7 +361,7 @@ class OutcomeService {
         val summary = if (isSatisfied) {
             "تم التحقق بنجاح من كافة معايير إنجاز المهمة (${satisfied.size} معايير مكتملة)."
         } else {
-            "فشل التحقق الموضوعي: ${missing.joinToString("; "))}"
+            "فشل التحقق الموضوعي: ${missing.joinToString("; ")}"
         }
 
         return TaskVerificationReport(
@@ -359,7 +374,15 @@ class OutcomeService {
             criterionResults = criterionResults,
             evidenceRefs = evidenceRefs,
             confidence = confidence,
-            summary = summary
+            summary = summary,
+            // CLOSURE P0-6 (loop integration): true when the ONLY barrier to
+            // verification is the unrecovered-error bar — every strategy
+            // criterion is otherwise met. The orchestrator uses this to
+            // distinguish "criteria unmet, re-decide" (retry can fix it)
+            // from "terminal errors, retry CANNOT fix it" — an already-
+            // failed execution must exit honestly instead of spinning on
+            // COMPLETE with a bar that no retry can lift.
+            isBarredSolelyByTerminalError = terminalErrorBarsVerification && strategySatisfied
         )
     }
 

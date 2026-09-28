@@ -620,7 +620,24 @@ class StudioViewModelFinalClosureTest {
         assertEquals(ChatMode.QUICK_CHAT, created?.mode)
         // The fresh conversation is BOUND to it (not just the durable row).
         assertEquals(newSessionId, viewModel.state.value.activeSessionId)
-        assertEquals(0, viewModel.state.value.timeline.size)
+        // CLOSURE P0-2 (transient semantics): under establishment-at-first-
+        // turn, the establishing turn is LEGITIMATELY part of the new
+        // conversation's timeline. The binding invariant is that the
+        // timeline holds ONLY the new conversation's entries — NO entry
+        // from the previous conversation may survive the transient reset
+        // (the pre-closure `size == 0` expectation pinned the old
+        // synchronous create-then-send timing and is timing-dependent
+        // under the new lifecycle).
+        val timeline = viewModel.state.value.timeline
+        val userTexts = timeline.filterIsInstance<ChatEntry.User>().map { it.text }
+        assertTrue(
+            "the establishing turn belongs to the NEW conversation",
+            userTexts.any { it.contains("أول رسالة بعد الجلسة الجديدة") }
+        )
+        assertTrue(
+            "no stale entry from the PREVIOUS conversation survives the transient reset",
+            userTexts.none { it.contains("رسالة لتثبيت الجلسة الأولى") }
+        )
     }
 
     // ------------------------------------------------------------------

@@ -20,7 +20,7 @@ import com.example.domain.core.llm.SafeProviderMetadata
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.Outcome
 import com.example.domain.core.task.AcceptanceCriterion
-import com.example.domain.core.task.AgentId
+import com.example.domain.core.agent.AgentId
 import com.example.domain.core.task.TaskId
 import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.task.TaskInput
@@ -89,7 +89,7 @@ class ClosureInvariantTests {
         val admissible = DecisionAction(DecisionActionType.EXECUTE_STEP)
         val inadmissible = DecisionAction(DecisionActionType.SEARCH)
 
-        fun seedNextRegion(engine: CbrMdpEngine) {
+        suspend fun seedNextRegion(engine: CbrMdpEngine) {
             // A state one step ahead — its region is the TD target's r'.
             val nextState = testState(step = 1)
             engine.processObservationAndUpdateBelief(
