@@ -78,20 +78,19 @@ class RepairCenterService(
         // 2. Orphaned projects (workspace row missing).
         val workspaceIds = workspaces.map { it.id }.toSet()
         val orphanProjects = mutableListOf<String>()
-        for (ws in workspaces) {
-            // per-workspace scan keeps this bounded
-            projectDao.forWorkspaceInState(ws.id, "ACTIVE") +
-                    projectDao.forWorkspaceInState(ws.id, "ARCHIVED")
-        }
+        // (The pre-fix per-workspace forWorkspaceInState loop computed and
+        // DISCARDED its results on every detect — removed with the fix.)
         // Global maintenance scan (only the repair center may use unscoped reads).
-        runCatching {
-            val method = projectDao.javaClass.methods.firstOrNull { it.name == "getAllActiveProjectsList" }
-            @Suppress("UNCHECKED_CAST")
-            val all = method?.invoke(projectDao) as? List<com.example.infrastructure.persistence.entities.ProjectEntity>
-            all?.forEach { p ->
-                if (p.workspaceId != null && p.workspaceId !in workspaceIds) {
-                    orphanProjects.add(p.id.toString())
-                }
+        // DIRECT call — the previous reflection-based invocation could never
+        // work: getAllActiveProjectsList is a SUSPEND method, and
+        // Method.invoke(dao) without the trailing Continuation argument
+        // throws IllegalArgumentException, which the surrounding runCatching
+        // swallowed silently — ORPHANED_PROJECT detection was DEAD CODE in
+        // production until RepairCenterServiceTest exposed it.
+        val all = projectDao.getAllActiveProjectsList()
+        all.forEach { p ->
+            if (p.workspaceId != null && p.workspaceId !in workspaceIds) {
+                orphanProjects.add(p.id.toString())
             }
         }
         if (orphanProjects.isNotEmpty()) {

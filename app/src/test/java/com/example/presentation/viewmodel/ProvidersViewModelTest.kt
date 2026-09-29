@@ -23,6 +23,7 @@ import com.example.infrastructure.persistence.repository.RoomUserPreferenceRepos
 import com.example.infrastructure.provider.ProtocolAdapterFactory
 import com.example.infrastructure.security.EncryptedSecretStorageAdapter
 import com.example.infrastructure.validation.defaultResourceValidatorRegistry
+import com.example.testing.awaitWhere
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
@@ -162,24 +163,15 @@ class ProvidersViewModelTest {
     }
 
     /**
-     * Documented helper (GovernanceViewModelTest pattern): the real services
-     * hop to Dispatchers.IO internally (Room queries, vault writes, validator
-     * pings), so outcomes settle asynchronously even under the Unconfined
-     * Main dispatcher.
+     * DETERMINISTIC (slice-6 load-flakiness closure): this suite now awaits
+     * the flows THEMSELVES — [com.example.testing.awaitWhere] suspends on the
+     * StateFlow and resumes the moment the terminal state lands, so the wait
+     * has no wall-clock polling window to miss under full-suite load. The
+     * old polling helper (Thread.sleep at 25ms intervals, timeout raised
+     * 5s→30s over its lifetime) is RETIRED: it dropped once per full
+     * --rerun-tasks run regardless of the window size while isolated reruns
+     * stayed green.
      */
-    private fun awaitUntil(
-        timeoutMs: Long = 5_000L,
-        intervalMs: Long = 25L,
-        condition: () -> Boolean
-    ) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (!condition()) {
-            if (System.currentTimeMillis() > deadline) {
-                throw AssertionError("Condition not met within ${timeoutMs}ms")
-            }
-            Thread.sleep(intervalMs)
-        }
-    }
 
     // ------------------------------------------------------------------
     // Init: the control-plane flows + the first-run bootstrap seeding
@@ -190,12 +182,12 @@ class ProvidersViewModelTest {
         // The seeding moved from MainViewModel's init to the feature VM —
         // constructing it triggers the same idempotent bootstrap. The wait is
         // on the FULL seeded set (the seeding lands provider-by-provider).
-        awaitUntil {
-            val ids = viewModel.state.value.generalizedProviders.map { it.id }
+        viewModel.state.awaitWhere {
+            val ids = it.generalizedProviders.map { p -> p.id }
             "local" in ids && "multi_source" in ids && "google" in ids
         }
 
-        awaitUntil { viewModel.state.value.materializedResources.size >= 3 }
+        viewModel.state.awaitWhere { it.materializedResources.size >= 3 }
         val resources = viewModel.state.value.materializedResources
         // The in-process resources validate for real (no network) → ENABLED.
         val local = resources.first { it.serviceId == "local_embedding" }
@@ -208,12 +200,12 @@ class ProvidersViewModelTest {
     }
 
     @Test
-    fun `service and configuration flows project into the feature state`() = runBlocking {
-        awaitUntil {
-            viewModel.state.value.generalizedServices.any { it.id == "google_gemini" }
+    fun `service and configuration flows project into the feature state`(): Unit = runBlocking {
+        viewModel.state.awaitWhere {
+            it.generalizedServices.any { s -> s.id == "google_gemini" }
         }
-        awaitUntil {
-            viewModel.state.value.generalizedConfigurations.any { it.id == "cfg_google_gemini" }
+        viewModel.state.awaitWhere {
+            it.generalizedConfigurations.any { c -> c.id == "cfg_google_gemini" }
         }
     }
 
@@ -223,8 +215,8 @@ class ProvidersViewModelTest {
 
     @Test
     fun `wizard full chain persists the chain and ends SavedUnverified when egress denies validation`() = runBlocking {
-        awaitUntil {
-            viewModelFakeVault.state.value.generalizedProviders.any { it.id == "google" }
+        viewModelFakeVault.state.awaitWhere {
+            it.generalizedProviders.any { p -> p.id == "google" }
         }
         val providersBefore = viewModelFakeVault.state.value.generalizedProviders.size
 
@@ -241,9 +233,7 @@ class ProvidersViewModelTest {
             apiKey = "gq_test-key-42"
         )
 
-        awaitUntil(
-            timeoutMs = 15_000L
-        ) { !viewModelFakeVault.state.value.wizardRunning && viewModelFakeVault.state.value.wizardResult != null }
+        viewModelFakeVault.state.awaitWhere { !it.wizardRunning && it.wizardResult != null }
         val state = viewModelFakeVault.state.value
         // Honest terminal: the real validation was egress-denied → the
         // resource was SAVED but stays unverified (no fabricated success).
@@ -255,7 +245,7 @@ class ProvidersViewModelTest {
         )
 
         // The chain itself persisted through the real Room repositories.
-        awaitUntil { viewModelFakeVault.state.value.generalizedProviders.size == providersBefore + 1 }
+        viewModelFakeVault.state.awaitWhere { it.generalizedProviders.size == providersBefore + 1 }
         val newProvider = viewModelFakeVault.state.value.generalizedProviders.last { it.name == "Groq Test" }
         val newService = viewModelFakeVault.state.value.generalizedServices
             .first { it.providerId == newProvider.id }
@@ -275,8 +265,8 @@ class ProvidersViewModelTest {
 
     @Test
     fun `wizard without the required key is rejected before the chain starts`() = runBlocking {
-        awaitUntil {
-            viewModelFakeVault.state.value.generalizedProviders.any { it.id == "google" }
+        viewModelFakeVault.state.awaitWhere {
+            it.generalizedProviders.any { p -> p.id == "google" }
         }
         val providersBefore = viewModelFakeVault.state.value.generalizedProviders.size
 
@@ -290,7 +280,7 @@ class ProvidersViewModelTest {
             apiKey = null
         )
 
-        awaitUntil { viewModelFakeVault.state.value.wizardResult != null }
+        viewModelFakeVault.state.awaitWhere { it.wizardResult != null }
         val state = viewModelFakeVault.state.value
         assertFalse(state.wizardResultIsSuccess)
         assertTrue(
@@ -303,8 +293,8 @@ class ProvidersViewModelTest {
 
     @Test
     fun `wizard fails honestly at the vault step when the device keystore is unavailable`() = runBlocking {
-        awaitUntil {
-            viewModel.state.value.generalizedProviders.any { it.id == "google" }
+        viewModel.state.awaitWhere {
+            it.generalizedProviders.any { p -> p.id == "google" }
         }
         val providersBefore = viewModel.state.value.generalizedProviders.size
 
@@ -317,7 +307,7 @@ class ProvidersViewModelTest {
             apiKey = "real-vault-key"
         )
 
-        awaitUntil { viewModel.state.value.wizardResult != null }
+        viewModel.state.awaitWhere { it.wizardResult != null }
         val state = viewModel.state.value
         // S-2: the REAL adapter refuses the insecure software-key fallback
         // under Robolectric — the chain stops at the vault step and says so.
@@ -355,14 +345,14 @@ class ProvidersViewModelTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `testServiceConnection without a stored key reports the honest no-key failure`() = runBlocking {
-        awaitUntil {
-            viewModel.state.value.generalizedConfigurations.any { it.id == "cfg_google_gemini" }
+    fun `testServiceConnection without a stored key reports the honest no-key failure`(): Unit = runBlocking {
+        viewModel.state.awaitWhere {
+            it.generalizedConfigurations.any { c -> c.id == "cfg_google_gemini" }
         }
 
         viewModel.testServiceConnection("cfg_google_gemini")
 
-        awaitUntil { viewModel.state.value.diagnosticBanner != null }
+        viewModel.state.awaitWhere { it.diagnosticBanner != null }
         val banner = viewModel.state.value.diagnosticBanner!!
         assertTrue(
             "expected the honest no-key diagnostic, got: $banner",
@@ -370,22 +360,22 @@ class ProvidersViewModelTest {
         )
         // The in-flight flag resets honestly after the probe (the id stays
         // for the tested-configuration display — moved-verbatim behavior).
-        awaitUntil { !viewModel.state.value.isTestingProvider }
+        viewModel.state.awaitWhere { !it.isTestingProvider }
     }
 
     @Test
-    fun `testServiceConnection surfaces the error channel for an unknown configuration`() = runBlocking {
+    fun `testServiceConnection surfaces the error channel for an unknown configuration`(): Unit = runBlocking {
         viewModel.testServiceConnection("cfg_does_not_exist")
 
-        awaitUntil { viewModel.state.value.errorMessage != null }
+        viewModel.state.awaitWhere { it.errorMessage != null }
         assertTrue(
             viewModel.state.value.errorMessage!!.contains("cfg_does_not_exist")
         )
-        awaitUntil { !viewModel.state.value.isTestingProvider }
+        viewModel.state.awaitWhere { !it.isTestingProvider }
     }
 
     @Test
-    fun `discoverOfferings without a configuration surfaces the honest error`() = runBlocking {
+    fun `discoverOfferings without a configuration surfaces the honest error`(): Unit = runBlocking {
         // Seed a provider + service with NO configuration through the real
         // plane, then ask the feature to discover.
         controlPlane.createProvider(
@@ -408,30 +398,30 @@ class ProvidersViewModelTest {
 
         viewModel.discoverOfferings("p_nocfg_llm")
 
-        awaitUntil { viewModel.state.value.errorMessage != null }
+        viewModel.state.awaitWhere { it.errorMessage != null }
         assertTrue(
             "expected the NO_CONFIG diagnostic, got: ${viewModel.state.value.errorMessage}",
             viewModel.state.value.errorMessage!!.contains("No configuration")
         )
-        awaitUntil { !viewModel.state.value.isDiscoveringModels }
+        viewModel.state.awaitWhere { !it.isDiscoveringModels }
     }
 
     @Test
-    fun `discoverOfferings with a real configuration reports the egress-denied discovery honestly`() = runBlocking {
-        awaitUntil {
-            viewModel.state.value.generalizedConfigurations.any { it.id == "cfg_google_gemini" }
+    fun `discoverOfferings with a real configuration reports the egress-denied discovery honestly`(): Unit = runBlocking {
+        viewModel.state.awaitWhere {
+            it.generalizedConfigurations.any { c -> c.id == "cfg_google_gemini" }
         }
 
         // The private egress authority denies the discovery dial BEFORE any
         // socket — the honest error channel carries the real diagnostic.
         viewModel.discoverOfferings("google_gemini")
 
-        awaitUntil { viewModel.state.value.errorMessage != null }
+        viewModel.state.awaitWhere { it.errorMessage != null }
         assertTrue(
             "expected a real discovery diagnostic, got: ${viewModel.state.value.errorMessage}",
             viewModel.state.value.errorMessage!!.isNotBlank()
         )
-        awaitUntil { !viewModel.state.value.isDiscoveringModels }
+        viewModel.state.awaitWhere { !it.isDiscoveringModels }
     }
 
     // ------------------------------------------------------------------
@@ -440,8 +430,8 @@ class ProvidersViewModelTest {
 
     @Test
     fun `submitCredential stores the trimmed key, closes the dialog and re-tests with the stored key`() = runBlocking {
-        awaitUntil {
-            viewModelFakeVault.state.value.materializedResources.any { it.serviceId == "google_gemini" }
+        viewModelFakeVault.state.awaitWhere {
+            it.materializedResources.any { r -> r.serviceId == "google_gemini" }
         }
 
         viewModelFakeVault.openCredentialDialog(
@@ -457,21 +447,16 @@ class ProvidersViewModelTest {
 
         // The trimmed key is retrievable from the (fake) vault — a real
         // storeSecret roundtrip under the config's authAlias.
-        awaitUntil {
-            viewModelFakeVault.state.value.credentialDialogServiceId == null
-        }
+        viewModelFakeVault.state.awaitWhere { it.credentialDialogServiceId == null }
         assertEquals("real-key-42", controlPlaneFakeVault.getSecret("gemini_api_key"))
-        awaitUntil { !viewModelFakeVault.state.value.isSavingCredential }
+        viewModelFakeVault.state.awaitWhere { !it.isSavingCredential }
 
         // The immediate re-test used the STORED key: the honest no-key
         // message is gone, and the real ping was denied by the (fresh)
         // egress authority before any socket — deterministic. Wait for the
         // TERMINAL diagnostic (the transient save banner appears first).
-        awaitUntil(
-            timeoutMs = 15_000L
-        ) {
-            viewModelFakeVault.state.value.diagnosticBanner
-                ?.contains("EGRESS_BLOCKED") == true
+        viewModelFakeVault.state.awaitWhere {
+            it.diagnosticBanner?.contains("EGRESS_BLOCKED") == true
         }
         // The gemini record stays honestly REGISTERED (validation denied).
         val gemini = viewModelFakeVault.state.value.materializedResources
@@ -480,9 +465,9 @@ class ProvidersViewModelTest {
     }
 
     @Test
-    fun `submitCredential surfaces the honest vault failure and keeps the dialog open`() = runBlocking {
-        awaitUntil {
-            viewModel.state.value.generalizedProviders.any { it.id == "google" }
+    fun `submitCredential surfaces the honest vault failure and keeps the dialog open`(): Unit = runBlocking {
+        viewModel.state.awaitWhere {
+            it.generalizedProviders.any { p -> p.id == "google" }
         }
 
         viewModel.openCredentialDialog(
@@ -496,7 +481,7 @@ class ProvidersViewModelTest {
         // S-2: the REAL adapter refuses the insecure software-key fallback
         // (no Android Keystore under Robolectric) — the user sees the
         // explicit failure, the dialog STAYS open, the flag resets.
-        awaitUntil { viewModel.state.value.errorMessage != null }
+        viewModel.state.awaitWhere { it.errorMessage != null }
         // The S-2 CONTRACT under Robolectric (keystore absent): the store
         // fails EXPLICITLY with a non-empty honest diagnostic — the slice-5
         // display-honesty repair routes it into diagnosticMessage so it
@@ -512,7 +497,7 @@ class ProvidersViewModelTest {
         // No insecure software-key fallback: nothing was stored at all.
         assertNull(controlPlane.getSecret("gemini_api_key"))
         assertEquals("google_gemini", viewModel.state.value.credentialDialogServiceId)
-        awaitUntil { !viewModel.state.value.isSavingCredential }
+        viewModel.state.awaitWhere { !it.isSavingCredential }
     }
 
     @Test
@@ -558,44 +543,42 @@ class ProvidersViewModelTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `toggleProvider flips the enabled flag through the real plane`() = runBlocking {
-        awaitUntil {
-            viewModel.state.value.generalizedProviders.any { it.id == "google" }
+    fun `toggleProvider flips the enabled flag through the real plane`(): Unit = runBlocking {
+        viewModel.state.awaitWhere {
+            it.generalizedProviders.any { p -> p.id == "google" }
         }
 
         viewModel.toggleProvider("google", false)
 
-        awaitUntil {
-            viewModel.state.value.generalizedProviders
-                .firstOrNull { it.id == "google" }?.isEnabled == false
+        viewModel.state.awaitWhere {
+            it.generalizedProviders.firstOrNull { p -> p.id == "google" }?.isEnabled == false
         }
         viewModel.toggleProvider("google", true)
-        awaitUntil {
-            viewModel.state.value.generalizedProviders
-                .firstOrNull { it.id == "google" }?.isEnabled == true
+        viewModel.state.awaitWhere {
+            it.generalizedProviders.firstOrNull { p -> p.id == "google" }?.isEnabled == true
         }
     }
 
     @Test
-    fun `deleteProvider cascades the services and resources away`() = runBlocking {
-        awaitUntil {
-            viewModel.state.value.materializedResources.any { it.serviceId == "google_gemini" }
+    fun `deleteProvider cascades the services and resources away`(): Unit = runBlocking {
+        viewModel.state.awaitWhere {
+            it.materializedResources.any { r -> r.serviceId == "google_gemini" }
         }
 
         viewModel.deleteProvider("google")
 
-        awaitUntil {
-            viewModel.state.value.generalizedProviders.none { it.id == "google" }
+        viewModel.state.awaitWhere {
+            it.generalizedProviders.none { p -> p.id == "google" }
         }
-        awaitUntil {
-            viewModel.state.value.materializedResources.none { it.serviceId == "google_gemini" }
+        viewModel.state.awaitWhere {
+            it.materializedResources.none { r -> r.serviceId == "google_gemini" }
         }
     }
 
     @Test
     fun `enableResource refuses an unvalidated resource honestly`() = runBlocking {
-        awaitUntil {
-            viewModel.state.value.materializedResources.any { it.serviceId == "google_gemini" }
+        viewModel.state.awaitWhere {
+            it.materializedResources.any { r -> r.serviceId == "google_gemini" }
         }
         val gemini = viewModel.state.value.materializedResources
             .first { it.serviceId == "google_gemini" }
@@ -603,7 +586,7 @@ class ProvidersViewModelTest {
 
         viewModel.enableResource(gemini.resourceId.value)
 
-        awaitUntil { viewModel.state.value.errorMessage != null }
+        viewModel.state.awaitWhere { it.errorMessage != null }
         assertTrue(
             "expected the NOT_VALIDATED diagnostic, got: ${viewModel.state.value.errorMessage}",
             viewModel.state.value.errorMessage!!.contains("must be validated")
@@ -611,10 +594,10 @@ class ProvidersViewModelTest {
     }
 
     @Test
-    fun `disableResource flips an enabled resource to DISABLED`() = runBlocking {
-        awaitUntil {
-            viewModel.state.value.materializedResources.any {
-                it.serviceId == "local_embedding" && it.lifecycleState == ResourceLifecycleState.ENABLED
+    fun `disableResource flips an enabled resource to DISABLED`(): Unit = runBlocking {
+        viewModel.state.awaitWhere {
+            it.materializedResources.any { r ->
+                r.serviceId == "local_embedding" && r.lifecycleState == ResourceLifecycleState.ENABLED
             }
         }
         val local = viewModel.state.value.materializedResources
@@ -623,9 +606,9 @@ class ProvidersViewModelTest {
 
         viewModel.disableResource(local.resourceId.value)
 
-        awaitUntil {
-            viewModel.state.value.materializedResources
-                .first { it.resourceId == local.resourceId }
+        viewModel.state.awaitWhere {
+            it.materializedResources
+                .first { r -> r.resourceId == local.resourceId }
                 .lifecycleState == ResourceLifecycleState.DISABLED
         }
     }
@@ -634,7 +617,7 @@ class ProvidersViewModelTest {
     fun `validateResource on an unknown id surfaces the error channel`() = runBlocking {
         viewModel.validateResource("res_does_not_exist")
 
-        awaitUntil { viewModel.state.value.errorMessage != null }
+        viewModel.state.awaitWhere { it.errorMessage != null }
         assertTrue(viewModel.state.value.errorMessage!!.contains("not found"))
     }
 
@@ -645,16 +628,16 @@ class ProvidersViewModelTest {
     @Test
     fun `banner and error channel are dismissible feature state`() = runBlocking {
         viewModel.validateResource("res_does_not_exist")
-        awaitUntil { viewModel.state.value.errorMessage != null }
+        viewModel.state.awaitWhere { it.errorMessage != null }
 
         viewModel.clearErrorMessage()
         assertNull(viewModel.state.value.errorMessage)
 
-        awaitUntil {
-            viewModel.state.value.generalizedConfigurations.any { it.id == "cfg_google_gemini" }
+        viewModel.state.awaitWhere {
+            it.generalizedConfigurations.any { c -> c.id == "cfg_google_gemini" }
         }
         viewModel.testServiceConnection("cfg_google_gemini")
-        awaitUntil { viewModel.state.value.diagnosticBanner != null }
+        viewModel.state.awaitWhere { it.diagnosticBanner != null }
         viewModel.dismissDiagnosticBanner()
         assertNull(viewModel.state.value.diagnosticBanner)
     }

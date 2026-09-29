@@ -11,6 +11,7 @@ import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.session.ChatMode
 import com.example.infrastructure.persistence.AppDatabase
 import com.example.infrastructure.persistence.repository.RoomConversationSessionRepository
+import com.example.testing.awaitWhere
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -132,28 +133,17 @@ class ProjectsViewModelTest {
     }
 
     /**
-     * The documented await-the-SPECIFIC-terminal-signal helper.
-     *
-     * TEST-side determinism (the slice-6 documented load-flakiness family):
-     * 30s instead of the 15s default — under the FULL-suite --rerun-tasks
-     * load (850 tests) a Room emission can lag past a shorter window (the
-     * one observed full-run drop of the create test; isolated and targeted
-     * reruns green, the ProvidersViewModelTest 5s precedents documented the
-     * same profile).
+     * DETERMINISTIC (the slice-6 documented load-flakiness family, CLOSED):
+     * this suite now awaits the flows THEMSELVES —
+     * [com.example.testing.awaitWhere] suspends on the StateFlow and resumes
+     * the moment the terminal signal lands. The old polling helper
+     * (Thread.sleep at 25ms intervals, window raised 5s→15s→30s) was
+     * structurally load-sensitive: it depended on the test thread observing
+     * a transient wall-clock window under full-suite --rerun-tasks load —
+     * the one observed full-run drop of the create test (isolated and
+     * targeted reruns green). No window exists to miss anymore; the shared
+     * helper's timeout is only a hang guard carrying the last observed value.
      */
-    private fun awaitUntil(
-        timeoutMs: Long = 30_000L,
-        intervalMs: Long = 25L,
-        condition: () -> Boolean
-    ) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (!condition()) {
-            if (System.currentTimeMillis() > deadline) {
-                throw AssertionError("Condition not met within ${timeoutMs}ms")
-            }
-            Thread.sleep(intervalMs)
-        }
-    }
 
     // ------------------------------------------------------------------
     // The honest current-project mirror + the owned sandbox project (P0-04)
@@ -162,9 +152,9 @@ class ProjectsViewModelTest {
     @Test
     fun `the current-project mirror lands the default workspace's OWNED sandbox project`() {
         newRealStack()
-        awaitUntil { service.activeWorkspace.value != null }
+        service.activeWorkspace.awaitWhere { it != null }
 
-        awaitUntil { viewModel.state.value.isLoading.not() && viewModel.state.value.currentProject != null }
+        viewModel.state.awaitWhere { it.isLoading.not() && it.currentProject != null }
         val current = viewModel.state.value.currentProject!!
         // P0-04 (transferred from MainViewModelTest with the ownership):
         // a REAL owned project id — never a silent shared "project 1".
@@ -178,9 +168,9 @@ class ProjectsViewModelTest {
     @Test
     fun `the ACTIVE-projects list lands with the sandbox project`() {
         newRealStack()
-        awaitUntil { service.activeWorkspace.value != null }
+        service.activeWorkspace.awaitWhere { it != null }
 
-        awaitUntil { viewModel.state.value.projects.isNotEmpty() }
+        viewModel.state.awaitWhere { it.projects.isNotEmpty() }
         assertTrue(viewModel.state.value.projects.any { it.id == viewModel.state.value.currentProject?.id })
     }
 
@@ -191,13 +181,13 @@ class ProjectsViewModelTest {
     @Test
     fun `create lands in the list, becomes the current project and moves the durable binding`() {
         newRealStack()
-        awaitUntil { service.activeWorkspace.value != null }
-        awaitUntil { viewModel.state.value.projects.isNotEmpty() }
+        service.activeWorkspace.awaitWhere { it != null }
+        viewModel.state.awaitWhere { it.projects.isNotEmpty() }
         val before = viewModel.state.value.projects.size
 
         viewModel.createProject("مشروع الاختبار الأول", "وصف تجريبي")
-        awaitUntil { viewModel.state.value.projects.size == before + 1 }
-        awaitUntil { viewModel.state.value.currentProject?.name == "مشروع الاختبار الأول" }
+        viewModel.state.awaitWhere { it.projects.size == before + 1 }
+        viewModel.state.awaitWhere { it.currentProject?.name == "مشروع الاختبار الأول" }
 
         // SCOPE SAVED (the package's explicit requirement): the durable
         // lastActiveProjectId column — read through the authoritative DAO,
@@ -219,15 +209,15 @@ class ProjectsViewModelTest {
     @Test
     fun `openProject switches the binding and the mirror to the other project`() {
         newRealStack()
-        awaitUntil { service.activeWorkspace.value != null }
-        awaitUntil { viewModel.state.value.projects.isNotEmpty() }
+        service.activeWorkspace.awaitWhere { it != null }
+        viewModel.state.awaitWhere { it.projects.isNotEmpty() }
         val sandbox = viewModel.state.value.currentProject!!
         viewModel.createProject("مشروع الاختبار الثاني", "")
-        awaitUntil { viewModel.state.value.currentProject?.name == "مشروع الاختبار الثاني" }
+        viewModel.state.awaitWhere { it.currentProject?.name == "مشروع الاختبار الثاني" }
         val second = viewModel.state.value.currentProject!!
 
         viewModel.openProject(sandbox.id)
-        awaitUntil { viewModel.state.value.currentProject?.id == sandbox.id }
+        viewModel.state.awaitWhere { it.currentProject?.id == sandbox.id }
         val wsId = service.activeWorkspace.value!!.id
         val bound = runBlocking {
             db.workspaceDao().getWorkspaceById(wsId)?.lastActiveProjectId
@@ -246,12 +236,12 @@ class ProjectsViewModelTest {
     @Test
     fun `rename is reflected in the list and the current-project mirror`() {
         newRealStack()
-        awaitUntil { service.activeWorkspace.value != null }
-        awaitUntil { viewModel.state.value.projects.isNotEmpty() }
+        service.activeWorkspace.awaitWhere { it != null }
+        viewModel.state.awaitWhere { it.projects.isNotEmpty() }
         val sandbox = viewModel.state.value.currentProject!!
 
         viewModel.renameProject(sandbox.id, "المشروع المعاد تسميته", "وصف جديد")
-        awaitUntil { viewModel.state.value.currentProject?.name == "المشروع المعاد تسميته" }
+        viewModel.state.awaitWhere { it.currentProject?.name == "المشروع المعاد تسميته" }
         assertEquals(
             "المشروع المعاد تسميته",
             viewModel.state.value.projects.first { it.id == sandbox.id }.name
@@ -265,16 +255,16 @@ class ProjectsViewModelTest {
     @Test
     fun `archiving the ACTIVE project clears the binding honestly`() {
         newRealStack()
-        awaitUntil { service.activeWorkspace.value != null }
-        awaitUntil { viewModel.state.value.projects.isNotEmpty() }
+        service.activeWorkspace.awaitWhere { it != null }
+        viewModel.state.awaitWhere { it.projects.isNotEmpty() }
         val sandbox = viewModel.state.value.currentProject!!
 
         viewModel.archiveProject(sandbox.id)
         // §27: archived projects leave the ONLY picker list.
-        awaitUntil { viewModel.state.value.projects.none { it.id == sandbox.id } }
+        viewModel.state.awaitWhere { it.projects.none { it.id == sandbox.id } }
         // §27 honesty: the active binding is cleared — the mirror does not
         // keep pointing at a hidden project.
-        awaitUntil { viewModel.state.value.currentProject == null }
+        viewModel.state.awaitWhere { it.currentProject == null }
         assertEquals(0L, service.activeWorkspace.value?.activeProjectId)
     }
 
@@ -285,19 +275,19 @@ class ProjectsViewModelTest {
     @Test
     fun `a duplicate name surfaces the service's honest rejection`() {
         newRealStack()
-        awaitUntil { service.activeWorkspace.value != null }
-        awaitUntil { viewModel.state.value.projects.isNotEmpty() }
+        service.activeWorkspace.awaitWhere { it != null }
+        viewModel.state.awaitWhere { it.projects.isNotEmpty() }
         viewModel.dismissError()
         val sizeBefore = viewModel.state.value.projects.size
 
         viewModel.createProject("مشروع مساحة العمل الافتراضية", "")
-        awaitUntil { viewModel.state.value.errorMessage != null }
+        viewModel.state.awaitWhere { it.errorMessage != null }
         assertTrue(
             "expected the duplicate-name rejection, got: ${viewModel.state.value.errorMessage}",
             viewModel.state.value.errorMessage!!.contains("بهذا الاسم")
         )
         // Nothing was created.
-        awaitUntil { viewModel.state.value.projects.size == sizeBefore }
+        viewModel.state.awaitWhere { it.projects.size == sizeBefore }
         assertNull(viewModel.state.value.successMessage)
     }
 
@@ -308,10 +298,10 @@ class ProjectsViewModelTest {
     @Test
     fun `the current project's session count reflects a REAL session row`() {
         newRealStack()
-        awaitUntil { service.activeWorkspace.value != null }
-        awaitUntil { viewModel.state.value.projects.isNotEmpty() }
+        service.activeWorkspace.awaitWhere { it != null }
+        viewModel.state.awaitWhere { it.projects.isNotEmpty() }
         val sandbox = viewModel.state.value.currentProject!!
-        awaitUntil { viewModel.state.value.currentProjectSessionCount == 0 }
+        viewModel.state.awaitWhere { it.currentProjectSessionCount == 0 }
 
         runBlocking {
             sessionService.createSession(
@@ -320,6 +310,6 @@ class ProjectsViewModelTest {
                 projectId = sandbox.id
             )
         }
-        awaitUntil { viewModel.state.value.currentProjectSessionCount == 1 }
+        viewModel.state.awaitWhere { it.currentProjectSessionCount == 1 }
     }
 }
