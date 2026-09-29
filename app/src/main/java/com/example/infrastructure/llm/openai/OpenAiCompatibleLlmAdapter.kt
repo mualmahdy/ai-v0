@@ -262,72 +262,78 @@ class OpenAiCompatibleLlmAdapter(
                 // ------------------------------------------------------------------
                 val toolCallAccumulator = StreamedToolCallAccumulator(executionId)
                 var malformedChunks = 0
-                val reader = BufferedReader(InputStreamReader(responseBody.byteStream(), Charsets.UTF_8))
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    val l = line ?: continue
-                    if (!l.startsWith("data:")) continue
-                    val payload = l.removePrefix("data:").trim()
-                    if (payload == "[DONE]") break
-                    if (payload.isEmpty()) continue
+                // A3 (CLOSURE FINAL STAGE §5/item 3): explicit ownership —
+                // the SSE reader (and its underlying body stream) closes
+                // when the reading loop ends on ANY path, independent of
+                // the enclosing response use{} (which stays as the safety
+                // net; previously the ownership was purely implicit).
+                responseBody.byteStream().bufferedReader(Charsets.UTF_8).use { reader ->
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        val l = line ?: continue
+                        if (!l.startsWith("data:")) continue
+                        val payload = l.removePrefix("data:").trim()
+                        if (payload == "[DONE]") break
+                        if (payload.isEmpty()) continue
 
-                    runCatching {
-                        val chunk = JSONObject(payload)
-                        val choice = chunk.optJSONArray("choices")?.optJSONObject(0) ?: return@runCatching
-                        val delta = choice.optJSONObject("delta")
-                        if (delta != null) {
-                            val deltaText = delta.optString("content", "")
-                            if (deltaText.isNotEmpty()) {
-                                fullText.append(deltaText)
-                                emit(
-                                    ExecutionEvent.ContentChunk(
-                                        executionId = executionId,
-                                        deltaText = deltaText,
-                                        sequenceIndex = sequenceIndex++
-                                    )
-                                )
-                            }
-                            // FRONTIER REASONING: `reasoning_content` (DeepSeek-R1
-                            // convention) and `reasoning` (gateway convention)
-                            // stream as separate delta fields BEFORE the content
-                            // tokens — emitted as ReasoningChunk, NEVER mixed
-                            // into ContentChunk or the final text.
-                            val reasoningDelta =
-                                if (delta.has("reasoning_content")) delta.optString("reasoning_content", "")
-                                else delta.optString("reasoning", "")
-                            if (reasoningDelta.isNotEmpty()) {
-                                emit(
-                                    ExecutionEvent.ReasoningChunk(
-                                        executionId = executionId,
-                                        deltaText = reasoningDelta,
-                                        sequenceIndex = sequenceIndex++
-                                    )
-                                )
-                            }
-                            // Streamed tool calls arrive as index-keyed deltas —
-                            // ACCUMULATE, never execute a fragment.
-                            delta.optJSONArray("tool_calls")?.let { arr ->
-                                for (i in 0 until arr.length()) {
-                                    val tc = arr.optJSONObject(i) ?: continue
-                                    val fn = tc.optJSONObject("function")
-                                    toolCallAccumulator.offer(
-                                        index = tc.optInt("index", i),
-                                        id = tc.optString("id", "").takeIf { it.isNotBlank() },
-                                        name = fn?.optString("name", "")?.takeIf { it.isNotBlank() },
-                                        argumentsFragment = fn?.optString("arguments", "") ?: ""
+                        runCatching {
+                            val chunk = JSONObject(payload)
+                            val choice = chunk.optJSONArray("choices")?.optJSONObject(0) ?: return@runCatching
+                            val delta = choice.optJSONObject("delta")
+                            if (delta != null) {
+                                val deltaText = delta.optString("content", "")
+                                if (deltaText.isNotEmpty()) {
+                                    fullText.append(deltaText)
+                                    emit(
+                                        ExecutionEvent.ContentChunk(
+                                            executionId = executionId,
+                                            deltaText = deltaText,
+                                            sequenceIndex = sequenceIndex++
+                                        )
                                     )
                                 }
+                                // FRONTIER REASONING: `reasoning_content` (DeepSeek-R1
+                                // convention) and `reasoning` (gateway convention)
+                                // stream as separate delta fields BEFORE the content
+                                // tokens — emitted as ReasoningChunk, NEVER mixed
+                                // into ContentChunk or the final text.
+                                val reasoningDelta =
+                                    if (delta.has("reasoning_content")) delta.optString("reasoning_content", "")
+                                    else delta.optString("reasoning", "")
+                                if (reasoningDelta.isNotEmpty()) {
+                                    emit(
+                                        ExecutionEvent.ReasoningChunk(
+                                            executionId = executionId,
+                                            deltaText = reasoningDelta,
+                                            sequenceIndex = sequenceIndex++
+                                        )
+                                    )
+                                }
+                                // Streamed tool calls arrive as index-keyed deltas —
+                                // ACCUMULATE, never execute a fragment.
+                                delta.optJSONArray("tool_calls")?.let { arr ->
+                                    for (i in 0 until arr.length()) {
+                                        val tc = arr.optJSONObject(i) ?: continue
+                                        val fn = tc.optJSONObject("function")
+                                        toolCallAccumulator.offer(
+                                            index = tc.optInt("index", i),
+                                            id = tc.optString("id", "").takeIf { it.isNotBlank() },
+                                            name = fn?.optString("name", "")?.takeIf { it.isNotBlank() },
+                                            argumentsFragment = fn?.optString("arguments", "") ?: ""
+                                        )
+                                    }
+                                }
                             }
-                        }
-                        chunk.optJSONObject("usage")?.let { u ->
-                            usageWasReported = true
-                            promptTokens = u.optInt("prompt_tokens", promptTokens)
-                            completionTokens = u.optInt("completion_tokens", completionTokens)
-                            cachedTokens = u.optJSONObject("prompt_tokens_details")
-                                ?.optInt("cached_tokens", cachedTokens) ?: cachedTokens
-                            if (u.has("total_tokens")) providerTotalTokens = u.optInt("total_tokens", 0)
-                        }
-                    }.onFailure { malformedChunks++ }
+                            chunk.optJSONObject("usage")?.let { u ->
+                                usageWasReported = true
+                                promptTokens = u.optInt("prompt_tokens", promptTokens)
+                                completionTokens = u.optInt("completion_tokens", completionTokens)
+                                cachedTokens = u.optJSONObject("prompt_tokens_details")
+                                    ?.optInt("cached_tokens", cachedTokens) ?: cachedTokens
+                                if (u.has("total_tokens")) providerTotalTokens = u.optInt("total_tokens", 0)
+                            }
+                        }.onFailure { malformedChunks++ }
+                    }
                 }
 
                 // FAIL-SAFE: chunks that could not be parsed are counted and

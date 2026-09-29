@@ -36,10 +36,18 @@ import java.util.concurrent.CopyOnWriteArrayList
  * [maxRetainedOperations] are evicted oldest-first so a long-lived process
  * cannot grow it without limit (audit §5.3/A3 resource ownership).
  *
- * HONEST BOUNDARY (this stage): bound at the mutation surfaces that carried
+ * HONEST BOUNDARY: originally bound at the mutation surfaces that carried
  * the audit's truth-divergence symptoms (session delete, transient session
- * open). The full execution path (which already tracks its own
- * LiveExecutionState) migrates onto the registry in the next stage.
+ * open). The FULL EXECUTION PATH migrated onto the registry in the final
+ * closure stage (§5/item 2): every chat-turn execution registers as
+ * CHAT_TURN_EXECUTION keyed by its execution task id — RUNNING at the
+ * kernel launch, SUCCEEDED/FAILED/CANCELLED at the honest terminal
+ * (SUCCEEDED only AFTER the durable turn persisted), PROJECTED when the
+ * assistant entry lands, FINALIZED in the finally-guard (with a defensive
+ * mirror that refuses to leave a dead run "live"). A consent-halted run is
+ * CANCELLED — the turn was never fulfilled; the resolution retry opens a
+ * NEW operation (the AWAITING_APPROVAL live block is the VIEW's resting
+ * state, not the operation's).
  */
 enum class OperationPhase {
     CREATED,

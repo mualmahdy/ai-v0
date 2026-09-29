@@ -104,7 +104,16 @@ class AgentOrchestrator(
     /** Action idempotency ledger (null in pure JVM tests = no exactly-once guarantee). */
     private val actionIntentDao: ActionIntentDao? = null,
     private val defaultSecurityPolicy: SecurityPolicy = SecurityPolicy(),
-    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    /**
+     * CLOSURE FINAL STAGE (§5/item 3 — A4): the default scope is SUPERVISED.
+     * A plain Job() root meant any child failure (e.g. one resumed task
+     * throwing during startup recovery) poisoned the scope permanently —
+     * every later launch started already-cancelled. Production may still
+     * inject its own scope (AppContainer passes the supervised
+     * applicationScope upstream); this default is now equally honest.
+     */
+    private val coroutineScope: CoroutineScope =
+        CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO),
     /**
      * GOVERNANCE PHASE — the economic governance facade. When present the
      * orchestrator (a) enforces the TASK-scope token QUOTA (execution limit,
@@ -1902,7 +1911,20 @@ class AgentOrchestrator(
                 for (entity in interrupted) {
                     resumedIds.add(entity.id)
                     launch {
-                        resumeTask(entity.id).collect { /* events flow through telemetry bus */ }
+                        // A4: one failed resumed task must never cancel its
+                        // sibling executions — the sweep's children run
+                        // guarded (an unguarded failure would fail the sweep
+                        // Job in its Completing state and silently kill every
+                        // OTHER resumed execution mid-run, recreating the
+                        // zombie-RUNNING-rows bug the sweep exists to fix).
+                        runCatching {
+                            resumeTask(entity.id).collect { /* events flow through telemetry bus */ }
+                        }.onFailure { failure ->
+                            System.err.println(
+                                "RESUME_FAILED task=${entity.id}: " +
+                                        "${failure::class.simpleName}: ${failure.message?.take(200)}"
+                            )
+                        }
                     }
                 }
                 // ------------------------------------------------------------

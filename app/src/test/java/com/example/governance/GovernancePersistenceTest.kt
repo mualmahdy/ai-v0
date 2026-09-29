@@ -274,7 +274,7 @@ class GovernancePersistenceTest {
         // GAP-08 (Design Closure 2026, ADR-7) v17: the three dead tables
         // (provider_configs, policy_versions, health_probes) are DROPPED.
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(21, dbVersion)
+        assertEquals(22, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))
@@ -293,7 +293,11 @@ class GovernancePersistenceTest {
             // of the governance inventory — the §30 audit_events table was
             // previously absent here while it (and its unified reader) are
             // core governance surfaces.
-            "audit_events", "audit_trail"
+            "audit_events", "audit_trail",
+            // CLOSURE FINAL STAGE (§5/item 4 — B6, v22): the central transfer
+            // id-mapping ledger (every remapped import id, written inside the
+            // import transaction).
+            "id_mappings"
         ).forEach { tableName ->
             assertTrue("missing table: $tableName", tables.contains(tableName))
         }

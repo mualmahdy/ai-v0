@@ -100,7 +100,14 @@ class ProviderControlPlaneService(
      * retained for later readers — an honest degradation, never a fabrication.
      */
     private val operationalSnapshotStore: OperationalResourceSnapshotStore? = null,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + Job())
+    /**
+     * CLOSURE FINAL STAGE (§5/item 3 — A4): SUPERVISED default scope. A
+     * plain Job() root meant one unguarded bootstrap failure
+     * (launchBootstrapDefaults runs unguarded Room work) poisoned the
+     * scope permanently — every later launch started already-cancelled.
+     */
+    private val scope: CoroutineScope =
+        CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
 ) {
 
     /**
@@ -1033,9 +1040,18 @@ class ProviderControlPlaneService(
      * for every persisted ENABLED resource (FIX F-1: restart survival).
      */
     fun launchBootstrapDefaults() {
+        // A4: guarded — an unguarded Room failure here previously failed the
+        // plain-Job root and poisoned every future launch on the scope.
         scope.launch {
-            ensureBootstrapDefaults()
-            restoreAdaptersForPersistedResources()
+            runCatching {
+                ensureBootstrapDefaults()
+                restoreAdaptersForPersistedResources()
+            }.onFailure { failure ->
+                System.err.println(
+                    "PROVIDER_BOOTSTRAP_DEFAULTS_FAILED: " +
+                            "${failure::class.simpleName}: ${failure.message?.take(200)}"
+                )
+            }
         }
     }
 

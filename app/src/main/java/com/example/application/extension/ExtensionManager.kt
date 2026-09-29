@@ -49,7 +49,14 @@ class ExtensionManager(
     private val integrationGateway: IntegrationGateway,
     private val extensionConfigDao: ExtensionConfigDao? = null,
     private val executableSkills: List<ExecutableSkill> = emptyList(),
-    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+    /**
+     * CLOSURE FINAL STAGE (§5/item 3 — A4): SUPERVISED default scope — a
+     * plain Job() root is poisoned permanently by one child failure,
+     * cancelling every later launch ("ExtensionManager" owns long-lived
+     * persistence work whose failure must stay isolated).
+     */
+    private val coroutineScope: CoroutineScope =
+        CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
 ) {
     private val _skills = MutableStateFlow<List<SkillManifest>>(emptyList())
     val skills: StateFlow<List<SkillManifest>> = _skills.asStateFlow()

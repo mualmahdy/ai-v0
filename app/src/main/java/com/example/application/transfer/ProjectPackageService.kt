@@ -16,6 +16,8 @@ import com.example.infrastructure.persistence.entities.ChatTimelineEventEntity
 import com.example.infrastructure.persistence.entities.ConversationSessionEntity
 import com.example.infrastructure.persistence.entities.ConversationTurnEntity
 import com.example.infrastructure.persistence.entities.DocumentChunkEntity
+import com.example.infrastructure.persistence.entities.IdMappingEntity
+import com.example.infrastructure.persistence.entities.IdMappingEntityType
 import com.example.infrastructure.persistence.entities.KnowledgeDocumentEntity
 import com.example.infrastructure.persistence.entities.ProjectDependencyEntity
 import com.example.infrastructure.persistence.entities.ProjectSnapshotEntity
@@ -389,6 +391,16 @@ class ProjectPackageService(
             )
         } catch (e: Exception) {
             TransferOutcome.Failure("EXPORT_EXCEPTION", "فشل تصدير المشروع: ${e.message}", true)
+        } finally {
+            // A3 (CLOSURE FINAL STAGE §5/item 3): the caller-supplied
+            // destination (a SAF stream on the UI path, a FileOutputStream
+            // on the snapshot path) is closed on EVERY path. The happy path
+            // already closes it through ZipOutputStream(...).use{} above;
+            // this finally covers the early-return and throw paths BEFORE
+            // that point (DB reads, hashing) — previously a failure there
+            // leaked the stream. A double-close after the happy path is
+            // harmless (Closeable.close is idempotent by contract).
+            runCatching { destination.close() }
         }
     }
 
@@ -583,7 +595,16 @@ class ProjectPackageService(
     /**
      * Full import into [targetWorkspaceId] as a NEW project identity (§11:
      * deterministic ID remapping for sessions, turns, tasks, knowledge,
-     * artifacts, dependencies; all internal references rewritten).
+     * artifacts, dependencies).
+     *
+     * CLOSURE FINAL STAGE (§5/item 4 — B6): the remapping is ONE CENTRAL
+     * ledger (`id_mappings`, written inside the import transaction) and
+     * every cross-entity reference is rebound through it — artifact→
+     * session/task, task→parentTask, turn-attachment→artifact. References
+     * to entities that never travel in a package (approvals, execution
+     * logs) are dropped honestly instead of left dangling. (The previous
+     * claim that ALL internal references were rewritten was false —
+     * artifact→session was ALWAYS dangling; fixed here.)
      *
      * ATOMICITY (§4.2): files are STAGED and hash-verified BEFORE any DB
      * row exists; every DB row lands in ONE transaction; the staged files
@@ -664,6 +685,21 @@ class ProjectPackageService(
             }
 
             // ---- TRANSFER: ONE Room transaction (all rows or none) ----
+            // CLOSURE FINAL STAGE (§5/item 4 — B6): the import's id remapping
+            // is ONE CENTRAL ledger. Every remapped id (document, session,
+            // turn, timeline event, task, artifact) is decided in a PRE-PASS
+            // and recorded in `id_mappings` INSIDE this same transaction;
+            // every cross-entity reference (artifact→session/task,
+            // task→parentTask, turn-attachment→artifact) is then rebound
+            // THROUGH the same maps. References to entities that never travel
+            // in a package (approvalId / executionId — approvals and
+            // execution logs are not package material) are nulled OUT
+            // honestly instead of left dangling against nothing.
+            val importOperationId = "import_${UUID.randomUUID().toString().take(16)}"
+            // B6 honest witnesses for the import report: references rebound
+            // through the central maps vs never-traveling references dropped.
+            var reboundReferenceCount = 0
+            var droppedReferenceCount = 0
             val newProjectId = database.withTransaction {
                 // REPLACE policy: delete the old project ONLY now (files for
                 // the replacement are staged; its rows go in the same tx).
@@ -682,16 +718,88 @@ class ProjectPackageService(
                 )
                 val id = projectDao.insertProject(provisional)
 
-                // ---- ID remapping tables ----
+                // ---- B6: the CENTRAL mapping ledger ----------------------
+                val mappingRows = mutableListOf<IdMappingEntity>()
+                fun recordMapping(
+                    entityType: IdMappingEntityType,
+                    sourceId: String,
+                    targetId: String
+                ) {
+                    mappingRows += IdMappingEntity(
+                        operationId = importOperationId,
+                        entityType = entityType.name,
+                        sourceId = sourceId,
+                        targetId = targetId,
+                        unchanged = sourceId == targetId,
+                        workspaceId = targetWorkspaceId,
+                        projectId = id,
+                        createdAtEpochMs = now
+                    )
+                }
+                // B6: the project id itself is part of the ledger (the new
+                // autoincrement identity vs the package's source project).
+                recordMapping(
+                    IdMappingEntityType.PROJECT,
+                    parsed.project.optString("projectId"),
+                    id.toString()
+                )
+
+                // ---- B6 PRE-PASS: decide EVERY id before any row lands ----
+                val docIdMap = mutableMapOf<String, String>()
+                for (i in 0 until parsed.knowledge.length()) {
+                    val sourceDocId = parsed.knowledge.getJSONObject(i).optString("id")
+                    docIdMap[sourceDocId] = "doc_${id}_${UUID.randomUUID().toString().take(10)}"
+                }
                 val sessionIdMap = mutableMapOf<String, String>()
+                for (i in 0 until parsed.sessions.length()) {
+                    val sourceSessionId = parsed.sessions.getJSONObject(i).optString("sessionId")
+                    sessionIdMap[sourceSessionId] = "sess_${UUID.randomUUID().toString().take(12)}"
+                }
+                val turnIdMap = mutableMapOf<String, String>()
+                for (i in 0 until parsed.turns.length()) {
+                    val t = parsed.turns.getJSONObject(i)
+                    val sourceTurnId = t.optString("turnId")
+                    val newSessionId = sessionIdMap[t.optString("sessionId")] ?: continue
+                    turnIdMap[sourceTurnId] = if (sourceTurnId.isNotBlank() &&
+                        turnDao.forSessionOnce(newSessionId).none { it.turnId == sourceTurnId } &&
+                        sourceTurnId.length < 120
+                    ) sourceTurnId else "turn_${UUID.randomUUID().toString().take(16)}"
+                }
+                val eventIdMap = mutableMapOf<String, String>()
+                for (i in 0 until parsed.timeline.length()) {
+                    val sourceEventId = parsed.timeline.getJSONObject(i).optString("eventId")
+                    eventIdMap[sourceEventId] =
+                        if (timelineDao.countById(sourceEventId) == 0 && sourceEventId.isNotBlank()) {
+                            sourceEventId
+                        } else "evt_${UUID.randomUUID().toString().take(16)}"
+                }
+                val taskIdMap = mutableMapOf<String, String>()
+                for (i in 0 until parsed.tasks.length()) {
+                    val sourceTaskId = parsed.tasks.getJSONObject(i).optString("id")
+                    taskIdMap[sourceTaskId] = if (taskDao.getTaskById(sourceTaskId) != null || sourceTaskId.isBlank()) {
+                        "${sourceTaskId}_imp_${UUID.randomUUID().toString().take(6)}"
+                    } else sourceTaskId
+                }
+                val artifactIdMap = mutableMapOf<String, String>()
+                for (i in 0 until parsed.artifacts.length()) {
+                    val sourceArtifactId = parsed.artifacts.getJSONObject(i).optString("id")
+                    artifactIdMap[sourceArtifactId] =
+                        if (artifactDao.countById(sourceArtifactId) > 0 || sourceArtifactId.isBlank()) {
+                            "art_${UUID.randomUUID().toString().take(16)}"
+                        } else sourceArtifactId
+                }
 
                 // Knowledge: new ids; projectId rebound; totalChunks = 0
                 // (honest — chunks are rebuilt AFTER the DB transaction).
                 for (i in 0 until parsed.knowledge.length()) {
                     val docJson = parsed.knowledge.getJSONObject(i)
+                    val sourceDocId = docJson.optString("id")
+                    val newDocId = docIdMap[sourceDocId]
+                        ?: "doc_${id}_${UUID.randomUUID().toString().take(10)}"
+                    recordMapping(IdMappingEntityType.DOCUMENT, sourceDocId, newDocId)
                     knowledgeDao.insertOrUpdate(
                         KnowledgeDocumentEntity(
-                            id = "doc_${id}_${UUID.randomUUID().toString().take(10)}",
+                            id = newDocId,
                             workspaceId = targetWorkspaceId,
                             title = docJson.optString("title"),
                             sourceUri = docJson.optString("sourceUri", "imported://package"),
@@ -718,8 +826,9 @@ class ProjectPackageService(
                 }
                 for (i in 0 until parsed.sessions.length()) {
                     val s = parsed.sessions.getJSONObject(i)
-                    val newSessionId = "sess_${UUID.randomUUID().toString().take(12)}"
-                    sessionIdMap[s.optString("sessionId")] = newSessionId
+                    val sourceSessionId = s.optString("sessionId")
+                    val newSessionId = sessionIdMap[sourceSessionId] ?: continue
+                    recordMapping(IdMappingEntityType.SESSION, sourceSessionId, newSessionId)
                     sessionDao.upsert(
                         ConversationSessionEntity(
                             sessionId = newSessionId,
@@ -741,15 +850,26 @@ class ProjectPackageService(
 
                 // v3: FULL turns — attachmentsJson + sourcesJson ride along;
                 // sessionId remapped; turnId collision-checked.
+                // B6: the EMBEDDED artifact references inside
+                // attachmentsJson are rebound through the central artifact
+                // map (a regenerated artifact id must not dangle inside the
+                // turn's attachment JSON); an attachment whose artifact did
+                // NOT travel keeps its display fields and loses only the
+                // dead link (the codec's artifactId is optional).
                 for (i in 0 until parsed.turns.length()) {
                     val t = parsed.turns.getJSONObject(i)
                     val newSessionId = sessionIdMap[t.optString("sessionId")]
                         ?: continue // orphaned turn (session excluded) — honest skip
                     val sourceTurnId = t.optString("turnId")
-                    val newTurnId = if (sourceTurnId.isNotBlank() &&
-                        turnDao.forSessionOnce(newSessionId).none { it.turnId == sourceTurnId } &&
-                        sourceTurnId.length < 120
-                    ) sourceTurnId else "turn_${UUID.randomUUID().toString().take(16)}"
+                    val newTurnId = turnIdMap[sourceTurnId]
+                        ?: "turn_${UUID.randomUUID().toString().take(16)}"
+                    recordMapping(IdMappingEntityType.TURN, sourceTurnId, newTurnId)
+                    val attachmentRemap = remapAttachmentArtifactIds(
+                        t.optString("attachmentsJson", "[]").ifBlank { "[]" },
+                        artifactIdMap
+                    )
+                    reboundReferenceCount += attachmentRemap.remapped
+                    droppedReferenceCount += attachmentRemap.dropped
                     turnDao.insert(
                         ConversationTurnEntity(
                             turnId = newTurnId,
@@ -764,20 +884,32 @@ class ProjectPackageService(
                             isSuccessful = t.optBoolean("isSuccessful", true),
                             eventCount = t.optInt("eventCount"),
                             createdAtEpochMs = t.optLong("createdAtEpochMs", now),
-                            attachmentsJson = t.optString("attachmentsJson", "[]").ifBlank { "[]" },
+                            attachmentsJson = attachmentRemap.json,
                             sourcesJson = t.optString("sourcesJson", "[]").ifBlank { "[]" }
                         )
                     )
                 }
 
                 // v3: timeline events (capability results + approval blocks).
+                // B6: approvalId / executionId point at entities that NEVER
+                // travel in a package (approvals and execution logs are not
+                // package material) — they are dropped honestly instead of
+                // left dangling against rows that will never exist here.
                 for (i in 0 until parsed.timeline.length()) {
                     val e = parsed.timeline.getJSONObject(i)
+                    // B6: approvalId / executionId reference never-traveling
+                    // entities — count the honest drops.
+                    if (e.optString("approvalId").takeIf { it.isNotBlank() } != null) {
+                        droppedReferenceCount++
+                    }
+                    if (e.optString("executionId").takeIf { it.isNotBlank() } != null) {
+                        droppedReferenceCount++
+                    }
                     val newSessionId = sessionIdMap[e.optString("sessionId")] ?: continue
                     val sourceEventId = e.optString("eventId")
-                    val newEventId = if (timelineDao.countById(sourceEventId) == 0 && sourceEventId.isNotBlank()) {
-                        sourceEventId
-                    } else "evt_${UUID.randomUUID().toString().take(16)}"
+                    val newEventId = eventIdMap[sourceEventId]
+                        ?: "evt_${UUID.randomUUID().toString().take(16)}"
+                    recordMapping(IdMappingEntityType.TIMELINE_EVENT, sourceEventId, newEventId)
                     timelineDao.insert(
                         ChatTimelineEventEntity(
                             eventId = newEventId,
@@ -792,8 +924,8 @@ class ProjectPackageService(
                             isDegraded = e.optBoolean("isDegraded"),
                             degradedMessage = e.optString("degradedMessage").takeIf { it.isNotBlank() },
                             createdAtEpochMs = e.optLong("createdAtEpochMs", now),
-                            approvalId = e.optString("approvalId").takeIf { it.isNotBlank() },
-                            executionId = e.optString("executionId").takeIf { it.isNotBlank() },
+                            approvalId = null, // B6: never-traveling reference — dropped honestly
+                            executionId = null, // B6: never-traveling reference — dropped honestly
                             toolName = e.optString("toolName").takeIf { it.isNotBlank() },
                             riskLevel = e.optString("riskLevel").takeIf { it.isNotBlank() },
                             justification = e.optString("justification").takeIf { it.isNotBlank() },
@@ -810,9 +942,9 @@ class ProjectPackageService(
                 for (i in 0 until parsed.tasks.length()) {
                     val t = parsed.tasks.getJSONObject(i)
                     val sourceTaskId = t.optString("id")
-                    val newTaskId = if (taskDao.getTaskById(sourceTaskId) != null || sourceTaskId.isBlank()) {
-                        "${sourceTaskId}_imp_${UUID.randomUUID().toString().take(6)}"
-                    } else sourceTaskId
+                    val newTaskId = taskIdMap[sourceTaskId]
+                        ?: "${sourceTaskId}_imp_${UUID.randomUUID().toString().take(6)}"
+                    recordMapping(IdMappingEntityType.TASK, sourceTaskId, newTaskId)
                     taskDao.insertOrUpdateTask(
                         TaskEntity(
                             id = newTaskId,
@@ -838,7 +970,18 @@ class ProjectPackageService(
                             minOutputLengthChars = t.optInt("minOutputLengthChars", 1),
                             verificationStrategy = t.optString("verificationStrategy", "STRICT"),
                             assignedModelId = t.optString("assignedModelId").takeIf { it.isNotBlank() },
-                            parentTaskId = t.optString("parentTaskId").takeIf { it.isNotBlank() },
+                            // B6: parent-task references are rebound through
+                            // the central task map (a remapped parent id must
+                            // not strand the delegation chain); a parent that
+                            // did not travel in the package is dropped
+                            // honestly (the task survives as a root task).
+                            parentTaskId = t.optString("parentTaskId")
+                                .takeIf { it.isNotBlank() }
+                                ?.let { parentId ->
+                                    val rebound = taskIdMap[parentId]
+                                    if (rebound != null) reboundReferenceCount++ else droppedReferenceCount++
+                                    rebound
+                                },
                             delegationDepth = t.optInt("delegationDepth"),
                             checkpointJson = t.optString("checkpointJson").takeIf { it.isNotBlank() },
                             executionContextJson = t.optString("executionContextJson").takeIf { it.isNotBlank() },
@@ -851,20 +994,46 @@ class ProjectPackageService(
                 // v3: artifacts — rows remapped to the new project; payload
                 // bytes ride in files.zip under their sandbox-relative
                 // storageUri (promoted with the staged files).
+                // B6: sessionId / taskId are rebound through the CENTRAL maps
+                // (previously sessionId rode RAW from the package — ALWAYS
+                // dangling because session ids are unconditionally
+                // regenerated); executionId points at a never-traveling
+                // entity and is dropped honestly.
                 for (i in 0 until parsed.artifacts.length()) {
                     val a = parsed.artifacts.getJSONObject(i)
+                    // B6: executionId references a never-traveling entity —
+                    // count the honest drop.
+                    if (a.optString("executionId").takeIf { it.isNotBlank() } != null) {
+                        droppedReferenceCount++
+                    }
                     val sourceArtifactId = a.optString("id")
-                    val newArtifactId = if (artifactDao.countById(sourceArtifactId) > 0 || sourceArtifactId.isBlank()) {
-                        "art_${UUID.randomUUID().toString().take(16)}"
-                    } else sourceArtifactId
+                    val newArtifactId = artifactIdMap[sourceArtifactId]
+                        ?: "art_${UUID.randomUUID().toString().take(16)}"
+                    recordMapping(IdMappingEntityType.ARTIFACT, sourceArtifactId, newArtifactId)
                     artifactDao.upsert(
                         ArtifactEntity(
                             id = newArtifactId,
                             workspaceId = targetWorkspaceId,
                             projectId = id,
-                            sessionId = a.optString("sessionId").takeIf { it.isNotBlank() }, // remapped session ids live in another package scope; artifact refs stay honest
-                            taskId = a.optString("taskId").takeIf { it.isNotBlank() },
-                            executionId = a.optString("executionId").takeIf { it.isNotBlank() },
+                            // B6: rebound through the central session map —
+                            // null when the referenced session did not travel.
+                            sessionId = a.optString("sessionId")
+                                .takeIf { it.isNotBlank() }
+                                ?.let { sourceSessionId ->
+                                    val rebound = sessionIdMap[sourceSessionId]
+                                    if (rebound != null) reboundReferenceCount++ else droppedReferenceCount++
+                                    rebound
+                                },
+                            // B6: rebound through the central task map — null
+                            // when the referenced task did not travel.
+                            taskId = a.optString("taskId")
+                                .takeIf { it.isNotBlank() }
+                                ?.let { sourceTaskId ->
+                                    val rebound = taskIdMap[sourceTaskId]
+                                    if (rebound != null) reboundReferenceCount++ else droppedReferenceCount++
+                                    rebound
+                                },
+                            executionId = null, // B6: never-traveling reference — dropped honestly
                             type = a.optString("type", "FILE"),
                             name = a.optString("name", "artifact"),
                             mimeType = a.optString("mimeType", "application/octet-stream"),
@@ -899,6 +1068,12 @@ class ProjectPackageService(
                         )
                     )
                 }
+
+                // B6: the central mapping ledger lands INSIDE the same
+                // transaction — the durable, queryable record of everything
+                // this import renamed (consumed by reference rebinding,
+                // REBUILD_INDEXES recovery, and future re-import detection).
+                database.idMappingDao().insertAll(mappingRows)
                 id
             }
 
@@ -965,10 +1140,14 @@ class ProjectPackageService(
             }
 
             // ---- Audit + report ----
+            // B6: the ledger count is read AFTER the transaction — the
+            // durable, queryable witness of every remapped id.
+            val remappedIdCount = database.idMappingDao().countForOperation(importOperationId)
             audit(AuditActions.PROJECT_IMPORTED, targetWorkspaceId, newProjectId, AuditResult.SUCCESS,
                 reason = "name=$finalName files=${parsed.fileEntries.size} turns=${parsed.turns.length()} " +
                         "tasks=${parsed.tasks.length()} artifacts=${parsed.artifacts.length()} " +
-                        "ragDocs=$reingestedDocuments ragChunks=$reingestedChunks")
+                        "ragDocs=$reingestedDocuments ragChunks=$reingestedChunks " +
+                        "remappedIds=$remappedIdCount reboundRefs=$reboundReferenceCount droppedRefs=$droppedReferenceCount")
             newProjectId to ImportReport.success(
                 finalName, parsed.fileEntries.size, report,
                 importedSessions = parsed.sessions.length(),
@@ -978,7 +1157,10 @@ class ProjectPackageService(
                 importedArtifacts = parsed.artifacts.length(),
                 reingestedDocuments = reingestedDocuments,
                 reingestedChunks = reingestedChunks,
-                degradedNotes = ragNotes
+                degradedNotes = ragNotes,
+                remappedIds = remappedIdCount,
+                reboundReferences = reboundReferenceCount,
+                droppedReferences = droppedReferenceCount
             )
         } catch (e: Exception) {
             // ANY failure before/inside/after the transaction leaves NO
@@ -1162,11 +1344,14 @@ class ProjectPackageService(
         snapshotDir.mkdirs()
         val snapshotId = "snap_${UUID.randomUUID().toString().take(12)}"
         val payloadFile = File(snapshotDir, "$snapshotId.aiv0project")
-        val payloadStream = java.io.FileOutputStream(payloadFile)
-        val result = runCatching {
-            exportProject(workspaceId, projectId, payloadStream)
+        // A3: ownership — the payload stream closes on every path (the old
+        // linear close() skipped payloadFile cleanup when close() itself
+        // threw or the coroutine was cancelled between the calls).
+        val result = java.io.FileOutputStream(payloadFile).use { payloadStream ->
+            runCatching {
+                exportProject(workspaceId, projectId, payloadStream)
+            }
         }
-        payloadStream.close()
         if (result.getOrNull() is TransferOutcome.Failure || !payloadFile.exists()) {
             payloadFile.delete()
             return@withContext null
@@ -1315,7 +1500,16 @@ class ProjectPackageService(
         val importedArtifacts: Int = 0,
         val reingestedDocuments: Int = 0,
         val reingestedChunks: Int = 0,
-        val degradedNotes: List<String> = emptyList()
+        val degradedNotes: List<String> = emptyList(),
+        /**
+         * CLOSURE FINAL STAGE (§5/item 4 — B6): the central mapping ledger's
+         * row count (every remapped id, recorded inside the import tx) and
+         * the cross-entity reference witnesses — rebound through the central
+         * maps vs never-traveling references dropped honestly.
+         */
+        val remappedIds: Int = 0,
+        val reboundReferences: Int = 0,
+        val droppedReferences: Int = 0
     ) {
         companion object {
             fun error(code: String, message: String) = ImportReport(false, "[$code] $message")
@@ -1329,13 +1523,16 @@ class ProjectPackageService(
                 importedSessions: Int = 0, importedTurns: Int = 0, importedKnowledge: Int = 0,
                 importedTasks: Int = 0, importedArtifacts: Int = 0,
                 reingestedDocuments: Int = 0, reingestedChunks: Int = 0,
-                degradedNotes: List<String> = emptyList()
+                degradedNotes: List<String> = emptyList(),
+                remappedIds: Int = 0, reboundReferences: Int = 0, droppedReferences: Int = 0
             ) = ImportReport(
                 true, "تم استيراد المشروع '$name'.", importedFiles = files, compatibility = compat,
                 importedSessions = importedSessions, importedTurns = importedTurns,
                 importedKnowledge = importedKnowledge, importedTasks = importedTasks,
                 importedArtifacts = importedArtifacts, reingestedDocuments = reingestedDocuments,
-                reingestedChunks = reingestedChunks, degradedNotes = degradedNotes
+                reingestedChunks = reingestedChunks, degradedNotes = degradedNotes,
+                remappedIds = remappedIds, reboundReferences = reboundReferences,
+                droppedReferences = droppedReferences
             )
         }
     }
@@ -1345,6 +1542,56 @@ class ProjectPackageService(
         val out = JSONArray()
         for (i in 0 until tags.length()) out.put(tags.optString(i))
         return out.toString()
+    }
+
+    /** B6: the attachment-remap witness (rewritten json + per-class counts). */
+    internal data class AttachmentRemapResult(
+        val json: String,
+        val remapped: Int,
+        val dropped: Int
+    )
+
+    /**
+     * CLOSURE FINAL STAGE (§5/item 4 — B6): rewrites the EMBEDDED artifact
+     * references inside a turn's attachmentsJson through the central
+     * artifact map. Each attachment object keeps its display fields
+     * (name/mimeType/sizeBytes/storageUri — the codec treats artifactId as
+     * optional); an artifactId that traveled is remapped, one that did NOT
+     * travel is dropped honestly (a dead link that can never resolve in
+     * this database — the attachment itself survives as a display record).
+     * A malformed payload degrades to the ORIGINAL string (the insert path's
+     * honesty contract — never a crash, never a silent content change).
+     */
+    internal fun remapAttachmentArtifactIds(
+        attachmentsJson: String,
+        artifactIdMap: Map<String, String>
+    ): AttachmentRemapResult {
+        if (attachmentsJson.isBlank() || artifactIdMap.isEmpty()) {
+            return AttachmentRemapResult(attachmentsJson, 0, 0)
+        }
+        return try {
+            val array = JSONArray(attachmentsJson)
+            var remapped = 0
+            var dropped = 0
+            for (i in 0 until array.length()) {
+                val obj = array.optJSONObject(i) ?: continue
+                val sourceArtifactId = obj.optString("artifactId").takeIf { it.isNotBlank() }
+                if (sourceArtifactId == null) continue
+                val targetArtifactId = artifactIdMap[sourceArtifactId]
+                if (targetArtifactId != null) {
+                    obj.put("artifactId", targetArtifactId)
+                    remapped++
+                } else {
+                    // The referenced artifact did not travel — drop the
+                    // dead link, keep the display record.
+                    obj.remove("artifactId")
+                    dropped++
+                }
+            }
+            AttachmentRemapResult(array.toString(), remapped, dropped)
+        } catch (_: Exception) {
+            AttachmentRemapResult(attachmentsJson, 0, 0)
+        }
     }
 
     private fun sha256Of(bytes: ByteArray): String =

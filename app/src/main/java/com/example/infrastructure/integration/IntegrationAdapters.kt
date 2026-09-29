@@ -74,21 +74,26 @@ class IntegrationGateway(
                 .header("User-Agent", "AI-V0-Android-Platform")
                 .build()
 
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: "{}"
-                val json = JSONObject(body)
-                val login = json.optString("login", "github_user")
-                Outcome.Success(
-                    descriptor.copy(
-                        isConnected = true,
-                        accountIdentifier = login,
-                        health = HealthStatus.HEALTHY,
-                        lastSyncTimestampMs = System.currentTimeMillis()
+            // A3 (CLOSURE FINAL STAGE §5/item 3): explicit ownership — the
+            // response is closed on EVERY path (the non-2xx branch previously
+            // leaked the body/connection — the COMMON case when a token is
+            // invalid, exactly when verification runs repeatedly).
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: "{}"
+                    val json = JSONObject(body)
+                    val login = json.optString("login", "github_user")
+                    Outcome.Success(
+                        descriptor.copy(
+                            isConnected = true,
+                            accountIdentifier = login,
+                            health = HealthStatus.HEALTHY,
+                            lastSyncTimestampMs = System.currentTimeMillis()
+                        )
                     )
-                )
-            } else {
-                Outcome.Error("فشل التحقق من مفتاح GitHub: خطأ ${response.code}")
+                } else {
+                    Outcome.Error("فشل التحقق من مفتاح GitHub: خطأ ${response.code}")
+                }
             }
         } catch (e: Exception) {
             Outcome.Error("تعذر الاتصال بـ GitHub API: ${e.localizedMessage}")
@@ -110,24 +115,26 @@ class IntegrationGateway(
                 .header("User-Agent", "AI-V0-Android-Platform")
                 .build()
 
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: "{}"
-                val json = JSONObject(body)
-                val user = json.optJSONObject("user")
-                val email = user?.optString("emailAddress")?.takeIf { it.isNotBlank() }
-                    ?: user?.optString("displayName")?.takeIf { it.isNotBlank() }
-                    ?: "google_drive_user"
-                Outcome.Success(
-                    descriptor.copy(
-                        isConnected = true,
-                        accountIdentifier = email,
-                        health = HealthStatus.HEALTHY,
-                        lastSyncTimestampMs = System.currentTimeMillis()
+            // A3: same explicit ownership as verifyGitHub — closed on every path.
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: "{}"
+                    val json = JSONObject(body)
+                    val user = json.optJSONObject("user")
+                    val email = user?.optString("emailAddress")?.takeIf { it.isNotBlank() }
+                        ?: user?.optString("displayName")?.takeIf { it.isNotBlank() }
+                        ?: "google_drive_user"
+                    Outcome.Success(
+                        descriptor.copy(
+                            isConnected = true,
+                            accountIdentifier = email,
+                            health = HealthStatus.HEALTHY,
+                            lastSyncTimestampMs = System.currentTimeMillis()
+                        )
                     )
-                )
-            } else {
-                Outcome.Error("رمز وصول Google Drive غير صالح أو منتهي الصلاحية.")
+                } else {
+                    Outcome.Error("رمز وصول Google Drive غير صالح أو منتهي الصلاحية.")
+                }
             }
         } catch (e: Exception) {
             Outcome.Error("تعذر الاتصال بـ Google Drive API: ${e.localizedMessage}")
@@ -146,21 +153,23 @@ class IntegrationGateway(
                 .header("User-Agent", "AI-V0-Android-Platform")
                 .build()
 
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: "{}"
-                val json = JSONObject(body)
-                val email = json.optString("email", "dropbox_user")
-                Outcome.Success(
-                    descriptor.copy(
-                        isConnected = true,
-                        accountIdentifier = email,
-                        health = HealthStatus.HEALTHY,
-                        lastSyncTimestampMs = System.currentTimeMillis()
+            // A3: same explicit ownership as verifyGitHub — closed on every path.
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: "{}"
+                    val json = JSONObject(body)
+                    val email = json.optString("email", "dropbox_user")
+                    Outcome.Success(
+                        descriptor.copy(
+                            isConnected = true,
+                            accountIdentifier = email,
+                            health = HealthStatus.HEALTHY,
+                            lastSyncTimestampMs = System.currentTimeMillis()
+                        )
                     )
-                )
-            } else {
-                Outcome.Error("رمز Dropbox غير صالح.")
+                } else {
+                    Outcome.Error("رمز Dropbox غير صالح.")
+                }
             }
         } catch (e: Exception) {
             Outcome.Error("تعذر الاتصال بـ Dropbox API: ${e.localizedMessage}")

@@ -1462,6 +1462,11 @@ class StudioViewModel(
         }
         if (taskId != null) {
             currentExecutionTaskId = null
+            // CLOSURE FINAL STAGE (§5 item 2): the cancellation REQUEST lands
+            // in the registry (the owner observes the flag; the job's death
+            // lands the CANCELLED terminal in the CancellationException
+            // handler, then the finally-guard finalizes).
+            operationRegistry?.requestCancellation(taskId)
             com.example.application.execution.ExecutionHost.cancel(taskId)
         }
         appContext?.let {
@@ -1885,19 +1890,43 @@ class StudioViewModel(
         componentRegistry.registerAgent(resolvedAgent)
 
         // ------------------------------------------------------------------
-        // FUNCTIONAL CLOSURE (§2): EXECUTION-PINNED CONTEXT — everything the
-        // execution persists or attributes is captured NOW, before the kernel
-        // runs: the workspace (ExecutionHost attribution + authorization),
-        // the project (session creation), and the workspace-scoped task
-        // constraints. A mid-execution workspace/project switch (§1 detaches
+        // FUNCTIONAL CLOSURE (§2) + CLOSURE FINAL STAGE (§5 items 1+2): the
+        // execution-pinned context is captured NOW, before the kernel runs —
+        // as ONE canonical [ScopeSnapshot]. The audit's fourth parallel
+        // capture shape (the ad-hoc `pinned*` locals) is retired: the locals
+        // below become PROJECTIONS of this value's fields. The workspace
+        // (ExecutionHost attribution + authorization), the project (session
+        // creation), and the workspace-scoped task constraints are frozen at
+        // acceptance; a mid-execution workspace/project switch (§1 detaches
         // the view) can neither hijack this execution's persistence nor lose
         // its turn.
         // ------------------------------------------------------------------
         val turnStartedAt = System.currentTimeMillis()
-        val pinnedWorkspaceId = scopeWorkspaceId
-            ?: runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull()
-        val pinnedProjectId = scopeProjectId
-            ?: runCatching { workspaceRuntimeService.activeProjectIdOrNull() }.getOrNull()
+        val executionScope = com.example.domain.core.execution.ScopeSnapshot.capture(
+            operationId = executionTaskId,
+            workspaceId = scopeWorkspaceId
+                ?: runCatching { workspaceRuntimeService.activeWorkspaceIdOrNull() }.getOrNull(),
+            projectId = scopeProjectId
+                ?: runCatching { workspaceRuntimeService.activeProjectIdOrNull() }.getOrNull(),
+            // Acceptance-time session (null = transient first turn — the
+            // honest acceptance truth; establishment may mint a NEW id, the
+            // snapshot records what was true when the send was accepted).
+            sessionId = sessionCandidateId
+        )
+        val pinnedWorkspaceId = executionScope.workspaceId
+        val pinnedProjectId = executionScope.projectId
+        // CLOSURE FINAL STAGE (§5 item 2): the chat-turn execution registers
+        // its lifecycle in the app-wide OperationRegistry — one operation →
+        // one immutable scope → one lifecycle → one outcome. The registry is
+        // the runtime observability/recovery surface, NOT durable truth
+        // (that stays with the turn/approval persistence); the record is
+        // keyed by the execution task id itself.
+        operationRegistry?.register(
+            type = "CHAT_TURN_EXECUTION",
+            scope = executionScope,
+            owner = "StudioViewModel",
+            resourceId = selectedModelId
+        )
         val pinnedConstraints = com.example.domain.core.task.TaskConstraints(
             autonomyPolicy = pinnedWorkspaceId?.let { wsId ->
                 runCatching { workspaceRuntimeService.activeWorkspace.value }
@@ -1906,6 +1935,12 @@ class StudioViewModel(
                     ?.settings?.get("autonomyPolicy")
                     ?.let { name -> runCatching { AutonomyPolicy.valueOf(name) }.getOrNull() }
             } ?: AutonomyPolicy.SUPERVISED
+        )
+        // CLOSURE FINAL STAGE (§5 item 2): the kernel launch is the RUNNING
+        // transition — lifecycle truth lands BEFORE any event can arrive.
+        operationRegistry?.transition(
+            executionTaskId,
+            com.example.application.operation.OperationPhase.RUNNING
         )
         com.example.application.execution.ExecutionHost.launch(executionTaskId, pinnedWorkspaceId) {
             var sessionId: ConversationSessionId? = null
@@ -1960,6 +1995,15 @@ class StudioViewModel(
                     is DurableSessionEstablishment.Established ->
                         sessionId = establishment.sessionId
                     is DurableSessionEstablishment.Failed -> {
+                        // --------------------------------------------------
+                        // CLOSURE FINAL STAGE (§5 item 2): the registry lands
+                        // its honest terminal FIRST — lifecycle truth before
+                        // any view mutation, attached or detached alike.
+                        // --------------------------------------------------
+                        operationRegistry?.fail(
+                            executionTaskId,
+                            "durable session establishment failed: ${establishment.reason}"
+                        )
                         // --------------------------------------------------
                         // CHAT FINAL CLOSURE (P1 fail-closed): NO durable
                         // session ⇒ NO normal persisted execution. The LLM
@@ -2023,6 +2067,33 @@ class StudioViewModel(
                     // they advance for EVERY event of THIS execution,
                     // attached or detached.
                     executionEventCount++
+                    // ----------------------------------------------------------
+                    // CLOSURE FINAL STAGE (§5 item 2): REGISTRY TERMINAL
+                    // MIRRORING. The kernel's terminal events land the
+                    // operation's honest terminal phase BEFORE the detached
+                    // gate and before any persist/projection — lifecycle
+                    // truth first, for BOTH paths. SUCCEEDED lands only
+                    // after the durable turn is actually persisted below;
+                    // a consent-halted run is CANCELLED (the turn was never
+                    // fulfilled — the resolution retry opens a NEW
+                    // operation; the AWAITING_APPROVAL live block is the
+                    // VIEW's resting state, not the operation's).
+                    // ----------------------------------------------------------
+                    when (event) {
+                        is ExecutionEvent.Cancelled -> operationRegistry?.transition(
+                            executionTaskId,
+                            com.example.application.operation.OperationPhase.CANCELLED,
+                            "system-side cancellation"
+                        )
+                        is ExecutionEvent.Completed -> if (approvalRequested) {
+                            operationRegistry?.transition(
+                                executionTaskId,
+                                com.example.application.operation.OperationPhase.CANCELLED,
+                                "halted: approval requested — resolution rides a new operation"
+                            )
+                        }
+                        else -> Unit
+                    }
                     if (event is ExecutionEvent.ContentChunk) {
                         executionStream.append(event.deltaText)
                     }
@@ -2101,6 +2172,19 @@ class StudioViewModel(
                                     pinnedProjectId = pinnedProjectId,
                                     executionTaskId = executionTaskId
                                 )
+                                // CLOSURE FINAL STAGE (§5 item 2): the durable
+                                // turn persisted — SUCCEEDED lands NOW (no
+                                // projection for a detached run; the finally
+                                // guard finalizes).
+                                operationRegistry?.transition(
+                                    executionTaskId,
+                                    com.example.application.operation.OperationPhase.SUCCEEDED,
+                                    if (terminalError != null) {
+                                        "turn persisted durably (detached, folded provider error)"
+                                    } else {
+                                        "turn persisted durably (detached)"
+                                    }
+                                )
                             }
                             is ExecutionEvent.Error -> when {
                                 // §8/§9: the consent request is durable in the
@@ -2155,6 +2239,19 @@ class StudioViewModel(
                             pinnedWorkspaceId = pinnedWorkspaceId,
                             pinnedProjectId = pinnedProjectId,
                             executionTaskId = executionTaskId
+                        )
+                        // CLOSURE FINAL STAGE (§5 item 2): durable truth first —
+                        // SUCCEEDED lands after the persist and BEFORE the
+                        // assistant entry projection below (the registry
+                        // enforces exactly this ordering).
+                        operationRegistry?.transition(
+                            executionTaskId,
+                            com.example.application.operation.OperationPhase.SUCCEEDED,
+                            if (terminalError != null) {
+                                "turn persisted durably (folded provider error)"
+                            } else {
+                                "turn persisted durably"
+                            }
                         )
                     }
                     if (event is ExecutionEvent.Error &&
@@ -2397,6 +2494,19 @@ class StudioViewModel(
                             else -> state.copy(executionLog = updatedLogs, liveExecution = updatedLive)
                         }
                     }
+                    // CLOSURE FINAL STAGE (§5 item 2): the assistant entry just
+                    // LANDED in the timeline (attached path, non-approval
+                    // Completed) — UI projection follows success, exactly the
+                    // ordering the registry enforces. Refusal-safe on the
+                    // documented multi-terminal quirk (a second terminal finds
+                    // the record already PROJECTED → null, no double-count).
+                    if (event is ExecutionEvent.Completed && !approvalRequested) {
+                        operationRegistry?.transition(
+                            executionTaskId,
+                            com.example.application.operation.OperationPhase.PROJECTED,
+                            "assistant entry projected"
+                        )
+                    }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // RESIDUAL CLOSURE (P1): an honest cancellation (the user's
@@ -2404,11 +2514,25 @@ class StudioViewModel(
                 // is NOT an unexpected error — the cancel path already set
                 // the honest CANCELLED trace. Rethrow so the job completes
                 // as cancelled and the finally-block runs its guards.
+                // CLOSURE FINAL STAGE (§5 item 2): the registry lands its
+                // CANCELLED here — the job is dying by cancellation, the
+                // record must not stay RUNNING.
+                operationRegistry?.transition(
+                    executionTaskId,
+                    com.example.application.operation.OperationPhase.CANCELLED,
+                    "execution cancelled (job death)"
+                )
                 throw e
             } catch (e: Exception) {
                 // P1: only the CURRENT view's execution surfaces pipeline
                 // exceptions — a detached execution's failure never writes
                 // an error into another scope's conversation.
+                // CLOSURE FINAL STAGE (§5 item 2): the pipeline exception is
+                // the operation's honest terminal — attached or detached.
+                operationRegistry?.fail(
+                    executionTaskId,
+                    "unexpected pipeline exception: ${e.localizedMessage}"
+                )
                 if (currentExecutionTaskId == executionTaskId) {
                     _state.update {
                         it.copy(
@@ -2427,6 +2551,13 @@ class StudioViewModel(
                 // cleared (an attached execution only).
                 // ----------------------------------------------------------
                 if (terminalError != null && !terminalPersisted) {
+                    // CLOSURE FINAL STAGE (§5 item 2): the kernel died before
+                    // its terminal event — FAILED lands BEFORE the durable
+                    // turn (lifecycle truth first, mirroring the normal path).
+                    operationRegistry?.fail(
+                        executionTaskId,
+                        terminalError?.message ?: "kernel died mid-run"
+                    )
                     terminalPersisted = true
                     val failedAnswer = executionStream.toString()
                         .ifBlank { terminalError?.message.orEmpty() }
@@ -2467,6 +2598,14 @@ class StudioViewModel(
                                 )
                             )
                         }
+                        // CLOSURE FINAL STAGE (§5 item 2): the failed entry
+                        // LANDED — projection follows the terminal, even on
+                        // the fail-safe path.
+                        operationRegistry?.transition(
+                            executionTaskId,
+                            com.example.application.operation.OperationPhase.PROJECTED,
+                            "failed entry projected (fail-safe path)"
+                        )
                     }
                 }
                 // DEFENSIVE HONESTY: if this execution is still shown as
@@ -2497,6 +2636,37 @@ class StudioViewModel(
                         state
                     }
                 }
+                // ------------------------------------------------------------
+                // CLOSURE FINAL STAGE (§5 item 2): REGISTRY FINALIZATION —
+                // the mirror of the defensive-honesty guard above. A record
+                // still RUNNING (the kernel ended without ANY terminal
+                // signal) must not stay "live" in the registry forever —
+                // FINALIZED is only reachable from a terminal phase, so the
+                // honest terminal lands first: CANCELLED when the run was
+                // consent-halted (awaiting resolution — nothing failed),
+                // FAILED for a genuine no-signal gap. All other transitions
+                // are refusal-safe (illegal → null).
+                // ------------------------------------------------------------
+                operationRegistry?.get(executionTaskId)?.let { record ->
+                    if (record.isActive) {
+                        if (approvalRequested) {
+                            operationRegistry?.transition(
+                                executionTaskId,
+                                com.example.application.operation.OperationPhase.CANCELLED,
+                                "halted: approval requested — resolution rides a new operation"
+                            )
+                        } else {
+                            operationRegistry?.fail(
+                                executionTaskId,
+                                "kernel ended without a terminal event"
+                            )
+                        }
+                    }
+                }
+                operationRegistry?.transition(
+                    executionTaskId,
+                    com.example.application.operation.OperationPhase.FINALIZED
+                )
             }
         }
 

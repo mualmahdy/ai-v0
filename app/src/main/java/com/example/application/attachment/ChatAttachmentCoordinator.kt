@@ -133,16 +133,24 @@ class ChatAttachmentCoordinator(
             ?: throw AttachmentImportException("استيراد المرفقات يتطلب مشروعاً مُسنداً (نطاق غير مُسند).")
         val displayName = contentPort.queryDisplayName(uri)
             ?: uri.substringAfterLast('/').ifBlank { "attachment" }
+        // CLOSURE FINAL STAGE (§5/item 3 — A3): EXPLICIT OWNERSHIP — the
+        // ContentResolver stream is a PFD-backed resource; `use` guarantees
+        // it is closed on EVERY path (the early-failure branches of
+        // importFile — PATH_REJECTED / ARCHIVE_TOO_LARGE — return WITHOUT
+        // consuming it, and the success path only reads it). Previously
+        // every chat file attachment leaked a file descriptor.
         val stream = contentPort.openRead(uri)
             ?: throw AttachmentImportException("تعذر فتح الملف المحدد (المصدر لم يعد متاحاً).")
         val safeName = sanitizeFileName(displayName)
         val relativePath = "attachments/${System.currentTimeMillis()}_${safeName}"
-        val outcome = fileTransferService.importFile(
-            workspaceId = workspaceId,
-            projectId = projectId,
-            source = stream,
-            relativePath = relativePath
-        )
+        val outcome = stream.use { ownedStream ->
+            fileTransferService.importFile(
+                workspaceId = workspaceId,
+                projectId = projectId,
+                source = ownedStream,
+                relativePath = relativePath
+            )
+        }
         if (outcome !is TransferOutcome.Success) {
             throw AttachmentImportException(
                 (outcome as TransferOutcome.Failure).message

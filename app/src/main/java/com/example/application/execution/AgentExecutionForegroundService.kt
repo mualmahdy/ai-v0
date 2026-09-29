@@ -52,11 +52,17 @@ class AgentExecutionForegroundService : Service() {
         if (collectorJob == null || collectorJob?.isActive != true) {
             collectorJob = ExecutionHost.scope.launch {
                 ExecutionHost.activeExecutions.collect { live ->
-                    if (live.isEmpty()) {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf()
-                    } else {
-                        notifyExecutionCount(live.size)
+                    // A4 (CLOSURE FINAL STAGE §5/item 3): per-emission guard —
+                    // an unguarded throw (notify/stopSelf) would kill the
+                    // collector silently; the service then never self-stops
+                    // and the foreground notification outlives its executions.
+                    runCatching {
+                        if (live.isEmpty()) {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            stopSelf()
+                        } else {
+                            notifyExecutionCount(live.size)
+                        }
                     }
                 }
             }

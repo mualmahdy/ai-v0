@@ -26,10 +26,21 @@ import org.json.JSONObject
  * Vector storage note: vectors are stored as JSON Float arrays in v5. This
  * is ~3-5x storage bloat vs BLOB but keeps the schema simple for the Phase 2
  * milestone. Phase 4 will migrate to BLOB + sqlite-vec for production scale.
+ *
+ * CLOSURE FINAL STAGE (§5/item 4 — B5, RAG transaction boundary): the
+ * document row, the idempotent chunk wipe and the chunk inserts are ONE
+ * atomic unit. Previously the three writes committed independently — a
+ * crash between them left a half-indexed document (a committed row claiming
+ * totalChunks=N with ZERO chunk rows) or a re-ingest whose chunks were all
+ * deleted; the delete path could equally orphan chunk rows. All multi-write
+ * mutations now run through [transactionRunner] (Room's withTransaction in
+ * production; the default runs blocks directly — the composed-DAOs test
+ * seam, exactly the pre-boundary behaviour).
  */
 open class KnowledgePersistenceService(
     private val documentDao: KnowledgeDocumentDao,
-    private val chunkDao: DocumentChunkDao
+    private val chunkDao: DocumentChunkDao,
+    private val transactionRunner: suspend (suspend () -> Unit) -> Unit = { it() }
 ) {
 
     /**
@@ -116,10 +127,6 @@ open class KnowledgePersistenceService(
             // REPAIR ORDER §15: project ownership — null = workspace-shared.
             projectId = document.projectId
         )
-        documentDao.insertOrUpdate(docEntity)
-
-        // Replace chunks for this document (delete + insert)
-        chunkDao.deleteChunksForDocument(document.id)
         val chunkEntities = chunks.map { chunk ->
             DocumentChunkEntity(
                 id = chunk.id,
@@ -135,7 +142,15 @@ open class KnowledgePersistenceService(
                 createdAtEpochMs = now
             )
         }
-        chunkDao.insertAll(chunkEntities)
+        // B5: ONE transaction — document row + chunk wipe + chunk inserts
+        // commit together or not at all (a crash can no longer leave a
+        // half-indexed document behind).
+        transactionRunner {
+            documentDao.insertOrUpdate(docEntity)
+            // Replace chunks for this document (delete + insert)
+            chunkDao.deleteChunksForDocument(document.id)
+            chunkDao.insertAll(chunkEntities)
+        }
     }
 
     /**
@@ -148,19 +163,28 @@ open class KnowledgePersistenceService(
 
     /**
      * Hard-deletes a document and all its chunks.
+     *
+     * B5: the two writes run in ONE transaction — a crash between them can
+     * no longer orphan chunk rows under a deleted document id.
      */
     suspend fun deleteDocument(documentId: String) = withContext(Dispatchers.IO) {
-        chunkDao.deleteChunksForDocument(documentId)
-        documentDao.deleteById(documentId)
+        transactionRunner {
+            chunkDao.deleteChunksForDocument(documentId)
+            documentDao.deleteById(documentId)
+        }
     }
 
     /**
      * Deletes all documents and chunks for a workspace. Used when a workspace
      * is deleted (cascade).
+     *
+     * B5: same transactional boundary as [deleteDocument].
      */
     suspend fun deleteAllForWorkspace(workspaceId: String) = withContext(Dispatchers.IO) {
-        chunkDao.deleteChunksForWorkspace(workspaceId)
-        documentDao.deleteAllForWorkspace(workspaceId)
+        transactionRunner {
+            chunkDao.deleteChunksForWorkspace(workspaceId)
+            documentDao.deleteAllForWorkspace(workspaceId)
+        }
     }
 
     /**

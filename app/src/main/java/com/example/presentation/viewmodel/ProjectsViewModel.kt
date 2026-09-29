@@ -413,10 +413,13 @@ class ProjectsViewModel(
         }
         val workspace = workspaceRuntimeService.activeWorkspace.value ?: return
         _state.update { it.copy(isTransferring = true, transferProgressLabel = "جارٍ استيراد المشروع…") }
-        viewModelScope.launch {
-            // The stream is consumed inside the IO dispatcher by the package
-            // service; buffer it first so the SAF pipe doesn't close mid-read.
-            val buffered = runCatching { source.readBytes() }.getOrNull()
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            // A3 (CLOSURE FINAL STAGE §5/item 3): explicit ownership + IO — the
+            // SAF stream is closed on EVERY path (`use`; `readBytes()` alone
+            // does NOT close it — previously every project import leaked the
+            // SAF pipe's file descriptor) and the blocking read no longer
+            // runs on the Main dispatcher.
+            val buffered = runCatching { source.use { it.readBytes() } }.getOrNull()
             if (buffered == null) {
                 _state.update {
                     it.copy(isTransferring = false, transferProgressLabel = null, errorMessage = "تعذر قراءة الحزمة المحددة.")

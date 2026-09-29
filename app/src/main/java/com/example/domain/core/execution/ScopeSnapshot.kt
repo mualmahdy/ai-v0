@@ -24,17 +24,18 @@ package com.example.domain.core.execution
  * PRINCIPLE (audit §5.18): one operation → one immutable scope → one owner
  * → one lifecycle → one outcome → one durable truth → one UI projection.
  *
- * UNIFICATION PROGRESS (CLOSURE §5/item 1): the four parallel capture
- * shapes named above are being retired onto THIS type —
+ * UNIFICATION PROGRESS (CLOSURE §5/item 1 — COMPLETE in the final closure
+ * stage): the four parallel capture shapes named above are retired onto
+ * THIS type —
  *   - `ChatAttachmentCoordinator.AttachmentScope` — REPLACED (the
  *     coordinator's capture/import/cleanup API now speaks ScopeSnapshot);
  *   - `ChatCapabilitiesViewModel.InvocationScopeSnapshot` — REPLACED (the
  *     capability invocations capture the canonical snapshot and project it
  *     via [toExecutionScope]);
- *   - the ad-hoc `pinned*` locals inside StudioViewModel remain (they ARE
- *     the pinned projections of this value's fields at the execution
- *     boundary — migrating them to carry the snapshot wholesale is later
- *     mechanical work);
+ *   - the ad-hoc `pinned*` locals inside StudioViewModel — RETIRED (the
+ *     execution path captures ONE canonical snapshot and the locals are
+ *     explicit PROJECTIONS of its fields; the snapshot also keys the
+ *     operation's registration in the OperationRegistry);
  *   - the domain [ExecutionScope] coroutine element STAYS by design (it is
  *     the runtime projection, not a capture — see [toExecutionScope]).
  */

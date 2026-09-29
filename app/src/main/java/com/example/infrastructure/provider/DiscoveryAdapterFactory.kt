@@ -138,47 +138,52 @@ class DiscoveryAdapterFactory(
                     if (!apiKey.isNullOrBlank()) {
                         builder.addHeader("Authorization", "Bearer $apiKey")
                     }
-                    val response = executeEgressChecked(builder.build())
-                    if (!response.isSuccessful) {
-                        return Outcome.Error(
-                            "HTTP_${response.code}",
-                            "Discovery failed: HTTP ${response.code} from $url"
-                        )
+                    // A3 (CLOSURE FINAL STAGE §5/item 3): explicit ownership —
+                    // the response is closed on EVERY path (the !isSuccessful
+                    // early return and any JSON parse throw previously leaked
+                    // the connection).
+                    executeEgressChecked(builder.build()).use { response ->
+                        if (!response.isSuccessful) {
+                            return Outcome.Error(
+                                "HTTP_${response.code}",
+                                "Discovery failed: HTTP ${response.code} from $url"
+                            )
+                        }
+                        val body = response.body?.string()
+                            ?: return Outcome.Error("EMPTY_BODY", "Discovery returned empty body")
+                        val json = JSONObject(body)
+                        val data: JSONArray = if (json.has("data")) json.getJSONArray("data")
+                        else if (json.has("models")) json.getJSONArray("models")
+                        else JSONArray()
+                        val offerings = (0 until data.length()).mapNotNull { i ->
+                            val item = data.getJSONObject(i)
+                            val id = item.optString("id").ifBlank { item.optString("name") }
+                            if (id.isBlank()) return@mapNotNull null
+                            ServiceOffering(
+                                id = id,
+                                serviceId = service.id,
+                                offeringType = OfferingType.MODEL,
+                                name = id,
+                                description = item.optString("description", "Discovered model"),
+                                // ------------------------------------------------------------
+                                // REPAIR ORDER §16 — HONEST capabilities: an arbitrary
+                                // OpenAI-compatible /models response contains ONLY ids.
+                                // STREAMING/REASONING were previously FABRICATED for
+                                // every discovered model. Only the capability implied
+                                // by the service type is claimed; everything else
+                                // remains UNKNOWN until verified (unclaimed = unknown).
+                                // ------------------------------------------------------------
+                                supportedCapabilities = if (service.serviceType == ServiceType.LLM)
+                                    setOf(CapabilityType.LLM_GENERATION)
+                                else setOf(CapabilityType.EMBEDDING, CapabilityType.MEMORY_RETRIEVAL),
+                                isLocal = service.serviceType == ServiceType.LLM && config.protocolId == ServiceProtocolId.OLLAMA_NATIVE,
+                                isAvailable = true,
+                                discoveredEpochMs = System.currentTimeMillis(),
+                                discoverySource = "OPENAI_COMPATIBLE_${config.protocolId.code}"
+                            )
+                        }
+                        Outcome.Success(offerings)
                     }
-                    val body = response.body?.string()
-                        ?: return Outcome.Error("EMPTY_BODY", "Discovery returned empty body")
-                    val json = JSONObject(body)
-                    val data: JSONArray = if (json.has("data")) json.getJSONArray("data")
-                    else if (json.has("models")) json.getJSONArray("models")
-                    else JSONArray()
-                    val offerings = (0 until data.length()).mapNotNull { i ->
-                        val item = data.getJSONObject(i)
-                        val id = item.optString("id").ifBlank { item.optString("name") }
-                        if (id.isBlank()) return@mapNotNull null
-                        ServiceOffering(
-                            id = id,
-                            serviceId = service.id,
-                            offeringType = OfferingType.MODEL,
-                            name = id,
-                            description = item.optString("description", "Discovered model"),
-                            // ------------------------------------------------------------
-                            // REPAIR ORDER §16 — HONEST capabilities: an arbitrary
-                            // OpenAI-compatible /models response contains ONLY ids.
-                            // STREAMING/REASONING were previously FABRICATED for
-                            // every discovered model. Only the capability implied
-                            // by the service type is claimed; everything else
-                            // remains UNKNOWN until verified (unclaimed = unknown).
-                            // ------------------------------------------------------------
-                            supportedCapabilities = if (service.serviceType == ServiceType.LLM)
-                                setOf(CapabilityType.LLM_GENERATION)
-                            else setOf(CapabilityType.EMBEDDING, CapabilityType.MEMORY_RETRIEVAL),
-                            isLocal = service.serviceType == ServiceType.LLM && config.protocolId == ServiceProtocolId.OLLAMA_NATIVE,
-                            isAvailable = true,
-                            discoveredEpochMs = System.currentTimeMillis(),
-                            discoverySource = "OPENAI_COMPATIBLE_${config.protocolId.code}"
-                        )
-                    }
-                    Outcome.Success(offerings)
                 }
 
                 ServiceProtocolId.GEMINI_NATIVE -> {
@@ -193,46 +198,49 @@ class DiscoveryAdapterFactory(
                     // x-goog-api-key HEADER instead of a ?key= URL query param
                     // (previously the key leaked into URLs/proxy logs).
                     val url = "https://generativelanguage.googleapis.com/v1beta/models"
-                    val response = executeEgressChecked(
-                        Request.Builder().url(url).header("x-goog-api-key", apiKey).build()
-                    )
-                    if (!response.isSuccessful) {
-                        return Outcome.Error(
-                            "HTTP_${response.code}",
-                            "Gemini discovery failed: HTTP ${response.code}"
-                        )
-                    }
-                    val body = response.body?.string()
-                        ?: return Outcome.Error("EMPTY_BODY", "Gemini discovery returned empty body")
-                    val json = JSONObject(body)
-                    val models = json.optJSONArray("models") ?: JSONArray()
-                    val offerings = (0 until models.length()).mapNotNull { i ->
-                        val item = models.getJSONObject(i)
-                        val name = item.optString("name").removePrefix("models/")
-                        if (name.isBlank()) return@mapNotNull null
-                        val supports = item.optJSONArray("supportedGenerationMethods") ?: JSONArray()
-                        if ((0 until supports.length()).none { supports.getString(it) == "generateContent" }) {
-                            return@mapNotNull null
+                    // A3 (CLOSURE FINAL STAGE §5/item 3): explicit ownership —
+                    // the response is closed on EVERY path (the !isSuccessful
+                    // early return and any JSON parse throw previously leaked
+                    // the connection).
+                    executeEgressChecked(Request.Builder().url(url).header("x-goog-api-key", apiKey).build()).use { response ->
+                        if (!response.isSuccessful) {
+                            return Outcome.Error(
+                                "HTTP_${response.code}",
+                                "Gemini discovery failed: HTTP ${response.code}"
+                            )
                         }
-                        ServiceOffering(
-                            id = name,
-                            serviceId = service.id,
-                            offeringType = OfferingType.MODEL,
-                            name = name,
-                            description = item.optString("description", "Discovered Gemini model"),
-                            // REPAIR ORDER §16 — only capabilities VERIFIED by the
-                            // discovery response: generateContent support (checked
-                            // above) implies LLM_GENERATION. VISION/STREAMING/
-                            // REASONING were previously fabricated for ALL models.
-                            supportedCapabilities = setOf(CapabilityType.LLM_GENERATION),
-                            isLocal = false,
-                            isAvailable = true,
-                            contextWindowTokens = item.optInt("inputTokenLimit").takeIf { it > 0 },
-                            discoveredEpochMs = System.currentTimeMillis(),
-                            discoverySource = "GEMINI_V1BETA_API"
-                        )
+                        val body = response.body?.string()
+                            ?: return Outcome.Error("EMPTY_BODY", "Gemini discovery returned empty body")
+                        val json = JSONObject(body)
+                        val models = json.optJSONArray("models") ?: JSONArray()
+                        val offerings = (0 until models.length()).mapNotNull { i ->
+                            val item = models.getJSONObject(i)
+                            val name = item.optString("name").removePrefix("models/")
+                            if (name.isBlank()) return@mapNotNull null
+                            val supports = item.optJSONArray("supportedGenerationMethods") ?: JSONArray()
+                            if ((0 until supports.length()).none { supports.getString(it) == "generateContent" }) {
+                                return@mapNotNull null
+                            }
+                            ServiceOffering(
+                                id = name,
+                                serviceId = service.id,
+                                offeringType = OfferingType.MODEL,
+                                name = name,
+                                description = item.optString("description", "Discovered Gemini model"),
+                                // REPAIR ORDER §16 — only capabilities VERIFIED by the
+                                // discovery response: generateContent support (checked
+                                // above) implies LLM_GENERATION. VISION/STREAMING/
+                                // REASONING were previously fabricated for ALL models.
+                                supportedCapabilities = setOf(CapabilityType.LLM_GENERATION),
+                                isLocal = false,
+                                isAvailable = true,
+                                contextWindowTokens = item.optInt("inputTokenLimit").takeIf { it > 0 },
+                                discoveredEpochMs = System.currentTimeMillis(),
+                                discoverySource = "GEMINI_V1BETA_API"
+                            )
+                        }
+                        Outcome.Success(offerings)
                     }
-                    Outcome.Success(offerings)
                 }
 
                 ServiceProtocolId.ANTHROPIC_NATIVE -> {

@@ -262,49 +262,54 @@ class McpClient(
                     .header("User-Agent", "AI-V0-MCP-Client/1.0")
             ).build()
 
-            val response = client.newCall(request).execute()
-            val duration = System.currentTimeMillis() - startTime
+            // A3 (CLOSURE FINAL STAGE §5/item 3): explicit ownership — closed
+            // on EVERY path (the non-2xx branch and a JSON parse throw
+            // previously leaked the connection; the sibling discovery path
+            // at line ~176 already uses this shape).
+            client.newCall(request).execute().use { response ->
+                val duration = System.currentTimeMillis() - startTime
 
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: "{}"
-                val json = JSONObject(body)
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: "{}"
+                    val json = JSONObject(body)
 
-                if (json.has("error")) {
-                    val errObj = json.getJSONObject("error")
-                    val errMsg = errObj.optString("message", "خطأ غير محدد من خادم MCP")
-                    return@withContext Outcome.Error(
-                        failure = ToolFailure.InternalExecutionError(errMsg),
-                        diagnosticMessage = errMsg
+                    if (json.has("error")) {
+                        val errObj = json.getJSONObject("error")
+                        val errMsg = errObj.optString("message", "خطأ غير محدد من خادم MCP")
+                        return@withContext Outcome.Error(
+                            failure = ToolFailure.InternalExecutionError(errMsg),
+                            diagnosticMessage = errMsg
+                        )
+                    }
+
+                    val resultObj = json.optJSONObject("result") ?: json
+                    val contentArr = resultObj.optJSONArray("content")
+                    val outputText = if (contentArr != null && contentArr.length() > 0) {
+                        val sb = StringBuilder()
+                        for (i in 0 until contentArr.length()) {
+                            val c = contentArr.getJSONObject(i)
+                            if (c.optString("type") == "text") {
+                                sb.append(c.optString("text")).append("\n")
+                            }
+                        }
+                        sb.toString().trim()
+                    } else {
+                        resultObj.optString("text", resultObj.toString())
+                    }
+
+                    Outcome.Success(
+                        value = ToolOutput(
+                            content = outputText,
+                            rawBytesCount = outputText.toByteArray().size.toLong()
+                        ),
+                        metadata = OutcomeMetadata(durationMs = duration, providerId = server.id)
+                    )
+                } else {
+                    Outcome.Error(
+                        failure = ToolFailure.InternalExecutionError("فشل طلب MCP HTTP: رمز الاستجابة ${response.code}"),
+                        diagnosticMessage = "استجابة غير صالحة من خادم MCP"
                     )
                 }
-
-                val resultObj = json.optJSONObject("result") ?: json
-                val contentArr = resultObj.optJSONArray("content")
-                val outputText = if (contentArr != null && contentArr.length() > 0) {
-                    val sb = StringBuilder()
-                    for (i in 0 until contentArr.length()) {
-                        val c = contentArr.getJSONObject(i)
-                        if (c.optString("type") == "text") {
-                            sb.append(c.optString("text")).append("\n")
-                        }
-                    }
-                    sb.toString().trim()
-                } else {
-                    resultObj.optString("text", resultObj.toString())
-                }
-
-                Outcome.Success(
-                    value = ToolOutput(
-                        content = outputText,
-                        rawBytesCount = outputText.toByteArray().size.toLong()
-                    ),
-                    metadata = OutcomeMetadata(durationMs = duration, providerId = server.id)
-                )
-            } else {
-                Outcome.Error(
-                    failure = ToolFailure.InternalExecutionError("فشل طلب MCP HTTP: رمز الاستجابة ${response.code}"),
-                    diagnosticMessage = "استجابة غير صالحة من خادم MCP"
-                )
             }
         } catch (e: java.net.SocketTimeoutException) {
             Outcome.Error(

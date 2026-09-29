@@ -52,7 +52,14 @@ class IntelligenceRadarPipeline(
      * tracked (closing discover → … → register → MEASURE → retire).
      */
     private val measurementRecorder: (suspend (candidate: EvolutionCandidate) -> Unit)? = null,
-    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+    /**
+     * CLOSURE FINAL STAGE (§5/item 3 — A4): SUPERVISED default scope — a
+     * plain Job() root is poisoned permanently by one child failure,
+     * cancelling every later launch ("IntelligenceRadarPipeline" owns long-lived
+     * persistence work whose failure must stay isolated).
+     */
+    private val coroutineScope: CoroutineScope =
+        CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
 ) {
 
     private val _radarItems = MutableStateFlow<List<RadarItem>>(emptyList())

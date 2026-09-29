@@ -484,70 +484,76 @@ class GeminiLlmAdapter(
                 if (!response.isSuccessful) {
                     throw IOExceptionWithCode(response.code, "HTTP ${response.code} from Gemini stream")
                 }
-                val reader = response.body?.byteStream()
+                // A3 (CLOSURE FINAL STAGE §5/item 3): explicit ownership —
+                // the SSE reader closes when the reading loop ends on ANY
+                // path, independent of the enclosing response use{} (which
+                // stays as the safety net; previously purely implicit).
+                response.body?.byteStream()
                     ?.bufferedReader(Charsets.UTF_8)
-                    ?: throw IOExceptionWithCode(-1, "Empty stream body from Gemini")
-                val pending = StringBuilder()
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    if (line.isBlank()) {
-                        // End of an SSE event — flush the accumulated data payload.
-                        val payload = pending.toString().trim()
-                        pending.setLength(0)
-                        if (payload.startsWith("data:")) {
-                            val json = payload.removePrefix("data:").trim()
-                            if (json.isNotBlank() && json != "[DONE]") {
-                                // FRONTIER REASONING: thought parts → ReasoningChunk
-                                // (streamed thinking), answer parts → ContentChunk.
-                                val thoughtDelta = extractThoughts(json)
-                                if (thoughtDelta.isNotEmpty()) {
-                                    fullReasoning.append(thoughtDelta)
-                                    emit(
-                                        ExecutionEvent.ReasoningChunk(
-                                            executionId = executionId,
-                                            deltaText = thoughtDelta,
-                                            sequenceIndex = sequence++
-                                        )
-                                    )
+                    ?.use { reader ->
+                        val pending = StringBuilder()
+                        while (true) {
+                            val line = reader.readLine() ?: break
+                            if (line.isBlank()) {
+                                // End of an SSE event — flush the accumulated data payload.
+                                val payload = pending.toString().trim()
+                                pending.setLength(0)
+                                if (payload.startsWith("data:")) {
+                                    val json = payload.removePrefix("data:").trim()
+                                    if (json.isNotBlank() && json != "[DONE]") {
+                                        // FRONTIER REASONING: thought parts → ReasoningChunk
+                                        // (streamed thinking), answer parts → ContentChunk.
+                                        val thoughtDelta = extractThoughts(json)
+                                        if (thoughtDelta.isNotEmpty()) {
+                                            fullReasoning.append(thoughtDelta)
+                                            emit(
+                                                ExecutionEvent.ReasoningChunk(
+                                                    executionId = executionId,
+                                                    deltaText = thoughtDelta,
+                                                    sequenceIndex = sequence++
+                                                )
+                                            )
+                                        }
+                                        val delta = extractDelta(json)
+                                        if (delta.isNotEmpty()) {
+                                            fullText.append(delta)
+                                            emit(
+                                                ExecutionEvent.ContentChunk(
+                                                    executionId = executionId,
+                                                    deltaText = delta,
+                                                    sequenceIndex = sequence++
+                                                )
+                                            )
+                                        }
+                                        // REAL protocol support: surface streamed functionCall
+                                        // parts as ToolRequested events (previously dropped).
+                                        // Each call gets a UNIQUE id (see defect family 6).
+                                        extractToolCalls(json, start, streamedToolCallOrdinal).forEach { call ->
+                                            streamedToolCallOrdinal++
+                                            streamedToolCallCount++
+                                            emit(
+                                                ExecutionEvent.ToolRequested(
+                                                    executionId = executionId,
+                                                    callId = call.callId,
+                                                    toolName = call.toolName,
+                                                    argumentsJson = call.argumentsJson
+                                                )
+                                            )
+                                        }
+                                        readUsage(json)?.let { (p, c, cached, total) ->
+                                            promptTokens = p
+                                            completionTokens = c
+                                            cachedTokens = cached
+                                            providerTotalTokens = total
+                                        }
+                                    }
                                 }
-                                val delta = extractDelta(json)
-                                if (delta.isNotEmpty()) {
-                                    fullText.append(delta)
-                                    emit(
-                                        ExecutionEvent.ContentChunk(
-                                            executionId = executionId,
-                                            deltaText = delta,
-                                            sequenceIndex = sequence++
-                                        )
-                                    )
-                                }
-                                // REAL protocol support: surface streamed functionCall
-                                // parts as ToolRequested events (previously dropped).
-                                // Each call gets a UNIQUE id (see defect family 6).
-                                extractToolCalls(json, start, streamedToolCallOrdinal).forEach { call ->
-                                    streamedToolCallOrdinal++
-                                    streamedToolCallCount++
-                                    emit(
-                                        ExecutionEvent.ToolRequested(
-                                            executionId = executionId,
-                                            callId = call.callId,
-                                            toolName = call.toolName,
-                                            argumentsJson = call.argumentsJson
-                                        )
-                                    )
-                                }
-                                readUsage(json)?.let { (p, c, cached, total) ->
-                                    promptTokens = p
-                                    completionTokens = c
-                                    cachedTokens = cached
-                                    providerTotalTokens = total
-                                }
+                            } else {
+                                pending.appendLine(line)
                             }
                         }
-                    } else {
-                        pending.appendLine(line)
                     }
-                }
+                    ?: throw IOExceptionWithCode(-1, "Empty stream body from Gemini")
             }
 
             // FALLBACK (defect family 6): the single-shot fallback fires only

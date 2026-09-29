@@ -410,7 +410,12 @@ class AppContainer(context: Context) {
     val knowledgePersistenceService: KnowledgePersistenceService by lazy {
         KnowledgePersistenceService(
             documentDao = database.knowledgeDocumentDao(),
-            chunkDao = database.documentChunkDao()
+            chunkDao = database.documentChunkDao(),
+            // CLOSURE FINAL STAGE (§5/item 4 — B5): the RAG transaction
+            // boundary — document row + chunk wipe + chunk inserts commit
+            // as ONE Room transaction (same runner convention as
+            // WorkspaceRuntimeService GAP-16).
+            transactionRunner = { block -> database.withTransaction { block() } }
         )
     }
 
@@ -1900,9 +1905,18 @@ class AppContainer(context: Context) {
             // adapter — and one blocked sandbox session can never affect
             // another session or workspace.
             // ----------------------------------------------------------------------
-            launch {
-                runCatching {
-                    workspaceRuntimeService.activeWorkspace.collect { workspace ->
+            // CLOSURE FINAL STAGE (§5/item 3 — A4): process-lifetime observers
+            // launch DIRECTLY on the SUPERVISED applicationScope — never as
+            // children of this bootstrap coroutine's plain Job. One escaped
+            // Error previously cancelled the bootstrap Job and silently
+            // killed ALL observers (egress policy pinning, session egress
+            // blocks, approval expiry, breaker persistence) for the whole
+            // process; each observer also guards PER-EMISSION so one bad
+            // value never ends it.
+            // ----------------------------------------------------------------------
+            applicationScope.launch {
+                workspaceRuntimeService.activeWorkspace.collect { workspace ->
+                    runCatching {
                         if (workspace != null) {
                             egressControl.pinWorkspacePolicy(workspace.id, workspace.networkPolicy)
                         }
@@ -1915,9 +1929,9 @@ class AppContainer(context: Context) {
             // ONLY for requests carrying that session's scope — never for
             // unrelated sessions or workspaces. Blocks are released on
             // terminal states (no stale leaks after sandbox teardown).
-            launch {
-                runCatching {
-                    sandboxLifecycleService.sessionsState.collect { sessions ->
+            applicationScope.launch {
+                sandboxLifecycleService.sessionsState.collect { sessions ->
+                    runCatching {
                         val blocked = sessions.filter { session ->
                             session.limits.networkPolicy ==
                                 com.example.domain.core.runtime.SandboxNetworkPolicy.NO_NETWORK &&
@@ -1963,6 +1977,14 @@ class AppContainer(context: Context) {
             // resumable list was computed and then discarded.
             runCatching { agentOrchestrator.resumeInterruptedTasks() }
                 .onFailure { recordBootstrapDegradation("TASK_RESUME_SWEEP_FAILED", it) }
+            // CLOSURE FINAL STAGE (§5/item 4 — B6): the transfer journal's
+            // interrupted-move reconciliation finally has its PRODUCTION
+            // caller — an interrupted workspace-move entry (a crash between
+            // the journal's PREPARE and the Room commit) is closed as
+            // RECOVERED at startup instead of staying pending forever
+            // (previously this recovery surface had zero callers).
+            runCatching { projectTransferCoordinator.reconcileInterruptedOperations() }
+                .onFailure { recordBootstrapDegradation("TRANSFER_RECONCILIATION_FAILED", it) }
             runCatching { workflowPersistenceService.resumable() } // surfaces resumable workflows for the UI/log
                 .onFailure { recordBootstrapDegradation("WORKFLOW_RESUMABLE_SCAN_FAILED", it) }
             // GOVERNANCE PHASE: derive the initial radar snapshot AFTER the
@@ -2005,7 +2027,7 @@ class AppContainer(context: Context) {
             // accumulated forever). A 60s sweep is cheap (one indexed SQL
             // UPDATE) and bounded; failures are recorded to the audit trail
             // instead of being silently swallowed.
-            launch {
+            applicationScope.launch {
                 while (isActive) {
                     kotlinx.coroutines.delay(60_000L)
                     runCatching { humanApprovalGate.expireStale() }
@@ -2050,7 +2072,10 @@ class AppContainer(context: Context) {
                     )
                 }
             }.onFailure { recordBootstrapDegradation("CIRCUIT_BREAKER_RESTORE_FAILED", it) }
-            circuitBreakerStateSink.startIn(this)
+            // A4: the breaker-state sink runs on the SUPERVISED application
+            // scope (a plain-Job `this` would chain its lifetime to the
+            // bootstrap coroutine).
+            circuitBreakerStateSink.startIn(applicationScope)
             } catch (t: Throwable) {
                 // P1-8: a bootstrap step threw. The readiness gate is STILL
                 // released below — the failure is attributed honestly so the

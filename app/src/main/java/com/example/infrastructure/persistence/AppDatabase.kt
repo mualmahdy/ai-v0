@@ -187,7 +187,10 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.ProjectSnapshotEntity::class,
         com.example.infrastructure.persistence.entities.AuditEventEntity::class,
         // v20 — CLOSURE §8: append-only artifact version history
-        com.example.infrastructure.persistence.entities.ArtifactVersionEntity::class
+        com.example.infrastructure.persistence.entities.ArtifactVersionEntity::class,
+        // v22 — CLOSURE FINAL STAGE (§5/item 4 — B6): central transfer id
+        // mapping table (every remapped import id, written in the import tx)
+        com.example.infrastructure.persistence.entities.IdMappingEntity::class
     ],
     version = AppDatabase.SCHEMA_VERSION,
     // GAP-01 (Design Closure 2026, ADR-1): schema export is now enabled and
@@ -247,6 +250,9 @@ abstract class AppDatabase : RoomDatabase() {
     // Phase 5 — Agent memory namespaces
     abstract fun agentMemoryNamespaceDao(): AgentMemoryNamespaceDao
 
+    // v22 — CLOSURE FINAL STAGE (§5/item 4 — B6): central transfer id mapping
+    abstract fun idMappingDao(): com.example.infrastructure.persistence.dao.IdMappingDao
+
     // Governance Phase — Capability Radar persistence
     abstract fun capabilityEvidenceDao(): com.example.infrastructure.persistence.dao.CapabilityEvidenceDao
     abstract fun radarCapabilityStateDao(): com.example.infrastructure.persistence.dao.RadarCapabilityStateDao
@@ -297,7 +303,7 @@ abstract class AppDatabase : RoomDatabase() {
          * database had already reached v17 — a stale honesty violation. UI
          * surfaces read this constant instead of a literal).
          */
-        const val SCHEMA_VERSION = 21
+        const val SCHEMA_VERSION = 22
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -1921,6 +1927,48 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * CLOSURE FINAL STAGE (§5/item 4 — B6, DB v22): the CENTRAL id
+         * mapping table. Purely additive — a new `id_mappings` table plus
+         * its indices; no existing column is altered.
+         */
+        private val MIGRATION_21_TO_22: Migration = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `id_mappings` (" +
+                            "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                            "`operationId` TEXT NOT NULL, " +
+                            "`entityType` TEXT NOT NULL, " +
+                            "`sourceId` TEXT NOT NULL, " +
+                            "`targetId` TEXT NOT NULL, " +
+                            "`unchanged` INTEGER NOT NULL, " +
+                            "`workspaceId` TEXT NOT NULL, " +
+                            "`projectId` INTEGER, " +
+                            "`createdAtEpochMs` INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_id_mappings_operationId` " +
+                            "ON `id_mappings` (`operationId`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_id_mappings_entityType_sourceId` " +
+                            "ON `id_mappings` (`entityType`, `sourceId`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_id_mappings_entityType_targetId` " +
+                            "ON `id_mappings` (`entityType`, `targetId`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_id_mappings_projectId` " +
+                            "ON `id_mappings` (`projectId`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_id_mappings_createdAtEpochMs` " +
+                            "ON `id_mappings` (`createdAtEpochMs`)"
+                )
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1944,6 +1992,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_18_TO_19,
             MIGRATION_19_TO_20,
             MIGRATION_20_TO_21,
+            MIGRATION_21_TO_22,
         )
 
         fun getInstance(context: Context): AppDatabase {
