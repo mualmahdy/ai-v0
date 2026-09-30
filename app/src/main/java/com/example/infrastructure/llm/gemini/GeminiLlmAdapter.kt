@@ -96,6 +96,18 @@ class GeminiLlmAdapter(
     private fun effectiveThinkingSupport(): GeminiThinkingSupport =
         GeminiThinkingCapability.runtimeVerdict(defaultModelName) ?: thinkingSupport
 
+    /**
+     * EMERGENCY HOTFIX R2 (the 400 family): the URL path segment for the
+     * model. Discovery-returned ids sometimes arrive in their FULL resource
+     * form ("models/gemini-2.5-flash") or with stray whitespace — both
+     * produce a malformed path ("/models/models/…:generateContent") that
+     * the endpoint rejects. Normalized once, used by every URL builder.
+     */
+    private fun normalizedModelName(): String = defaultModelName
+        .trim()
+        .removePrefix("models/")
+        .removePrefix("v1beta/models/")
+
     override val metadata: SafeProviderMetadata
         get() {
             // CLOSURE P0-5 (+P1-1 runtime override): `reasoning` is advertised
@@ -154,12 +166,23 @@ class GeminiLlmAdapter(
                     }
                     else -> {
                         val role = if (msg.role == MessageRole.ASSISTANT) "model" else "user"
+                        // EMERGENCY HOTFIX R2 (the HTTP-400 chain): Gemini
+                        // REJECTS the whole request with 400 INVALID_ARGUMENT
+                        // when ANY text part is empty. A FAILED prior turn
+                        // replayed as history with a blank answer (the common
+                        // aftermath of an earlier error) therefore poisoned
+                        // EVERY later request in the session — the
+                        // "execution loop collapses with 400 and never works
+                        // again" report. Blank contents now degrade to a
+                        // single space: the turn keeps its slot, the API
+                        // never sees an empty part.
+                        val text = msg.content.ifBlank { " " }
                         contents.put(
                             JSONObject()
                                 .put("role", role)
                                 .put(
                                     "parts",
-                                    JSONArray().put(JSONObject().put("text", msg.content))
+                                    JSONArray().put(JSONObject().put("text", text))
                                 )
                         )
                     }
@@ -186,11 +209,23 @@ class GeminiLlmAdapter(
         if (request.availableTools.isEmpty()) return null
         val declarations = JSONArray()
         for (tool in request.availableTools) {
+            // EMERGENCY HOTFIX R2: one malformed declaration used to reject
+            // the WHOLE request with 400 INVALID_ARGUMENT. The schema is now
+            // sanitized per tool and an unfixable tool is DROPPED (never the
+            // request): blank names/param names are skipped, and an enum
+            // parameter is always STRING-typed (the only legal enum carrier).
+            if (tool.name.isBlank()) continue
             val parameters = JSONObject().put("type", "object")
             val properties = JSONObject()
             val required = JSONArray()
             for (param in tool.parameters) {
-                val prop = JSONObject().put("type", param.type.ifBlank { "string" })
+                if (param.name.isBlank()) continue
+                val type = if (param.enumValues.isNotEmpty()) {
+                    "string"
+                } else {
+                    param.type.ifBlank { "string" }
+                }
+                val prop = JSONObject().put("type", type)
                 if (param.description.isNotBlank()) prop.put("description", param.description)
                 if (param.enumValues.isNotEmpty()) {
                     prop.put("enum", JSONArray(param.enumValues))
@@ -207,6 +242,7 @@ class GeminiLlmAdapter(
                     .put("parameters", parameters)
             )
         }
+        if (declarations.length() == 0) return null
         return JSONArray().put(JSONObject().put("functionDeclarations", declarations))
     }
 
@@ -279,13 +315,16 @@ class GeminiLlmAdapter(
     override suspend fun generate(request: LlmRequest): Outcome<LlmResponse, LlmFailure> =
         withContext(Dispatchers.IO) {
             val start = System.currentTimeMillis()
-            val model = defaultModelName
+            val model = normalizedModelName()
             try {
                 val url = "$baseUrl/v1beta/models/$model:generateContent"
                 val call = client.newCall(requestWithKey(url, buildRequestBody(request, stream = false), stream = false))
                 call.execute().use { response ->
                     if (!response.isSuccessful) {
-                        return@withContext httpFailure(response.code, url)
+                        // HOTFIX R2: the provider's own rejection text rides the
+                        // failure — a bare "400" was undiagnosable in the field.
+                        val errBody = runCatching { response.body?.string() }.getOrNull()
+                        return@withContext httpFailure(response.code, url, errBody)
                     }
                     val text = response.body?.string()
                         ?: return@withContext Outcome.Error(
@@ -415,7 +454,7 @@ class GeminiLlmAdapter(
     override suspend fun probeOptionalFeatureAcceptance():
         com.example.domain.ports.llm.CapabilityProbeOutcome = withContext(Dispatchers.IO) {
         val outcome = try {
-            val url = "$baseUrl/v1beta/models/$defaultModelName:generateContent"
+            val url = "$baseUrl/v1beta/models/${normalizedModelName()}:generateContent"
             val body = buildRequestBody(
                 com.example.infrastructure.validation.GenerationProbe.request(),
                 stream = false,
@@ -459,7 +498,7 @@ class GeminiLlmAdapter(
 
     override fun stream(request: LlmRequest, executionId: String): Flow<ExecutionEvent> = flow {
         val start = System.currentTimeMillis()
-        val model = defaultModelName
+        val model = normalizedModelName()
         val url = "$baseUrl/v1beta/models/$model:streamGenerateContent?alt=sse"
         try {
             val call = client.newCall(requestWithKey(url, buildRequestBody(request, stream = true), stream = true))
@@ -748,10 +787,14 @@ class GeminiLlmAdapter(
 
 
     /** Maps a non-2xx HTTP code onto the domain failure taxonomy. */
-    private fun <T> httpFailure(code: Int, url: String): Outcome<T, LlmFailure> = when (code) {
+    private fun <T> httpFailure(code: Int, url: String, errorBody: String? = null): Outcome<T, LlmFailure> = when (code) {
         400 -> Outcome.Error(
-            LlmFailure.ProviderUnavailable(providerId, "HTTP 400 — طلب غير صالح (راجع اسم النموذج)"),
-            "Bad request: HTTP 400 from $url"
+            LlmFailure.ProviderUnavailable(
+                providerId,
+                "HTTP 400 — طلب غير صالح" +
+                    (errorBody?.take(200)?.let { " ($it)" } ?: " (راجع اسم النموذج وصلاحيات المفتاح)")
+            ),
+            "Bad request: HTTP 400 from $url ${errorBody?.take(300) ?: ""}"
         )
         401, 403 -> Outcome.Error(
             LlmFailure.AuthenticationFailed(providerId, "HTTP $code — مفتاح Gemini غير صالح أو غير مصرّح"),
