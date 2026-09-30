@@ -98,6 +98,32 @@ class ChatAttachmentCoordinator(
         )
     }
 
+    /**
+     * EMERGENCY HOTFIX R2 (the attach dead-end): the ASYNC import entry the
+     * chat capability layer uses. Unlike the strict [captureActiveScope], a
+     * workspace whose activeProjectId is currently unbound is REPAIRED first
+     * (resolve-or-create through [WorkspaceRuntimeService.
+     * ensureActiveProjectBinding] — the same reconciliation the startup
+     * bootstrap performs) so an ordinary chat user can ALWAYS attach instead
+     * of hitting a permanently disabled row. Fails closed with the same
+     * honest [AttachmentImportException] when no scope can be established.
+     */
+    suspend fun ensureActiveScope(): ScopeSnapshot {
+        val workspaceId = runCatching {
+            workspaceRuntimeService.requireActiveWorkspaceId()
+        }.getOrElse { throw AttachmentImportException("لا توجد مساحة عمل نشطة.") }
+        val projectId = workspaceRuntimeService.activeProjectIdOrNull()
+            ?: workspaceRuntimeService.ensureActiveProjectBinding()
+            ?: throw AttachmentImportException(
+                "تعذر تثبيت مشروع نشط لتخزين المرفقات — أنشئ مشروعاً في مساحة العمل ثم أعد المحاولة."
+            )
+        return ScopeSnapshot.capture(
+            operationId = "attachment_${UUID.randomUUID()}",
+            workspaceId = workspaceId,
+            projectId = projectId
+        )
+    }
+
     /** Per-attachment digest cap — keeps grounding bounded for context windows. */
     private val maxPerAttachmentDigestChars = 8_000
     private val maxTotalDigestChars = 24_000

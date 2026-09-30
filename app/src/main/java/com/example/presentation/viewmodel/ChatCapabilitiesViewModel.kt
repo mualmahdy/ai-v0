@@ -126,13 +126,25 @@ class ChatCapabilitiesViewModel(
                     if (workspace != null) {
                         val scope = workspace.id to workspace.activeProjectId.takeIf { it > 0L }
                         val previous = lastSeenScope
+                        val firstObservation = previous == null
                         lastSeenScope = scope
-                        if (previous != null && previous != scope) {
-                            // The composer drafts belong to the PREVIOUS
-                            // project's sandbox — dropping them (with their
-                            // imported files cleaned up) prevents sending
-                            // stale-scope references from the new scope.
-                            dropAttachmentDraftsForScopeChange(previous)
+                        if (previous != scope) {
+                            // EMERGENCY HOTFIX R2 (stale attach rows): the
+                            // FIRST emission used to skip the refresh entirely
+                            // (`previous != null` guard), so a catalog resolved
+                            // before the startup bootstrap finished kept
+                            // showing the attach rows UNAVAILABLE forever even
+                            // after the project binding landed. Every SCOPE
+                            // transition now re-resolves; only a LATER
+                            // transition also drops the previous scope's
+                            // drafts (the first observation has none).
+                            if (!firstObservation) {
+                                // The composer drafts belong to the PREVIOUS
+                                // project's sandbox — dropping them (with their
+                                // imported files cleaned up) prevents sending
+                                // stale-scope references from the new scope.
+                                dropAttachmentDraftsForScopeChange(previous)
+                            }
                             refreshCapabilities()
                         }
                     }
@@ -286,6 +298,11 @@ class ChatCapabilitiesViewModel(
                     activeProjectId = runCatching {
                         workspaceRuntimeService.activeProjectIdOrNull()
                     }.getOrNull(),
+                    // HOTFIX R2: attach stays available whenever a workspace
+                    // exists (the import path repairs the project binding).
+                    hasActiveWorkspace = runCatching {
+                        workspaceRuntimeService.activeWorkspaceIdOrNull()
+                    }.getOrNull() != null,
                     folderAttachSupported = true,
                     radarChecks = radarChecks,
                     knowledgeDocumentCount = knowledgeDocumentCount,
@@ -325,25 +342,40 @@ class ChatCapabilitiesViewModel(
     fun pickFiles(uris: List<String>, mimeTypes: List<String?> = emptyList()) {
         if (uris.isEmpty()) return
 
-        // Capture BOTH the semantic conversation and the storage scope BEFORE
-        // launching async work. Completion is admitted only while both still
-        // identify the conversation that requested the import.
+        // Capture the SEMANTIC conversation boundary BEFORE launching async
+        // work. Completion is admitted only while it still identifies the
+        // conversation that requested the import.
         val acceptedConversationKey = boundConversationKey
-        val acceptedScope = runCatching {
-            attachmentCoordinator.captureActiveScope()
-        }.getOrElse { error ->
-            _state.update {
-                it.copy(
-                    isImportingAttachment = false,
-                    attachmentError = error.message
-                        ?: "تعذر تثبيت نطاق استيراد المرفق."
-                )
-            }
-            return
-        }
 
         _state.update { it.copy(isImportingAttachment = true, attachmentError = null) }
         viewModelScope.launch {
+            // EMERGENCY HOTFIX R2 (the attach dead-end): the scope is now
+            // established through the coordinator's REPAIRING entry — a
+            // workspace whose project binding is currently unbound is
+            // reconciled (resolve-or-create) instead of failing the whole
+            // import with "يتطلب مشروعاً نشطاً".
+            val acceptedScope = try {
+                attachmentCoordinator.ensureActiveScope()
+            } catch (error: ChatAttachmentCoordinator.AttachmentImportException) {
+                _state.update {
+                    it.copy(
+                        isImportingAttachment = false,
+                        attachmentError = error.message
+                            ?: "تعذر تثبيت نطاق استيراد المرفق."
+                    )
+                }
+                return@launch
+            } catch (t: Throwable) {
+                t.rethrowIfCancellation()
+                _state.update {
+                    it.copy(
+                        isImportingAttachment = false,
+                        attachmentError = "تعذر تثبيت نطاق استيراد المرفق: ${t.localizedMessage ?: t.javaClass.simpleName}"
+                    )
+                }
+                return@launch
+            }
+
             var failure: String? = null
             val imported = mutableListOf<TurnAttachment>()
             uris.forEachIndexed { index, uri ->
@@ -369,8 +401,20 @@ class ChatCapabilitiesViewModel(
                 }
             }
 
+            // EMERGENCY HOTFIX R2 (the silent vanishing import): the stale
+            // check compared the conversation's BIND-TIME scope pair against
+            // the import's scope — a binding captured before the startup
+            // bootstrap landed (scope=null) made EVERY successful import get
+            // deleted as "no longer attached", with NO error shown: the user
+            // picked a file and NOTHING happened. The honest check compares
+            // the LIVE scope AT COMPLETION against the import's own scope:
+            // the drafts belong here when the same conversation is visible
+            // AND the active scope did not move under the import.
             val stillAttached = boundConversationKey == acceptedConversationKey &&
-                boundConversationScope == (acceptedScope.workspaceId to acceptedScope.projectId)
+                runCatching {
+                    workspaceRuntimeService.activeWorkspaceIdOrNull() to
+                        workspaceRuntimeService.activeProjectIdOrNull()
+                }.getOrNull() == (acceptedScope.workspaceId to acceptedScope.projectId)
 
             if (!stillAttached) {
                 // The import completed for its ORIGINAL owner, but that owner
@@ -383,6 +427,12 @@ class ChatCapabilitiesViewModel(
                     }.onFailure { error ->
                         failure = error.message
                     }
+                }
+                // HOTFIX R2 (honesty): a cancelled import must SAY so —
+                // silence read as "the + button does nothing".
+                if (imported.isNotEmpty()) {
+                    failure = failure
+                        ?: "أُلغي استيراد المرفقات لأن المحادثة أو المشروع تغيّر أثناء الاستيراد — أعد الإرفاق في المحادثة الحالية."
                 }
             }
 
@@ -406,28 +456,44 @@ class ChatCapabilitiesViewModel(
         if (treeUri.isBlank()) return
 
         val acceptedConversationKey = boundConversationKey
-        val acceptedScope = runCatching {
-            attachmentCoordinator.captureActiveScope()
-        }.getOrElse { error ->
-            _state.update {
-                it.copy(
-                    isImportingAttachment = false,
-                    attachmentError = error.message
-                        ?: "تعذر تثبيت نطاق استيراد المجلد."
-                )
-            }
-            return
-        }
 
         _state.update { it.copy(isImportingAttachment = true, attachmentError = null) }
         viewModelScope.launch {
+            // HOTFIX R2: same repairing scope entry as the file path.
+            val acceptedScope = try {
+                attachmentCoordinator.ensureActiveScope()
+            } catch (error: ChatAttachmentCoordinator.AttachmentImportException) {
+                _state.update {
+                    it.copy(
+                        isImportingAttachment = false,
+                        attachmentError = error.message
+                            ?: "تعذر تثبيت نطاق استيراد المجلد."
+                    )
+                }
+                return@launch
+            } catch (t: Throwable) {
+                t.rethrowIfCancellation()
+                _state.update {
+                    it.copy(
+                        isImportingAttachment = false,
+                        attachmentError = "تعذر تثبيت نطاق استيراد المجلد: ${t.localizedMessage ?: t.javaClass.simpleName}"
+                    )
+                }
+                return@launch
+            }
+
             try {
                 val attachment = attachmentCoordinator.importFolderAttachment(
                     treeUri = treeUri,
                     scope = acceptedScope
                 )
+                // HOTFIX R2: LIVE completion-time scope comparison (see the
+                // file path) — never the stale bind-time pair.
                 val stillAttached = boundConversationKey == acceptedConversationKey &&
-                    boundConversationScope == (acceptedScope.workspaceId to acceptedScope.projectId)
+                    runCatching {
+                        workspaceRuntimeService.activeWorkspaceIdOrNull() to
+                            workspaceRuntimeService.activeProjectIdOrNull()
+                    }.getOrNull() == (acceptedScope.workspaceId to acceptedScope.projectId)
 
                 if (!stillAttached) {
                     attachmentCoordinator.deleteImportedAttachment(attachment, acceptedScope)
@@ -440,7 +506,13 @@ class ChatCapabilitiesViewModel(
                     }
                 }
                 if (!stillAttached) {
-                    _state.update { it.copy(isImportingAttachment = false) }
+                    _state.update {
+                        it.copy(
+                            isImportingAttachment = false,
+                            attachmentError = it.attachmentError
+                                ?: "أُلغي استيراد المجلد لأن المحادثة أو المشروع تغيّر أثناء الاستيراد — أعد الإرفاق في المحادثة الحالية."
+                        )
+                    }
                 }
             } catch (e: ChatAttachmentCoordinator.AttachmentImportException) {
                 _state.update {

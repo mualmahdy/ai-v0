@@ -336,6 +336,63 @@ class WorkspaceRuntimeService(
      * workspace — a stale/archived/foreign reference is REJECTED, which
      * is the reconciliation input of the bootstrap state machine).
      */
+    /**
+     * EMERGENCY HOTFIX R2 (the attach dead-end): ensures the ACTIVE workspace
+     * has an ACTIVE project binding, repairing the state where the workspace
+     * exists but `activeProjectId` is 0/null (the user archived or deleted
+     * every project, or a legacy row lost its binding). In that state the
+     * chat attach rows used to hard-disable — leaving NO way to attach at all.
+     *
+     * Resolution order mirrors the bootstrap's reconciliation (§3A):
+     *  1. an existing valid binding is returned as-is;
+     *  2. the workspace's most recently updated ACTIVE OWNED project is
+     *     re-bound (deterministic restoration);
+     *  3. a fresh owned sandbox project is created transactionally — a
+     *     workspace must always carry its required project.
+     *
+     * Returns null when no workspace is active or no project DAO is wired
+     * (the honest un-attributed state — callers fail closed, never default).
+     */
+    suspend fun ensureActiveProjectBinding(): Long? = mutex.withLock {
+        val active = _activeWorkspace.value ?: return@withLock null
+        active.activeProjectId.takeIf { it > 0L }?.let { return@withLock it }
+        val dao = projectDao ?: return@withLock null
+
+        val replacement = runCatching {
+            dao.mostRecentActiveProjectForWorkspace(active.id)
+        }.getOrNull()
+
+        val boundId: Long = if (replacement != null) {
+            replacement.id
+        } else {
+            val now = System.currentTimeMillis()
+            runCatching {
+                transactionRunner {
+                    val provisional = ProjectEntity(
+                        name = "مشروع مساحة العمل الافتراضية",
+                        description = "مشروع sandbox مملوك لمساحة العمل",
+                        rootPath = "",
+                        createdAtEpochMs = now,
+                        updatedAtEpochMs = now,
+                        workspaceId = active.id
+                    )
+                    val generatedId = dao.insertProject(provisional)
+                    dao.updateProject(
+                        provisional.copy(
+                            id = generatedId,
+                            rootPath = projectRootPathResolver(generatedId)
+                        )
+                    )
+                    generatedId
+                }
+            }.getOrNull() ?: return@withLock null
+        }
+
+        workspaceDao.setActiveProject(active.id, boundId, System.currentTimeMillis())
+        refreshActiveWorkspace()
+        boundId
+    }
+
     suspend fun setActiveProject(projectId: Long?) {
         val active = _activeWorkspace.value ?: return
         if (projectId != null && projectId > 0) {

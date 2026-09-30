@@ -134,6 +134,16 @@ object ChatCapabilityReasons {
 data class ChatCapabilityFacts(
     /** The storage layer is project-scoped — attachments need an active project. */
     val activeProjectId: Long? = null,
+    /**
+     * EMERGENCY HOTFIX R2 (the attach dead-end): TRUE when a workspace is
+     * active. Attach no longer hard-requires a PRE-BOUND project: the
+     * import path now REPAIRS an unbound workspace first (resolve-or-create
+     * through WorkspaceRuntimeService.ensureActiveProjectBinding), so the
+     * rows stay AVAILABLE whenever a workspace exists. Default false keeps
+     * the legacy JVM-test semantics (facts built without the fact → the old
+     * project-gated verdict).
+     */
+    val hasActiveWorkspace: Boolean = false,
     /** Folder attach needs the SAF tree→zip serializer (wired in production). */
     val folderAttachSupported: Boolean = true,
     /** The radar's checks (THE capability-level authority — e.g. VISION). */
@@ -247,12 +257,15 @@ object ChatCapabilityPolicy {
             category = ChatCapabilityCategory.FILES_AND_CONTEXT,
             title = "إرفاق ملف",
             subtitle = "ملف من جهازك يُرسل مع الرسالة (نصوص وأكواد تُقرأ فعلياً)",
-            status = if (facts.activeProjectId != null) {
+            // HOTFIX R2 (the attach dead-end): AVAILABLE whenever a workspace
+            // exists — the import path repairs an unbound project binding
+            // (resolve-or-create) instead of leaving the row dead.
+            status = if (facts.activeProjectId != null || facts.hasActiveWorkspace) {
                 ChatCapabilityStatus.AVAILABLE
             } else {
                 ChatCapabilityStatus.UNAVAILABLE
             },
-            reason = if (facts.activeProjectId == null) {
+            reason = if (facts.activeProjectId == null && !facts.hasActiveWorkspace) {
                 "غير متاح حالياً — تخزين المرفقات يتطلب مشروعاً نشطاً"
             } else null
         ),
@@ -262,12 +275,13 @@ object ChatCapabilityPolicy {
             title = "إرفاق مجلد",
             subtitle = "مجلد يُستورد كوحدة واحدة إلى ملعب المشروع",
             status = when {
-                facts.activeProjectId == null -> ChatCapabilityStatus.UNAVAILABLE
+                facts.activeProjectId == null && !facts.hasActiveWorkspace ->
+                    ChatCapabilityStatus.UNAVAILABLE
                 !facts.folderAttachSupported -> ChatCapabilityStatus.UNAVAILABLE
                 else -> ChatCapabilityStatus.AVAILABLE
             },
             reason = when {
-                facts.activeProjectId == null ->
+                facts.activeProjectId == null && !facts.hasActiveWorkspace ->
                     "غير متاح حالياً — تخزين المرفقات يتطلب مشروعاً نشطاً"
                 !facts.folderAttachSupported ->
                     "غير متاح في هذا التكوين — لا يوجد مسار استيراد للمجلدات"
