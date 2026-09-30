@@ -474,6 +474,49 @@ object ChatAutoScrollPolicy {
     }
 
     /**
+     * EMERGENCY HOTFIX R2 (the unreachable buttons): the TALL-ITEM-aware
+     * overload. Index proximity alone lies when the LAST item is taller than
+     * the viewport — a big streamed table marks the list "at the bottom"
+     * while the item's bottom edge (and the Copy/Regenerate/Retry actions
+     * riding it) sit far below the fold, and every follow-scroll then
+     * re-pinned the item's TOP, cancelling the user's drag mid-gesture
+     * ("the buttons become untouchable"). Near-bottom now additionally
+     * requires the last item's bottom EDGE to be inside the viewport.
+     *
+     * @param lastItemOffset the last item's [androidx.compose.foundation
+     * .lazy.LazyListItemInfo.offset] (pass 0 when unknown).
+     * @param lastItemSize the last item's size (pass 0 when unknown — the
+     * edge check is skipped, degrading to the index-only verdict).
+     * @param viewportEndOffset the layout's viewport end offset.
+     */
+    fun isNearBottom(
+        lastVisibleIndex: Int,
+        totalItems: Int,
+        lastItemOffset: Int,
+        lastItemSize: Int,
+        viewportEndOffset: Int,
+        threshold: Int = 2
+    ): Boolean {
+        if (totalItems <= 0) return true
+        if (lastVisibleIndex < totalItems - 1 - threshold) return false
+        if (lastVisibleIndex >= totalItems - 1 && lastItemSize > 0) {
+            return lastItemOffset + lastItemSize <= viewportEndOffset
+        }
+        return true
+    }
+
+    /**
+     * EMERGENCY HOTFIX R2: the scroll offset that pins the LAST item's BOTTOM
+     * edge to the viewport's bottom — what "following the stream" honestly
+     * means when the last item is taller than the viewport (its top-alignment
+     * left the newest content and the message actions permanently below the
+     * fold). Returns 0 for ordinary (short) items — identical to the legacy
+     * behavior.
+     */
+    fun followScrollOffset(lastItemSize: Int, lastItemOffset: Int, viewportSize: Int): Int =
+        (lastItemSize + lastItemOffset - viewportSize).coerceAtLeast(0)
+
+    /**
      * Whether a content update should follow (scroll to bottom):
      * following users keep following; a just-sent message forces it.
      */

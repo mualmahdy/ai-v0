@@ -660,7 +660,21 @@ object BidiSanitizer {
                     run.contains(':') || run.contains('_') ||
                     run.contains('\\') || run.contains('#') ||
                     run.length >= 24
-            if (looksTechnical) "$LRI$run$PDI" else run
+            // EMERGENCY HOTFIX R2 (the broken Arabic rendering): this
+            // sanitizer runs BEFORE block parsing, so any isolated run that
+            // is part of the MARKDOWN STRUCTURE silently corrupted the
+            // document for every Arabic conversation: '##' headings,
+            // ordered-list markers ('1.'), and alignment table separators
+            // (':---:') all matched LTR_RUN and got wrapped in LRI/PDI —
+            // after which the parser saw neither a heading, nor a list, nor
+            // a table, and the whole message rendered as bare run-on text
+            // ("the text comes out very poor, no rendering at all"). A run
+            // must now contain at least one LETTER to be isolated — real
+            // technical identifiers always do, while structural token runs
+            // ('##', '1.', '---', ':---:', '2024') never do. Pure-digit and
+            // punctuation runs lose nothing meaningful: digits and hyphens
+            // are weak-directional and never flip an RTL line.
+            if (looksTechnical && run.any { it.isLetter() }) "$LRI$run$PDI" else run
         }
     }
 }

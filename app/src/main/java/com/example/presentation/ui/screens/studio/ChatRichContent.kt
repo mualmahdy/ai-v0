@@ -2,6 +2,7 @@ package com.example.presentation.ui.screens.studio
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -462,7 +463,14 @@ private fun RichTable(block: RichChatBlock.Table) {
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
     ) {
-        Row(modifier = Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 6.dp)) {
+        // HOTFIX R2: clipToBounds — a wide table's scrollable region must
+        // never paint or intercept touches beyond its own bubble bounds.
+        Row(
+            modifier = Modifier
+                .clipToBounds()
+                .horizontalScroll(rememberScrollState())
+                .padding(vertical = 6.dp)
+        ) {
             Column(modifier = Modifier.widthIn(min = minWidth)) {
                 TableRow(block.header, header = true)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), modifier = Modifier.padding(vertical = 4.dp))

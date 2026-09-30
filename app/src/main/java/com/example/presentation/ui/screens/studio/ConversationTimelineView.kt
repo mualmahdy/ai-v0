@@ -166,16 +166,56 @@ fun ConversationTimeline(
     val itemCount = timeline.size + if (showLiveBlock) 1 else 0
 
     // Track whether the user is near the bottom on every scroll/layout pass.
+    // EMERGENCY HOTFIX R2 (the unreachable buttons): near-bottom is
+    // TALL-ITEM-aware — a last item taller than the viewport (a big streamed
+    // table) no longer counts as "at the bottom" while its bottom edge is
+    // below the fold, so streaming follow-scroll stops yanking the user's
+    // drag and the message actions riding the item's bottom stay reachable.
     val nearBottom by remember {
         derivedStateOf {
             val info = listState.layoutInfo
             val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-            ChatAutoScrollPolicy.isNearBottom(lastVisible, info.totalItemsCount)
+            val lastItem = info.visibleItemsInfo.lastOrNull { it.index == info.totalItemsCount - 1 }
+            if (lastItem != null) {
+                ChatAutoScrollPolicy.isNearBottom(
+                    lastVisibleIndex = lastVisible,
+                    totalItems = info.totalItemsCount,
+                    lastItemOffset = lastItem.offset,
+                    lastItemSize = lastItem.size,
+                    viewportEndOffset = info.viewportEndOffset
+                )
+            } else {
+                ChatAutoScrollPolicy.isNearBottom(lastVisible, info.totalItemsCount)
+            }
         }
     }
     LaunchedEffect(nearBottom) {
         isFollowing = nearBottom
         if (isFollowing) hasNewContent = false
+    }
+
+    // HOTFIX R2: the follow target pins the LAST item's BOTTOM edge to the
+    // viewport bottom — for ordinary items the offset is 0 (the legacy
+    // behavior), for a tall streamed table the newest rows and the message
+    // actions stay visible instead of the item's (often empty) top.
+    fun scrollToBottomOfLast(instant: Boolean) {
+        val info = listState.layoutInfo
+        val lastIndex = info.totalItemsCount - 1
+        if (lastIndex < 0) return
+        val lastItem = info.visibleItemsInfo.firstOrNull { it.index == lastIndex }
+        val viewportSize = info.viewportEndOffset - info.viewportStartOffset
+        val offset = if (lastItem != null) {
+            ChatAutoScrollPolicy.followScrollOffset(lastItem.size, lastItem.offset, viewportSize)
+        } else {
+            0
+        }
+        runCatching {
+            if (instant) {
+                listState.scrollToItem(lastIndex, offset)
+            } else {
+                listState.animateScrollToItem(lastIndex, offset)
+            }
+        }
     }
 
     // A user send is ALWAYS an intentional return to the bottom (§9).
@@ -185,7 +225,7 @@ fun ConversationTimeline(
         isFollowing = true
         hasNewContent = false
         if (itemCount > 0) {
-            runCatching { listState.animateScrollToItem(itemCount - 1) }
+            scrollToBottomOfLast(instant = false)
         }
     }
 
@@ -194,7 +234,7 @@ fun ConversationTimeline(
     LaunchedEffect(itemCount) {
         if (itemCount == 0) return@LaunchedEffect
         if (ChatAutoScrollPolicy.shouldFollow(isFollowing, pendingSendScroll)) {
-            runCatching { listState.animateScrollToItem(itemCount - 1) }
+            scrollToBottomOfLast(instant = false)
             pendingSendScroll = false
             hasNewContent = false
         } else {
@@ -204,7 +244,7 @@ fun ConversationTimeline(
     LaunchedEffect(streamText.length) {
         if (streamText.isEmpty()) return@LaunchedEffect
         if (ChatAutoScrollPolicy.shouldFollow(isFollowing, pendingSendScroll)) {
-            runCatching { listState.scrollToItem(itemCount - 1) }
+            scrollToBottomOfLast(instant = true)
         }
     }
     // FRONTIER REASONING: thinking tokens stream too — a following user keeps
@@ -212,7 +252,7 @@ fun ConversationTimeline(
     LaunchedEffect(reasoningText.length) {
         if (reasoningText.isEmpty()) return@LaunchedEffect
         if (ChatAutoScrollPolicy.shouldFollow(isFollowing, pendingSendScroll)) {
-            runCatching { listState.scrollToItem(itemCount - 1) }
+            scrollToBottomOfLast(instant = true)
         }
     }
 
@@ -266,7 +306,11 @@ fun ConversationTimeline(
                         onReject = onReject,
                         onRetryAfterApproval = onRetryAfterApproval,
                         onGrantAlways = onGrantAlways,
-                        onOpenArtifact = onOpenArtifact
+                        onOpenArtifact = onOpenArtifact,
+                        // HOTFIX R2 (consistency): entries after the live block
+                        // keep their full action set — the save-as-artifact
+                        // action was silently dropped for them.
+                        onSaveAsArtifact = onSaveAsArtifact
                     )
                 }
             }
@@ -286,7 +330,7 @@ fun ConversationTimeline(
                     hasNewContent = false
                     isFollowing = true
                     scope.launch {
-                        runCatching { listState.animateScrollToItem(itemCount - 1) }
+                        scrollToBottomOfLast(instant = false)
                     }
                 },
                 shape = RoundedCornerShape(20.dp),
