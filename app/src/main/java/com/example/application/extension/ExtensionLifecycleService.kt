@@ -10,6 +10,7 @@ import com.example.domain.core.extension.lifecycle.ExtensionUpdateResult
 import com.example.domain.core.extension.lifecycle.ExtensionVersion
 import com.example.domain.core.extension.lifecycle.HealthMonitorConfig
 import com.example.domain.core.extension.lifecycle.VersionCompatibility
+import com.example.domain.core.rethrowIfCancellation
 import com.example.infrastructure.persistence.dao.ExtensionConfigDao
 import com.example.infrastructure.persistence.entities.ExtensionConfigEntity
 import kotlinx.coroutines.CoroutineScope
@@ -272,7 +273,8 @@ class ExtensionLifecycleService(
                         recordHealthProbe(ext.id, ext.isConnected, 0L, if (!ext.isConnected) "غير متصل (لا يوجد مسبار حقيقي مهيأ)" else null)
                     }
                 }
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                e.rethrowIfCancellation()
                 // Monitor loop must never crash.
             }
             delay(healthMonitorConfig.checkIntervalMs)

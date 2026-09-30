@@ -1,5 +1,6 @@
 package com.example.application.governed
 
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.security.RiskLevel
 import com.example.domain.core.security.SecurityDecision
 import com.example.domain.core.security.SecurityPolicy
@@ -293,7 +294,8 @@ class AdmissionControlService(
         if (needsApproval) {
             val standingConsent = try {
                 consentGrantPort?.hasStandingConsent(request) ?: false
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 // Standing-consent lookup failure must fail CLOSED toward
                 // the explicit-consent paths (token / pause), never open.
                 false

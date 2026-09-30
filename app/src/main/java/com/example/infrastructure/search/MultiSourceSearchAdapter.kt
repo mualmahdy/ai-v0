@@ -3,6 +3,7 @@ package com.example.infrastructure.search
 import com.example.domain.core.DegradedReason
 import com.example.domain.core.Outcome
 import com.example.domain.core.OutcomeMetadata
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.search.SafeSearchProviderMetadata
 import com.example.domain.core.search.SearchFailure
 import com.example.domain.core.search.SearchQuery
@@ -115,7 +116,8 @@ class MultiSourceSearchAdapter(
                         )
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 // Fallback to secondary source
             }
         }
@@ -166,7 +168,8 @@ class MultiSourceSearchAdapter(
                     }
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
             // Fall through to workspace search
         }
 

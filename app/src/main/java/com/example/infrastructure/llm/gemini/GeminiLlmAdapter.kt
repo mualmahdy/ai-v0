@@ -12,6 +12,7 @@ import com.example.domain.core.llm.MessageRole
 import com.example.domain.core.llm.SafeProviderMetadata
 import com.example.domain.core.llm.TokenUsage
 import com.example.domain.core.llm.ToolCallRequest
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.llm.LlmProviderPort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -368,6 +369,7 @@ class GeminiLlmAdapter(
                     "Transport failure: ${e.message}"
                 )
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 Outcome.Error(
                     LlmFailure.ProviderUnavailable(providerId, e.message ?: "error"),
                     "Generation failed: ${e.message}"
@@ -428,6 +430,7 @@ class GeminiLlmAdapter(
             // Transport/timeout/egress-denied → INCONCLUSIVE, no override.
             com.example.domain.ports.llm.CapabilityProbeOutcome.INCONCLUSIVE
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             com.example.domain.ports.llm.CapabilityProbeOutcome.INCONCLUSIVE
         }
         // P1-1 override registration — THE seam P0-5 documented: the probe's
@@ -643,6 +646,7 @@ class GeminiLlmAdapter(
                 )
             )
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             emit(
                 ExecutionEvent.Error(
                     executionId = executionId,

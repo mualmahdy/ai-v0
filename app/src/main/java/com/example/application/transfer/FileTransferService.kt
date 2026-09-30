@@ -5,6 +5,7 @@ import com.example.domain.core.audit.AuditActions
 import com.example.domain.core.audit.AuditActorType
 import com.example.domain.core.audit.AuditResult
 import com.example.domain.core.context.ResourceScope
+import com.example.domain.core.rethrowIfCancellation
 import com.example.infrastructure.storage.SandboxProjectFileStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -111,6 +112,7 @@ class FileTransferService(
             audit(AuditActions.FILE_IMPORTED, workspaceId, projectId, AuditResult.SUCCESS, relativePath)
             TransferOutcome.Success("تم استيراد الملف: $relativePath", importedFileCount = 1)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             TransferOutcome.Failure("IMPORT_EXCEPTION", "فشل الاستيراد: ${e.message}", true)
         } finally {
             File(root, ".staging_import").deleteRecursively()
@@ -207,6 +209,7 @@ class FileTransferService(
                 importedFileCount = entryCount
             )
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             TransferOutcome.Failure("IMPORT_EXCEPTION", "فشل استيراد المجلد: ${e.message}", true)
         } finally {
             stagingDir.deleteRecursively()
@@ -231,6 +234,7 @@ class FileTransferService(
             audit(AuditActions.FILE_EXPORTED, workspaceId, projectId, AuditResult.SUCCESS, relativePath)
             TransferOutcome.Success("تم تصدير الملف: $relativePath", importedFileCount = 1)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             TransferOutcome.Failure("EXPORT_EXCEPTION", "فشل التصدير: ${e.message}", true)
         }
     }
@@ -267,6 +271,7 @@ class FileTransferService(
             audit(AuditActions.FOLDER_EXPORTED, workspaceId, projectId, AuditResult.SUCCESS, subDirectory)
             TransferOutcome.Success("تم تصدير المجلد ($count ملفاً).", importedFileCount = count)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             TransferOutcome.Failure("EXPORT_EXCEPTION", "فشل تصدير المجلد: ${e.message}", true)
         }
     }

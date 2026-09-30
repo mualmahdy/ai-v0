@@ -7,6 +7,7 @@ import com.example.domain.core.extension.McpDiscoveredTool
 import com.example.domain.core.extension.McpServerDescriptor
 import com.example.domain.core.extension.McpTransportType
 import com.example.domain.core.provider.HealthStatus
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.tools.ToolFailure
 import com.example.domain.core.tools.ToolOutput
 import kotlinx.coroutines.Dispatchers
@@ -208,6 +209,7 @@ class McpClient(
                 }
             }
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 failure = "MCP discovery failed for ${server.name}: ${e::class.java.simpleName} - ${e.message}",
                 diagnosticMessage = "تعذّر الوصول إلى خادم MCP ${server.name}: ${e.localizedMessage ?: e.message ?: "خطأ غير معروف"}"
@@ -317,6 +319,7 @@ class McpClient(
                 diagnosticMessage = "انتهت مهلة استجابة خادم MCP."
             )
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 failure = ToolFailure.CapabilityUnavailable(
                     capabilityName = toolName,

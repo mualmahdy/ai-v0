@@ -3,6 +3,7 @@ package com.example.infrastructure.mcp
 import com.example.domain.core.Outcome
 import com.example.domain.core.extension.McpDiscoveredTool
 import com.example.domain.core.provider.ServiceConfiguration
+import com.example.domain.core.rethrowIfCancellation
 import com.example.infrastructure.network.EgressControl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -155,6 +156,7 @@ class McpAdapter(
             } catch (e: java.io.IOException) {
                 Outcome.Error("MCP_TRANSPORT", "MCP $method transport failure: ${e.message}")
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 Outcome.Error("MCP_FAILURE", "MCP $method failed: ${e.message}")
             }
         }
@@ -202,6 +204,7 @@ class McpAdapter(
                                 "reason=${e.reasonCode}; ${e.message}"
                         )
                     } catch (e: Exception) {
+                        e.rethrowIfCancellation()
                         // Transport-level failure on a NOTIFICATION is
                         // non-fatal per MCP semantics (no response is
                         // expected) — fire-and-forget for noise ONLY.

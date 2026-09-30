@@ -6,6 +6,7 @@ import com.example.domain.core.evolution.EvolutionStage
 import com.example.domain.core.radar.ExtractedCapabilityProfile
 import com.example.domain.core.radar.RadarCategory
 import com.example.domain.core.radar.RadarItem
+import com.example.domain.core.rethrowIfCancellation
 import com.example.infrastructure.persistence.dao.EvolutionCandidateDao
 import com.example.infrastructure.persistence.dao.RadarItemDao
 import com.example.infrastructure.persistence.entities.EvolutionCandidateEntity
@@ -195,7 +196,8 @@ class IntelligenceRadarPipeline(
                         }
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 // Non-fatal, fallback to bootstrap items
             }
         }
@@ -335,7 +337,7 @@ class IntelligenceRadarPipeline(
                     governanceApproved = updated.governanceApproved,
                     now = System.currentTimeMillis()
                 )
-            } catch (_: Exception) {}
+            } catch (e: Exception) { e.rethrowIfCancellation() }
         }
         return@withContext Outcome.Success(candidateToPersist!!)
     }
@@ -366,7 +368,7 @@ class IntelligenceRadarPipeline(
                 notes = updated.evaluationNotes,
                 now = System.currentTimeMillis()
             )
-        } catch (_: Exception) {}
+        } catch (e: Exception) { e.rethrowIfCancellation() }
         Outcome.Success(updated)
     }
 
@@ -392,7 +394,7 @@ class IntelligenceRadarPipeline(
                 governanceApproved = approved,
                 now = System.currentTimeMillis()
             )
-        } catch (_: Exception) {}
+        } catch (e: Exception) { e.rethrowIfCancellation() }
         Outcome.Success(updated)
     }
 
@@ -422,6 +424,7 @@ class IntelligenceRadarPipeline(
         try {
             recorder(current)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             return@withContext Outcome.Error(
                 "MEASUREMENT_FAILED",
                 "تعذّر تسجيل قياس القدرة: ${e.localizedMessage}"
@@ -462,7 +465,7 @@ class IntelligenceRadarPipeline(
                 notes = "RETIRED: $reason",
                 now = System.currentTimeMillis()
             )
-        } catch (_: Exception) {}
+        } catch (e: Exception) { e.rethrowIfCancellation() }
         Outcome.Success(updated)
     }
 
@@ -472,7 +475,7 @@ class IntelligenceRadarPipeline(
             try {
                 val entities = items.take(50).map { it.toEntity() }
                 radarItemDao.insertAll(entities)
-            } catch (_: Exception) {}
+            } catch (e: Exception) { e.rethrowIfCancellation() }
         }
     }
 
@@ -482,7 +485,7 @@ class IntelligenceRadarPipeline(
             try {
                 val entities = candidates.take(50).map { it.toEntity() }
                 evolutionCandidateDao.insertAll(entities)
-            } catch (_: Exception) {}
+            } catch (e: Exception) { e.rethrowIfCancellation() }
         }
     }
 

@@ -6,6 +6,7 @@ import com.example.domain.core.observability.AuditSeverity
 import com.example.domain.core.observability.MetricDimensions
 import com.example.domain.core.observability.MetricSample
 import com.example.domain.core.observability.MetricType
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.observability.TelemetryPort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -203,7 +204,8 @@ class TelemetryService(
             events.collect { event ->
                 try {
                     handle(event)
-                } catch (_: Throwable) {
+                } catch (e: Throwable) {
+                    e.rethrowIfCancellation()
                     // Observability must NEVER break the runtime.
                 }
             }

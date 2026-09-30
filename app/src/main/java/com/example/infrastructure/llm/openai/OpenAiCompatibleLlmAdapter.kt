@@ -12,6 +12,7 @@ import com.example.domain.core.llm.MessageRole
 import com.example.domain.core.llm.SafeProviderMetadata
 import com.example.domain.core.llm.TokenUsage
 import com.example.domain.core.llm.ToolCallRequest
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.tools.ToolDeclaration
 import com.example.domain.ports.llm.LlmProviderPort
 import kotlinx.coroutines.Dispatchers
@@ -183,6 +184,7 @@ class OpenAiCompatibleLlmAdapter(
                     "Transport failure: ${e.message}"
                 )
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 Outcome.Error(
                     LlmFailure.ProviderUnavailable(providerId, e.message ?: "error"),
                     "Generation failed: ${e.message}"
@@ -415,6 +417,7 @@ class OpenAiCompatibleLlmAdapter(
                 )
             )
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             emit(
                 ExecutionEvent.Error(
                     executionId = executionId,

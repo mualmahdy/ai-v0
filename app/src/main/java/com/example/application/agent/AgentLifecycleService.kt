@@ -13,6 +13,7 @@ import com.example.domain.core.agent.lifecycle.BudgetRecommendedAction
 import com.example.domain.core.agent.lifecycle.VersionedAgentDefinition
 import com.example.domain.core.agent.lifecycle.AgentVersion
 import com.example.domain.core.capability.CapabilityType
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.domain.ports.agent.AgentRevisionRecord
 import com.example.domain.ports.agent.AgentRevisionStorePort
@@ -147,7 +148,8 @@ class AgentLifecycleService(
                             createdAtEpochMs = versioned.createdAtEpochMs
                         )
                     )
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    e.rethrowIfCancellation()
                     // Persistence failure is visible through the revision
                     // history query (the in-memory chain continues) — never a
                     // silent success claim.

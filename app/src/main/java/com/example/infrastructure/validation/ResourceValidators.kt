@@ -8,6 +8,7 @@ import com.example.domain.core.provider.ServiceValidationResult
 import com.example.domain.core.resource.ResourceType
 import com.example.domain.core.resource.ResourceValidator
 import com.example.domain.core.resource.ResourceValidatorRegistry
+import com.example.domain.core.rethrowIfCancellation
 import com.example.infrastructure.llm.gemini.GeminiBootstrap
 import com.example.infrastructure.llm.openai.OpenAiCompatibleLlmAdapter
 import com.example.infrastructure.network.EgressControl
@@ -97,6 +98,7 @@ private suspend fun httpPing(
             "Transport failure: ${e.message}"
         )
     } catch (e: Exception) {
+        e.rethrowIfCancellation()
         ServiceValidationResult.failure(
             ServiceHealthClassification.PROTOCOL_FAILURE,
             System.currentTimeMillis() - start,
@@ -144,6 +146,7 @@ private suspend fun geminiPing(
             System.currentTimeMillis() - start, "Transport failure: ${e.message}"
         )
     } catch (e: Exception) {
+        e.rethrowIfCancellation()
         ServiceValidationResult.failure(
             ServiceHealthClassification.PROTOCOL_FAILURE,
             System.currentTimeMillis() - start, "Validation error: ${e.message}"

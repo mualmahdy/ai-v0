@@ -5,6 +5,7 @@ import com.example.domain.core.Outcome
 import com.example.domain.core.memory.EmbeddingFailure
 import com.example.domain.core.memory.EmbeddingVector
 import com.example.domain.core.memory.SafeEmbeddingProviderMetadata
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.memory.EmbeddingProviderPort
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
@@ -137,6 +138,7 @@ class OnnxSemanticEmbeddingAdapter(
             }
             Outcome.Success(Unit)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error("تعذر تهيئة النموذج الدلالي المحلي: ${e.message ?: e.javaClass.simpleName}")
         }
     }
@@ -210,6 +212,7 @@ class OnnxSemanticEmbeddingAdapter(
                     Outcome.Success(out)
                 }
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 Outcome.Error(
                     EmbeddingFailure.EmbeddingUnavailable(
                         providerId,

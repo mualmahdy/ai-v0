@@ -6,6 +6,7 @@ import com.example.domain.core.agent.AgentDefinition
 import com.example.domain.core.agent.AgentId
 import com.example.domain.core.agent.AgentIdentity
 import com.example.domain.core.agent.AgentRole
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.task.TaskDefinition
 import com.example.domain.core.task.TaskInput
 import com.example.domain.core.task.TaskSpecification
@@ -214,6 +215,7 @@ class WorkflowEngine(
         val pinnedWorkspaceId = try {
             workspaceIdProvider()
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             val failure = WorkflowFailure.StepExecutionFailed(
                 stepId = "plan",
                 reason = "WORKSPACE_CONTEXT_REQUIRED: تعذّر تثبيت مساحة العمل للخطة — ${e.message ?: e.javaClass.simpleName}"
@@ -506,6 +508,7 @@ class WorkflowEngine(
         val stepAgent: AgentDefinition = try {
             agentResolver?.invoke(step) ?: syntheticStepAgent(step)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             // Honest step failure — the pinned binding could not be honoured.
             val reason = e.message ?: e.javaClass.simpleName
             stateMutex.withLock {
@@ -661,7 +664,8 @@ class WorkflowEngine(
         if (persistenceService == null) return
         try {
             block()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
             state.persistenceFailures++
         }
     }

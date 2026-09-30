@@ -23,6 +23,7 @@ import com.example.domain.core.decision.EnvironmentObservation
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.provider.ServiceType
 import com.example.domain.core.radar.OperationalCapabilityState
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.provider.UserPreferenceRepository
 import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceType
@@ -747,6 +748,7 @@ class DecisionService(
         return try {
             withContext(Dispatchers.IO) { repo.getPreference(serviceType) }
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             null
         }
     }

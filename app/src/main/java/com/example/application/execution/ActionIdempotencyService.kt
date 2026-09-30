@@ -5,6 +5,7 @@ import com.example.domain.core.execution.ActionIntentState
 import com.example.domain.core.execution.IntentGate
 import com.example.domain.core.decision.DecisionAction
 import com.example.domain.core.decision.DecisionActionType
+import com.example.domain.core.rethrowIfCancellation
 import com.example.infrastructure.persistence.dao.ActionIntentDao
 import com.example.infrastructure.persistence.entities.ActionIntentEntity
 import java.security.MessageDigest
@@ -82,6 +83,7 @@ class ActionIdempotencyService(private val dao: ActionIntentDao?) {
                 else -> IntentGate.Proceed(stored.toDomain())
             }
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             IntentGate.LedgerUnavailable("INTENT_LEDGER_WRITE_FAILED: ${e.message}")
         }
     }
@@ -113,6 +115,7 @@ class ActionIdempotencyService(private val dao: ActionIntentDao?) {
             )
             true
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             // Outcome recording is best-effort; the begin() row (INTENDED)
             // stays authoritative and the resume path treats it as ambiguous.
             lastOutcomeWriteFailure = "INTENT_OUTCOME_WRITE_FAILED: ${e::class.simpleName}: ${e.message?.take(120)}"
@@ -137,6 +140,7 @@ class ActionIdempotencyService(private val dao: ActionIntentDao?) {
             )
             true
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             lastOutcomeWriteFailure = "INTENT_OUTCOME_WRITE_FAILED: ${e::class.simpleName}: ${e.message?.take(120)}"
             false
         }

@@ -32,6 +32,7 @@ import com.example.application.governed.BudgetAuthorizationPort
 import com.example.application.governed.BudgetAuthorizationOutcome
 import com.example.application.governed.ConsentGrantPort
 import com.example.application.governed.ToolDeclarationResolver
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.runtime.IsolationLevel
 import com.example.domain.core.security.governance.BudgetAuthorizationVerdict
 import com.example.domain.core.security.governance.SecurableResourceType
@@ -2077,6 +2078,7 @@ class AppContainer(context: Context) {
             // bootstrap coroutine).
             circuitBreakerStateSink.startIn(applicationScope)
             } catch (t: Throwable) {
+                t.rethrowIfCancellation()
                 // P1-8: a bootstrap step threw. The readiness gate is STILL
                 // released below — the failure is attributed honestly so the
                 // audit trail carries it, and the runtime proceeds in a

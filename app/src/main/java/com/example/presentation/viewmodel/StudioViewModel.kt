@@ -13,6 +13,7 @@ import com.example.domain.core.DegradedReason
 import com.example.domain.core.agent.AgentDefinition
 import com.example.domain.core.events.ExecutionEvent
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.session.ChatMode
 import com.example.domain.core.session.ConversationSessionId
 import com.example.domain.core.session.ConversationTimelineEvent
@@ -1254,6 +1255,7 @@ class StudioViewModel(
             }
             DurableSessionEstablishment.Established(session.id)
         } catch (failure: Exception) {
+            failure.rethrowIfCancellation()
             DurableSessionEstablishment.Failed(
                 failure.localizedMessage ?: failure::class.simpleName ?: "فشل غير معروف"
             )
@@ -1347,6 +1349,7 @@ class StudioViewModel(
                     )
                 }
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 // RESIDUAL CLOSURE (persistence-failure leak): the banner is
                 // written ONLY while THIS execution is still the view's current
                 // one — a detached execution's persistence failure is recorded
@@ -3224,6 +3227,7 @@ class StudioViewModel(
                     )
                 }
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 _state.update {
                     it.copy(
                         errorMessage = "تم تسجيل قرارك في بوابة الموافقة لكن تعذر تحديث السجل الدائم للجلسة " +

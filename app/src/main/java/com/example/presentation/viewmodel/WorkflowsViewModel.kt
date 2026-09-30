@@ -6,6 +6,7 @@ import com.example.application.usecases.ExecuteWorkflowUseCase
 import com.example.application.workflow.WorkflowLibraryService
 import com.example.application.workflow.WorkflowPersistenceService
 import com.example.application.workspace.WorkspaceRuntimeService
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.workflow.StepNode
 import com.example.domain.core.workflow.WorkflowExecutionReport
 import com.example.domain.core.workflow.WorkflowId
@@ -168,6 +169,7 @@ class WorkflowsViewModel(
                 // Refresh the resumable surface (a failed run is resumable).
                 loadResumableWorkflows()
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 _state.update { it.copy(isExecutingWorkflow = false, errorMessage = "فشل تنفيذ خطة العمل: ${e.localizedMessage}") }
                 loadResumableWorkflows()
             }

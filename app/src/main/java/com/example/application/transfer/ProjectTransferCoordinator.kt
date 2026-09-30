@@ -8,6 +8,7 @@ import com.example.domain.core.audit.AuditActions
 import com.example.domain.core.audit.AuditActorType
 import com.example.domain.core.audit.AuditResult
 import com.example.domain.core.context.ResourceScope
+import com.example.domain.core.rethrowIfCancellation
 import com.example.infrastructure.persistence.AppDatabase
 import com.example.infrastructure.storage.SandboxProjectFileStore
 import kotlinx.coroutines.Dispatchers
@@ -186,6 +187,7 @@ class ProjectTransferCoordinator(
                     )
                 }
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 // The transaction rolled back — nothing moved. The journal
                 // keeps the interrupted attempt as a PENDING_RECOVERY row so
                 // recovery has something truthful to reconcile against.

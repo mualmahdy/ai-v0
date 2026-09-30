@@ -2,6 +2,7 @@ package com.example.infrastructure.storage
 
 import android.content.Context
 import com.example.domain.core.Outcome
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.security.governance.PathContainment
 import com.example.domain.core.storage.StorageFailure
 import com.example.domain.core.storage.WorkspaceFileEntry
@@ -74,6 +75,7 @@ class SandboxWorkspaceStorageAdapter(
             val text = targetFile.readText(Charsets.UTF_8)
             Outcome.Success(text)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 StorageFailure.ReadWriteError(relativePath, "فشل قراءة الملف: ${e.localizedMessage}")
             )
@@ -96,6 +98,7 @@ class SandboxWorkspaceStorageAdapter(
             targetFile.writeText(content, Charsets.UTF_8)
             Outcome.Success(Unit)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 StorageFailure.ReadWriteError(relativePath, "فشل كتابة الملف: ${e.localizedMessage}")
             )
@@ -129,6 +132,7 @@ class SandboxWorkspaceStorageAdapter(
 
             Outcome.Success(entries)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 StorageFailure.ReadWriteError(subDirectory ?: "", "فشل سرد الملفات: ${e.localizedMessage}")
             )
@@ -153,6 +157,7 @@ class SandboxWorkspaceStorageAdapter(
             val deleted = targetFile.deleteRecursively()
             if (deleted) Outcome.Success(Unit) else Outcome.Error(StorageFailure.ReadWriteError(relativePath, "فشل حذف $relativePath"))
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(StorageFailure.ReadWriteError(relativePath, "استثناء أثناء الحذف: ${e.localizedMessage}"))
         }
     }

@@ -4,6 +4,7 @@ import com.example.domain.core.Outcome
 import com.example.domain.core.memory.EmbeddingFailure
 import com.example.domain.core.memory.EmbeddingVector
 import com.example.domain.core.memory.SafeEmbeddingProviderMetadata
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.memory.EmbeddingProviderPort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -111,6 +112,7 @@ class OpenAiCompatibleEmbeddingAdapter(
             } catch (e: java.io.IOException) {
                 Outcome.Error(EmbeddingFailure.EmbeddingUnavailable(providerId, e.message ?: "io error"))
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 Outcome.Error(EmbeddingFailure.EmbeddingUnavailable(providerId, e.message ?: "parse error"))
             }
         }

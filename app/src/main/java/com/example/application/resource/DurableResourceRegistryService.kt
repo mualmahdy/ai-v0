@@ -4,6 +4,7 @@ import com.example.domain.core.provider.HealthStatus
 import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.domain.core.resource.ResourceRecord
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.resource.ResourceRecordRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -97,6 +98,7 @@ class DurableResourceRegistryService(
             val persisted = try {
                 repo.getAllResources()
             } catch (error: Throwable) {
+                error.rethrowIfCancellation()
                 // P1-13: an unreadable store is HONEST degradation — memory
                 // stays empty/authoritative and the failure is observable.
                 recordPersistenceFailure("eagerLoad(getAllResources)", error)
@@ -118,6 +120,7 @@ class DurableResourceRegistryService(
             try {
                 repo.saveResource(record)
             } catch (error: Throwable) {
+                error.rethrowIfCancellation()
                 // P1-13: honest degradation — memory keeps the record (runtime
                 // stays up) but the divergence is RECORDED, not swallowed.
                 recordPersistenceFailure("saveResource(${record.resourceId})", error)
@@ -132,6 +135,7 @@ class DurableResourceRegistryService(
         val persisted = try {
             repo.getResourceById(resourceId)
         } catch (error: Throwable) {
+            error.rethrowIfCancellation()
             recordPersistenceFailure("getResourceById($resourceId)", error)
             null
         }
@@ -153,6 +157,7 @@ class DurableResourceRegistryService(
         try {
             repo.updateRuntimeState(resourceId, lifecycleState, runtimeSupported, healthStatus)
         } catch (error: Throwable) {
+            error.rethrowIfCancellation()
             recordPersistenceFailure("updateRuntimeState($resourceId)", error)
         }
     }
@@ -163,6 +168,7 @@ class DurableResourceRegistryService(
         try {
             repo.deleteResource(resourceId)
         } catch (error: Throwable) {
+            error.rethrowIfCancellation()
             recordPersistenceFailure("deleteResource($resourceId)", error)
         }
     }
@@ -175,6 +181,7 @@ class DurableResourceRegistryService(
         try {
             repo.deleteResourcesForService(serviceId)
         } catch (error: Throwable) {
+            error.rethrowIfCancellation()
             recordPersistenceFailure("deleteResourcesForService($serviceId)", error)
         }
     }
@@ -225,6 +232,7 @@ class DurableResourceRegistryService(
             try {
                 block(repo)
             } catch (error: Throwable) {
+                error.rethrowIfCancellation()
                 // P1-13: the async mirror path is best-effort, but the failure
                 // is OBSERVABLE (never silently reported as success).
                 recordPersistenceFailure("mirrorPersist", error)

@@ -4,6 +4,7 @@ import com.example.domain.core.Outcome
 import com.example.domain.core.radar.ExtractedCapabilityProfile
 import com.example.domain.core.radar.RadarCategory
 import com.example.domain.core.radar.RadarItem
+import com.example.domain.core.rethrowIfCancellation
 import com.example.infrastructure.network.GovernedHttpClientFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -95,6 +96,7 @@ class GitHubReleasesRadarSource(
             }
             Outcome.Success(items)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error("تعذر الاتصال بمصدر GitHub: ${e.localizedMessage}")
         }
     }
@@ -137,6 +139,7 @@ class RssFeedRadarSource(
             }
             Outcome.Success(items)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error("تعذر قراءة خلاصات RSS: ${e.localizedMessage}")
         }
     }

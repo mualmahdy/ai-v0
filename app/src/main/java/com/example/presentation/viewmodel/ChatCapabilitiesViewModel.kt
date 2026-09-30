@@ -15,6 +15,7 @@ import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.Outcome
 import com.example.domain.core.capability.CapabilityType
 import com.example.domain.core.events.ExecutionEvent
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.session.TurnAttachment
 import com.example.domain.core.tools.ToolDeclaration
 import com.example.domain.core.execution.ExecutionScope
@@ -355,6 +356,7 @@ class ChatCapabilitiesViewModel(
                 } catch (e: ChatAttachmentCoordinator.AttachmentImportException) {
                     failure = e.message
                 } catch (e: Exception) {
+                    e.rethrowIfCancellation()
                     failure = "فشل استيراد المرفق: ${e.localizedMessage}"
                 }
             }
@@ -437,6 +439,7 @@ class ChatCapabilitiesViewModel(
                     it.copy(isImportingAttachment = false, attachmentError = e.message)
                 }
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 _state.update {
                     it.copy(
                         isImportingAttachment = false,

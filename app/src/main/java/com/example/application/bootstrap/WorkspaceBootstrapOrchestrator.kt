@@ -1,5 +1,6 @@
 package com.example.application.bootstrap
 
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.workspace.Workspace
 import com.example.infrastructure.persistence.AppDatabase
 import com.example.infrastructure.persistence.entities.ProjectEntity
@@ -89,6 +90,7 @@ class WorkspaceBootstrapOrchestrator(
         try {
             runStateMachine()
         } catch (t: Throwable) {
+            t.rethrowIfCancellation()
             _state.value = BootstrapState(
                 BootstrapPhase.Failed(
                     BootstrapFailure.BOOTSTRAP_FAILED,

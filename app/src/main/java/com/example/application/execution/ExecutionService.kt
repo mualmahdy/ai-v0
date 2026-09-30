@@ -20,6 +20,7 @@ import com.example.domain.core.llm.MessageRole
 import com.example.domain.core.map
 import com.example.domain.core.network.NetworkPolicy
 import com.example.domain.core.resource.ResourceId
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.search.SearchFailure
 import com.example.domain.core.search.SearchQuery
 import com.example.domain.core.security.SecurityDecision
@@ -383,7 +384,8 @@ class ExecutionService(
         if (lifecycleEnforcer != null) {
             val executable = try {
                 lifecycleEnforcer(toolName)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 false
             }
             if (!executable) {
@@ -483,7 +485,8 @@ class ExecutionService(
                     permission = com.example.domain.core.security.governance.Permission.EXECUTE,
                     workspaceId = workspaceId
                 )
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 false // enforcement failure must fail CLOSED, never open
             }
             if (!allowed) {
@@ -555,6 +558,7 @@ class ExecutionService(
             val admissionResult = try {
                 admission.admit(request)
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 // Gate failure must fail CLOSED, never open.
                 auditAuthorization(
                     agent, toolName, actionType, executionId, "DENY",
@@ -873,6 +877,7 @@ class ExecutionService(
             val allowed = try {
                 breaker.allowCall(breakerResourceId.value)
             } catch (enforcement: Exception) {
+                enforcement.rethrowIfCancellation()
                 onEvent(
                     ExecutionEvent.Degraded(
                         executionId = executionId,
@@ -927,6 +932,7 @@ class ExecutionService(
             val gateVerdict = try {
                 economicGovernance.authorize(gateRequest)
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 // FAIL CLOSED (honest surfaces): an enforcement error must
                 // never silently become an ALLOW. The step degrades visibly
                 // and the loop can replan.
@@ -1411,6 +1417,7 @@ class ExecutionService(
             val allowed = try {
                 breaker.allowCall(breakerResourceId.value)
             } catch (enforcement: Exception) {
+                enforcement.rethrowIfCancellation()
                 onEvent(
                     ExecutionEvent.Degraded(
                         executionId = executionId,
@@ -1444,6 +1451,7 @@ class ExecutionService(
             val intelligentResult = try {
                 intelligenceHook(query, searchProvider)
             } catch (intelligence: Exception) {
+                intelligence.rethrowIfCancellation()
                 onEvent(
                     ExecutionEvent.Degraded(
                         executionId = executionId,
@@ -1559,6 +1567,7 @@ class ExecutionService(
         val ragContext = try {
             ragRetrievalProvider?.invoke(query, 4)
         } catch (rag: Exception) {
+            rag.rethrowIfCancellation()
             onEvent(
                 ExecutionEvent.Degraded(
                     executionId = executionId,

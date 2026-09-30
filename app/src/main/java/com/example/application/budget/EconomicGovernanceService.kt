@@ -23,6 +23,7 @@ import com.example.domain.core.budget.TokenUsageRecord
 import com.example.domain.core.budget.UsageAccountingInput
 import com.example.domain.core.budget.UsageCostRecord
 import com.example.domain.core.observability.MetricDimensions
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.budget.BudgetAllocationPort
 import com.example.domain.ports.budget.CostAggregate
 import com.example.domain.ports.budget.CostLedgerPort
@@ -355,6 +356,7 @@ class EconomicGovernanceService(
             try {
                 accountUsageSuspend(input)
             } catch (t: Throwable) {
+                t.rethrowIfCancellation()
                 // Accounting is best-effort by design; telemetry failure must
                 // not cascade.
             }
@@ -371,6 +373,7 @@ class EconomicGovernanceService(
         return try {
             accountUsageInternal(input)
         } catch (t: Throwable) {
+            t.rethrowIfCancellation()
             null
         }
     }

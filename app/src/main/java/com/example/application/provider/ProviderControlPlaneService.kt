@@ -19,6 +19,7 @@ import com.example.domain.core.resource.ResourceIdScheme
 import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.resource.ResourceValidatorRegistry
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.provider.OfferingRepository
 import com.example.domain.ports.provider.ProviderRepository
 import com.example.domain.ports.provider.ProviderServiceRepository
@@ -396,6 +397,7 @@ class ProviderControlPlaneService(
                 is Outcome.Error -> Outcome.Error(discovery.failure.toString(), discovery.diagnosticMessage)
             }
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error("DISCOVERY_FAILED", "Discovery failed: ${e.message}")
         }
     }

@@ -5,6 +5,7 @@ import com.example.domain.core.OutcomeMetadata
 import com.example.domain.core.memory.EmbeddingFailure
 import com.example.domain.core.memory.EmbeddingVector
 import com.example.domain.core.memory.SafeEmbeddingProviderMetadata
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.memory.EmbeddingProviderPort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -59,6 +60,7 @@ class LocalDeterministicEmbeddingAdapter(
                 metadata = OutcomeMetadata(durationMs = duration, providerId = providerId)
             )
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 failure = EmbeddingFailure.EmbeddingUnavailable(providerId, "فشل توليد التضمينات الدلالية محلياً: ${e.localizedMessage}"),
                 diagnosticMessage = e.message ?: "Local embedding error"

@@ -10,6 +10,7 @@ import com.example.domain.core.context.ResourceScope
 import com.example.domain.core.project.DependencyRequirement
 import com.example.domain.core.project.DependencyStatus
 import com.example.domain.core.project.ProjectDependencyType
+import com.example.domain.core.rethrowIfCancellation
 import com.example.infrastructure.persistence.AppDatabase
 import com.example.infrastructure.persistence.entities.ArtifactEntity
 import com.example.infrastructure.persistence.entities.ChatTimelineEventEntity
@@ -390,6 +391,7 @@ class ProjectPackageService(
                 importedFileCount = files.size
             )
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             TransferOutcome.Failure("EXPORT_EXCEPTION", "فشل تصدير المشروع: ${e.message}", true)
         } finally {
             // A3 (CLOSURE FINAL STAGE §5/item 3): the caller-supplied
@@ -1163,6 +1165,7 @@ class ProjectPackageService(
                 droppedReferences = droppedReferenceCount
             )
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             // ANY failure before/inside/after the transaction leaves NO
             // partial destination state (staging is cleaned; the DB
             // transaction rolled back by Room on throw).

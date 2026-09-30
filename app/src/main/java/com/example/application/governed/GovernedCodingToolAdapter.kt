@@ -2,6 +2,7 @@ package com.example.application.governed
 
 import com.example.domain.core.Outcome
 import com.example.domain.core.execution.ExecutionScope
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.security.governance.PrincipalType
 import com.example.domain.core.tools.ToolDeclaration
 import com.example.domain.core.tools.ToolFailure
@@ -103,7 +104,8 @@ class GovernedCodingToolAdapter(
             val token = if (scope != null) {
                 try {
                     approvalTokenProvider?.invoke(executionId, governedToolName)
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    e.rethrowIfCancellation()
                     null // transport failure is honest: the pause path handles it
                 }
             } else null

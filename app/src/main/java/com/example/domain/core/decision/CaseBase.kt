@@ -1,6 +1,7 @@
 package com.example.domain.core.decision
 
 import com.example.domain.core.resource.ResourceId
+import com.example.domain.core.rethrowIfCancellation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.sqrt
@@ -103,6 +104,7 @@ class CaseBase(
                     }
                     durableStoreHealthy = true
                 } catch (e: Exception) {
+                    e.rethrowIfCancellation()
                     recordPersistenceFailure("LOAD_FAILED: ${e.message ?: e.javaClass.simpleName}")
                     // Fall back to in-memory bootstrap cases (counted, not silent).
                 } finally {
@@ -174,6 +176,7 @@ class CaseBase(
             }
             true
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             recordPersistenceFailure("APPEND_FAILED: ${e.message ?: e.javaClass.simpleName}")
             false
         }

@@ -24,6 +24,7 @@ import com.example.domain.core.radar.RadarSnapshot
 import com.example.domain.core.radar.RecommendationPriority
 import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.domain.core.resource.ResourceRecord
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.radar.CapabilityRadarPersistencePort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -99,7 +100,8 @@ class CapabilityRadarService(
             try {
                 persistence.insertEvidence(evidence)
                 scheduleReDerivation(evidence.workspaceId)
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                e.rethrowIfCancellation()
                 // Observability/derivation is best-effort.
             }
         }
@@ -115,7 +117,8 @@ class CapabilityRadarService(
             events.collect { event ->
                 try {
                     handleExecutionEvent(event)
-                } catch (_: Throwable) {
+                } catch (e: Throwable) {
+                    e.rethrowIfCancellation()
                     // Radar must never break the event pipeline.
                 }
             }
@@ -261,7 +264,8 @@ class CapabilityRadarService(
         derivationJobs[key] = scope.launch {
             try {
                 deriveSnapshotSuspend(workspaceId, NetworkPolicy.HYBRID, isNetworkAvailable = true)
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                e.rethrowIfCancellation()
                 // best-effort
             }
         }

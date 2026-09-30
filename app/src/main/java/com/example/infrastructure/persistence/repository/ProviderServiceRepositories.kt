@@ -17,6 +17,7 @@ import com.example.domain.core.resource.ResourceId
 import com.example.domain.core.resource.ResourceLifecycleState
 import com.example.domain.core.resource.ResourceRecord
 import com.example.domain.core.resource.ResourceType
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.provider.OfferingRepository
 import com.example.domain.ports.provider.ProviderRepository
 import com.example.domain.ports.provider.ProviderServiceRepository
@@ -106,6 +107,7 @@ class RoomProviderRepository(
         dao.upsert(provider.toEntity())
         Outcome.Success(Unit)
     } catch (e: Exception) {
+        e.rethrowIfCancellation()
         Outcome.Error("PROVIDER_SAVE_FAILED", e.message ?: "Unknown error saving provider")
     }
 
@@ -113,6 +115,7 @@ class RoomProviderRepository(
         dao.deleteById(id)
         Outcome.Success(Unit)
     } catch (e: Exception) {
+        e.rethrowIfCancellation()
         Outcome.Error("PROVIDER_DELETE_FAILED", e.message ?: "Unknown error deleting provider")
     }
 
@@ -166,6 +169,7 @@ class RoomProviderServiceRepository(
         dao.upsert(service.toEntity())
         Outcome.Success(Unit)
     } catch (e: Exception) {
+        e.rethrowIfCancellation()
         Outcome.Error("SERVICE_SAVE_FAILED", e.message ?: "Unknown error saving service")
     }
 
@@ -173,6 +177,7 @@ class RoomProviderServiceRepository(
         dao.deleteById(id)
         Outcome.Success(Unit)
     } catch (e: Exception) {
+        e.rethrowIfCancellation()
         Outcome.Error("SERVICE_DELETE_FAILED", e.message ?: "Unknown error deleting service")
     }
 
@@ -246,6 +251,7 @@ class RoomServiceConfigurationRepository(
             dao.upsert(toSave.toEntity())
             Outcome.Success(Unit)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error("CONFIG_SAVE_FAILED", e.message ?: "Unknown error saving configuration")
         }
     }
@@ -254,6 +260,7 @@ class RoomServiceConfigurationRepository(
         dao.deleteById(id)
         Outcome.Success(Unit)
     } catch (e: Exception) {
+        e.rethrowIfCancellation()
         Outcome.Error("CONFIG_DELETE_FAILED", e.message ?: "Unknown error deleting configuration")
     }
 

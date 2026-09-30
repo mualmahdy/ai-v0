@@ -9,6 +9,7 @@ import com.example.domain.core.memory.RetrievalMode
 import com.example.domain.core.memory.ScoredMemoryRecord
 import com.example.domain.core.memory.VectorStoreFailure
 import com.example.domain.core.memory.VectorStoreRecord
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.memory.EmbeddingProviderPort
 import com.example.domain.ports.memory.MemoryRepositoryPort
 import com.example.domain.ports.memory.VectorStorePort
@@ -73,6 +74,7 @@ class RoomVectorStoreAdapter(
             memoryDao.insertMemory(entity)
             Outcome.Success(Unit)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 VectorStoreFailure.StorageWriteError("فشل حفظ السجل في الذاكرة: ${e.localizedMessage}")
             )
@@ -120,6 +122,7 @@ class RoomVectorStoreAdapter(
             val topResults = scored.sortedByDescending { it.second }.take(topK).map { it.first }
             Outcome.Success(topResults)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 VectorStoreFailure.StorageReadError("خطأ أثناء استعلام المتجهات الدلالية: ${e.localizedMessage}")
             )
@@ -131,6 +134,7 @@ class RoomVectorStoreAdapter(
             memoryDao.deleteMemory(id)
             Outcome.Success(Unit)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(VectorStoreFailure.StorageWriteError("فشل حذف السجل: ${e.localizedMessage}"))
         }
     }
@@ -140,6 +144,7 @@ class RoomVectorStoreAdapter(
             memoryDao.clearAll()
             Outcome.Success(Unit)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(VectorStoreFailure.StorageWriteError("فشل تفريغ الذاكرة: ${e.localizedMessage}"))
         }
     }
@@ -192,6 +197,7 @@ class RoomVectorStoreAdapter(
             memoryDao.insertMemory(entity)
             Outcome.Success(Unit)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(VectorStoreFailure.StorageWriteError("فشل حفظ الذاكرة: ${e.localizedMessage}"))
         }
     }
@@ -255,6 +261,7 @@ class RoomVectorStoreAdapter(
                 Outcome.Success(sorted)
             }
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(VectorStoreFailure.StorageReadError("فشل استرجاع الذاكرة: ${e.localizedMessage}"))
         }
     }
@@ -273,6 +280,7 @@ class RoomVectorStoreAdapter(
             }
             Outcome.Success(list)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(VectorStoreFailure.StorageReadError("فشل جلب الذاكرة: ${e.localizedMessage}"))
         }
     }

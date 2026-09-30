@@ -9,6 +9,7 @@ import com.example.domain.core.provider.ServiceProtocolId
 import com.example.domain.core.provider.ServiceType
 import com.example.domain.core.provider.offering.OfferingType
 import com.example.domain.core.provider.offering.ServiceOffering
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.llm.LlmProviderPort
 import com.example.infrastructure.network.EgressControl
 import com.example.infrastructure.network.GovernedHttpClientFactory
@@ -257,6 +258,7 @@ class DiscoveryAdapterFactory(
                 else -> Outcome.Success(emptyList())
             }
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error("DISCOVERY_EXCEPTION", "Discovery exception: ${e.message}")
         }
     }

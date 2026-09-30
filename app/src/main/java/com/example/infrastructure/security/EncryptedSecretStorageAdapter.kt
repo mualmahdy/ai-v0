@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
 import com.example.domain.core.Outcome
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.ports.provider.SecureCredentialStoragePort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -116,6 +117,7 @@ class EncryptedSecretStorageAdapter(
                     "ولن يتم استخدام مفتاح برمجي غير آمن. لا يمكن تخزين الأسرار في هذه البيئة."
             )
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 "SECRET_ENCRYPTION_FAILED",
                 "فشل تشفير وحفظ المفتاح السري بأمان: ${e.localizedMessage}"
@@ -153,6 +155,7 @@ class EncryptedSecretStorageAdapter(
                 "فشل الاسترجاع: مخزن مفاتيح الجهاز غير متاح — رُفض استخدام بديل برمجي غير آمن."
             )
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 "SECRET_DECRYPTION_FAILED",
                 "فشل فك تشفير المفتاح السري: ${e.localizedMessage}"
@@ -165,6 +168,7 @@ class EncryptedSecretStorageAdapter(
             prefs.edit().remove("secret_$alias").apply()
             Outcome.Success(Unit)
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             Outcome.Error(
                 "SECRET_DELETE_FAILED",
                 "فشل حذف المفتاح السري: ${e.localizedMessage}"

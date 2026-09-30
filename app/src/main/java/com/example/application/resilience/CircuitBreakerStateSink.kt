@@ -2,6 +2,7 @@ package com.example.application.resilience
 
 import com.example.domain.core.resilience.CircuitBreakerSnapshot
 import com.example.domain.core.resilience.CircuitBreakerState
+import com.example.domain.core.rethrowIfCancellation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
@@ -53,6 +54,7 @@ class CircuitBreakerStateSink(
                 writer(resourceId, snapshot)
                 lastPersisted[resourceId] = persistKey
             } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 persistenceFailureCount += 1
                 onError(resourceId, e)
             }

@@ -24,6 +24,7 @@ import com.example.domain.core.execution.ExecutionScope
 import com.example.domain.core.execution.IntentGate
 import com.example.domain.core.llm.LlmMessage
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.security.SecurityPolicy
 import com.example.domain.core.agent.AgentId
 import com.example.domain.core.task.TaskDefinition
@@ -1987,6 +1988,7 @@ class AgentOrchestrator(
             )
             true
         } catch (e: Exception) {
+            e.rethrowIfCancellation()
             false
         }
     }
@@ -2072,7 +2074,8 @@ class AgentOrchestrator(
                 )
             )
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
             // GAP-13: honest failure — the caller EMITS the degradation.
             false
         }
@@ -2103,7 +2106,8 @@ class AgentOrchestrator(
                 now = System.currentTimeMillis()
             )
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
             false
         }
     }

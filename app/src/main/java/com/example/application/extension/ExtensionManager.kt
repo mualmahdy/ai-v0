@@ -14,6 +14,7 @@ import com.example.domain.core.extension.SkillManifest
 import com.example.domain.core.extension.SkillParameterDefinition
 import com.example.domain.core.extension.SkillState
 import com.example.domain.core.provider.HealthStatus
+import com.example.domain.core.rethrowIfCancellation
 import com.example.domain.core.tools.ToolDeclaration
 import com.example.domain.core.tools.ToolFailure
 import com.example.domain.core.tools.ToolInput
@@ -224,7 +225,8 @@ class ExtensionManager(
                     }
                     registerMcpToolsInRegistry()
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 // Ignore failure and maintain defaults
             }
         }
@@ -422,7 +424,8 @@ class ExtensionManager(
                         lastVerifiedEpochMs = System.currentTimeMillis()
                     )
                 )
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                e.rethrowIfCancellation()
                 // Ignore non-fatal db save error
             }
         }
