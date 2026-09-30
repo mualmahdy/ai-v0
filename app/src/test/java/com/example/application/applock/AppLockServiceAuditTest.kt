@@ -113,11 +113,11 @@ class AppLockServiceAuditTest {
         service.setPolicy(AppLockPolicy.DISABLED)
 
         // The unified trail writes async (the service scope launches each
-        // record) — await the full episode (≥ 9 rows).
-        awaitUntil { recentAuditRows().size >= 9 }
-        val events = recentAuditRows()
-        val actions = events.map { it.action }
-
+        // record) — await the COMPLETE episode, not a row count: awaiting
+        // ">= 9 rows" raced the final APP_LOCK_DISABLED insert (the 10th)
+        // under a loaded full-suite JVM — the assertion then failed on a
+        // trail that simply hadn't finished landing. Waiting for every
+        // expected KIND makes the await exactly as strong as the assertion.
         val expectedKinds = listOf(
             "APP_LOCK_ENABLED",
             "APP_LOCK_TRIGGERED",
@@ -127,6 +127,10 @@ class AppLockServiceAuditTest {
             "APP_LOCK_AUTH_CANCELLED",
             "APP_LOCK_DISABLED"
         )
+        awaitUntil { expectedKinds.all { kind -> recentAuditRows().any { it.action == kind } } }
+        val events = recentAuditRows()
+        val actions = events.map { it.action }
+
         expectedKinds.forEach { kind ->
             assertTrue(
                 "the audit trail must contain the app-lock event $kind (saw: $actions)",

@@ -1,6 +1,8 @@
 package com.example.domain.core
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 
 /**
  * Cancellation-safe companion for broad `catch` clauses.
@@ -44,4 +46,41 @@ import kotlinx.coroutines.CancellationException
  */
 fun Throwable.rethrowIfCancellation() {
     if (this is CancellationException) throw this
+}
+
+/**
+ * Cancellation-aware companion for catches around THIRD-PARTY suspending I/O
+ * (Room's suspend DAOs are the canonical case in this codebase).
+ *
+ * Why this exists (HOTFIX — the CI unit-test failure after d8cf5c0):
+ * Room delivers "the database was closed while the suspend insert ran" AS a
+ * [CancellationException]/[JobCancellationException] thrown from its own
+ * coroutine machinery. That is NOT the caller's cancellation — nobody
+ * cancelled the business coroutine — but a plain
+ * [rethrowIfCancellation] rethrows it anyway, which:
+ *
+ *  - breaks the honest-outage contract of the catch (the failure is no
+ *    longer counted/surfaced — the audit-trail observability test pins
+ *    exactly this); and
+ *  - injects a FALSE cancellation into the caller: a perfectly healthy
+ *    coroutine dies with JobCancellationException, which is strictly worse
+ *    for structured concurrency than the swallow it replaced.
+ *
+ * This suspend variant rethrows ONLY when the CURRENT coroutine is genuinely
+ * cancelled (its job is no longer active). A CancellationException arriving
+ * while the current job is still active is by definition a foreign signal
+ * (closed executor/pool) and is left for the handler to classify as an
+ * honest failure.
+ *
+ * Use [rethrowIfCancellation] in catches that only guard YOUR OWN coroutine
+ * machinery; use this wherever the guarded call goes through a third-party
+ * suspend bridge that may leak cancellation semantics (Room, and any
+ * library that owns its own dispatcher).
+ */
+suspend fun Throwable.rethrowIfGenuineCancellation() {
+    if (this is CancellationException &&
+        !currentCoroutineContext().isActive
+    ) {
+        throw this
+    }
 }

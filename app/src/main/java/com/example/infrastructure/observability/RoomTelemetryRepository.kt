@@ -9,6 +9,7 @@ import com.example.domain.core.observability.MetricSample
 import com.example.domain.core.observability.MetricSnapshot
 import com.example.domain.core.observability.MetricType
 import com.example.domain.core.rethrowIfCancellation
+import com.example.domain.core.rethrowIfGenuineCancellation
 import com.example.domain.ports.observability.TelemetryPort
 import com.example.infrastructure.persistence.dao.AuditTrailDao
 import com.example.infrastructure.persistence.dao.ExecutionLogDao
@@ -130,7 +131,7 @@ class RoomTelemetryRepository(
             }
             cacheLock.withLock { _snapshotsFlow.value = newCache }
         } catch (e: Throwable) {
-            e.rethrowIfCancellation()
+            e.rethrowIfGenuineCancellation()
             // Best-effort seed; the cache will rebuild as new samples arrive.
         }
     }
@@ -201,7 +202,7 @@ class RoomTelemetryRepository(
             val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
             metricEventDao.pruneOlderThan(cutoff)
         } catch (t: Throwable) {
-            t.rethrowIfCancellation()
+            t.rethrowIfGenuineCancellation()
             // Persistence failures must never break the runtime path — but
             // they are COUNTED and surfaced (never silently swallowed).
             persistenceFailureCount++
@@ -272,7 +273,7 @@ class RoomTelemetryRepository(
         try {
             auditTrailDao.insert(entity)
         } catch (t: Throwable) {
-            t.rethrowIfCancellation()
+            t.rethrowIfGenuineCancellation()
             // GAP-24: an audit-write failure must never break the audited
             // business path — but it is COUNTED and surfaced (the -1L return
             // already told the caller; the counters tell the observatory).
@@ -313,7 +314,7 @@ class RoomTelemetryRepository(
                     workspaceId = node.workspaceId
                 )
             )
-        } catch (e: Throwable) { e.rethrowIfCancellation(); /* best-effort */ }
+        } catch (e: Throwable) { e.rethrowIfGenuineCancellation(); /* best-effort */ }
 
         try {
             executionTraceDao.insert(
@@ -334,7 +335,7 @@ class RoomTelemetryRepository(
                     workspaceId = node.workspaceId
                 )
             )
-        } catch (e: Throwable) { e.rethrowIfCancellation(); /* best-effort */ }
+        } catch (e: Throwable) { e.rethrowIfGenuineCancellation(); /* best-effort */ }
         Unit
     }
 
