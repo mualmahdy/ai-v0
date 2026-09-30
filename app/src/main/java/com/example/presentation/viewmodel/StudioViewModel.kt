@@ -269,6 +269,18 @@ class StudioViewModel(
     private var currentExecutionTaskId: String? = null
 
     /**
+     * EMERGENCY HOTFIX R2 (the duplicated message after regenerate): a
+     * SYNCHRONOUS in-flight gate for the targeted regenerate/retry entries.
+     * The `isExecuting` flag used to be set only INSIDE the launched
+     * coroutine, so a rapid double-tap on Regenerate/Retry passed the
+     * `current.isExecuting` guard TWICE — two concurrent executions, two
+     * appended answers, two durable turns with the same prompt. The CAS
+     * gate rejects the second tap synchronously; the flag is released in the
+     * execution's finally-guard (and on every honest early exit).
+     */
+    private val targetedActionInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
      * ARTIFACT CANVAS (§10): monotonic request token — a late artifact read
      * from a superseded request (or a different session/project scope) can
      * never mutate the CURRENT preview state.
@@ -923,7 +935,10 @@ class StudioViewModel(
                         studioSession = loaded.turns.map { turn ->
                             StudioTurn(
                                 id = turn.id,
-                                prompt = turn.prompt,
+                                // HOTFIX R2: a regenerated turn's history text
+                                // is the CLEAN prompt (the marker never enters
+                                // the in-memory transcript or the LLM history).
+                                prompt = com.example.presentation.state.RegenerationTurnMarker.strip(turn.prompt),
                                 agentName = turn.agentName ?: loaded.session.agentName ?: "المساعد",
                                 agentRole = turn.agentRole ?: "",
                                 answer = turn.answer,
@@ -1038,6 +1053,27 @@ class StudioViewModel(
         sessionAgentName: String?
     ): List<ChatEntry> {
         val agentName = turn.agentName ?: sessionAgentName ?: "المساعد"
+        // EMERGENCY HOTFIX R2 (the duplicated message after regenerate): a
+        // marked turn is a TARGETED REGENERATION — its answer anchors under
+        // the ORIGINAL user entry (already rendered by the original turn);
+        // rebuilding a fresh user bubble for it visibly duplicated the
+        // question after a session reopen.
+        if (com.example.presentation.state.RegenerationTurnMarker.isRegeneration(turn.prompt)) {
+            return listOf(
+                ChatEntry.Assistant(
+                    id = "a_${turn.id}",
+                    text = turn.answer,
+                    agentName = agentName,
+                    agentRole = turn.agentRole ?: "",
+                    isSuccessful = turn.isSuccessful,
+                    modelResourceId = turn.modelResourceId,
+                    tokensConsumed = turn.tokensConsumed,
+                    durationMs = turn.durationMs,
+                    eventCount = turn.eventCount,
+                    sources = turn.sources.map { it.toChatSourceRef() }
+                )
+            )
+        }
         return listOf(
             ChatEntry.User(
                 id = "u_${turn.id}",
@@ -1289,7 +1325,16 @@ class StudioViewModel(
         sources: List<TurnSourceRef> = emptyList(),
         pinnedWorkspaceId: String? = null,
         pinnedProjectId: Long? = null,
-        executionTaskId: String
+        executionTaskId: String,
+        /**
+         * EMERGENCY HOTFIX R2 (the duplicated message after regenerate):
+         * TRUE when this turn was produced by a TARGETED REGENERATION — the
+         * durable row then carries the [RegenerationTurnMarker] so a session
+         * reopen anchors the answer to the ORIGINAL user entry instead of
+         * minting a duplicate user bubble (the live conversation never
+         * repeated the question; the reopened one must not either).
+         */
+        isRegeneration: Boolean = false
     ) {
         val id = sessionId ?: return
         // CLOSURE P0: the durable write runs on the app-wide durable scope —
@@ -1306,7 +1351,11 @@ class StudioViewModel(
                 // turn that was not persisted.
                 val appended = conversationSessionService.appendTurn(
                     sessionId = id,
-                    prompt = prompt,
+                    prompt = if (isRegeneration) {
+                        com.example.presentation.state.RegenerationTurnMarker.mark(prompt)
+                    } else {
+                        prompt
+                    },
                     answer = answer,
                     agentName = agentName,
                     agentRole = agentRole,
@@ -1639,14 +1688,27 @@ class StudioViewModel(
     fun regenerateFromAssistant(assistantEntryId: String, agent: AgentDefinition?) {
         val current = _state.value
         if (current.isExecuting) return
+        // HOTFIX R2: synchronous double-tap gate — see [targetedActionInFlight].
+        if (!targetedActionInFlight.compareAndSet(false, true)) return
         val assistantIndex = current.timeline.indexOfFirst { it.id == assistantEntryId }
-        if (assistantIndex < 0) return
+        if (assistantIndex < 0) {
+            targetedActionInFlight.set(false)
+            return
+        }
         val targetUser = current.timeline.take(assistantIndex)
-            .lastOrNull { it is ChatEntry.User } as? ChatEntry.User ?: return
-
+            .lastOrNull { it is ChatEntry.User } as? ChatEntry.User
+        if (targetUser == null) {
+            targetedActionInFlight.set(false)
+            return
+        }
+        val resolvedAgent = resolveAgentForExecution(agent)
+        if (resolvedAgent == null) {
+            targetedActionInFlight.set(false)
+            return
+        }
         launchExecutionForUserEntry(
             targetUser = targetUser,
-            resolvedAgent = resolveAgentForExecution(agent) ?: return
+            resolvedAgent = resolvedAgent
         )
     }
 
@@ -1718,6 +1780,9 @@ class StudioViewModel(
                         else -> outcome.failures.joinToString("\n")
                     }
                     _state.update { it.copy(errorMessage = reason) }
+                    // HOTFIX R2: release the double-tap gate on the honest
+                    // early exit (executeText never ran to release it).
+                    targetedActionInFlight.set(false)
                     return@launch
                 }
                 executeText(
@@ -2173,7 +2238,8 @@ class StudioViewModel(
                                     sources = collectedSources.map { it.toTurnSourceRef() },
                                     pinnedWorkspaceId = pinnedWorkspaceId,
                                     pinnedProjectId = pinnedProjectId,
-                                    executionTaskId = executionTaskId
+                                    executionTaskId = executionTaskId,
+                                    isRegeneration = !appendUserEntry
                                 )
                                 // CLOSURE FINAL STAGE (§5 item 2): the durable
                                 // turn persisted — SUCCEEDED lands NOW (no
@@ -2241,7 +2307,8 @@ class StudioViewModel(
                             sources = collectedSources.map { it.toTurnSourceRef() },
                             pinnedWorkspaceId = pinnedWorkspaceId,
                             pinnedProjectId = pinnedProjectId,
-                            executionTaskId = executionTaskId
+                            executionTaskId = executionTaskId,
+                            isRegeneration = !appendUserEntry
                         )
                         // CLOSURE FINAL STAGE (§5 item 2): durable truth first —
                         // SUCCEEDED lands after the persist and BEFORE the
@@ -2578,7 +2645,8 @@ class StudioViewModel(
                         attachments = attachments,
                         pinnedWorkspaceId = pinnedWorkspaceId,
                         pinnedProjectId = pinnedProjectId,
-                        executionTaskId = executionTaskId
+                        executionTaskId = executionTaskId,
+                        isRegeneration = !appendUserEntry
                     )
                     if (currentExecutionTaskId == executionTaskId && !approvalRequested) {
                         terminalSeq++
@@ -2616,6 +2684,11 @@ class StudioViewModel(
                 // kernel gap), free the composer instead of leaving a
                 // permanently-cancel-only UI — and say so honestly.
                 if (currentExecutionTaskId == executionTaskId) currentExecutionTaskId = null
+                // HOTFIX R2: release the targeted-action double-tap gate —
+                // this execution (regenerate/retry or plain send) is fully
+                // terminal now. Releasing an already-false flag is a no-op
+                // for ordinary sends.
+                targetedActionInFlight.set(false)
                 _state.update { state ->
                     val stillLive = state.liveExecution?.executionId == executionTaskId &&
                         state.liveExecution?.phase != ExecutionPhase.CANCELLED &&
@@ -3301,6 +3374,14 @@ class StudioViewModel(
         }
 
         val resolvedAgent = resolveAgentForExecution(agent) ?: return null
+        // HOTFIX R2: same synchronous double-tap gate as regenerate (the
+        // approval retry rides the SAME launch path).
+        if (!targetedActionInFlight.compareAndSet(false, true)) {
+            _state.update {
+                it.copy(errorMessage = "هناك إجراء مستهدف جارٍ بالفعل — أعد المحاولة عند اكتماله.")
+            }
+            return null
+        }
         launchExecutionForUserEntry(
             targetUser = blockedUser,
             resolvedAgent = resolvedAgent

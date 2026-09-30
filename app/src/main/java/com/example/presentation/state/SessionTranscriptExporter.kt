@@ -86,7 +86,13 @@ object SessionTranscriptExporter {
 
         turns.forEach { turn ->
             sb.append("## المستخدم\n")
-                .append(turn.prompt.trim().ifBlank { "_(رسالة فارغة)_" })
+                // HOTFIX R2: a regenerated turn's durable prompt carries the
+                // invisible regeneration marker — the EXPORT always shows the
+                // clean user text.
+                .append(
+                    com.example.presentation.state.RegenerationTurnMarker.strip(turn.prompt)
+                        .trim().ifBlank { "_(رسالة فارغة)_" }
+                )
                 .append("\n\n")
             val agentLabel = turn.agentName?.let { " — $it" } ?: ""
             val failureLabel = if (turn.isSuccessful) "" else " (فاشلة)"
