@@ -231,8 +231,9 @@ class ChatInputAcceptanceTest {
     @Test
     fun `the capability plus button is reachable and clickable`() {
         openChatScreen()
-        composeRule.onNodeWithTag("btn_open_capabilities").assertIsDisplayed()
-        composeRule.onNodeWithTag("btn_open_capabilities").performClick()
+        // UNIFICATION: the [+] beside the field is the SINGLE hub entry.
+        composeRule.onNodeWithTag("btn_quick_attach").assertIsDisplayed()
+        composeRule.onNodeWithTag("btn_quick_attach").performClick()
         composeRule.waitUntil(timeoutMillis = 20_000) {
             composeRule.onAllNodesWithTag("capability_menu_sheet").fetchSemanticsNodes().isNotEmpty()
         }
@@ -243,14 +244,18 @@ class ChatInputAcceptanceTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `the composer context strip carries the hub chip - context is NOT duplicated per CLOSURE 13`() {
+    fun `the hub entry is UNIFIED into the plus button - no duplicated capabilities strip`() {
         openChatScreen()
-        composeRule.onNodeWithTag("composer_context_strip").assertIsDisplayed()
-        composeRule.onNodeWithTag("btn_open_capabilities").assertIsDisplayed()
+        // UNIFICATION HOTFIX (duplicated capabilities entries): the
+        // "القدرات" chip above the input is GONE — one door ([+]) into the
+        // capability space, frontier composer pattern. The transient
+        // context gauge may still compose the strip row when it is visible,
+        // but it never carries a second hub entry.
+        composeRule.onNodeWithTag("btn_open_capabilities").assertDoesNotExist()
+        composeRule.onNodeWithTag("btn_quick_attach").assertIsDisplayed()
         // CLOSURE §13 (IA consolidation): the agent/model chip NO LONGER
         // lives in the composer — it is in the CHAT HEADER and the context
-        // sheet (one Conversation Context — §14). The composer stays
-        // INPUT + primary actions; the token gauge is transient.
+        // sheet (one Conversation Context — §14).
         composeRule.onNodeWithTag("chip_composer_agent_model").assertDoesNotExist()
     }
 
@@ -276,7 +281,7 @@ class ChatInputAcceptanceTest {
     @Test
     fun `the capability hub renders the four professional groups`() {
         openChatScreen()
-        composeRule.onNodeWithTag("btn_open_capabilities").performClick()
+        composeRule.onNodeWithTag("btn_quick_attach").performClick()
         composeRule.waitUntil(timeoutMillis = 20_000) {
             composeRule.onAllNodesWithTag("capability_menu_sheet").fetchSemanticsNodes().isNotEmpty()
         }
@@ -293,7 +298,7 @@ class ChatInputAcceptanceTest {
     @Test
     fun `UNAVAILABLE is not HIDDEN - media and creation rows stay visible in the hub`() {
         openChatScreen()
-        composeRule.onNodeWithTag("btn_open_capabilities").performClick()
+        composeRule.onNodeWithTag("btn_quick_attach").performClick()
         composeRule.waitUntil(timeoutMillis = 20_000) {
             composeRule.onAllNodesWithTag("capability_menu_sheet").fetchSemanticsNodes().isNotEmpty()
         }

@@ -19,8 +19,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Apps
-import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -39,7 +37,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -69,11 +66,21 @@ import com.example.presentation.state.ContextWindowGauge
  *
  * THE COMMAND SURFACE (§7), top to bottom:
  *  1. the ATTACHMENT DRAFTS chips row (SAF-picked, removable before send);
- *  2. the CONTEXT STRIP — one compact row carrying the capability hub entry
- *     and the live AGENT/MODEL binding chip (the conversation's command
- *     context — both open EXISTING surfaces, nothing new is invented);
- *  3. the INPUT ROW — [+] quick attach | the field | the VOICE placeholder
- *     (disabled with the honest reason — UNAVAILABLE ≠ HIDDEN) | Send/Stop.
+ *  2. the TRANSIENT context gauge — only while the conversation's context
+ *     window is filling (NEAR_FULL/CRITICAL) or an execution is live;
+ *  3. the INPUT ROW — [+] the SINGLE capability hub entry (attachments,
+ *     search, knowledge, skills, tools, MCP… one door, frontier pattern)
+ *     | the field | the VOICE placeholder (disabled with the honest
+ *     reason — UNAVAILABLE ≠ HIDDEN) | Send/Stop.
+ *
+ * UNIFICATION HOTFIX (the duplicated capabilities entries): the composer
+ * previously carried TWO entries into the same capability space — the
+ * "القدرات" chip in a strip ABOVE the input row and a [+] quick-attach
+ * beside the field. Both launched pickers on divergent paths and both
+ * crashed the app (see the import-path hotfix). Per the frontier
+ * composer pattern (Claude / ChatGPT), the [+] is now the ONE entry: it
+ * always opens the categorized hub (whose rows each carry their own
+ * honest availability), and the duplicated strip is gone.
  *
  * The VOICE placeholder (§3/§7): speech has NO runtime execution path in
  * this version (the provider architecture knows the service type; nothing
@@ -90,13 +97,8 @@ fun ChatComposer(
     onCancel: () -> Unit,
     onClearDraft: () -> Unit,
     modifier: Modifier = Modifier,
-    /** Task-2: opens the capability hub (the context strip's chip — §3). */
-    onOpenCapabilities: () -> Unit = {},
-    /** UI POLISH §7: the [+] quick-attach — launches the file picker directly. */
+    /** UNIFICATION: the [+] entry — opens the capability hub (ONE door). */
     onQuickAttach: () -> Unit = {},
-    /** UI POLISH §3/§7: quick attach mirrors the hub's ATTACH_FILE availability. */
-    canQuickAttach: Boolean = true,
-    quickAttachDisabledReason: String? = null,
     /** UI POLISH §7: opens the conversation-context sheet (agent/model). */
     onOpenContext: () -> Unit = {},
     /** UI POLISH §7: the live binding the agent/model chip summarizes. */
@@ -242,37 +244,28 @@ fun ChatComposer(
                 )
             }
 
-            // ---- CLOSURE §13 (Composer Redesign): the composer shows
-            // INPUT + PRIMARY ACTIONS permanently; context is NOT duplicated
-            // here — the conversation-context chip (agent/model) lives in the
-            // HEADER and the editable surface in the CONTEXT SHEET (§14:
-            // one Conversation Context concept, summary in the header,
-            // details in a sheet). The gauge is TRANSIENT: it appears only
-            // when the window fills (NEAR_FULL/CRITICAL) or an execution is
-            // live — the composer never becomes a permanent control panel.
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 6.dp)
-                    .testTag("composer_context_strip")
-            ) {
-                CommandChip(
-                    icon = Icons.Default.Apps,
-                    text = "القدرات",
-                    onClick = onOpenCapabilities,
-                    tag = "btn_open_capabilities",
-                    modifier = Modifier.weight(1f, fill = false)
-                )
-                // ---- FRONTIER CONTEXT WINDOW (TRANSIENT per §13): the honest
-                // token gauge — only while numbers exist AND the window is
-                // filling (or an execution is live); tinted by severity.
-                val gaugeVisible = ContextWindowGauge
-                    .isKnown(contextTokensUsed, contextTokensRemaining) &&
-                        (ContextWindowGauge.severity(contextTokensUsed, contextTokensRemaining) !=
-                                ContextWindowGauge.Severity.NORMAL || isExecuting)
-                if (gaugeVisible) {
-                    Spacer(modifier = Modifier.width(6.dp))
+            // ---- CLOSURE §13 (Composer Redesign) + UNIFICATION HOTFIX: the
+            // composer shows INPUT + PRIMARY ACTIONS permanently. The
+            // duplicated "القدرات" strip is REMOVED — the [+] beside the
+            // field is the single hub entry. The gauge is TRANSIENT: it
+            // appears only when the window fills (NEAR_FULL/CRITICAL) or an
+            // execution is live — the composer never becomes a permanent
+            // control panel.
+            val gaugeVisible = ContextWindowGauge
+                .isKnown(contextTokensUsed, contextTokensRemaining) &&
+                    (ContextWindowGauge.severity(contextTokensUsed, contextTokensRemaining) !=
+                            ContextWindowGauge.Severity.NORMAL || isExecuting)
+            if (gaugeVisible) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 6.dp)
+                        .testTag("composer_context_strip")
+                ) {
+                    // ---- FRONTIER CONTEXT WINDOW (TRANSIENT per §13): the honest
+                    // token gauge — only while numbers exist AND the window is
+                    // filling (or an execution is live); tinted by severity.
                     val severity = ContextWindowGauge.severity(contextTokensUsed, contextTokensRemaining)
                     val gaugeColor = when (severity) {
                         ContextWindowGauge.Severity.NORMAL -> MaterialTheme.colorScheme.primary
@@ -309,35 +302,27 @@ fun ChatComposer(
                     }
                 }
             }
-
-            // ---- §7: the INPUT ROW — quick attach | field | voice | send ----
+            // ---- §7 + UNIFICATION: the INPUT ROW — [+] hub | field | voice | send ----
             Row(verticalAlignment = Alignment.Bottom) {
-                // The [+] quick-attach (§7): the most common intent, one tap
-                // from the field. Mirrors the hub's ATTACH_FILE availability
-                // honestly — disabled with the REAL reason when the storage
-                // layer has no active project (§3: never a mystery dead button).
-                val quickAttachDescription = if (canQuickAttach) {
-                    "إرفاق ملف مع الرسالة"
-                } else {
-                    quickAttachDisabledReason?.let { "إرفاق ملف — $it" }
-                        ?: "إرفاق ملف — غير متاح حالياً"
-                }
+                // The [+] capability-hub entry (UNIFICATION HOTFIX): one door
+                // for attachments AND every conversation capability, always
+                // tappable — the hub's own rows carry the honest per-row
+                // availability + reasons (the previously gated + ALSO
+                // duplicated the hub above the field; one entry now).
                 Surface(
-                    onClick = { if (canQuickAttach) onQuickAttach() },
-                    enabled = canQuickAttach,
+                    onClick = onQuickAttach,
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     modifier = Modifier
                         .size(48.dp)
-                        .semantics { contentDescription = quickAttachDescription }
+                        .semantics { contentDescription = "القدرات — إرفاق ملفات واستدعاء الأدوات" }
                         .testTag("btn_quick_attach")
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             Icons.Default.Add,
                             contentDescription = null,
-                            tint = if (canQuickAttach) MaterialTheme.colorScheme.onSurfaceVariant
-                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -458,51 +443,3 @@ fun ChatComposer(
     }
 }
 
-/**
- * §7: one compact command chip of the composer's context strip — a 48dp
- * touch target that opens its EXISTING owning surface (hub / context sheet).
- */
-@Composable
-private fun CommandChip(
-    icon: ImageVector,
-    text: String,
-    onClick: () -> Unit,
-    tag: String,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-        modifier = modifier
-            .heightIn(min = 44.dp)
-            .testTag(tag)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = text,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Icon(
-                Icons.Default.ArrowDropDown,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(14.dp)
-            )
-        }
-    }
-}
