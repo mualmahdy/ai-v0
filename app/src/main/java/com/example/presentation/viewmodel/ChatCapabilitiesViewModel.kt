@@ -358,6 +358,14 @@ class ChatCapabilitiesViewModel(
                 } catch (e: Exception) {
                     e.rethrowIfCancellation()
                     failure = "فشل استيراد المرفق: ${e.localizedMessage}"
+                } catch (e: Throwable) {
+                    // HOTFIX (attach crash): an Error escaping the import
+                    // pipeline (OutOfMemoryError on oversized content, linkage
+                    // errors…) previously KILLED THE PROCESS straight out of
+                    // viewModelScope. First aid: the import pipeline never
+                    // takes the app down — the failure surfaces on the honest
+                    // attachmentError channel instead.
+                    failure = "فشل استيراد المرفق: ${e.localizedMessage ?: e.javaClass.simpleName}"
                 }
             }
 
@@ -444,6 +452,16 @@ class ChatCapabilitiesViewModel(
                     it.copy(
                         isImportingAttachment = false,
                         attachmentError = "فشل استيراد المجلد: ${e.localizedMessage}"
+                    )
+                }
+            } catch (e: Throwable) {
+                // HOTFIX (attach crash): same first-aid contract as the file
+                // path — an Error from the folder serialization/import must
+                // surface honestly, never kill the process.
+                _state.update {
+                    it.copy(
+                        isImportingAttachment = false,
+                        attachmentError = "فشل استيراد المجلد: ${e.localizedMessage ?: e.javaClass.simpleName}"
                     )
                 }
             }

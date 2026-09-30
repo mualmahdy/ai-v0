@@ -10,6 +10,8 @@ import com.example.domain.core.session.TurnAttachment
 import com.example.infrastructure.storage.SandboxProjectFileStore
 import java.io.InputStream
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * ============================================================================
@@ -156,7 +158,14 @@ class ChatAttachmentCoordinator(
                 (outcome as TransferOutcome.Failure).message
             )
         }
-        val sizeBytes = fileStore.stat(fileStore.projectRoot(projectId), relativePath).sizeBytes
+        // HOTFIX (attach crash — main-thread file hashing): this previously
+        // called fileStore.stat() HERE — on the CALLER's dispatcher, which for
+        // the chat attach path is the MAIN thread. stat() canonicalizes the
+        // path AND computes a full SHA-256 over the ENTIRE imported file, so
+        // every attachment froze the UI during the re-hash (large files →
+        // ANR → the system/user kills the app). registerFileArtifact()
+        // already stats the file ON Dispatchers.IO and returns the honest
+        // sizeBytes — the duplicate main-thread stat is simply gone.
         val artifact = artifactService.registerFileArtifact(
             workspaceId = workspaceId,
             projectId = projectId,
@@ -169,7 +178,7 @@ class ChatAttachmentCoordinator(
             id = "attm_${UUID.randomUUID().toString().take(12)}",
             name = displayName,
             mimeType = reportedMimeType ?: guessMimeType(displayName),
-            sizeBytes = if (sizeBytes > 0) sizeBytes else artifact.sizeBytes,
+            sizeBytes = artifact.sizeBytes,
             storageUri = relativePath,
             artifactId = artifact.id,
             provenance = "SAF_FILE"
@@ -210,7 +219,15 @@ class ChatAttachmentCoordinator(
             ?: throw AttachmentImportException("استيراد المجلد يتطلب مساحة عمل مُسندة (نطاق غير مُسند).")
         val projectId = scope.projectId
             ?: throw AttachmentImportException("استيراد المجلد يتطلب مشروعاً مُسنداً (نطاق غير مُسند).")
-        val zipStream = zipper(treeUri)
+        // HOTFIX (folder attach crash — main-thread in-memory zip): the tree
+        // traversal + full copy of every file into the ZIP buffer previously
+        // ran on the CALLER's dispatcher — the MAIN thread for the chat attach
+        // path. A real folder (binder queries + file reads + ZIP buffering,
+        // all in memory) froze the UI for seconds (ANR → app killed) and
+        // could OOM the process outright on larger folders. The serialization
+        // now runs on Dispatchers.IO, bounded by the port's own entry/byte
+        // caps (see AndroidContentPort).
+        val zipStream = withContext(Dispatchers.IO) { zipper(treeUri) }
             ?: throw AttachmentImportException("تعذر قراءة المجلد المحدد.")
         val displayName = contentPort.queryDisplayName(treeUri)
             ?: treeUri.substringAfterLast('/').ifBlank { "folder" }

@@ -76,19 +76,43 @@ class AndroidContentPort(
      * [FileTransferService.importFolderZip] contract consumes. Pure
      * framework APIs (DocumentsContract child queries) — no new dependency;
      * the transfer limits still bound the import downstream.
+     *
+     * HOTFIX (folder attach crash — unbounded in-memory serialization): the
+     * whole tree used to be buffered into ONE ByteArrayOutputStream with no
+     * cap of its own, so a folder larger than the heap killed the process
+     * with OutOfMemoryError BEFORE the transfer layer's limits could ever
+     * engage (they only see the stream afterwards). The traversal is now
+     * bounded here: at most [MAX_TREE_ENTRIES] entries and
+     * [MAX_TREE_TOTAL_BYTES] of file content. Exceeding either aborts the
+     * serialization (null → the coordinator's honest failure) instead of
+     * taking the whole app down. A streaming redesign (no in-memory buffer)
+     * is the strategic fix — see the delivery report.
      */
     fun openTreeAsZipStream(treeUriString: String): InputStream? = runCatching {
         val treeUri = Uri.parse(treeUriString)
         val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
         val rootDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, treeDocId)
+        val budget = TreeSerializationBudget()
         val buffer = ByteArrayOutputStream()
         ZipOutputStream(buffer).use { zip ->
-            writeTreeEntries(zip, rootDocUri, basePath = "")
+            writeTreeEntries(zip, rootDocUri, basePath = "", budget)
         }
         ByteArrayInputStream(buffer.toByteArray())
     }.getOrNull()
 
-    private fun writeTreeEntries(zip: ZipOutputStream, documentUri: Uri, basePath: String) {
+    /** Bounded traversal state for [openTreeAsZipStream]. */
+    private class TreeSerializationBudget {
+        var entries = 0
+        var totalBytes = 0L
+        val exceeded: Boolean get() = entries > MAX_TREE_ENTRIES || totalBytes > MAX_TREE_TOTAL_BYTES
+    }
+
+    private fun writeTreeEntries(
+        zip: ZipOutputStream,
+        documentUri: Uri,
+        basePath: String,
+        budget: TreeSerializationBudget
+    ) {
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
             documentUri,
             DocumentsContract.getDocumentId(documentUri)
@@ -106,6 +130,7 @@ class AndroidContentPort(
             val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
             val mimeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
             while (cursor.moveToNext()) {
+                if (budget.exceeded) throw TreeBudgetExceededException()
                 val documentId = cursor.getString(idIndex) ?: continue
                 val name = cursor.getString(nameIndex) ?: continue
                 val mimeType = cursor.getString(mimeIndex) ?: ""
@@ -114,17 +139,44 @@ class AndroidContentPort(
                 if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
                     zip.putNextEntry(ZipEntry("$entryPath/"))
                     zip.closeEntry()
-                    writeTreeEntries(zip, entryUri, entryPath)
+                    writeTreeEntries(zip, entryUri, entryPath, budget)
                 } else {
+                    budget.entries++
+                    if (budget.entries > MAX_TREE_ENTRIES) throw TreeBudgetExceededException()
                     zip.putNextEntry(ZipEntry(entryPath))
                     context.contentResolver.openInputStream(entryUri)?.use { input ->
-                        input.copyTo(zip)
+                        val buf = ByteArray(64 * 1024)
+                        while (true) {
+                            if (budget.totalBytes > MAX_TREE_TOTAL_BYTES) throw TreeBudgetExceededException()
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            budget.totalBytes += n
+                            zip.write(buf, 0, n)
+                        }
                     }
                     zip.closeEntry()
                 }
             }
         }
     }
+
+    private companion object {
+        /**
+         * HOTFIX caps for the folder bridge — generous enough for real
+         * project folders, far below the heap ceiling of a foreground app.
+         */
+        const val MAX_TREE_ENTRIES = 5_000
+        const val MAX_TREE_TOTAL_BYTES = 512L * 1024 * 1024
+    }
+
+    /**
+     * Signals the tree serialization budget was exceeded — caught by
+     * [openTreeAsZipStream]'s runCatching and surfaced as its honest null
+     * (an unimportable folder) instead of a truncated/partial ZIP.
+     */
+    private class TreeBudgetExceededException : RuntimeException(
+        "المجلد يتجاوز حدود الاستيراد (عدد المدخلات أو الحجم الكلي)."
+    )
 
     private fun queryDisplayNameOfDocument(uri: Uri): String? {
         return context.contentResolver.query(

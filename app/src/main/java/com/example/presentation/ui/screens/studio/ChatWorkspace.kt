@@ -203,6 +203,26 @@ fun ChatWorkspace(
         if (uri != null) onPickFolder(uri.toString())
     }
 
+    // HOTFIX (attach-crash hardening): the launch call itself is now guarded
+    // too — a device/ROM without a DocumentsUI activity for
+    // ACTION_OPEN_DOCUMENT / ACTION_OPEN_DOCUMENT_TREE throws
+    // ActivityNotFoundException synchronously, which previously ESCAPED the
+    // click handler and killed the process at the tap. The guard keeps the
+    // app alive and logs the honest reason instead of crashing.
+    fun launchFilePickerSafely() {
+        runCatching { filePicker.launch(arrayOf("*/*")) }
+            .onFailure {
+                android.util.Log.e("ChatWorkspace", "file picker launch failed", it)
+            }
+    }
+
+    fun launchFolderPickerSafely() {
+        runCatching { folderPicker.launch(null) }
+            .onFailure {
+                android.util.Log.e("ChatWorkspace", "folder picker launch failed", it)
+            }
+    }
+
     // FUNCTIONAL CLOSURE (§5): the operational truth of "an LLM is usable":
     // lifecycle ENABLED **or** ACTIVE (the runtime promotes healthy resources
     // to ACTIVE — checking only ENABLED missed them) AND health not UNAVAILABLE
@@ -324,13 +344,10 @@ fun ChatWorkspace(
             )
 
             // ---- 3. The composer — the COMMAND SURFACE (§7) ----
-            // The [+] quick-attach mirrors the hub's ATTACH_FILE row (§3:
-            // the honest availability + reason, never a mystery dead button);
-            // the context strip carries the hub entry + the live agent/model
-            // binding chip; the voice placeholder stays visibly disabled.
-            val attachItem = capabilityState.capabilities.firstOrNull {
-                it.key == ChatCapabilityKey.ATTACH_FILE
-            }
+            // UNIFICATION HOTFIX: the [+] beside the field is the SINGLE
+            // capability-hub entry (the duplicated "القدرات" strip above the
+            // input is gone). One door, frontier composer pattern — the hub's
+            // rows carry their own honest availability + reasons.
             ChatComposer(
                 value = state.promptInput,
                 isExecuting = state.isExecuting,
@@ -341,15 +358,12 @@ fun ChatWorkspace(
                 },
                 onCancel = onCancelExecution,
                 onClearDraft = { onPromptInput("") },
-                onOpenCapabilities = {
-                    // §3: the context strip's chip opens the categorized hub
-                    // and the capability layer refreshes its facts.
+                onQuickAttach = {
+                    // ONE entry: refresh the capability facts, then open the
+                    // categorized hub (attachments live in its first group).
                     onOpenCapabilities()
                     capabilityMenuOpen = true
                 },
-                onQuickAttach = { filePicker.launch(arrayOf("*/*")) },
-                canQuickAttach = attachItem?.status == ChatCapabilityStatus.AVAILABLE,
-                quickAttachDisabledReason = attachItem?.reason,
                 onOpenContext = { contextSheetOpen = true },
                 chatMode = state.chatMode,
                 selectedModelDisplayName = state.selectedModelDisplayName,
@@ -502,8 +516,8 @@ fun ChatWorkspace(
             onCapabilityClick = { key ->
                 capabilityMenuOpen = false
                 when (key) {
-                    ChatCapabilityKey.ATTACH_FILE -> filePicker.launch(arrayOf("*/*"))
-                    ChatCapabilityKey.ATTACH_FOLDER -> folderPicker.launch(null)
+                    ChatCapabilityKey.ATTACH_FILE -> launchFilePickerSafely()
+                    ChatCapabilityKey.ATTACH_FOLDER -> launchFolderPickerSafely()
                     ChatCapabilityKey.KNOWLEDGE_RETRIEVAL -> knowledgeSheetOpen = true
                     ChatCapabilityKey.SEARCH_INTELLIGENCE -> searchSheetOpen = true
                     // UI POLISH §4: the AGENT entry opens the EXISTING
