@@ -347,7 +347,25 @@ class CbrMdpEngine(
             ?: action.targetId?.let { ResourceId(it) }
         // 1. CBR Score: Aggregate rewards of similar historical cases that took matching action
         var cbrScore = 0.5f // Neutral prior
-        val matchingCases = similarCases.filter { it.first.chosenAction.type == action.type }
+        // EMERGENCY HOTFIX R2 (failure isolation — the permanently poisoned
+        // engine): FAILED cases from a DIFFERENT resource used to zero the
+        // cbrScore of THIS candidate via type-level matching, so one
+        // provider's 400 streak (persisted in the durable case base)
+        // permanently outranked EVERY later EXECUTE_STEP/SELECT_MODEL
+        // candidate — on ANY provider, in ANY session, after ANY restart —
+        // and the loop answered every message with the injected guidance
+        // fallback. Failure credit is now RESOURCE-SCOPED: a failed case
+        // counts against a candidate only when it failed on the SAME
+        // resource (or the case carries no resource identity and the
+        // candidate is untargeted). Successes keep generalizing at type
+        // level — the action type demonstrably works somewhere.
+        val matchingCases = similarCases.filter { (case, _) ->
+            case.chosenAction.type == action.type &&
+                (case.outcomeReward >= 0f ||
+                    actionResourceId == null ||
+                    (case.chosenAction.decisionRecord?.selectedResourceId?.value
+                        ?: case.chosenAction.targetId) == actionResourceId.value)
+        }
         if (matchingCases.isNotEmpty()) {
             // CLOSURE P1-3: a matching case that ran on the SAME resource as
             // this candidate weighs heavier (identity match — see CaseBase's

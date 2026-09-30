@@ -76,11 +76,21 @@ object AdmissibleActionSet {
             isAdmissible(action.type, contract, agentAllowedCapabilities, effectiveAutonomyPolicy)
         }
 
-        // Fallback safety: control actions (COMPLETE/ASK_USER/RETRY/REPLAN)
-        // are ALWAYS admissible — a task can never end up with an EMPTY
-        // action space (that would loop forever).
-        if (filtered.none { it.type in StandardActionSpace.ALWAYS_ADMISSIBLE_CONTROL_ACTIONS }) {
-            filtered = filtered + listOfNotNull(
+        // EMERGENCY HOTFIX R2 (fallback discipline — the sticky guidance
+        // takeover): the fallback ASK_USER used to be injected whenever the
+        // surviving set merely LACKED a control action — which is EVERY
+        // ordinary chat decision (generation actions are not control
+        // actions). That synthetic ASK_USER then competed with the viable
+        // EXECUTE_STEP candidate in the CBR ranking, and after a
+        // provider-failure streak poisoned the case base it WON — every
+        // message got answered with "لا توجد أفعال مسموحة…" and the task
+        // parked itself in WAITING. The never-empty guarantee now means
+        // exactly what it says: inject ONLY when the admissible set is
+        // TRULY empty. The loop still terminates honestly — the planner
+        // proposes RETRY/REPLAN/ASK_USER candidates on consecutive
+        // failures, and maxSteps bounds the loop.
+        if (filtered.isEmpty()) {
+            filtered = listOfNotNull(
                 candidates.firstOrNull { it.type == DecisionActionType.ASK_USER }
             ).ifEmpty {
                 listOf(

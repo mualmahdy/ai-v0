@@ -1058,6 +1058,21 @@ class AgentOrchestrator(
                         message = reason
                     )
                 )
+                // EMERGENCY HOTFIX R2 (the reply that never came): WAITING
+                // used to end the flow with NO terminal event, so the chat
+                // surfaced NOTHING after the user's message — no assistant
+                // entry, no retry affordance, just a stale banner. The
+                // guidance ask now lands an explicit terminal Error: the
+                // conversation shows ONE failed, retryable entry carrying
+                // the guidance text.
+                collector.emit(
+                    ExecutionEvent.Error(
+                        executionId = executionId,
+                        failureCode = "ASK_USER_GUIDANCE",
+                        message = reason,
+                        isFatal = false
+                    )
+                )
                 isTerminal = true
                 return
             }
