@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.NavigateNext
@@ -134,7 +135,23 @@ fun UnifiedActivityFeedScreen(
                             subtitle = "خطوات حقيقية من جدول التتبع الدائم"
                         )
                     }
-                    items(executionTrace, key = { "${it.executionId}_${it.stepIndex}" }) { node ->
+                    // HOTFIX (Activity crash after the first conversation):
+                    // the durable trace rows are NOT unique on
+                    // (executionId, stepIndex) — the telemetry bridge records
+                    // STARTED and DECISION rows with stepIndex = -1 for the
+                    // SAME execution, and a replanned step shares its index
+                    // with the step it replaced. Keying the LazyColumn on
+                    // that pair threw
+                    // "IllegalArgumentException: Key "exec_-1" was already
+                    // used" the moment ANY conversation had produced trace
+                    // rows — the feed only rendered on a fresh install
+                    // (empty list, no keys at all). The entity's row id is
+                    // not projected into the domain model yet (strategic
+                    // fix), so the key prefixes the POSITION index —
+                    // guaranteed unique, identical rendering.
+                    itemsIndexed(executionTrace, key = { index, node ->
+                        "${index}_${node.executionId}_${node.stepIndex}"
+                    }) { _, node ->
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
