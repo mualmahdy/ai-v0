@@ -307,7 +307,16 @@ class ProvidersViewModelTest {
             apiKey = "real-vault-key"
         )
 
-        viewModel.state.awaitWhere { it.wizardResult != null }
+        viewModel.state.awaitWhere {
+            // EMERGENCY HOTFIX R2 (test-side race, the round-1 AppLock
+            // family): awaiting ONLY wizardResult raced the provider-list
+            // state propagation — the wizard's terminal result can land one
+            // frame BEFORE the persisted provider row reaches the state
+            // flow, and the very next assertion then read the stale count
+            // (order-dependent flake: passed solo, failed under a loaded
+            // suite). The await now covers BOTH observables.
+            it.wizardResult != null && it.generalizedProviders.size == providersBefore + 1
+        }
         val state = viewModel.state.value
         // S-2: the REAL adapter refuses the insecure software-key fallback
         // under Robolectric — the chain stops at the vault step and says so.

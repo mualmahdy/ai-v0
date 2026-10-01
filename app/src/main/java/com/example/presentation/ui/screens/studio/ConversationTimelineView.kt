@@ -198,7 +198,7 @@ fun ConversationTimeline(
     // viewport bottom — for ordinary items the offset is 0 (the legacy
     // behavior), for a tall streamed table the newest rows and the message
     // actions stay visible instead of the item's (often empty) top.
-    fun scrollToBottomOfLast(instant: Boolean) {
+    suspend fun scrollToBottomOfLast(instant: Boolean) {
         val info = listState.layoutInfo
         val lastIndex = info.totalItemsCount - 1
         if (lastIndex < 0) return

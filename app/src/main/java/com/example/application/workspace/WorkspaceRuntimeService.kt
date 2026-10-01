@@ -366,6 +366,9 @@ class WorkspaceRuntimeService(
             replacement.id
         } else {
             val now = System.currentTimeMillis()
+            // GAP-16 pattern: the project row + its canonical root path land
+            // in ONE transaction — a mid-sequence failure leaves no orphan.
+            var generated: Long = 0L
             runCatching {
                 transactionRunner {
                     val provisional = ProjectEntity(
@@ -383,9 +386,10 @@ class WorkspaceRuntimeService(
                             rootPath = projectRootPathResolver(generatedId)
                         )
                     )
-                    generatedId
+                    generated = generatedId
                 }
-            }.getOrNull() ?: return@withLock null
+            }.getOrNull()
+            if (generated > 0L) generated else return@withLock null
         }
 
         workspaceDao.setActiveProject(active.id, boundId, System.currentTimeMillis())

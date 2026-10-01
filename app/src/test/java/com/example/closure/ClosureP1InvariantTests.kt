@@ -332,8 +332,17 @@ class ClosureP1InvariantTests {
 
     /**
      * INVARIANT P1-2b — the PRODUCTION admissible filter (the same object
-     * DecisionService delegates to) never returns an empty action space,
-     * even for a candidate list stripped of every control action.
+     * DecisionService delegates to) never returns an empty action space.
+     *
+     * EMERGENCY HOTFIX R2 (fallback discipline — updated contract): the
+     * fallback ASK_USER is injected ONLY when the admissible set is TRULY
+     * empty. The old trigger — "no CONTROL action among the survivors" —
+     * injected a synthetic ASK_USER into EVERY ordinary chat decision
+     * (generation actions are not control actions), and once a
+     * provider-failure streak poisoned the CBR scores that synthetic
+     * guidance action OUTRANKED the viable execution step and every message
+     * ended in a permanent WAITING state. The never-empty guarantee keeps
+     * its meaning (never an empty action space); its SHAPE now matches it.
      */
     @Test
     fun `production admissible filter never yields an empty action space`() {
@@ -350,6 +359,33 @@ class ClosureP1InvariantTests {
             )
             assertTrue(
                 "filter must never return an empty space (policy=${policy.name})",
+                filtered.isNotEmpty()
+            )
+            // R2: a VIABLE surviving set is returned untouched — no
+            // synthetic guidance action competes with a usable execution
+            // step (the loop's RETRY/REPLAN/ASK_USER candidates arrive from
+            // the planner on consecutive failures, and maxSteps bounds it).
+            assertTrue(
+                "the surviving execution step must stay in the space (policy=${policy.name})",
+                filtered.any { it.type == DecisionActionType.EXECUTE_STEP }
+            )
+        }
+
+        // The never-empty core: when NOTHING survives filtering, the
+        // injected fallback IS a control action.
+        val allInadmissible = listOf(
+            DecisionAction(DecisionActionType.EXECUTE_TOOL, targetId = "tool"),
+            DecisionAction(DecisionActionType.EXECUTE_MCP, targetId = "mcp")
+        )
+        for (policy in AutonomyPolicy.entries) {
+            val filtered = AdmissibleActionSet.filter(
+                candidates = allInadmissible,
+                contract = TaskContracts.QUICK_CHAT,
+                agentAllowedCapabilities = setOf(CapabilityType.LLM_GENERATION),
+                effectiveAutonomyPolicy = policy
+            )
+            assertTrue(
+                "a truly-empty space still gets the fallback (policy=${policy.name})",
                 filtered.isNotEmpty()
             )
             assertTrue(
