@@ -293,6 +293,15 @@ fun StudioScreen(
         onRollbackArtifactVersion = studioViewModel::rollbackArtifactVersion,
         onCloseArtifact = studioViewModel::closeArtifact,
         onRequestArtifactEdit = studioViewModel::requestArtifactEdit,
+        // ROUND-3 (the silent no-response): the conversation-level error
+        // banner's dismiss path — the message channel finally has a surface.
+        onDismissError = studioViewModel::dismissError,
+        // ROUND-3 (the silent picker): a SAF picker that cannot even LAUNCH
+        // (ROM without a DocumentsUI activity) now surfaces on the composer's
+        // honest attachment-error line instead of dying as a log line.
+        onPickLaunchFailed = { reason ->
+            chatCapabilitiesViewModel.reportPickLaunchFailure(reason)
+        },
         modifier = modifier
     )
 }

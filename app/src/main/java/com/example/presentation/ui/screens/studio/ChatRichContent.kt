@@ -2,6 +2,7 @@ package com.example.presentation.ui.screens.studio
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -457,21 +459,41 @@ private fun CodeBlockBody(language: String?, code: String) {
 @Composable
 private fun RichTable(block: RichChatBlock.Table) {
     val columns = block.header.size.coerceAtLeast(1)
-    val minWidth = (columns * 120).coerceAtLeast(320).dp
+    val tableMinWidth = (columns * 120).coerceAtLeast(320).dp
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
     ) {
-        // HOTFIX R2: clipToBounds — a wide table's scrollable region must
-        // never paint or intercept touches beyond its own bubble bounds.
+        // ROUND-3 FIX (the blank table + the unreachable message actions):
+        // the previous subtree put Modifier.fillMaxWidth() on every table
+        // Row and RowScope.weight(1f, fill=false) on every cell — both under
+        // horizontalScroll's INFINITE width constraints. The repo's own
+        // committed Roborazzi reference (timeline_rich_conversation.png)
+        // documents the result: a message containing a table renders its
+        // ENTIRE rich block as reserved-but-blank space (no text, no cells,
+        // no code — verified pixel-level), and the blank-but-huge item pushes
+        // the Copy/Regenerate/Retry actions far below the fold ("the buttons
+        // become untouchable", while plain-text messages keep them working).
+        // The rebuilt table uses NO width modifiers that depend on bounded
+        // constraints inside the scroll: the table's width comes from the
+        // Column's widthIn(min = tableMinWidth) and each cell's own
+        // widthIn(min = 110.dp); rows wrap their content. A height cap
+        // + verticalScroll keeps a long streamed table inside its own
+        // scrollable bubble so the message item can never grow taller than
+        // the screen (the actions stay reachable).
         Row(
             modifier = Modifier
                 .clipToBounds()
                 .horizontalScroll(rememberScrollState())
                 .padding(vertical = 6.dp)
         ) {
-            Column(modifier = Modifier.widthIn(min = minWidth)) {
+            Column(
+                modifier = Modifier
+                    .widthIn(min = tableMinWidth)
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
                 TableRow(block.header, header = true)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), modifier = Modifier.padding(vertical = 4.dp))
                 block.rows.forEach { row -> TableRow(row + List((columns - row.size).coerceAtLeast(0)) { "" }, header = false) }
@@ -482,14 +504,17 @@ private fun RichTable(block: RichChatBlock.Table) {
 
 @Composable
 private fun TableRow(cells: List<String>, header: Boolean) {
-    Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp)) {
+    // ROUND-3: NO fillMaxWidth / weight here (see RichTable) — under the
+    // enclosing horizontal scroll these measured against infinite width and
+    // corrupted the whole message layout.
+    Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)) {
         cells.forEach { cell ->
             Text(
                 text = cell,
                 style = if (header) MaterialTheme.typography.labelMedium else MaterialTheme.typography.bodySmall,
                 fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
                 color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.widthIn(min = 110.dp).weight(1f, fill = false).padding(end = 8.dp)
+                modifier = Modifier.widthIn(min = 110.dp).padding(end = 8.dp)
             )
         }
     }

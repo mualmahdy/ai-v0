@@ -1083,6 +1083,16 @@ class ExecutionService(
         // final synthesis round (bounded to MAX_TOOL_ROUNDS so a tool-requesting
         // loop cannot run forever).
         val toolResultMessages = mutableListOf<LlmMessage>()
+        // ROUND-3 (the tool-round protocol fix): the tool CALLS the model made
+        // during THIS stream — the follow-up round replays them as an
+        // ASSISTANT turn carrying the calls themselves. OpenAI-compatible
+        // providers require the tool messages to answer an assistant
+        // `tool_calls` array with the SAME ids; Gemini requires every
+        // functionResponse to be preceded by the matching functionCall
+        // parts. The previous plain-text assistant turn made the synthesis
+        // request structurally invalid on BOTH protocols (400) and the
+        // visible answer degraded to the pre-tool preamble.
+        val roundToolCalls = mutableListOf<com.example.domain.core.llm.ToolCallRequest>()
         var toolRounds = 0
 
         try {
@@ -1101,6 +1111,15 @@ class ExecutionService(
                         onEvent(event)
                         val toolResult = handleToolExecution(executionId, event.callId, event.toolName, event.argumentsJson, agent)
                         onEvent(toolResult)
+                        // ROUND-3: remember the CALL itself (id + name + args)
+                        // — the follow-up round's assistant turn replays it.
+                        roundToolCalls.add(
+                            com.example.domain.core.llm.ToolCallRequest(
+                                callId = event.callId,
+                                toolName = event.toolName,
+                                argumentsJson = event.argumentsJson
+                            )
+                        )
                         // Record the tool result as a TOOL-role message for the
                         // follow-up synthesis round (delegation loop).
                         val resultContent = when (val o = toolResult.outcome) {
@@ -1266,10 +1285,16 @@ class ExecutionService(
             while (toolResultMessages.isNotEmpty() && toolRounds < MAX_TOOL_ROUNDS && isSuccess) {
                 toolRounds++
                 val followUpMessages = messages.toMutableList()
+                // ROUND-3: the assistant turn that OWNS these tool results
+                // carries the actual toolCalls — the protocol-valid shape for
+                // BOTH wire formats. Its text is whatever the model streamed
+                // before/around the calls (a blank is honest: many models emit
+                // nothing but the calls).
                 followUpMessages.add(
                     LlmMessage(
                         role = MessageRole.ASSISTANT,
-                        content = textAccumulator.toString().ifBlank { "[تم استدعاء الأدوات المطلوبة — بانتظار المزامنة]" }
+                        content = textAccumulator.toString().trim(),
+                        toolCalls = roundToolCalls.toList()
                     )
                 )
                 followUpMessages.addAll(

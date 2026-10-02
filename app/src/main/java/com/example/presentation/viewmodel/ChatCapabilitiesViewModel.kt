@@ -328,6 +328,17 @@ class ChatCapabilitiesViewModel(
         _state.update { it.copy(errorMessage = null, attachmentError = null) }
     }
 
+    /**
+     * ROUND-3 (the silent picker): a SAF picker that failed to LAUNCH (ROM
+     * without a DocumentsUI activity) lands on the composer's visible
+     * attachment-error line — the guard in the UI layer keeps the process
+     * alive, this makes the failure HONEST instead of a log-only death that
+     * read as "the attach button does nothing".
+     */
+    fun reportPickLaunchFailure(reason: String) {
+        _state.update { it.copy(attachmentError = reason) }
+    }
+
     // ------------------------------------------------------------------
     // §5 — attachment drafts (SAF pick → import → chip)
     // ------------------------------------------------------------------

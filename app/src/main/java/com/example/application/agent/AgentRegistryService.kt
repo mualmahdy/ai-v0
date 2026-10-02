@@ -45,12 +45,47 @@ class AgentRegistryService(
     private val dao: AgentDefinitionDao
 ) {
 
-    /** Seeds the canonical default catalog exactly once (first launch). */
+    /**
+     * Seeds the canonical default catalog exactly once (first launch), and
+     * reconciles the PROMPT of platform-owned canonical agents on later
+     * launches.
+     *
+     * ROUND-3 (the "poor text" root cause on EXISTING installs): the seed
+     * used to run only when the table was empty — a device that had already
+     * seeded the old quick-chat prompt ("أجب مباشرة وبتلميح موجز" — answer
+     * with a brief hint) kept instructing the model to be artificially
+     * terse FOREVER, no matter how the catalog was fixed afterwards, because
+     * the durable row won every resolution. Canonical PLATFORM agents are
+     * app-owned content, not user data: refreshing their definition when the
+     * shipped catalog changes is the honest reconciliation (user-created
+     * agents are never touched — they have their own ids).
+     */
     suspend fun ensureSeeded(defaults: List<AgentDefinition>) = withContext(Dispatchers.IO) {
-        if (dao.agentCount() > 0) return@withContext
         val now = System.currentTimeMillis()
+        if (dao.agentCount() == 0) {
+            defaults.forEach { agent ->
+                dao.upsertAgent(toEntity(agent, origin = "PLATFORM", version = 1, now = now))
+            }
+            return@withContext
+        }
+        // Prompt reconciliation for platform-owned canonical agents only.
         defaults.forEach { agent ->
-            dao.upsertAgent(toEntity(agent, origin = "PLATFORM", version = 1, now = now))
+            val existing = dao.getAgentById(agent.identity.id.value) ?: return@forEach
+            if (existing.origin == "PLATFORM" &&
+                existing.systemPrompt != agent.identity.systemPrompt
+            ) {
+                // Keep the durable createdAt; refresh the definition and bump
+                // the version so the change is auditable in the row itself.
+                dao.upsertAgent(
+                    toEntity(
+                        agent,
+                        origin = "PLATFORM",
+                        version = existing.version + 1,
+                        now = now,
+                        createdAt = existing.createdAtEpochMs
+                    )
+                )
+            }
         }
     }
 

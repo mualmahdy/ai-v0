@@ -134,15 +134,22 @@ class OpenAiCompatibleLlmAdapter(
                     val json = JSONObject(text)
                     val choice = json.optJSONArray("choices")?.optJSONObject(0)
                     val message = choice?.optJSONObject("message")
-                    val content = message?.optString("content") ?: ""
+                    // ROUND-3 FIX (the literal-"null" text): tool-call-only
+                    // responses carry "content": null — Android's org.json
+                    // optString() coerces a JSON null into the STRING "null",
+                    // so the answer text literally became "null". A null
+                    // content is now the empty string, never the word null.
+                    val content = message?.let { if (it.isNull("content")) "" else it.optString("content", "") } ?: ""
                     // FRONTIER REASONING: DeepSeek-R1 convention `reasoning_content`
                     // (and the `reasoning` gateway variant) — captured SEPARATELY
                     // from the answer text, never mixed into it.
                     val reasoning = message
-                        ?.takeIf { it.has("reasoning_content") || it.has("reasoning") }
                         ?.let {
-                            if (it.has("reasoning_content")) it.optString("reasoning_content", "")
-                            else it.optString("reasoning", "")
+                            when {
+                                !it.isNull("reasoning_content") -> it.optString("reasoning_content", "")
+                                !it.isNull("reasoning") -> it.optString("reasoning", "")
+                                else -> ""
+                            }
                         }.orEmpty()
                     val toolCalls = parseToolCalls(message)
                     val usageJson = json.optJSONObject("usage")
@@ -283,7 +290,15 @@ class OpenAiCompatibleLlmAdapter(
                             val choice = chunk.optJSONArray("choices")?.optJSONObject(0) ?: return@runCatching
                             val delta = choice.optJSONObject("delta")
                             if (delta != null) {
-                                val deltaText = delta.optString("content", "")
+                                // ROUND-3 FIX (the literal-"null" runs): many
+                                // OpenAI-compatible gateways stream
+                                // "content": null on role/tool/finish deltas —
+                                // optString() coerced each of those into the
+                                // four-letter word "null" APPENDED to the
+                                // answer, garbling every tool-using or
+                                // role-first stream. Null means "nothing to
+                                // append", never the word null.
+                                val deltaText = delta.stringOrEmpty("content")
                                 if (deltaText.isNotEmpty()) {
                                     fullText.append(deltaText)
                                     emit(
@@ -299,9 +314,8 @@ class OpenAiCompatibleLlmAdapter(
                                 // stream as separate delta fields BEFORE the content
                                 // tokens — emitted as ReasoningChunk, NEVER mixed
                                 // into ContentChunk or the final text.
-                                val reasoningDelta =
-                                    if (delta.has("reasoning_content")) delta.optString("reasoning_content", "")
-                                    else delta.optString("reasoning", "")
+                                val reasoningDelta = delta.stringOrEmpty("reasoning_content")
+                                    .ifEmpty { delta.stringOrEmpty("reasoning") }
                                 if (reasoningDelta.isNotEmpty()) {
                                     emit(
                                         ExecutionEvent.ReasoningChunk(
@@ -431,8 +445,16 @@ class OpenAiCompatibleLlmAdapter(
     /**
      * Builds the OpenAI Chat Completions request body: messages (including
      * tool results), model params, and function tool declarations.
+     *
+     * ROUND-3: internal (same-module test observability — mirrors the Gemini
+     * adapter's buildRequestBody seam) and tool-round aware: an ASSISTANT
+     * message carrying [LlmMessage.toolCalls] serializes the `tool_calls`
+     * array the protocol requires — tool messages must ANSWER that array
+     * (same ids), otherwise the whole request is rejected with
+     * "An assistant message with 'tool_calls' must be followed by tool
+     * messages responding to each 'tool_call_id'".
      */
-    private fun buildJsonBody(request: LlmRequest, stream: Boolean): JSONObject {
+    internal fun buildJsonBody(request: LlmRequest, stream: Boolean): JSONObject {
         return JSONObject().apply {
             put("model", defaultModel)
             put("temperature", request.config.temperature.toDouble())
@@ -444,11 +466,36 @@ class OpenAiCompatibleLlmAdapter(
             val messagesArray = JSONArray()
             request.messages.forEach { msg ->
                 val obj = JSONObject()
-                obj.put("role", msg.role.wireName)
-                obj.put("content", msg.content)
-                if (msg.role == MessageRole.TOOL) {
-                    msg.toolCallId?.let { obj.put("tool_call_id", it) }
-                    msg.name?.let { obj.put("name", it) }
+                if (msg.role == MessageRole.ASSISTANT && msg.toolCalls.isNotEmpty()) {
+                    // The tool-requesting model turn: tool_calls carry the
+                    // ids the following tool messages answer. Content is a
+                    // REAL null when the model said nothing besides the
+                    // calls (an empty string is also accepted by most
+                    // gateways, but null is the canonical form).
+                    obj.put("role", "assistant")
+                    obj.put("content", msg.content.ifBlank { JSONObject.NULL })
+                    val toolCallsArray = JSONArray()
+                    msg.toolCalls.forEach { call ->
+                        toolCallsArray.put(
+                            JSONObject()
+                                .put("id", call.callId)
+                                .put("type", "function")
+                                .put(
+                                    "function",
+                                    JSONObject()
+                                        .put("name", call.toolName)
+                                        .put("arguments", call.argumentsJson.ifBlank { "{}" })
+                                )
+                        )
+                    }
+                    obj.put("tool_calls", toolCallsArray)
+                } else {
+                    obj.put("role", msg.role.wireName)
+                    obj.put("content", msg.content)
+                    if (msg.role == MessageRole.TOOL) {
+                        msg.toolCallId?.let { obj.put("tool_call_id", it) }
+                        msg.name?.let { obj.put("name", it) }
+                    }
                 }
                 messagesArray.put(obj)
             }
@@ -636,3 +683,11 @@ private val MessageRole.wireName: String
         MessageRole.ASSISTANT -> "assistant"
         MessageRole.TOOL -> "tool"
     }
+
+/**
+ * ROUND-3: JSON-null-safe string read — Android's org.json coerces
+ * `"key": null` into the literal string "null" via optString, so every
+ * nullable wire field must be guarded with isNull first.
+ */
+private fun org.json.JSONObject.stringOrEmpty(key: String): String =
+    if (isNull(key)) "" else optString(key, "")

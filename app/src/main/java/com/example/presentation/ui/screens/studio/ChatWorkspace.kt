@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -132,6 +133,12 @@ fun ChatWorkspace(
     onOpenCapabilities: () -> Unit,
     onPickFiles: (List<String>, List<String?>) -> Unit,
     onPickFolder: (String) -> Unit,
+    /**
+     * ROUND-3 (the silent picker): a SAF picker that failed to LAUNCH
+     * (no DocumentsUI activity on the ROM) surfaces here — the honest
+     * error line instead of a log-only death.
+     */
+    onPickLaunchFailed: (String) -> Unit = {},
     onRemoveAttachment: (String) -> Unit,
     onInvokeSearch: (String) -> Unit,
     onInvokeKnowledge: (String) -> Unit,
@@ -160,6 +167,14 @@ fun ChatWorkspace(
     onCloseArtifact: () -> Unit = {},
     /** Stages a reviewable edit request for the active artifact in the composer. */
     onRequestArtifactEdit: () -> Unit = {},
+    /**
+     * ROUND-3 (the silent no-response): dismisses the conversation-level
+     * error banner — every honest failure reason the ViewModel writes
+     * (attachment-grounding aborts, session establishment failures, blocked
+     * attachment-only sends…) was previously set in state and NEVER
+     * rendered anywhere, so a failed send looked like a dead button.
+     */
+    onDismissError: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -209,10 +224,17 @@ fun ChatWorkspace(
     // ActivityNotFoundException synchronously, which previously ESCAPED the
     // click handler and killed the process at the tap. The guard keeps the
     // app alive and logs the honest reason instead of crashing.
+    // ROUND-3 (the silent picker): surviving is not enough — a picker that
+    // cannot launch is REPORTED to the user through the capability layer's
+    // visible attachment-error channel (a dead-looking row was
+    // indistinguishable from a working one).
     fun launchFilePickerSafely() {
         runCatching { filePicker.launch(arrayOf("*/*")) }
             .onFailure {
                 android.util.Log.e("ChatWorkspace", "file picker launch failed", it)
+                onPickLaunchFailed(
+                    "تعذر فتح منتقي الملفات على هذا الجهاز (لا يوجد تطبيق مستندات) — تعذّر اختيار ملف للإرفاق."
+                )
             }
     }
 
@@ -220,6 +242,9 @@ fun ChatWorkspace(
         runCatching { folderPicker.launch(null) }
             .onFailure {
                 android.util.Log.e("ChatWorkspace", "folder picker launch failed", it)
+                onPickLaunchFailed(
+                    "تعذر فتح منتقي المجلدات على هذا الجهاز (لا يوجد تطبيق مستندات) — تعذّر اختيار مجلد للإرفاق."
+                )
             }
     }
 
@@ -342,6 +367,52 @@ fun ChatWorkspace(
                 onSaveAsArtifact = onSaveAsArtifact,
                 modifier = Modifier.weight(1f)
             )
+
+            // ---- ROUND-3: the CONVERSATION-LEVEL error banner ----
+            // Previously every honest failure message (attachment grounding
+            // aborts, "add text with the attachments", session-establishment
+            // failures, provider errors) was written to state.errorMessage
+            // and NEVER rendered — sends that failed looked like buttons
+            // that do nothing ("attaching a file triggers no response").
+            // The banner sits directly ABOVE the composer where the user's
+            // attention already is, and is dismissible.
+            state.errorMessage?.let { message ->
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .testTag("conversation_error_banner")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.WarningAmber,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = onDismissError) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "إغلاق رسالة الخطأ",
+                                tint = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
 
             // ---- 3. The composer — the COMMAND SURFACE (§7) ----
             // UNIFICATION HOTFIX: the [+] beside the field is the SINGLE

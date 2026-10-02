@@ -166,25 +166,57 @@ class GeminiLlmAdapter(
                     }
                     else -> {
                         val role = if (msg.role == MessageRole.ASSISTANT) "model" else "user"
-                        // EMERGENCY HOTFIX R2 (the HTTP-400 chain): Gemini
-                        // REJECTS the whole request with 400 INVALID_ARGUMENT
-                        // when ANY text part is empty. A FAILED prior turn
-                        // replayed as history with a blank answer (the common
-                        // aftermath of an earlier error) therefore poisoned
-                        // EVERY later request in the session — the
-                        // "execution loop collapses with 400 and never works
-                        // again" report. Blank contents now degrade to a
-                        // single space: the turn keeps its slot, the API
-                        // never sees an empty part.
-                        val text = msg.content.ifBlank { " " }
-                        contents.put(
-                            JSONObject()
-                                .put("role", role)
-                                .put(
-                                    "parts",
-                                    JSONArray().put(JSONObject().put("text", text))
+                        // ROUND-3 FIX (the tool-round 400): an ASSISTANT turn
+                        // that requested tools must carry its functionCall
+                        // parts — Gemini REQUIRES every functionResponse part
+                        // to be preceded by the matching functionCall parts of
+                        // the immediately-preceding model turn, otherwise the
+                        // whole follow-up request dies with
+                        // 400 INVALID_ARGUMENT and the tool-synthesis answer
+                        // silently degrades to the pre-tool preamble text.
+                        if (msg.role == MessageRole.ASSISTANT && msg.toolCalls.isNotEmpty()) {
+                            val parts = JSONArray()
+                            msg.toolCalls.forEach { call ->
+                                val args = runCatching { JSONObject(call.argumentsJson) }
+                                    .getOrElse { JSONObject().put("rawArgs", call.argumentsJson) }
+                                parts.put(
+                                    JSONObject().put(
+                                        "functionCall",
+                                        JSONObject()
+                                            .put("name", call.toolName)
+                                            .put("args", args)
+                                    )
                                 )
-                        )
+                            }
+                            // A blank text part would itself be a 400 — text
+                            // rides along ONLY when the model actually said
+                            // something before/around the tool calls.
+                            val text = msg.content.trim()
+                            if (text.isNotEmpty()) {
+                                parts.put(JSONObject().put("text", text))
+                            }
+                            contents.put(JSONObject().put("role", "model").put("parts", parts))
+                        } else {
+                            // EMERGENCY HOTFIX R2 (the HTTP-400 chain): Gemini
+                            // REJECTS the whole request with 400 INVALID_ARGUMENT
+                            // when ANY text part is empty. A FAILED prior turn
+                            // replayed as history with a blank answer (the common
+                            // aftermath of an earlier error) therefore poisoned
+                            // EVERY later request in the session — the
+                            // "execution loop collapses with 400 and never works
+                            // again" report. Blank contents now degrade to a
+                            // single space: the turn keeps its slot, the API
+                            // never sees an empty part.
+                            val text = msg.content.ifBlank { " " }
+                            contents.put(
+                                JSONObject()
+                                    .put("role", role)
+                                    .put(
+                                        "parts",
+                                        JSONArray().put(JSONObject().put("text", text))
+                                    )
+                            )
+                        }
                     }
                 }
             }
@@ -256,6 +288,7 @@ class GeminiLlmAdapter(
      * provider's reaction to thinkingConfig REGARDLESS of what the static
      * gate would attach; production paths never set it.
      */
+    @Suppress("UNUSED_PARAMETER") // `stream` kept for call-site compatibility (see ROUND-3 note above)
     internal fun buildRequestBody(
         request: LlmRequest,
         stream: Boolean,
@@ -291,7 +324,19 @@ class GeminiLlmAdapter(
             .put("generationConfig", generationConfig)
         buildSystemInstruction(request.messages)?.let { body.put("systemInstruction", it) }
         buildToolDeclarations(request)?.let { body.put("tools", it) }
-        if (stream) body.put("stream", true) // informational only for REST; alt=sse drives it
+        // ROUND-3 FIX (the permanent Google-Provider 400 family): the REST
+        // GenerateContentRequest proto has NO "stream" field — Google's API
+        // frontend validates the payload BEFORE auth and rejects unknown
+        // fields with:
+        //   400 INVALID_ARGUMENT — "Invalid JSON payload received. Unknown
+        //   name \"stream\": Cannot find field."
+        // (verified live against generativelanguage.googleapis.com: the same
+        // body WITHOUT this key fails only on the API key, i.e. the schema
+        // is otherwise accepted). Streaming is driven by the METHOD
+        // (:streamGenerateContent?alt=sse), never by a body field — the
+        // informational flag that used to sit here poisoned EVERY streaming
+        // request with a 400 and collapsed the execution loop, while the
+        // single-shot :generateContent call (no flag) kept working.
         return body.toString()
     }
 
@@ -342,7 +387,8 @@ class GeminiLlmAdapter(
                     if (parts != null) {
                         for (i in 0 until parts.length()) {
                             val part = parts.optJSONObject(i) ?: continue
-                            val partText = part.optString("text", "") ?: ""
+                            // ROUND-3 defensive null guard (see extractParts).
+                            val partText = if (part.isNull("text")) "" else part.optString("text", "")
                             if (part.optBoolean("thought", false)) {
                                 reasoning.append(partText)
                             } else {
@@ -524,7 +570,16 @@ class GeminiLlmAdapter(
             // line reads and vault lookups are safe, emissions stay in-context.
             call.execute().use { response ->
                 if (!response.isSuccessful) {
-                    throw IOExceptionWithCode(response.code, "HTTP ${response.code} from Gemini stream")
+                    // ROUND-3: the provider's own rejection text rides the
+                    // failure — a bare "HTTP 400" hid the actual cause (the
+                    // unknown-field rejection, a bad tool schema, a role
+                    // mismatch…) and made field diagnosis guesswork.
+                    val errBody = runCatching { response.body?.string() }.getOrNull()
+                    throw IOExceptionWithCode(
+                        response.code,
+                        "HTTP ${response.code} from Gemini stream" +
+                            (errBody?.take(300)?.let { " — $it" } ?: "")
+                    )
                 }
                 // A3 (CLOSURE FINAL STAGE §5/item 3): explicit ownership —
                 // the SSE reader closes when the reading loop ends on ANY
@@ -717,7 +772,9 @@ class GeminiLlmAdapter(
                 val part = parts.optJSONObject(i) ?: continue
                 val isThought = part.optBoolean("thought", false)
                 if (isThought == thoughtsOnly) {
-                    sb.append(part.optString("text", "") ?: "")
+                    // ROUND-3 defensive null guard: a JSON null "text" must
+                    // never coerce into the literal string "null".
+                    sb.append(if (part.isNull("text")) "" else part.optString("text", ""))
                 }
             }
             sb.toString()

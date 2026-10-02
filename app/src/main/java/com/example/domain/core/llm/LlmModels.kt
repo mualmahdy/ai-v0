@@ -14,13 +14,25 @@ enum class MessageRole {
 
 /**
  * Single conversational message exchanged with an LLM.
+ *
+ * ROUND-3 (the tool-round protocol fix): an ASSISTANT turn that requested
+ * tools now carries its [toolCalls] — every OpenAI-compatible provider
+ * requires the tool messages to answer an assistant message whose
+ * `tool_calls` array carries the same ids, and Gemini requires the
+ * functionResponse parts to be preceded by the matching functionCall parts
+ * of the immediately-preceding model turn. Replaying tool results after a
+ * plain-text assistant turn (the previous contract) was structurally
+ * invalid on BOTH wire protocols — the synthesis round died with 400 and
+ * the visible answer degraded to the pre-tool preamble ("the text comes
+ * out very poor"). Default-empty keeps every existing constructor honest.
  */
 data class LlmMessage(
     val role: MessageRole,
     val content: String,
     val name: String? = null,
     val toolCallId: String? = null,
-    val isUntrustedInput: Boolean = false
+    val isUntrustedInput: Boolean = false,
+    val toolCalls: List<ToolCallRequest> = emptyList()
 )
 
 /**
