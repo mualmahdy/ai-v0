@@ -424,7 +424,30 @@ class CodingToolchainService(
                     description = "الأداة المفضلة للتعديل: رقع ذرّية موجهة بالسياق مع تحقق تزامني.",
                     parameters = listOf(
                         pathParam,
-                        ToolParameter("hunks", "array", "قائمة الرُقع [{expect, replaceWith}]", isRequired = true),
+                        // ROUND-4: `hunks` is an ARRAY — Gemini's OpenAPI subset
+                        // requires `items` for array-typed properties; the item
+                        // shape is now declared domain-side (was: bare "array"
+                        // → 400 INVALID_ARGUMENT
+                        // `tools[0].function_declarations[2].parameters
+                        //  .properties[hunks].items: missing field` on every
+                        // Gemini call that advertised the coding toolchain).
+                        ToolParameter(
+                            "hunks", "array", "قائمة الرُقع [{expect, replaceWith}]",
+                            isRequired = true,
+                            itemType = "object",
+                            itemProperties = listOf(
+                                ToolParameter(
+                                    "expect", "string",
+                                    "النص الحالي الذي يجب أن يظهر مرة واحدة بالضبط (فارغ = إدراج في ملف جديد)",
+                                    isRequired = true
+                                ),
+                                ToolParameter(
+                                    "replaceWith", "string",
+                                    "النص البديل الذي يحل محل expect",
+                                    isRequired = true
+                                )
+                            )
+                        ),
                         ToolParameter("expected_hash", "string", "هاش المحتوى المتوقع (تزامن تفاؤلي)", isRequired = false)
                     ),
                     networkRequirement = NetworkRequirement.LOCAL_ONLY,

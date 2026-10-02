@@ -69,8 +69,10 @@ import kotlin.math.max
 
 /** The math layout tree (a tiny real typesetting model). */
 sealed interface MathNode {
-    /** A single symbol/identifier run (already mapped to Unicode where applicable). */
-    data class Atom(val text: String) : MathNode
+    /** A single symbol/identifier run (already mapped to Unicode where
+     * applicable). [bold] is set by the ROUND-4 style-argument commands
+     * (\mathbf, \bm, \boldsymbol) so vectors/tensors stay visually bold. */
+    data class Atom(val text: String, val bold: Boolean = false) : MathNode
     /** Horizontal row of nodes. */
     data class Row(val children: List<MathNode>) : MathNode
     /** \frac{num}{den} — stacked with a rule. */
@@ -85,44 +87,103 @@ sealed interface MathNode {
 
 object MathTypesetter {
 
-    /** LaTeX-ish commands mapped to Unicode glyphs (documented subset). */
-    private val SYMBOLS = mapOf(
+    /**
+     * LaTeX-ish commands mapped to Unicode glyphs — ONE shared table for
+     * BOTH the structural typesetter AND the inline [normalizeMath]
+     * approximation (ROUND-4 dedup: the two lists used to drift, and the
+     * approximation was missing \partial, \nu, \theta, the floor/ceiling/
+     * angle brackets… exactly the symbols the Navier–Stokes report showed
+     * rendering raw). Consumers MUST apply longest-key-first.
+     */
+    internal val SYMBOLS = mapOf(
         "alpha" to "α", "beta" to "β", "gamma" to "γ", "delta" to "δ", "epsilon" to "ε",
-        "zeta" to "ζ", "eta" to "η", "theta" to "θ", "iota" to "ι", "kappa" to "κ",
-        "lambda" to "λ", "mu" to "μ", "nu" to "ν", "xi" to "ξ", "pi" to "π",
-        "rho" to "ρ", "sigma" to "σ", "tau" to "τ", "upsilon" to "υ", "phi" to "φ",
-        "chi" to "χ", "psi" to "ψ", "omega" to "ω",
+        "varepsilon" to "ε", "zeta" to "ζ", "eta" to "η", "theta" to "θ", "vartheta" to "ϑ",
+        "iota" to "ι", "kappa" to "κ", "lambda" to "λ", "mu" to "μ", "nu" to "ν",
+        "xi" to "ξ", "pi" to "π", "rho" to "ρ", "sigma" to "σ", "varsigma" to "ς",
+        "tau" to "τ", "upsilon" to "υ", "phi" to "φ", "varphi" to "φ", "chi" to "χ",
+        "psi" to "ψ", "omega" to "ω",
         "Gamma" to "Γ", "Delta" to "Δ", "Theta" to "Θ", "Lambda" to "Λ", "Xi" to "Ξ",
         "Pi" to "Π", "Sigma" to "Σ", "Phi" to "Φ", "Psi" to "Ψ", "Omega" to "Ω",
         "cdot" to "·", "times" to "×", "div" to "÷", "pm" to "±", "mp" to "∓",
-        "leq" to "≤", "geq" to "≥", "neq" to "≠", "approx" to "≈", "equiv" to "≅",
+        "leq" to "≤", "le" to "≤", "geq" to "≥", "ge" to "≥", "neq" to "≠", "ne" to "≠",
+        "approx" to "≈", "equiv" to "≅", "cong" to "≅", "sim" to "∼", "simeq" to "≃",
+        "ll" to "≪", "gg" to "≫", "prec" to "≺", "succ" to "≻",
         "infty" to "∞", "partial" to "∂", "nabla" to "∇", "propto" to "∝",
-        "in" to "∈", "notin" to "∉", "subset" to "⊂", "supset" to "⊃",
-        "cup" to "∪", "cap" to "∩", "emptyset" to "∅", "forall" to "∀", "exists" to "∃",
-        "rightarrow" to "→", "leftarrow" to "←", "Rightarrow" to "⇒", "Leftarrow" to "⇐",
-        "land" to "∧", "lor" to "∨", "neg" to "¬",
-        "degree" to "°", "circ" to "∘", "bullet" to "•",
-        "ldots" to "…", "cdots" to "⋯", "vdots" to "⋮"
+        "in" to "∈", "notin" to "∉", "ni" to "∋", "subset" to "⊂", "supset" to "⊃",
+        "subseteq" to "⊆", "supseteq" to "⊇",
+        "cup" to "∪", "cap" to "∩", "emptyset" to "∅", "varnothing" to "∅",
+        "forall" to "∀", "exists" to "∃", "nexists" to "∄", "neg" to "¬", "lnot" to "¬",
+        "land" to "∧", "wedge" to "∧", "lor" to "∨", "vee" to "∨",
+        "rightarrow" to "→", "to" to "→", "leftarrow" to "←", "leftrightarrow" to "↔",
+        "Rightarrow" to "⇒", "Leftarrow" to "⇐", "Leftrightarrow" to "⇔", "mapsto" to "↦",
+        "uparrow" to "↑", "downarrow" to "↓",
+        "degree" to "°", "circ" to "∘", "bullet" to "•", "star" to "⋆", "ast" to "∗",
+        "odot" to "⊙", "otimes" to "⊗", "oplus" to "⊕",
+        "perp" to "⊥", "parallel" to "∥", "angle" to "∠", "triangle" to "△",
+        "langle" to "⟨", "rangle" to "⟩", "vert" to "|", "lvert" to "|", "rvert" to "|",
+        "Vert" to "‖", "lVert" to "‖", "rVert" to "‖",
+        "lfloor" to "⌊", "rfloor" to "⌋", "lceil" to "⌈", "rceil" to "⌉",
+        "lbrack" to "[", "rbrack" to "]",
+        "hbar" to "ℏ", "ell" to "ℓ", "Re" to "ℜ", "Im" to "ℑ", "aleph" to "ℵ",
+        "prime" to "′", "dagger" to "†", "ddagger" to "‡",
+        "ldots" to "…", "cdots" to "⋯", "vdots" to "⋮", "ddots" to "⋱"
     )
 
     /** Constructs that the typesetter STRUCTURALLY renders (vs approximates). */
     val STRUCTURAL_COMMANDS = setOf("frac", "sqrt", "sum", "int", "prod")
 
+    /** Style-argument commands whose {group} is the styled content. */
+    private val BOLD_COMMANDS = setOf("mathbf", "bm", "boldsymbol", "textbf")
+    private val PLAIN_STYLE_COMMANDS = setOf(
+        "mathit", "mathsf", "mathtt", "mathrm", "mathcal", "mathbb", "mathfrak",
+        "text", "mbox", "operatorname", "ensuremath"
+    )
+
+    /** Accent commands → Unicode combining marks applied to the FIRST char. */
+    private val ACCENTS = mapOf(
+        "vec" to '\u20D7', "hat" to '\u0302', "widehat" to '\u0302',
+        "tilde" to '\u0303', "widetilde" to '\u0303', "dot" to '\u0307',
+        "ddot" to '\u0308', "bar" to '\u0304', "overline" to '\u0304',
+        "underline" to '\u0332', "check" to '\u030C', "breve" to '\u0306', "acute" to '\u0301'
+    )
+
+    /** Zero-argument mode/size macros the parser simply skips. */
+    private val SKIPPED_MACROS = setOf(
+        "displaystyle", "textstyle", "limits", "nolimits", "middle",
+        "big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr", "biggl", "biggr",
+        "quad", "qquad"
+    )
+
     /**
      * Parses the supported subset into a layout tree. Returns
      * (tree, usedStructuralConstruct) — the flag lets the caller show the
      * honest fallback notice when a construct was only approximated.
+     *
+     * ROUND-4 preprocessing fixes (the Navier–Stokes report):
+     *  * multi-line formulas: newlines are token separators (LaTeX
+     *    semantics), NOT content — they used to survive as literal
+     *    line-break atoms inside the equation row;
+     *  * `\left`/`\right` before ANY delimiter (not just the three
+     *    historically hardcoded pairs) is stripped with a lookahead that
+     *    keeps `\rightarrow`/`\leftarrow` intact.
      */
     fun parse(source: String): Pair<MathNode, Boolean> {
         val input = source
+            .replace("\\r", " ").replace("\\n", " ")
             .replace("\\left(", "(").replace("\\right)", ")")
             .replace("\\left[", "[").replace("\\right]", "]")
             .replace("\\left{", "{").replace("\\right}", "}")
-            .replace("\\$", "").trim()
+            .replace(LEFT_RIGHT_REGEX, "")
+            .replace("\\$", "")
+            .replace(Regex(" {2,}"), " ")
+            .trim()
         val parser = MathParser(input)
         val row = parser.parseRow(stopAtBrace = false)
         return row to parser.usedStructural
     }
+
+    /** `\left`/`\right` before any non-letter delimiter — lookahead-safe. */
+    private val LEFT_RIGHT_REGEX = Regex("\\\\(left|right)(?![a-zA-Z])")
 
     /** Mutable parser state (class-level methods allow recursion). */
     private class MathParser(val input: String) {
@@ -179,15 +240,41 @@ object MathTypesetter {
                         }
                         node
                     }
-                    "text", "mathrm" -> {
-                        if (index < chars.size && chars[index] == '{') {
-                            index++
-                            val start2 = index
-                            while (index < chars.size && chars[index] != '}') index++
-                            val text = input.substring(start2, index)
-                            if (index < chars.size) index++
-                            MathNode.Atom(text)
-                        } else MathNode.Atom("")
+                    // ROUND-4: style-argument commands used to fall into the
+                    // generic else-branch and render LITERALLY ("mathbf" as
+                    // text, then a stray '{' atom, then the content…) — and
+                    // the first unmatched '}' TRUNCATED the rest of the
+                    // formula (parseRow broke on it). The whole
+                    // \\mathbf{u} family now parses its group and styles it.
+                    in BOLD_COMMANDS -> {
+                        boldAll(parseGroup() ?: MathNode.Atom(""))
+                    }
+                    in PLAIN_STYLE_COMMANDS -> {
+                        // Upright text content: parsed as a GROUP so braces
+                        // and nested commands inside still resolve (\text{a
+                        // \cdot b} works), unlike the old raw-text scan.
+                        parseGroup() ?: MathNode.Atom("")
+                    }
+                    in ACCENTS -> {
+                        val inner = parseGroup() ?: MathNode.Atom("")
+                        accentFirstAtom(inner, ACCENTS[command] ?: ' ')
+                    }
+                    in SKIPPED_MACROS -> {
+                        MathNode.Atom(" ")
+                    }
+                    "" -> {
+                        // ROUND-4: backslash-punctuation spacing — \! \, \; \:
+                        // and the escaped space used to leave their
+                        // punctuation CHARACTER behind as a literal atom
+                        // (\! rendered as "!"). Consumed as spacing now;
+                        // \\ (row separator) renders as a gap.
+                        when {
+                            index < chars.size && chars[index] == '!' -> { index++; MathNode.Atom("") }
+                            index < chars.size && (chars[index] == ',' || chars[index] == ';' ||
+                                chars[index] == ':' || chars[index] == ' ') -> { index++; MathNode.Atom(" ") }
+                            index < chars.size && chars[index] == '\\' -> { index++; MathNode.Atom("  ") }
+                            else -> MathNode.Atom("")
+                        }
                     }
                     else -> MathNode.Atom(SYMBOLS[command] ?: command)
                 }
@@ -210,7 +297,21 @@ object MathTypesetter {
             val children = mutableListOf<MathNode>()
             while (index < chars.size) {
                 if (stopAtBrace && chars[index] == '}') break
-                var node = parseAtom() ?: break
+                var node = parseAtom()
+                if (node == null) {
+                    // ROUND-4: an UNMATCHED '}' at row level used to BREAK the
+                    // loop and silently DROP everything after it — one
+                    // \\mathbf{u} was enough to truncate a whole equation.
+                    // It now renders as a literal brace atom and parsing
+                    // continues (matched '}' never reach here: parseGroup
+                    // consumes them, stopAtBrace breaks on them).
+                    if (index < chars.size && chars[index] == '}') {
+                        index++
+                        node = MathNode.Atom("}")
+                    } else {
+                        break
+                    }
+                }
                 while (index < chars.size && (chars[index] == '^' || chars[index] == '_')) {
                     val isSup = chars[index] == '^'
                     index++
@@ -221,6 +322,31 @@ object MathTypesetter {
             }
             return if (children.size == 1) children.first() else MathNode.Row(children)
         }
+    }
+
+    /** Recursively bolds every atom of [node] (\\mathbf{u + \\frac{a}{b}}
+     * bolds the letters AND the fraction's scripts). */
+    private fun boldAll(node: MathNode): MathNode = when (node) {
+        is MathNode.Atom -> node.copy(bold = true)
+        is MathNode.Row -> MathNode.Row(node.children.map { boldAll(it) })
+        is MathNode.Frac -> MathNode.Frac(boldAll(node.numerator), boldAll(node.denominator))
+        is MathNode.Sqrt -> MathNode.Sqrt(boldAll(node.content))
+        is MathNode.Sup -> MathNode.Sup(boldAll(node.base), node.exponent)
+        is MathNode.Sub -> MathNode.Sub(boldAll(node.base), node.subscript)
+    }
+
+    /** Attaches [mark] to the first character of the FIRST atom in [node]
+     * (\\vec{u} → u⃗); non-atom content degrades to itself — honest, no
+     * fake accent. */
+    private fun accentFirstAtom(node: MathNode, mark: Char): MathNode = when (node) {
+        is MathNode.Atom -> if (node.text.isEmpty()) node else
+            MathNode.Atom(node.text[0] + mark.toString() + node.text.substring(1), node.bold)
+        is MathNode.Row -> {
+            val children = node.children.toMutableList()
+            if (children.isNotEmpty()) children[0] = accentFirstAtom(children[0], mark)
+            MathNode.Row(children)
+        }
+        else -> node
     }
 }
 
@@ -237,7 +363,12 @@ fun MathNodeView(node: MathNode, isScriptLevel: Boolean = false) {
         MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Serif)
     }
     when (node) {
-        is MathNode.Atom -> Text(text = node.text, style = baseStyle)
+        // ROUND-4: bold atoms (\mathbf/\bm/\boldsymbol) render with an
+        // explicit bold weight — vectors and tensors keep their identity.
+        is MathNode.Atom -> Text(
+            text = node.text,
+            style = if (node.bold) baseStyle.copy(fontWeight = FontWeight.Bold) else baseStyle
+        )
         is MathNode.Row -> Row(verticalAlignment = Alignment.CenterVertically) {
             node.children.forEachIndexed { i, child ->
                 if (i > 0) Spacer(Modifier.width(1.dp))
@@ -646,12 +777,30 @@ object BidiSanitizer {
      * Isolates LTR technical runs inside RTL prose so paths, URLs and
      * identifiers keep their visual order at RTL boundaries. Pure text
      * transformation — applies to mixed Arabic + technical content only.
+     *
+     * ROUND-4 (the math corruption): LaTeX command runs (`\\frac`,
+     * `\\partial`, `\\mathbf` — backslash + letters, i.e. EXACTLY what this
+     * scanner classifies as "technical") used to receive LRI/PDI isolates
+     * BEFORE parsing — the typesetter then saw a backslash, an invisible
+     * isolate, then "frac" (an unparseable command: silent symbol loss),
+     * and the approximation's \\frac{…}{…} matching failed outright.
+     * Math regions (\\[…\\], $$…$$, \\(…\\), $…$) are now SEGMENTED OUT
+     * and passed through untouched; isolation applies to the prose
+     * between them only.
      */
     fun isolateTechnicalRuns(text: String): String {
         if (text.isEmpty()) return text
         val hasArabic = text.any { it in '\u0600'..'\u06FF' || it in '\u0750'..'\u077F' || it in '\uFB50'..'\uFDFF' || it in '\uFE70'..'\uFEFF' }
         if (!hasArabic) return text // pure LTR text needs no isolation
-        return LTR_RUN.replace(text) { match ->
+        return MathRegionSplitter.split(text).joinToString("") { segment ->
+            if (segment.isMath) segment.text else isolateRuns(segment.text)
+        }
+    }
+
+    /** The LTR-run isolation pass (semantics unchanged from R2/R3 — the
+     * math regions are already removed by the caller). */
+    private fun isolateRuns(text: String): String =
+        LTR_RUN.replace(text) { match ->
             val run = match.value
             // Only isolate runs that look technical (contain / . : _ or are
             // multi-word identifiers — avoid isolating every single English
@@ -676,5 +825,87 @@ object BidiSanitizer {
             // are weak-directional and never flip an RTL line.
             if (looksTechnical && run.any { it.isLetter() }) "$LRI$run$PDI" else run
         }
+}
+
+/**
+ * ROUND-4: splits raw message text into MATH and PROSE segments so the
+ * Bidi sanitizer can leave formula bodies byte-identical. Recognizes the
+ * four delimiter shapes the models actually emit, with streaming-friendly
+ * tolerance: an unclosed DISPLAY region runs to the end of the text (the
+ * block parser treats it the same way), while an unclosed INLINE region
+ * stops at the end of its line so one truncated `\\(` cannot swallow the
+ * rest of the message.
+ */
+internal object MathRegionSplitter {
+
+    data class Segment(val text: String, val isMath: Boolean)
+
+    fun split(text: String): List<Segment> {
+        val segments = mutableListOf<Segment>()
+        val prose = StringBuilder()
+        var i = 0
+
+        fun flushProse() {
+            if (prose.isNotEmpty()) {
+                segments += Segment(prose.toString(), isMath = false)
+                prose.setLength(0)
+            }
+        }
+
+        while (i < text.length) {
+            when {
+                text.startsWith("\\[", i) -> {
+                    val close = text.indexOf("\\]", i + 2)
+                    val end = if (close >= 0) close + 2 else text.length
+                    flushProse()
+                    segments += Segment(text.substring(i, end), isMath = true)
+                    i = end
+                }
+                text.startsWith("\\(", i) -> {
+                    val close = text.indexOf("\\)", i + 2)
+                    val end = if (close >= 0) close + 2 else endOfLine(text, i)
+                    flushProse()
+                    segments += Segment(text.substring(i, end), isMath = true)
+                    i = end
+                }
+                text.startsWith("$$", i) -> {
+                    val close = text.indexOf("$$", i + 2)
+                    val end = if (close >= 0) close + 2 else text.length
+                    flushProse()
+                    segments += Segment(text.substring(i, end), isMath = true)
+                    i = end
+                }
+                text[i] == '$' -> {
+                    // Inline $…$: pair only within the SAME line and only when
+                    // the content carries a LaTeX signal (\\ ^ _ { }) —
+                    // "وسعره 5$ إلى 7$" prose must not be mistaken for math.
+                    val close = text.indexOf('$', i + 1)
+                    val nextNl = text.indexOf('\n', i + 1)
+                    val sameLine = close > i && (nextNl < 0 || close < nextNl)
+                    val content = if (close > i) text.substring(i + 1, close) else null
+                    val latexish = content != null && content.length <= 100 &&
+                        content.any { it == '\\' || it == '^' || it == '_' || it == '{' || it == '}' }
+                    if (sameLine && latexish) {
+                        flushProse()
+                        segments += Segment(text.substring(i, close + 1), isMath = true)
+                        i = close + 1
+                    } else {
+                        prose.append('$')
+                        i++
+                    }
+                }
+                else -> {
+                    prose.append(text[i])
+                    i++
+                }
+            }
+        }
+        flushProse()
+        return segments
+    }
+
+    private fun endOfLine(text: String, from: Int): Int {
+        val nl = text.indexOf('\n', from)
+        return if (nl >= 0) nl else text.length
     }
 }

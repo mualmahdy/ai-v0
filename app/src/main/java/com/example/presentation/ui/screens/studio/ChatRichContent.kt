@@ -83,7 +83,7 @@ fun RichMarkdownContent(
                 is RichChatBlock.Quote -> QuoteBlock(block.text, spanStyles)
                 is RichChatBlock.MathBlock -> MathBlock(block.formula)
                 is RichChatBlock.Code -> RichCodeBlock(block.language, block.code)
-                is RichChatBlock.Table -> RichTable(block)
+                is RichChatBlock.Table -> RichTable(block, spanStyles)
                 is RichChatBlock.Chart -> RichChart(block)
                 is RichChatBlock.Diagram -> RichDiagram(block)
             }
@@ -162,16 +162,39 @@ object RichChatParser {
                 continue
             }
 
-            if (trimmed == "$$" || trimmed == "\\[") {
+            // ROUND-4: display math in ALL shapes the models actually emit —
+            // `\[…\]` / `$$…$$` with the delimiters ALONE on their lines
+            // (the historical shape), squeezed onto ONE line, or split with
+            // content trailing the opener (`\[ E = mc^2` … `\]`).
+            // Previously ONLY the alone-on-their-lines shape parsed as
+            // math; every other shape fell through to the paragraph path
+            // and rendered as raw backslash noise inside the bubble. The
+            // closer tolerates trailing content (`… + \\mathbf{f} \\]`).
+            val singleLineMath = singleLineDisplayMath(trimmed)
+            if (singleLineMath != null) {
                 flushMarkdown()
-                val close = if (trimmed == "$$") "$$" else "\\]"
-                val formula = StringBuilder()
+                blocks += RichChatBlock.MathBlock(singleLineMath)
                 i++
-                while (i < lines.size && lines[i].trim() != close) {
+                continue
+            }
+            val displayOpen = displayMathOpener(trimmed)
+            if (displayOpen != null) {
+                flushMarkdown()
+                val (close, firstLine) = displayOpen
+                val formula = StringBuilder(firstLine)
+                i++
+                while (i < lines.size) {
+                    val bodyLine = lines[i].trim()
+                    if (bodyLine == close || bodyLine.endsWith(close)) {
+                        if (bodyLine.length > close.length) {
+                            formula.append(' ').append(bodyLine.removeSuffix(close).trim())
+                        }
+                        i++
+                        break
+                    }
                     formula.appendLine(lines[i])
                     i++
                 }
-                if (i < lines.size && lines[i].trim() == close) i++
                 blocks += RichChatBlock.MathBlock(formula.toString().trim())
                 continue
             }
@@ -218,6 +241,27 @@ object RichChatParser {
             val value = parts.last().toFloatOrNull() ?: return@mapNotNull null
             ChartPoint(parts.dropLast(1).joinToString(" "), value)
         }
+
+    /** ROUND-4: `\\[ E = mc^2 \\]` / `$$ E = mc^2 $$` on ONE line → its
+     * formula (null when the line is not single-line display math). */
+    internal fun singleLineDisplayMath(trimmed: String): String? = when {
+        trimmed.startsWith("\\[") && trimmed.endsWith("\\]") && trimmed.length > 4 ->
+            trimmed.substring(2, trimmed.length - 2).trim()
+        trimmed.startsWith("$$") && trimmed.endsWith("$$") && trimmed.length > 4 &&
+            !trimmed.substring(2, trimmed.length - 2).contains("$$") ->
+            trimmed.substring(2, trimmed.length - 2).trim()
+        else -> null
+    }
+
+    /** ROUND-4: a display-math OPENER carrying trailing content
+     * (`\\[ E = mc^2` on its own line) → (closer, firstFormulaChunk). */
+    internal fun displayMathOpener(trimmed: String): Pair<String, String>? = when {
+        trimmed == "\\[" -> "\\]" to ""
+        trimmed == "$$" -> "$$" to ""
+        trimmed.startsWith("\\[") && !trimmed.endsWith("\\]") -> "\\]" to trimmed.removePrefix("\\[").trim()
+        trimmed.startsWith("$$") && !trimmed.endsWith("$$") -> "$$" to trimmed.removePrefix("$$").trim()
+        else -> null
+    }
 
     fun parseDiagram(source: String): List<DiagramEdge> {
         val edgeRegex = Regex("^\\s*([A-Za-z0-9_ .\\-]+?)\\s*(?:-->|---|==>)\\s*([A-Za-z0-9_ .\\-]+?)\\s*$")
@@ -285,7 +329,14 @@ private fun MarkdownBlocks(blocks: List<MdBlock>, spanStyles: MdSpanStyles) {
                 }
 
                 is MdBlock.CodeBlock -> RichCodeBlock(block.language, block.code)
-                is MdBlock.Table -> RichTable(RichChatBlock.Table(block.header, block.rows))
+                is MdBlock.Table -> RichTable(RichChatBlock.Table(block.header, block.rows), spanStyles)
+
+                // ROUND-4: a thematic break renders as a real divider — it
+                // used to accumulate into the paragraph as literal "---".
+                is MdBlock.HorizontalRule -> HorizontalDivider(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                )
             }
         }
     }
@@ -457,7 +508,7 @@ private fun CodeBlockBody(language: String?, code: String) {
 }
 
 @Composable
-private fun RichTable(block: RichChatBlock.Table) {
+private fun RichTable(block: RichChatBlock.Table, spanStyles: MdSpanStyles) {
     val columns = block.header.size.coerceAtLeast(1)
     val tableMinWidth = (columns * 120).coerceAtLeast(320).dp
     Surface(
@@ -494,23 +545,28 @@ private fun RichTable(block: RichChatBlock.Table) {
                     .heightIn(max = 420.dp)
                     .verticalScroll(rememberScrollState())
             ) {
-                TableRow(block.header, header = true)
+                TableRow(block.header, header = true, spanStyles = spanStyles)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), modifier = Modifier.padding(vertical = 4.dp))
-                block.rows.forEach { row -> TableRow(row + List((columns - row.size).coerceAtLeast(0)) { "" }, header = false) }
+                block.rows.forEach { row -> TableRow(row + List((columns - row.size).coerceAtLeast(0)) { "" }, header = false, spanStyles = spanStyles) }
             }
         }
     }
 }
 
 @Composable
-private fun TableRow(cells: List<String>, header: Boolean) {
+private fun TableRow(cells: List<String>, header: Boolean, spanStyles: MdSpanStyles) {
     // ROUND-3: NO fillMaxWidth / weight here (see RichTable) — under the
     // enclosing horizontal scroll these measured against infinite width and
     // corrupted the whole message layout.
+    // ROUND-4: cells are INLINE-PARSED — `\(\rho\)` inside a table cell
+    // used to render raw because the cell text bypassed the inline parser
+    // entirely (the Navier–Stokes symbol table showed literal backslashes).
+    // Bold/italics/code/links/math now work inside cells exactly as in
+    // paragraphs; the cell text stays selectable plain text underneath.
     Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)) {
         cells.forEach { cell ->
             Text(
-                text = cell,
+                text = ChatMarkdownParser.parseInline(cell).toAnnotatedString(spanStyles),
                 style = if (header) MaterialTheme.typography.labelMedium else MaterialTheme.typography.bodySmall,
                 fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
                 color = MaterialTheme.colorScheme.onSurface,

@@ -7,13 +7,26 @@ import com.example.domain.core.capability.SideEffectClassification
 
 /**
  * Definition of a parameter accepted by a tool.
+ *
+ * ROUND-4 (Gemini 400 `properties[hunks].items: missing field`): Gemini's
+ * function-declaration schema is an OpenAPI SUBSET that REQUIRES an `items`
+ * element for every `type: "array"` property — an array without an item
+ * schema rejects the WHOLE request with 400 INVALID_ARGUMENT (OpenAI-style
+ * providers tolerate it, which is why only Gemini collapsed). The two new
+ * optional fields let a catalog declare the item shape once, domain-side:
+ *  - [itemType] — the JSON type of ONE array element ("string"/"object"/…);
+ *  - [itemProperties] — when items are objects, their inner parameter list
+ *    (rendered as `items.properties` + `items.required` on the wire).
+ * Both default to "absent" so every existing declaration is unaffected.
  */
 data class ToolParameter(
     val name: String,
     val type: String, // "string", "number", "boolean", "object", "array"
     val description: String,
     val isRequired: Boolean = true,
-    val enumValues: List<String> = emptyList()
+    val enumValues: List<String> = emptyList(),
+    val itemType: String? = null,
+    val itemProperties: List<ToolParameter> = emptyList()
 )
 
 /**

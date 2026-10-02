@@ -61,6 +61,11 @@ sealed interface MdBlock {
     data class ListItem(val ordered: Boolean, val ordinal: Int, val spans: List<MdSpan>) : MdBlock
     data class CodeBlock(val language: String?, val code: String) : MdBlock
     data class Table(val header: List<String>, val rows: List<List<String>>) : MdBlock
+
+    /** ROUND-4: a thematic break (`---`, `***`, `___` alone on a line) — the
+     * models emit them between sections; they used to accumulate into the
+     * paragraph as literal "---" noise inside the rendered bubble. */
+    data object HorizontalRule : MdBlock
 }
 
 /**
@@ -80,6 +85,11 @@ object ChatMarkdownParser {
     private val unorderedRegex = Regex("^[-*+]\\s+(.*)$")
     private val orderedRegex = Regex("^(\\d{1,3})\\.\\s+(.*)$")
     private val fenceRegex = Regex("^```(.*)$")
+
+    /** ROUND-4: `---` / `***` / `___` thematic breaks (never a table
+     * separator — those carry a `|`; never a list marker — those have no
+     * repeat count of 3+). */
+    private val thematicBreakRegex = Regex("^(-{3,}|\\*{3,}|_{3,})$")
 
     fun parse(source: String): List<MdBlock> {
         val blocks = mutableListOf<MdBlock>()
@@ -135,6 +145,14 @@ object ChatMarkdownParser {
                 flushParagraph()
                 val level = trimmed.takeWhile { it == '#' }.length
                 blocks += MdBlock.Heading(level, parseInline(heading.groupValues[1]))
+                i++
+                continue
+            }
+
+            // ROUND-4: thematic break — a lone --- / *** / ___ line.
+            if (thematicBreakRegex.matches(trimmed)) {
+                flushParagraph()
+                blocks += MdBlock.HorizontalRule
                 i++
                 continue
             }
@@ -363,7 +381,7 @@ fun List<MdSpan>.toAnnotatedString(styles: MdSpanStyles): AnnotatedString =
                     SpanStyle(fontFamily = FontFamily.Monospace, background = styles.codeBackground)
                 ) { append(span.text) }
                 is MdSpan.Math -> withStyle(
-                    SpanStyle(fontFamily = FontFamily.Monospace, fontSize = 15.sp)
+                    SpanStyle(fontFamily = FontFamily.Serif, fontSize = 15.sp)
                 ) { append(normalizeMath(span.text)) }
                 is MdSpan.Link -> withStyle(
                     SpanStyle(color = styles.linkColor, textDecoration = TextDecoration.Underline)
@@ -377,58 +395,194 @@ fun List<MdSpan>.toAnnotatedString(styles: MdSpanStyles): AnnotatedString =
     }
 
 /**
- * Unicode-normalizes a LaTeX-ish formula into readable text (moved verbatim
- * from the old rich renderer — the single math approximation of the app):
- * common commands → their Unicode twins, \frac{a}{b} → (a)/(b), simple
- * super/subscripts → Unicode scripts, remaining braces dropped.
+ * Unicode-normalizes a LaTeX-ish formula into readable text — the INLINE
+ * math approximation of the app (display math goes through the REAL
+ * [MathTypesetter] layout tree).
+ *
+ * ROUND-4 REWRITE (the Navier–Stokes report): the old approximation was
+ * regex-based and fell apart on exactly what real models emit —
+ *  * `\frac{\partial \mathbf{u}}{\partial t}` never matched the
+ *    `[^{}]+` fraction regex (NESTED braces) and survived as raw
+ *    backslash noise;
+ *  * `\partial`, `\mathbf`, `\displaystyle`, `\!`, `\nu`… were not in
+ *    the hand-copied symbol list at all;
+ *  * `^{2}` / `_{n}` braced scripts stayed literal;
+ *  * the bare `\left`/`\right` replaces corrupted `\rightarrow`
+ *    (a prefix collision).
+ * The rewrite is brace-matching (nesting-safe), shares ONE symbol table
+ * with [MathTypesetter] (longest-key-first so `\notin` beats `\in`,
+ * `\int` beats `\in`), strips style/spacing macros, converts braced
+ * scripts, and attaches accent marks as Unicode combining characters.
+ * Still an approximation — but an honest, complete one.
  */
 internal fun normalizeMath(source: String): String {
-    var value = source
-        .replace("\\left", "")
-        .replace("\\right", "")
-        .replace("\\cdot", "·")
-        .replace("\\times", "×")
-        .replace("\\div", "÷")
-        .replace("\\leq", "≤")
-        .replace("\\le", "≤")
-        .replace("\\geq", "≥")
-        .replace("\\ge", "≥")
-        .replace("\\neq", "≠")
-        .replace("\\approx", "≈")
-        .replace("\\infty", "∞")
-        .replace("\\alpha", "α")
-        .replace("\\beta", "β")
-        .replace("\\gamma", "γ")
-        .replace("\\delta", "δ")
-        .replace("\\epsilon", "ε")
-        .replace("\\lambda", "λ")
-        .replace("\\mu", "μ")
-        .replace("\\pi", "π")
-        .replace("\\rho", "ρ")
-        .replace("\\sigma", "σ")
-        .replace("\\tau", "τ")
-        .replace("\\phi", "φ")
-        .replace("\\omega", "ω")
-        .replace("\\sum", "Σ")
-        .replace("\\prod", "Π")
-        .replace("\\int", "∫")
-        .replace("\\nabla", "∇")
-        .replace("\\to", "→")
-        .replace("\\rightarrow", "→")
-        .replace("\\in", "∈")
-        .replace("\\notin", "∉")
-        .replace("\\pm", "±")
-        .replace("\\sqrt", "√")
+    var value = source.replace("\r", " ").replace("\n", " ")
 
-    value = value.replace(Regex("\\\\frac\\{([^{}]+)\\}\\{([^{}]+)\\}")) { match ->
-        "(${match.groupValues[1]})/(${match.groupValues[2]})"
+    // \left / \right pair markers — lookahead keeps \rightarrow intact.
+    value = value.replace(Regex("\\\\(left|right)(?![a-zA-Z])"), "")
+
+    // Structural commands (brace-matched, nesting-safe, repeatable).
+    value = replaceLaTeXCommand(value, "dfrac") { args -> "(${args[0]})/(${args[1]})" }
+    value = replaceLaTeXCommand(value, "tfrac") { args -> "(${args[0]})/(${args[1]})" }
+    value = replaceLaTeXCommand(value, "frac") { args -> "(${args[0]})/(${args[1]})" }
+    value = replaceLaTeXCommand(value, "sqrt") { args -> "√(${args[0]})" }
+
+    // Style commands: keep the CONTENT only (bold/accents have no inline
+    // equivalent inside an AnnotatedString run).
+    for (style in LATEX_STYLE_COMMANDS) {
+        value = replaceLaTeXCommand(value, style) { args -> args[0] }
     }
-    value = value.replace(Regex("\\\\sqrt\\{([^{}]+)\\}")) { match ->
-        "√(${match.groupValues[1]})"
+    // Accents: attach the combining mark to the first character.
+    for ((command, mark) in LATEX_ACCENT_MARKS) {
+        value = replaceLaTeXCommand(value, command) { args ->
+            args[0].let { content ->
+                if (content.isEmpty()) content else content[0] + mark.toString() + content.substring(1)
+            }
+        }
     }
+    // Zero-argument mode/size macros: stripped WITHOUT touching the
+    // delimiter that follows (`\bigl(` must keep its parenthesis).
+    value = value.replace(ZERO_ARG_MACRO_REGEX, "")
+    value = value.replace("\\quad", "  ").replace("\\qquad", "    ")
+    value = value.replace("\\!", "").replace("\\,", " ")
+        .replace("\\;", " ").replace("\\:", " ")
+        .replace("\\ ", " ")
+
+    // Symbol table — SHARED with the real typesetter, longest key first
+    // (so \notin never partially matches as \not/\in, \int as \in…).
+    for ((command, glyph) in MathTypesetter.SYMBOLS.entries.sortedByDescending { it.key.length }) {
+        value = value.replace("\\$command", glyph)
+    }
+
+    // Braced scripts ^{...} / _{...}, then bare ^2 / _3.
+    value = replaceBracedScript(value, '^', superscriptMap)
+    value = replaceBracedScript(value, '_', subscriptMap)
     value = replaceSimpleScript(value, '^', superscriptMap)
     value = replaceSimpleScript(value, '_', subscriptMap)
-    return value.replace("{", "").replace("}", "").trim()
+
+    return value.replace("{", "").replace("}", "")
+        .replace(Regex(" {2,}"), " ").trim()
+}
+
+/** Style commands whose argument is kept verbatim in the approximation. */
+private val LATEX_STYLE_COMMANDS = listOf(
+    "mathbf", "mathit", "mathrm", "mathsf", "mathtt", "bm", "boldsymbol",
+    "mathcal", "mathbb", "mathfrak",
+    "text", "mbox", "operatorname", "ensuremath", "textbf", "textit"
+)
+
+/** Accent commands → Unicode combining marks (attached to the first char). */
+private val LATEX_ACCENT_MARKS = listOf(
+    "vec" to '\u20D7', "hat" to '\u0302', "widehat" to '\u0302',
+    "tilde" to '\u0303', "widetilde" to '\u0303', "dot" to '\u0307',
+    "ddot" to '\u0308', "bar" to '\u0304', "overline" to '\u0304',
+    "underline" to '\u0332'
+)
+
+/** Mode/size macros that take NO argument — removed with a lookahead so
+ * the delimiter they scale (`\bigl(` …) survives untouched. */
+private val ZERO_ARG_MACRO_REGEX = Regex(
+    "\\\\(displaystyle|textstyle|limits|nolimits|middle|bigl|bigr|Bigl|Bigr|biggl|biggr|bigg|Bigg|big|Big)(?![a-zA-Z])"
+)
+
+/**
+ * Replaces every well-formed `\command{arg}…{arg}` occurrence (and the
+ * single-token form `\command x`) with [transform] of its arguments.
+ * BRACE-MATCHED: nested groups count depth, so
+ * `\frac{\partial u}{\partial t}` parses correctly where the old
+ * `[^{}]+` regex could not. A command that is the PREFIX of a longer one
+ * (`\ge` inside `\geq`) is skipped via a letter-boundary check; an
+ * unclosed argument leaves the rest of the input untouched (tolerance).
+ */
+private fun replaceLaTeXCommand(
+    value: String,
+    command: String,
+    argCount: Int = 1,
+    transform: (List<String>) -> String
+): String {
+    val token = "\\$command"
+    val out = StringBuilder()
+    var i = 0
+    while (i < value.length) {
+        val idx = value.indexOf(token, i)
+        if (idx < 0) {
+            out.append(value, i, value.length)
+            break
+        }
+        val after = idx + token.length
+        val isFullCommand = after >= value.length || !value[after].isLetter()
+        if (!isFullCommand) {
+            // A longer command (\geq seen as \ge): copy verbatim, rescan after it.
+            out.append(value, i, after)
+            i = after
+            continue
+        }
+        out.append(value, i, idx)
+        var j = after
+        val args = mutableListOf<String>()
+        var wellFormed = true
+        repeat(argCount) {
+            while (j < value.length && value[j] == ' ') j++
+            val group = readGroup(value, j)
+            if (group == null) {
+                wellFormed = false
+            } else {
+                args += group.first
+                j = group.second
+            }
+        }
+        if (!wellFormed) {
+            // Unclosed argument: keep the rest verbatim (honest tolerance).
+            out.append(value, idx, value.length)
+            return out.toString()
+        }
+        out.append(transform(args))
+        i = j
+    }
+    return out.toString()
+}
+
+/** Reads one LaTeX group from [from]: `{…}` (depth-counted, nesting-safe)
+ * or a single token character when no brace follows. Returns (content,
+ * indexAfter) or null when nothing readable remains. */
+private fun readGroup(value: String, from: Int): Pair<String, Int>? {
+    if (from >= value.length) return null
+    if (value[from] != '{') {
+        return value[from].toString() to from + 1
+    }
+    var depth = 0
+    var i = from
+    while (i < value.length) {
+        when (value[i]) {
+            '{' -> depth++
+            '}' -> {
+                depth--
+                if (depth == 0) return value.substring(from + 1, i) to (i + 1)
+            }
+        }
+        i++
+    }
+    return null // unclosed
+}
+
+/** Braced scripts: `^{2}`→², `_{n}`→ₙ (per-character via [map]; characters
+ * without a Unicode twin stay literal — the honest approximation). */
+private fun replaceBracedScript(value: String, marker: Char, map: Map<Char, Char>): String {
+    val out = StringBuilder()
+    var i = 0
+    while (i < value.length) {
+        if (value[i] == marker && i + 1 < value.length && value[i + 1] == '{') {
+            val group = readGroup(value, i + 1)
+            if (group != null) {
+                out.append(group.first.map { map[it] ?: it })
+                i = group.second
+                continue
+            }
+        }
+        out.append(value[i])
+        i++
+    }
+    return out.toString()
 }
 
 private fun replaceSimpleScript(value: String, marker: Char, map: Map<Char, Char>): String {
@@ -451,10 +605,17 @@ private fun replaceSimpleScript(value: String, marker: Char, map: Map<Char, Char
 
 private val superscriptMap = mapOf(
     '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
-    '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹'
+    '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹',
+    '+' to '⁺', '-' to '⁻', '=' to '⁼', '(' to '⁽', ')' to '⁾',
+    'n' to 'ⁿ', 'i' to 'ⁱ'
 )
 
 private val subscriptMap = mapOf(
     '0' to '₀', '1' to '₁', '2' to '₂', '3' to '₃', '4' to '₄',
-    '5' to '₅', '6' to '₆', '7' to '₇', '8' to '₈', '9' to '₉'
+    '5' to '₅', '6' to '₆', '7' to '₇', '8' to '₈', '9' to '₉',
+    '+' to '₊', '-' to '₋', '=' to '₌', '(' to '₍', ')' to '₎',
+    'a' to 'ₐ', 'e' to 'ₑ', 'h' to 'ₕ', 'i' to 'ᵢ', 'j' to 'ⱼ',
+    'k' to 'ₖ', 'l' to 'ₗ', 'm' to 'ₘ', 'n' to 'ₙ', 'o' to 'ₒ',
+    'p' to 'ₚ', 'r' to 'ᵣ', 's' to 'ₛ', 't' to 'ₜ', 'u' to 'ᵤ',
+    'v' to 'ᵥ', 'x' to 'ₓ'
 )

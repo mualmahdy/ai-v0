@@ -515,6 +515,30 @@ class OpenAiCompatibleLlmAdapter(
                         val prop = JSONObject().put("type", param.type.ifBlank { "string" })
                         if (param.description.isNotBlank()) prop.put("description", param.description)
                         if (param.enumValues.isNotEmpty()) prop.put("enum", JSONArray(param.enumValues))
+                        // ROUND-4 parity with the Gemini fix: array-typed
+                        // parameters carry an explicit `items` schema (OpenAI
+                        // tolerates a bare "array", but the item shape makes
+                        // function-calling materially more accurate — and the
+                        // two adapters now share ONE declaration contract).
+                        if (param.type == "array") {
+                            val itemType = param.itemType?.takeIf { it.isNotBlank() } ?: "string"
+                            val items = JSONObject().put("type", itemType)
+                            if (itemType == "object" && param.itemProperties.isNotEmpty()) {
+                                val itemProps = JSONObject()
+                                val itemRequired = JSONArray()
+                                param.itemProperties.forEach { ip ->
+                                    if (ip.name.isBlank()) return@forEach
+                                    val ipProp = JSONObject().put("type", ip.type.ifBlank { "string" })
+                                    if (ip.description.isNotBlank()) ipProp.put("description", ip.description)
+                                    if (ip.enumValues.isNotEmpty()) ipProp.put("enum", JSONArray(ip.enumValues))
+                                    itemProps.put(ip.name, ipProp)
+                                    if (ip.isRequired) itemRequired.put(ip.name)
+                                }
+                                items.put("properties", itemProps)
+                                if (itemRequired.length() > 0) items.put("required", itemRequired)
+                            }
+                            prop.put("items", items)
+                        }
                         properties.put(param.name, prop)
                         if (param.isRequired) required.put(param.name)
                     }

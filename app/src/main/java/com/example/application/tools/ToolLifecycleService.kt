@@ -204,6 +204,17 @@ class ToolLifecycleService(
             if (param.type !in setOf("string", "number", "boolean", "object", "array")) {
                 parameterSchemaIssues.add("نوع بارامتر غير معروف: ${param.name}=${param.type}")
             }
+            // ROUND-4: array items governance — Gemini REQUIRES `items` on
+            // array-typed properties; an itemType outside the known set would
+            // either 400 the request (Gemini) or degrade silently (OpenAI).
+            if (param.type == "array" && param.itemType != null &&
+                param.itemType !in setOf("string", "number", "boolean", "object")
+            ) {
+                parameterSchemaIssues.add("نوع عنصر مصفوفة غير معروف: ${param.name}[]=${param.itemType}")
+            }
+            if (param.type == "array" && param.itemType == "object" && param.itemProperties.isEmpty()) {
+                parameterSchemaIssues.add("مصفوفة كائنات بلا تعريف عناصرها: ${param.name}[]")
+            }
             if (param.isRequired && param.description.isBlank()) {
                 parameterSchemaIssues.add("بارامتر إلزامي بلا وصف: ${param.name}")
             }

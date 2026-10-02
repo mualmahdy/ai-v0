@@ -13,6 +13,7 @@ import com.example.domain.core.llm.SafeProviderMetadata
 import com.example.domain.core.llm.TokenUsage
 import com.example.domain.core.llm.ToolCallRequest
 import com.example.domain.core.rethrowIfCancellation
+import com.example.domain.core.tools.ToolParameter
 import com.example.domain.ports.llm.LlmProviderPort
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -262,6 +263,20 @@ class GeminiLlmAdapter(
                 if (param.enumValues.isNotEmpty()) {
                     prop.put("enum", JSONArray(param.enumValues))
                 }
+                // ROUND-4 FIX (the surviving Gemini 400 family): Gemini's
+                // function-declaration schema is an OpenAPI SUBSET that
+                // REQUIRES `items` on every ARRAY-typed property —
+                //   "…parameters.properties[hunks].items: missing field"
+                // rejected the ENTIRE streamGenerateContent request while
+                // OpenAI-compatible providers happily accepted the same bare
+                // "array". Every array property now carries an items schema:
+                // the domain-declared [ToolParameter.itemType]/[itemProperties]
+                // when present, and a defensive {"type":"string"} fallback
+                // otherwise — no future catalog edit can 400 the whole chat
+                // by declaring an unshaped array.
+                if (type == "array") {
+                    prop.put("items", buildItemsSchema(param))
+                }
                 properties.put(param.name, prop)
                 if (param.isRequired) required.put(param.name)
             }
@@ -276,6 +291,38 @@ class GeminiLlmAdapter(
         }
         if (declarations.length() == 0) return null
         return JSONArray().put(JSONObject().put("functionDeclarations", declarations))
+    }
+
+    /**
+     * ROUND-4: the `items` schema of one array-typed parameter. A declared
+     * object item type renders its full inner [ToolParameter.itemProperties]
+     * (properties + required — recursively valid Schema objects for Gemini);
+     * anything undeclared degrades to a string item schema so the request
+     * can never be rejected for a missing `items` field again.
+     */
+    private fun buildItemsSchema(param: ToolParameter): JSONObject {
+        val itemType = param.itemType?.takeIf { it.isNotBlank() } ?: "string"
+        val items = JSONObject().put("type", itemType)
+        if (itemType == "object" && param.itemProperties.isNotEmpty()) {
+            val itemProps = JSONObject()
+            val itemRequired = JSONArray()
+            for (ip in param.itemProperties) {
+                if (ip.name.isBlank()) continue
+                val ipType = if (ip.enumValues.isNotEmpty()) "string" else ip.type.ifBlank { "string" }
+                val ipProp = JSONObject().put("type", ipType)
+                if (ip.description.isNotBlank()) ipProp.put("description", ip.description)
+                if (ip.enumValues.isNotEmpty()) ipProp.put("enum", JSONArray(ip.enumValues))
+                // Nested arrays inside items get the same defensive items rule.
+                if (ipType == "array") {
+                    ipProp.put("items", JSONObject().put("type", ip.itemType?.takeIf { it.isNotBlank() } ?: "string"))
+                }
+                itemProps.put(ip.name, ipProp)
+                if (ip.isRequired) itemRequired.put(ip.name)
+            }
+            items.put("properties", itemProps)
+            if (itemRequired.length() > 0) items.put("required", itemRequired)
+        }
+        return items
     }
 
     /**
