@@ -22,14 +22,38 @@
 ### نتائج التحقق — الجولة 4
 
 - **محاكاة قراءة عميقة للخوارزميات** (لا بيئة Android SDK في بيئة إعداد الرقعة): مُحاكاة كاملة بلغة أخرى لخط أنابيب `MathRegionSplitter` + `normalizeMath` + محلّل المصفِّف + كاشف display-math على **نفس مدخلات تقرير المستخدم** (معادلة نافييه‑ستوكس حرفياً) — كل التوقعات تحققت: كسران مكدّسان ببنية `Frac` حقيقية، `\mathbf{f}` يصل آخر المعادلة (لا قطع)، لا backslash ناجٍ في التقريب.
-- `HotfixRound4RegressionTest.kt` **(جديد، 21 اختبار JVM نقي)**: عقد `items` لدى Gemini (الكامل + الحارس الدفاعي + مسح شامل لكل خاصية array) + مرآة OpenAI + عقد الكتالوج نفسه + عزل مناطق الرياضيات + الأشكال الأربعة لـ display-math + mathbf/القوس الغريب/التباعد + التقريب (كسور متداخلة/رموز مشتركة/سكربتات معقوطة) + الفاصل الأفقي.
-- **التجميع والاختبارات غير مشغَّلة هنا** (لا Android SDK) — شغّلها محلياً/في CI: `./gradlew :app:compileDebugKotlin :app:testDebugUnitTest :app:assembleDebug`.
+- `HotfixRound4RegressionTest.kt` **(جديد، 28 اختبار JVM نقي)**: عقد `items` لدى Gemini (الكامل + الحارس الدفاعي + مسح شامل لكل خاصية array) + مرآة OpenAI + عقد الكتالوج نفسه + عزل مناطق الرياضيات + الأشكال الأربعة لـ display-math + mathbf/القوس الغريب/التباعد + التقريب (كسور متداخلة/رموز مشتركة/سكربتات معقوطة) + الفاصل الأفقي.
+- **أصلحته الجولة 4b أدناه**: رقعة الجولة 4 نفسها احتوت خطأي تجميع وثلاثة اختبارات فاشلة (شُخِّصت وأُصلحت في بيئة بناء فعلية) — راجع قسم «الجولة 4b».
 
 ### ملفات تغيّرت — الجولة 4
 
 **إنتاج (8):** `ToolModels.kt` (itemType/itemProperties)، `CodingToolchainService.kt` (مخطط hunks الكامل)، `GeminiLlmAdapter.kt` (انبعاث items الإلزامي + buildItemsSchema)، `OpenAiCompatibleLlmAdapter.kt` (مرآة items)، `ToolLifecycleService.kt` (تحكّم itemType)، `ChatMarkdown.kt` (HorizontalRule + Math بـ Serif + إعادة بناء normalizeMath)، `ChatRichContent.kt` (كل أشكال display-math + خلايا الجدول عبر parseInline + فاصل أفقي)، `TechnicalRenderers.kt` (MathRegionSplitter + ترقية المصفِّف + جدول الرموز المشترك).
 
 **اختبارات (1):** `HotfixRound4RegressionTest.kt` (جديد).
+
+### الجولة 4b — إصلاح فشل البناء والاختبارات بعد تطبيق رقعة الجولة 4
+
+**التقرير المبلَّغ:** «فشل البناء وفشلت الإختبارات بعد تطبيق الباتش». أُعيد إنتاج الفشل في بيئة بناء كاملة (JDK 21 + Android SDK platform 36.1 + Gradle 9.3.1 + AGP 9.1.1 + Kotlin 2.2.10) — خطآن تجميعيان وثلاثة اختبارات فاشلة، كلها في كود الجولة 4 نفسه، ولكلٍّ منها سبب جذري محدد ومُثبت:
+
+| # | العطل (كما ظهر في البناء) | السبب الجذري | الإصلاح |
+|---|---|---|---|
+| R4b-1 | `compileDebugKotlin` يفشل: `TechnicalRenderers.kt:319 Argument type mismatch: actual type is 'MathNode?', but 'MathNode' was expected` | Kotlin 2.2 **يرفض الـ smart cast** على `var node` الذي يُعاد إسناده داخل حلقة السكربتات بين فحص null والاستخدام (قيد smart cast المعروف على vars المعدَّلة في الحلقات) | الذرة تُربط بـ `val atom: MathNode` عبر elvis (فرع `break` من نوع Nothing) ثم `var node = atom` — النوع الساكن غير الفارغ يغني عن smart cast كلياً |
+| R4b-2 | `compileDebugUnitTestKotlin` يفشل: `Method 'iterator()' is ambiguous` + `Unresolved reference 'keySet'` | **android.jar يحجب نسخة Maven من org.json** في مسار تجميع اختبارات الوحدة، ونسخة AOSP من `JSONObject` **لا تملك `keySet()`** أصلاً | الاستبدال بـ `keys()` (الموجودة في النسختين) مع حلقة `while` كلاسيكية |
+| R4b-3 | اختبارا `$$y$$` يفشلان: `Unresolved reference 'y'` | `"$$y$$"` في Kotlin ليست نصاً حرفياً — **`$y` قالب نصي** يُفسَّر كمتغيّر غير موجود | تهريب الدولارات: `\$\$y\$\$` |
+| R4b-4 | اختبار الكسور المتداخلة ينهار: `IndexOutOfBoundsException: Index 1 out of bounds for length 1` | نداءات `frac`/`dfrac`/`tfrac` كانت تستخدم `argCount` الافتراضي (**1**) بينما الـ transform يقرأ `args[1]` — كل `\frac{..}{..}` ينهار وقت التشغيل | `argCount = 2` صراحةً في الثلاثة |
+| R4b-5 | اختبار `\nabla^{2}` يفشل: `expected:<∇²> but was:<∇[²]>` | `out.append(group.first.map { … })` يمرّر **`List<Char>`** فيختار المحوّل `append(Any?)` فيُسلسل **تنسيق القائمة نفسه** `[²]` | `.joinToString("")` قبل append |
+| R4b-6 | اختبار نافييه‑ستوكس يفشل: ذرات تحتوي `\n` | `.replace("\\n", " ")` تستبدل **النص الحرفي** backslash+n (سلسلة كوتلن `"\\n"`) لا محارف التحكم الحقيقية — فالأسطر الجديدة تنجو للذرات | `.replace('\n', ' ')` بمحارف التحكم |
+
+**نتائج التحقق — الجولة 4b (بيئة بناء فعلية):**
+
+- `:app:compileDebugKotlin` — أخضر
+- `:app:compileDebugUnitTestKotlin` — أخضر
+- `:app:testDebugUnitTest` **كاملاً (173 صفاً)**: **1313 اختباراً، 0 فشل، 0 تخطٍّ** — يشمل `HotfixRound4RegressionTest` بكل اختباراته الـ 28
+- `:app:assembleDebug` — أخضر (APK أُنتج فعلاً، ~102MB)
+
+**الدرس المنهجي (موثّق بلا تجميل):** «محاكاة خارجية للخوارزميات» في الجولة 4 لم تكن بديلاً عن التجميع الفعلي — ثلاثة من الأخطاء الستة أعلاه (R4b-4/R4b-5/R4b-6) كانت **أخطاء كوتلن صرفة لا تظهر إلا بمترجم حقيقي**. الرقعات اللاحقة تُقيَّد ببناء واختبارات خضراء في بيئة إعداد الرقعة نفسها قبل التسليم.
+
+**ملفات تغيّرت — الجولة 4b (3):** `TechnicalRenderers.kt` (R4b-1 + R4b-6)، `ChatMarkdown.kt` (R4b-4 + R4b-5)، `HotfixRound4RegressionTest.kt` (R4b-2 + R4b-3).
 
 ---
 

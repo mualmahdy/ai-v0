@@ -137,7 +137,13 @@ class HotfixRound4RegressionTest {
             for (d in 0 until decls.length()) {
                 val params = decls.getJSONObject(d).optJSONObject("parameters") ?: continue
                 val props = params.optJSONObject("properties") ?: continue
-                for (key in props.keySet()) {
+                // ROUND-4b: android.jar's org.json.JSONObject has no
+                // keySet() (the AOSP subset shadows the Maven org.json on
+                // the unit-test compile classpath) — keys() is the API that
+                // compiles against BOTH variants.
+                val keys = props.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
                     val prop = props.getJSONObject(key)
                     if (prop.optString("type") == "array") {
                         arrayProperties++
@@ -235,10 +241,13 @@ class HotfixRound4RegressionTest {
     @Test
     fun `math region splitter segments the four delimiter shapes`() {
         val segments = MathRegionSplitter.split(
-            "قبل \\(a+b\\) وسط \\[x^2\\] آخر $$y$$ ونهاية"
+            "قبل \\(a+b\\) وسط \\[x^2\\] آخر \$\$y\$\$ ونهاية"
         )
         val math = segments.filter { it.isMath }.map { it.text }
-        assertEquals(listOf("\\(a+b\\)", "\\[x^2\\]", "$$y$$"), math)
+        // ROUND-4b: the dollars are escaped (\$) — a bare "$$y" is a
+        // Kotlin string TEMPLATE (\$y → unresolved 'y') and broke the
+        // round-4 patch's own test compilation.
+        assertEquals(listOf("\\(a+b\\)", "\\[x^2\\]", "\$\$y\$\$"), math)
         // The prose segments concatenate back to the text around the math.
         assertEquals("قبل  وسط  آخر  ونهاية", segments.filter { !it.isMath }.joinToString("") { it.text })
     }

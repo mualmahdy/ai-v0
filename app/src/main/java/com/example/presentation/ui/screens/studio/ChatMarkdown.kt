@@ -422,9 +422,12 @@ internal fun normalizeMath(source: String): String {
     value = value.replace(Regex("\\\\(left|right)(?![a-zA-Z])"), "")
 
     // Structural commands (brace-matched, nesting-safe, repeatable).
-    value = replaceLaTeXCommand(value, "dfrac") { args -> "(${args[0]})/(${args[1]})" }
-    value = replaceLaTeXCommand(value, "tfrac") { args -> "(${args[0]})/(${args[1]})" }
-    value = replaceLaTeXCommand(value, "frac") { args -> "(${args[0]})/(${args[1]})" }
+    // ROUND-4b: argCount = 2 — with the default 1 the transform read
+    // args[1] on a single-element list and CRASHED with
+    // IndexOutOfBoundsException on every \frac{..}{..}.
+    value = replaceLaTeXCommand(value, "dfrac", argCount = 2) { args -> "(${args[0]})/(${args[1]})" }
+    value = replaceLaTeXCommand(value, "tfrac", argCount = 2) { args -> "(${args[0]})/(${args[1]})" }
+    value = replaceLaTeXCommand(value, "frac", argCount = 2) { args -> "(${args[0]})/(${args[1]})" }
     value = replaceLaTeXCommand(value, "sqrt") { args -> "√(${args[0]})" }
 
     // Style commands: keep the CONTENT only (bold/accents have no inline
@@ -574,7 +577,10 @@ private fun replaceBracedScript(value: String, marker: Char, map: Map<Char, Char
         if (value[i] == marker && i + 1 < value.length && value[i + 1] == '{') {
             val group = readGroup(value, i + 1)
             if (group != null) {
-                out.append(group.first.map { map[it] ?: it })
+                // ROUND-4b: joinToString("") — appending the raw List<Char>
+                // picked StringBuilder.append(Any?) and materialised the
+                // LIST'S toString: ^{2} rendered as "[²]".
+                out.append(group.first.map { map[it] ?: it }.joinToString(""))
                 i = group.second
                 continue
             }

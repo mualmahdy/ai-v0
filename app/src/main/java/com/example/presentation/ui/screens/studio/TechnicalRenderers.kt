@@ -169,7 +169,11 @@ object MathTypesetter {
      */
     fun parse(source: String): Pair<MathNode, Boolean> {
         val input = source
-            .replace("\\r", " ").replace("\\n", " ")
+            // ROUND-4b: '\r'/'\n' CONTROL characters — the previous
+            // "\\r"/"\\n" Kotlin literals (backslash+letter, matching the
+            // two-character TEXT "\\n") never matched real line breaks, so
+            // multi-line \\[ ... \\] blocks leaked Atom("\\n") into the tree.
+            .replace('\r', ' ').replace('\n', ' ')
             .replace("\\left(", "(").replace("\\right)", ")")
             .replace("\\left[", "[").replace("\\right]", "]")
             .replace("\\left{", "{").replace("\\right}", "}")
@@ -297,21 +301,24 @@ object MathTypesetter {
             val children = mutableListOf<MathNode>()
             while (index < chars.size) {
                 if (stopAtBrace && chars[index] == '}') break
-                var node = parseAtom()
-                if (node == null) {
-                    // ROUND-4: an UNMATCHED '}' at row level used to BREAK the
-                    // loop and silently DROP everything after it — one
-                    // \\mathbf{u} was enough to truncate a whole equation.
-                    // It now renders as a literal brace atom and parsing
-                    // continues (matched '}' never reach here: parseGroup
-                    // consumes them, stopAtBrace breaks on them).
-                    if (index < chars.size && chars[index] == '}') {
+                // ROUND-4: an UNMATCHED '}' at row level used to BREAK the
+                // loop and silently DROP everything after it — one
+                // \\mathbf{u} was enough to truncate a whole equation.
+                // It now renders as a literal brace atom and parsing
+                // continues (matched '}' never reach here: parseGroup
+                // consumes them, stopAtBrace breaks on them).
+                // ROUND-4b: the atom is bound to a NON-NULL val — Kotlin 2.2
+                // refuses the smart cast on the old mutable `node` because it
+                // is reassigned inside the script loop below (this was the
+                // compile failure reported after applying the round-4 patch).
+                val atom: MathNode = parseAtom()
+                    ?: if (index < chars.size && chars[index] == '}') {
                         index++
-                        node = MathNode.Atom("}")
+                        MathNode.Atom("}")
                     } else {
                         break
                     }
-                }
+                var node = atom
                 while (index < chars.size && (chars[index] == '^' || chars[index] == '_')) {
                     val isSup = chars[index] == '^'
                     index++
