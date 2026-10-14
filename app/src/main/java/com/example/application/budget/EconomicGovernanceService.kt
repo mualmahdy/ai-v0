@@ -67,7 +67,16 @@ class EconomicGovernanceService(
     private val rateLimitGovernor: RateLimitGovernor = RateLimitGovernor(),
     /** Optional telemetry sink — observability must never break governance. */
     private val telemetry: TelemetryService? = null,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    /**
+     * v23 hold-based budget gate (approved Day 8-9 wiring, Section و.6).
+     * NULL (the default) preserves the legacy authorize() behavior
+     * EXACTLY — every existing construction site is unchanged. When wired,
+     * authorize() routes through authorizeAndReserve whenever an active
+     * accounting policy covers the request's scope, and falls back to the
+     * legacy comparison verbatim otherwise (full retro-compatibility).
+     */
+    private val holdBasedBudgetCore: HoldBasedBudgetGate? = null
 ) {
 
     private val ledgerMutex = Mutex()
@@ -188,6 +197,19 @@ class EconomicGovernanceService(
                 estimate = estimate,
                 appliedPolicy = null
             )
+        }
+
+        // ---- v23: hold-based authorization when an accounting policy is
+        // active for one of the request's scopes (Section و.6). The gate
+        // returns null when no policy covers the request, in which case the
+        // legacy path below runs VERBATIM — budget_allocations keeps
+        // working throughout the transition. ----
+        if (holdBasedBudgetCore != null) {
+            val holdDecision = holdBasedBudgetCore.tryAuthorize(request, estimate, statuses, rateStatus)
+            if (holdDecision != null) {
+                notifyBudgetEvent(request, holdDecision.decision, holdDecision.reason, null)
+                return holdDecision
+            }
         }
 
         // ---- Budget evaluation over scopes with allocations ----
@@ -558,7 +580,10 @@ class EconomicGovernanceService(
         request: EconomicAuthorizationRequest,
         decision: EconomicGateDecision,
         reason: String,
-        status: BudgetStatus
+        /** Nullable since the v23 hold-based path reports at request level
+         *  (no single legacy BudgetStatus applies). Unused by the current
+         *  telemetry sink — kept for call-site compatibility. */
+        @Suppress("UNUSED_PARAMETER") status: BudgetStatus?
     ) {
         telemetry ?: return
         scope.launch {

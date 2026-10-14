@@ -98,9 +98,8 @@ class RoomEconomicStore(
     ): List<UsageCostRecord> =
         ledgerDao.recentForIdentity(providerId, modelId, limit).map { it.toDomain() }
 
-    override suspend fun pruneOlderThan(epochMs: Long) {
-        ledgerDao.pruneOlderThan(epochMs)
-    }
+    // ADR-B2 (approved 2026-10-14): pruneOlderThan override REMOVED — the
+    // port no longer declares it and financial records are never deleted.
 
     // ================= BudgetAllocationPort =================
 
@@ -249,7 +248,9 @@ class RoomEconomicStore(
     private fun BudgetAllocation.toEntity() = BudgetAllocationEntity(
         scopeType = scope.scopeType.name,
         scopeId = scope.scopeId,
-        allocatedAmountMicro = allocated.amountMicro ?: 0L,
+        // NF-2 fix (approved Day 8-9, vehicle MIGRATION_23_TO_24): an
+        // UNKNOWN allocation amount persists as NULL — never coerced to 0.
+        allocatedAmountMicro = allocated.amountMicro,
         currency = allocated.currency,
         policyActionsCsv = policy.actions.joinToString(",") { it.name },
         warnThresholdRatio = policy.warnThresholdRatio,
@@ -264,7 +265,9 @@ class RoomEconomicStore(
             scopeType = runCatching { BudgetScopeType.valueOf(scopeType) }.getOrDefault(BudgetScopeType.WORKSPACE),
             scopeId = scopeId
         ),
-        allocated = MoneyAmount.of(allocatedAmountMicro, currency),
+        // NULL in storage stays UNKNOWN in the domain (MoneyAmount with
+        // amountMicro = null) — the ج-4 round-trip invariant.
+        allocated = MoneyAmount(allocatedAmountMicro, currency),
         policy = BudgetPolicy(
             actions = policyActionsCsv.split(",")
                 .mapNotNull { runCatching { BudgetPolicyAction.valueOf(it.trim()) }.getOrNull() },

@@ -126,10 +126,8 @@ class FakeCostLedger : CostLedgerPort {
                 (modelId == null || r.modelId == modelId)
         }.sortedByDescending { it.timestampEpochMs }.take(limit)
 
-    override suspend fun pruneOlderThan(epochMs: Long) {
-        records.removeAll { it.timestampEpochMs < epochMs }
-        flow.value = records.toList()
-    }
+    // ADR-B2 (approved 2026-10-14): pruneOlderThan removed from the port —
+    // financial records are never physically deleted.
 }
 
 class FakeBudgetAllocationRepository : BudgetAllocationPort {

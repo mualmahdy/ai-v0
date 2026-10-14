@@ -214,8 +214,9 @@ data class CostLedgerEntryEntity(
 data class BudgetAllocationEntity(
     val scopeType: String,       // BudgetScopeType.name
     val scopeId: String,
-    /** Allocated amount in micro currency units. */
-    val allocatedAmountMicro: Long,
+    /** Allocated amount in micro currency units; NULL = UNKNOWN spending
+     *  authority (NF-2 fix, MIGRATION_23_TO_24) — never a silent 0. */
+    val allocatedAmountMicro: Long?,
     val currency: String,
     /** Ordered CSV of BudgetPolicyAction names — precedence = order. */
     val policyActionsCsv: String,

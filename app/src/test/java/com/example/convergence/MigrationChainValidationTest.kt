@@ -243,7 +243,7 @@ class MigrationChainValidationTest {
             // FUNCTIONAL CLOSURE Phase 1 §9).
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(22, c.getInt(0))
+                assertEquals(24, c.getInt(0))
             }
 
             // Room accepted the migrated schema: it wrote its identity hash.
@@ -304,6 +304,35 @@ class MigrationChainValidationTest {
                 assertEquals("[0.1,0.9]", c.getString(1))
                 assertEquals(0.9f, c.getFloat(2), 0.0001f)
             }
+
+            // v23 (STAGE 1, approved 2026-10-14): the accounting budget core
+            // exists on the fully-migrated database with ALL ten protections
+            // (upgraded devices get the triggers from MIGRATION_22_TO_23 —
+            // fresh installs get them from the onCreate callback).
+            for (table in listOf(
+                "scope_descriptor", "budget_policy", "budget_period",
+                "budget_hold", "budget_ledger_entry", "budget_hold_settlement"
+            )) {
+                db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='$table'").use { c ->
+                    assertTrue("budget core table $table must exist after the full chain", c.moveToFirst())
+                }
+            }
+            db.query("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_budget%'").use { c ->
+                assertTrue(c.moveToFirst())
+                assertEquals("all ten budget protection triggers must exist", 10, c.getInt(0))
+            }
+            // v24: budget_allocations.allocatedAmountMicro is nullable on the
+            // upgraded database (NF-2 fix — UNKNOWN stays UNKNOWN).
+            db.query("PRAGMA table_info(budget_allocations)").use { c ->
+                var found = false
+                while (c.moveToNext()) {
+                    if (c.getString(1) == "allocatedAmountMicro") {
+                        found = true
+                        assertEquals("allocatedAmountMicro must be nullable after v24", 0, c.getInt(3))
+                    }
+                }
+                assertTrue("allocatedAmountMicro column must exist", found)
+            }
         } finally {
             room.close()
         }
@@ -327,7 +356,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(22, c.getInt(0))
+                assertEquals(24, c.getInt(0))
             }
             // Validation accepted → identity hash written.
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
@@ -375,7 +404,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(22, c.getInt(0))
+                assertEquals(24, c.getInt(0))
             }
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
                 assertTrue(c.moveToFirst())

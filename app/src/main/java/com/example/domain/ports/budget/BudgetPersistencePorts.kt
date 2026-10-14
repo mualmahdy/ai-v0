@@ -50,7 +50,11 @@ interface CostLedgerPort {
         modelId: String?,
         limit: Int
     ): List<UsageCostRecord>
-    suspend fun pruneOlderThan(epochMs: Long)
+
+    // ADR-B2 (approved 2026-10-14): pruneOlderThan is REMOVED from the
+    // cost-ledger contract. Financial records are Class A retention data:
+    // no physical delete, ever. Archival is export-based (JSONL), backups
+    // use VACUUM INTO before upgrades.
 }
 
 /** Aggregate of a scope's consumed cost with honest unknown accounting. */

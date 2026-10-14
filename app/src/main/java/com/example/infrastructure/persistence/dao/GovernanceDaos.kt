@@ -140,7 +140,10 @@ interface PricingEntryDao {
 
 @Dao
 interface CostLedgerEntryDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    /** ADR-B4 layer 1 (approved 2026-10-14): ABORT, not REPLACE — a
+     *  duplicate ledger id must FAIL LOUDLY, never silently replace an
+     *  existing financial record (risk ز-4). */
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(entry: CostLedgerEntryEntity)
 
     @Query("SELECT * FROM cost_ledger_entries WHERE executionId = :executionId ORDER BY timestampEpochMs ASC")
@@ -226,8 +229,11 @@ interface CostLedgerEntryDao {
         limit: Int
     ): List<CostLedgerEntryEntity>
 
-    @Query("DELETE FROM cost_ledger_entries WHERE timestampEpochMs < :epochMs")
-    suspend fun pruneOlderThan(epochMs: Long)
+    // ADR-B2 (approved 2026-10-14): the physical-delete path for the COST
+    // LEDGER is REMOVED. Financial records are Class A retention data —
+    // immutable, never pruned; archival happens via export, not deletion.
+    // (This method had no production caller — removal closes the latent
+    // hazard documented as EC-1 in the Stage-0 evidence audit.)
 }
 
 @Dao

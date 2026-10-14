@@ -928,9 +928,25 @@ class AppContainer(context: Context) {
     }
 
     /**
+     * v23 — the accounting budget core (approved 2026-10-14, "أعتمد الكل").
+     * Four atomic operations over the five-table core; append-only ledger.
+     */
+    val budgetLedgerService: com.example.application.budget.BudgetLedgerService by lazy {
+        com.example.application.budget.BudgetLedgerService(database = database)
+    }
+
+    /**
      * The economic governance facade: pricing resolution, cost ledger,
      * hierarchical budgets with enforceable policies, rate-limit gate,
      * pre-execution authorization and post-execution accounting.
+     *
+     * v23 WIRING FLAG (documented per the approved Day 8-9 sequence): when
+     * ENABLE_HOLD_BASED_BUDGET_GATE is true, authorize() consults the
+     * hold-based core whenever an active accounting policy covers the
+     * request's scope; requests with NO such policy run the legacy
+     * budget_allocations path VERBATIM (full retro-compatibility, و.6).
+     * Set to false to isolate any issue by returning to the pure legacy
+     * behavior with zero database involvement.
      */
     val economicGovernanceService: com.example.application.budget.EconomicGovernanceService by lazy {
         com.example.application.budget.EconomicGovernanceService(
@@ -939,7 +955,12 @@ class AppContainer(context: Context) {
             allocationRepository = economicPersistence,
             rateLimitGovernor = rateLimitGovernor,
             telemetry = telemetryService,
-            scope = applicationScope
+            scope = applicationScope,
+            holdBasedBudgetCore = if (ENABLE_HOLD_BASED_BUDGET_GATE) {
+                com.example.application.budget.HoldBasedBudgetGate(budgetLedgerService)
+            } else {
+                null
+            }
         )
     }
 
@@ -2545,6 +2566,19 @@ class GovernanceViewModelFactory(
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+
+    companion object {
+        /**
+         * v23 DOCUMENTED WIRING FLAG (approved Day 8-9, Section و.6):
+         * true  → authorize() routes through the hold-based accounting core
+         *          when an active policy covers the request (hold created,
+         *          serialized, idempotent); legacy path otherwise, verbatim.
+         * false → pure legacy behavior, zero v23 database involvement.
+         * Flipping this flag requires NO database change either way — the
+         * v23 tables are additive and both paths coexist by design.
+         */
+        const val ENABLE_HOLD_BASED_BUDGET_GATE = true
     }
 }
 

@@ -163,6 +163,14 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.PricingEntryEntity::class,
         com.example.infrastructure.persistence.entities.CostLedgerEntryEntity::class,
         com.example.infrastructure.persistence.entities.BudgetAllocationEntity::class,
+        // v23 — BUDGET CORE (approved Stage-1 Section و): scope descriptor +
+        // accounting budget five-table core (micro units, epochMs, deferred FKs)
+        com.example.infrastructure.persistence.entities.ScopeDescriptorEntity::class,
+        com.example.infrastructure.persistence.entities.BudgetPolicyEntity::class,
+        com.example.infrastructure.persistence.entities.BudgetPeriodEntity::class,
+        com.example.infrastructure.persistence.entities.BudgetHoldEntity::class,
+        com.example.infrastructure.persistence.entities.BudgetLedgerEntryEntity::class,
+        com.example.infrastructure.persistence.entities.BudgetHoldSettlementEntity::class,
         // Gap-closure — canonical durable agent registry (P1-08/P1-09)
         com.example.infrastructure.persistence.entities.ActionIntentEntity::class,
         com.example.infrastructure.persistence.entities.AgentDefinitionEntity::class,
@@ -262,6 +270,14 @@ abstract class AppDatabase : RoomDatabase() {
     // Governance Phase — Economic budget persistence
     abstract fun pricingEntryDao(): com.example.infrastructure.persistence.dao.PricingEntryDao
     abstract fun costLedgerEntryDao(): com.example.infrastructure.persistence.dao.CostLedgerEntryDao
+
+    // v23 — BUDGET CORE DAOs (append-only ledger; no update/delete paths)
+    abstract fun scopeDescriptorDao(): com.example.infrastructure.persistence.dao.ScopeDescriptorDao
+    abstract fun budgetPolicyDao(): com.example.infrastructure.persistence.dao.BudgetPolicyDao
+    abstract fun budgetPeriodDao(): com.example.infrastructure.persistence.dao.BudgetPeriodDao
+    abstract fun budgetHoldDao(): com.example.infrastructure.persistence.dao.BudgetHoldDao
+    abstract fun budgetLedgerEntryDao(): com.example.infrastructure.persistence.dao.BudgetLedgerEntryDao
+    abstract fun budgetHoldSettlementDao(): com.example.infrastructure.persistence.dao.BudgetHoldSettlementDao
     abstract fun budgetAllocationDao(): com.example.infrastructure.persistence.dao.BudgetAllocationDao
 
     // Gap-closure — action idempotency ledger (P0-05/P0-06)
@@ -303,7 +319,11 @@ abstract class AppDatabase : RoomDatabase() {
          * database had already reached v17 — a stale honesty violation. UI
          * surfaces read this constant instead of a literal).
          */
-        const val SCHEMA_VERSION = 22
+        // v23 (2026-10-14, approved "أعتمد الكل"): budget core — 6 new
+        // tables + 10 triggers (PDM v0.2 Stage-1 subset). v24: the
+        // budget_allocations nullability fix (NF-2/ج-4) as an isolated
+        // rebuild — see MIGRATION_23_TO_24 for why it is a separate step.
+        const val SCHEMA_VERSION = 24
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -1969,6 +1989,75 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * STAGE 1 (approved 2026-10-14, "أعتمد الكل" — D-5/D-6/D-7): the
+         * accounting budget core, PDM v0.2 Stage-1 subset. PURELY ADDITIVE
+         * per the approved migration plan (Section هـ): six new tables,
+         * nine declared indices and ten protection triggers. NO existing
+         * table is touched, no column is altered, no data is moved — the
+         * lowest possible risk class for a first migration of its kind.
+         * The DDL lives in [BudgetCoreMigrationSql] (single source of
+         * truth, also verified standalone against SQLite).
+         */
+        private val MIGRATION_22_TO_23: Migration = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                BudgetCoreMigrationSql.STATEMENTS.forEach(db::execSQL)
+            }
+        }
+
+        /**
+         * STAGE 1 Day 8-9 — the NULLABILITY FIX (finding NF-2, test ج-4):
+         * budget_allocations.allocatedAmountMicro becomes NULLABLE so an
+         * UNKNOWN allocation stays unknown in storage instead of being
+         * silently coerced to 0 by the old mapping (`?: 0L`).
+         *
+         * WHY A SEPARATE MIGRATION: the approved 22→23 plan explicitly
+         * forbids touching existing tables ("no rebuild, no delete, no
+         * column change"), while the approved Day 8-9 launch sequence
+         * requires this fix. The only way to honor BOTH approvals is an
+         * isolated rebuild migration of its own — recorded as
+         * interpretation I-6 in the stage register. Data-preserving: every
+         * existing row is copied VERBATIM (a stored 0 remains the 0 a
+         * previous build wrote; this fix stops FUTURE corruption, it does
+         * not rewrite history). Room cannot alter column nullability in
+         * place, hence the standard rebuild pattern.
+         */
+        private val MIGRATION_23_TO_24: Migration = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `budget_allocations_new` (
+                        scopeType TEXT NOT NULL,
+                        scopeId TEXT NOT NULL,
+                        allocatedAmountMicro INTEGER,
+                        currency TEXT NOT NULL,
+                        policyActionsCsv TEXT NOT NULL,
+                        warnThresholdRatio REAL NOT NULL,
+                        policyNote TEXT,
+                        isActive INTEGER NOT NULL,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL,
+                        PRIMARY KEY(scopeType, scopeId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "INSERT INTO budget_allocations_new " +
+                        "(scopeType, scopeId, allocatedAmountMicro, currency, policyActionsCsv, " +
+                        "warnThresholdRatio, policyNote, isActive, createdAtEpochMs, updatedAtEpochMs) " +
+                        "SELECT scopeType, scopeId, allocatedAmountMicro, currency, policyActionsCsv, " +
+                        "warnThresholdRatio, policyNote, isActive, createdAtEpochMs, updatedAtEpochMs " +
+                        "FROM budget_allocations"
+                )
+                db.execSQL("DROP TABLE budget_allocations")
+                db.execSQL("ALTER TABLE budget_allocations_new RENAME TO budget_allocations")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_budget_allocations_scopeType " +
+                        "ON budget_allocations(scopeType)"
+                )
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -1993,6 +2082,8 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_19_TO_20,
             MIGRATION_20_TO_21,
             MIGRATION_21_TO_22,
+            MIGRATION_22_TO_23,
+            MIGRATION_23_TO_24,
         )
 
         fun getInstance(context: Context): AppDatabase {
@@ -2003,6 +2094,18 @@ abstract class AppDatabase : RoomDatabase() {
                     "agent_orchestrator_platform.db"
                 )
                     .addMigrations(*ALL_MIGRATIONS)
+                    // v23: FRESH installs create the tables from the @Entity
+                    // declarations — the ten DB-level budget protections
+                    // (posted immutability, append-only ledger, currency
+                    // unification, settlement coherence...) exist ONLY in
+                    // the migration path, so they are created here as well.
+                    // Upgraded devices get them from MIGRATION_22_TO_23;
+                    // CREATE TRIGGER IF NOT EXISTS keeps this idempotent.
+                    .addCallback(object : androidx.room.RoomDatabase.Callback() {
+                        override fun onCreate(db: SupportSQLiteDatabase) {
+                            BudgetCoreMigrationSql.TRIGGERS.forEach(db::execSQL)
+                        }
+                    })
                     .build()
                 INSTANCE = instance
                 instance
