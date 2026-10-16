@@ -89,6 +89,19 @@ android {
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
+  // STAGE 1 VERIFICATION (2026-10-16): expose the Room schema JSONs to
+  // Robolectric for MigrationTestHelper. AGP's local-test pipeline points
+  // Robolectric at the DEBUG merged assets (test_config.properties:
+  // android_merged_assets=.../assets/debug/mergeDebugAssets) — the "test"
+  // source set assets are NOT merged for local unit tests, so the canonical
+  // `getByName("test").assets.srcDir(...)` pattern silently ships nothing.
+  // Declaring them on the debug source set makes them visible to local
+  // tests (debug-only APK impact; release builds are unaffected).
+  sourceSets {
+    getByName("debug") {
+      assets.srcDir("$projectDir/schemas")
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
@@ -175,6 +188,9 @@ dependencies {
   testImplementation(libs.json.jvm)
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
+  // STAGE 1 VERIFICATION (2026-10-16): MigrationTestHelper for the isolated
+  // 22->23 / 23->24 upgrade tests against the committed schema baselines.
+  testImplementation(libs.androidx.room.testing)
   testImplementation(libs.roborazzi)
   testImplementation(libs.roborazzi.compose)
   testImplementation(libs.roborazzi.junit.rule)

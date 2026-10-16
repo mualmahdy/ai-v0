@@ -2150,6 +2150,24 @@ class AppContainer(context: Context) {
             }
         }
     }
+
+    companion object {
+        /**
+         * v23 DOCUMENTED WIRING FLAG (approved Day 8-9, Section و.6):
+         * true  → authorize() routes through the hold-based accounting core
+         *          when an active policy covers the request (hold created,
+         *          serialized, idempotent); legacy path otherwise, verbatim.
+         * false → pure legacy behavior, zero v23 database involvement.
+         * Flipping this flag requires NO database change either way — the
+         * v23 tables are additive and both paths coexist by design.
+         *
+         * Build-fix 2026-10-16 (first real compile of the Stage-1 branch,
+         * verification run): moved here from GovernanceViewModelFactory's
+         * companion — the flag is consumed by AppContainer's own
+         * economicGovernanceService wiring, so its home is this class.
+         */
+        const val ENABLE_HOLD_BASED_BUDGET_GATE = true
+    }
 }
 
 /**
@@ -2566,19 +2584,6 @@ class GovernanceViewModelFactory(
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
-    }
-
-    companion object {
-        /**
-         * v23 DOCUMENTED WIRING FLAG (approved Day 8-9, Section و.6):
-         * true  → authorize() routes through the hold-based accounting core
-         *          when an active policy covers the request (hold created,
-         *          serialized, idempotent); legacy path otherwise, verbatim.
-         * false → pure legacy behavior, zero v23 database involvement.
-         * Flipping this flag requires NO database change either way — the
-         * v23 tables are additive and both paths coexist by design.
-         */
-        const val ENABLE_HOLD_BASED_BUDGET_GATE = true
     }
 }
 

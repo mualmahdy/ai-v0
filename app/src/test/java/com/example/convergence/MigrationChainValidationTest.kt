@@ -317,9 +317,27 @@ class MigrationChainValidationTest {
                     assertTrue("budget core table $table must exist after the full chain", c.moveToFirst())
                 }
             }
-            db.query("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_budget%'").use { c ->
-                assertTrue(c.moveToFirst())
-                assertEquals("all ten budget protection triggers must exist", 10, c.getInt(0))
+            // Build-fix 2026-10-16 (first real execution on the full chain):
+            // one of the ten trigger names (trg_hold_settlement_currency_insert)
+            // does NOT match the old `LIKE 'trg_budget%'` pattern — the count
+            // query saw 9 and failed while all ten triggers existed
+            // (Migration22to23Test's explicit-name assertion passes on the
+            // same DDL). Assert the exact ten names instead of a pattern.
+            for (triggerName in listOf(
+                "trg_budget_period_currency_via_policy_insert",
+                "trg_budget_hold_currency_insert",
+                "trg_budget_ledger_currency_insert",
+                "trg_hold_settlement_currency_insert",
+                "trg_budget_policy_no_self_scope_insert",
+                "trg_budget_policy_no_self_scope_update",
+                "trg_budget_hold_settlement_amount_insert",
+                "trg_budget_period_limit_immutable_after_posting",
+                "trg_budget_ledger_no_update_posted",
+                "trg_budget_ledger_no_delete"
+            )) {
+                db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name='$triggerName'").use { c ->
+                    assertTrue("budget trigger $triggerName must exist after the full chain", c.moveToFirst())
+                }
             }
             // v24: budget_allocations.allocatedAmountMicro is nullable on the
             // upgraded database (NF-2 fix — UNKNOWN stays UNKNOWN).

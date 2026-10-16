@@ -140,7 +140,10 @@ class HoldBasedBudgetGate(
         denial: BudgetLedgerService.HoldReservation.Denied,
         active: BudgetLedgerService.ActiveBudget,
         pdmScopeType: String,
-        scopeId: String,
+        // Build-fix 2026-10-16: String? — the global APPLICATION catch-all
+        // carries the canonical platform-null scopeId (ScopeEntry.fixedScopeId),
+        // matching activeBudgetForScope's nullable platformObjectId.
+        scopeId: String?,
         estimate: CostEstimate,
         evaluatedScopes: List<com.example.domain.core.budget.BudgetStatus>,
         rateLimitStatus: com.example.domain.core.budget.RateLimitStatus?

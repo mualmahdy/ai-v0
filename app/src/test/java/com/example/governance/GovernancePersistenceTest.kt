@@ -252,7 +252,7 @@ class GovernancePersistenceTest {
     }
 
     @Test
-    fun `db version is 19 with all governance + execution-kernel + convergence + portability tables`() {
+    fun `db version is 24 with all governance + execution-kernel + convergence + portability tables`() {
         // Gap-closure: v11 added action_intents + agent_definitions + the
         // tasks.executionContextJson column (canonical execution kernel).
         // P0 convergence (v12): workspace-owned projects, RAG metadata
@@ -273,8 +273,15 @@ class GovernancePersistenceTest {
         // audit_events.
         // GAP-08 (Design Closure 2026, ADR-7) v17: the three dead tables
         // (provider_configs, policy_versions, health_probes) are DROPPED.
+        // FUNCTIONAL CLOSURE v18/v19: chat_turns.attachmentsJson,
+        // sourcesJson + chat_timeline_events. CLOSURE FINAL STAGE v22: the
+        // id-mapping transfer ledger. STAGE 1 v23 (approved 2026-10-14):
+        // the six accounting budget-core tables + ten protection triggers;
+        // v24: budget_allocations.allocatedAmountMicro nullable (NF-2).
+        // Build-fix 2026-10-16: this assert was missed when the Stage-1
+        // commit raised the version asserts to 24 (22 -> 24).
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(22, dbVersion)
+        assertEquals(24, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))

@@ -47,6 +47,16 @@ class HoldBasedBudgetGateTest {
     private val windowStart = 0L
     private val windowEnd = 10_000_000L
 
+    /**
+     * Build-fix 2026-10-16 (first real execution of this suite): the
+     * production default clock is System.currentTimeMillis(); the fixed
+     * window above [0, 10M] is ancient history in real time, so every
+     * lookup saw NO active period and the gate fell back to the legacy
+     * path. Tests MUST inject a fixed instant inside the window (the same
+     * pattern BudgetLedgerServiceTest uses with its mutable `tick`).
+     */
+    private val nowMs = 5_000_000L
+
     @Before
     fun setup() {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -58,8 +68,8 @@ class HoldBasedBudgetGateTest {
                 }
             })
             .build()
-        ledger = BudgetLedgerService(database = db)
-        gate = HoldBasedBudgetGate(ledger)
+        ledger = BudgetLedgerService(database = db, clock = { nowMs })
+        gate = HoldBasedBudgetGate(ledger, clock = { nowMs })
         governance = EconomicGovernanceService(
             pricingRepository = FakePricingRepository(),
             costLedger = FakeCostLedger(),
@@ -161,7 +171,10 @@ class HoldBasedBudgetGateTest {
     @Test
     fun `a soft-limit overage never creates an over-limit hold (I-7)`(): Unit = runBlocking {
         createPolicy(limitMicro = 1_000L, overage = BudgetLedgerService.OVERAGE_SOFT_LIMIT)
-        val r1 = ledger.authorizeAndReserve("WORKSPACE", "ws-1", 900L, "exec-1", "auth:exec-1:WORKSPACE:ws-1")
+        // Build-fix 2026-10-16: reserve the FULL limit (was 900L by an
+        // arithmetic slip — never executed until this run), so the denied
+        // over-request leaves the raw hold sum EXACTLY at the limit.
+        val r1 = ledger.authorizeAndReserve("WORKSPACE", "ws-1", 1_000L, "exec-1", "auth:exec-1:WORKSPACE:ws-1")
         assertTrue(r1 is BudgetLedgerService.HoldReservation.Reserved)
         val r2 = ledger.authorizeAndReserve("WORKSPACE", "ws-1", 200L, "exec-2", "auth:exec-2:WORKSPACE:ws-1")
         assertTrue("over-limit request must be Denied at the core (invariant)", r2 is BudgetLedgerService.HoldReservation.Denied)
