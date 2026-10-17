@@ -39,8 +39,12 @@ object CostMath {
     /** The strategy name recorded on every pricing_profile_version. */
     const val ROUNDING_STRATEGY = "ROUND_LINE_THEN_SUM"
 
-    /** Canonical pricing basis: prices are per this many tokens. */
-    const val PRICE_UNIT_QUANTITY = BigDecimal(1_000_000)
+    /**
+     * Canonical pricing basis: prices are per this many tokens.
+     * Build-fix BF-7 (caught by the Stage-3 verification build): BigDecimal
+     * is not a const-compatible type — only primitives and String are.
+     */
+    val PRICE_UNIT_QUANTITY = BigDecimal(1_000_000)
 
     /**
      * The exact (pre-rounding) line amount in micro currency units for

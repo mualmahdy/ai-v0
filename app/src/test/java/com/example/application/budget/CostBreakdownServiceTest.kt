@@ -229,15 +229,21 @@ class CostBreakdownServiceTest {
     @Test
     fun `PARITY - itemized totals match the legacy engine within the rounding policy`() = runBlocking {
         // reference sample set: (in, out, cached, inPrice, outPrice, cachedPrice)
+        // BF-14: this was written as 6-argument Triple(...) calls — the
+        // stdlib Triple holds exactly three. A named row type reads better.
+        data class ParitySample(
+            val input: Int, val output: Int, val cached: Int,
+            val inPrice: Long, val outPrice: Long, val cachedPrice: Long?
+        )
         val samples = listOf(
-            Triple(1_000_000, 2_000_000, 0, 1500L, 3000L, null),
-            Triple(1_234, 4_321, 0, 1500L, 3000L, null),
-            Triple(999_999, 1, 500, 1500L, 3000L, 750L),
-            Triple(1, 1, 1, 333L, 777L, 111L),
-            Triple(0, 500_000, 0, 2500L, 1250L, null),
-            Triple(3_333_333, 3_333_333, 3_333_333, 1234L, 4321L, 555L),
-            Triple(250, 250, 250, 1500L, 1500L, 1500L),
-            Triple(10_000_000, 10_000_000, 10_000_000, 15L, 30L, 7L)
+            ParitySample(1_000_000, 2_000_000, 0, 1500L, 3000L, null),
+            ParitySample(1_234, 4_321, 0, 1500L, 3000L, null),
+            ParitySample(999_999, 1, 500, 1500L, 3000L, 750L),
+            ParitySample(1, 1, 1, 333L, 777L, 111L),
+            ParitySample(0, 500_000, 0, 2500L, 1250L, null),
+            ParitySample(3_333_333, 3_333_333, 3_333_333, 1234L, 4321L, 555L),
+            ParitySample(250, 250, 250, 1500L, 1500L, 1500L),
+            ParitySample(10_000_000, 10_000_000, 10_000_000, 15L, 30L, 7L)
         )
         for ((index, sample) in samples.withIndex()) {
             val (input, output, cached, inPrice, outPrice, cachedPrice) = sample

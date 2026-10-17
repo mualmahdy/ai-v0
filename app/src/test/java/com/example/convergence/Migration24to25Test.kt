@@ -79,7 +79,9 @@ class Migration24to25Test {
                 "inputPriceMicroPerMillion, outputPriceMicroPerMillion, cachedInputPriceMicroPerMillion, " +
                 "currency, billingClass, pricingVersion, effectiveFromEpochMs, effectiveToEpochMs, " +
                 "provenance, createdAtEpochMs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            arrayOf<Any>(id, scopeType, providerId, serviceId, modelId, inputPrice, outputPrice,
+            // BF-13: arrayOf<Any> cannot hold the helper's nullable
+            // arguments — the bind array must be Array<Any?>.
+            arrayOf<Any?>(id, scopeType, providerId, serviceId, modelId, inputPrice, outputPrice,
                 cachedPrice, currency, "CLOUD", "v1", fromMs, toMs, provenance, createdAtMs)
         )
     }
@@ -218,6 +220,13 @@ class Migration24to25Test {
             } catch (expected: android.database.SQLException) {
                 // trigger fired — correct
             }
+            // BF-15: SQLite triggers are FOR EACH ROW — the DELETE proof
+            // needs a row to delete, or an empty table deletes silently.
+            db.execSQL(
+                "INSERT INTO usage_record (usage_record_id, request_attempt_id, report_source, " +
+                    "report_version, report_status, is_final_report, recorded_at_epoch_ms) " +
+                    "VALUES ('ur-proof','att-proof','PROVIDER','1','FINAL',1,0)"
+            )
             try {
                 db.execSQL("DELETE FROM usage_record")
                 assertFalse("usage_record DELETE must be rejected", true)

@@ -105,11 +105,16 @@ class EconomicGovernanceStage2IntegrationTest {
         )
         pricing.upsertPricing(
             PricingEntry(
-                id = "pe-1", scope = PricingScope.MODEL, providerId = "prov", serviceId = null, modelId = "m1",
+                // BF-16: the domain invariant "SERVICE/MODEL pricing requires
+                // serviceId" predates Stage 2 and is correct — a model is
+                // priced through its service. The Stage-2 test violated it
+                // with serviceId=null; every layer (fake, Room seed, usage
+                // input) now carries the same service.
+                id = "pe-1", scope = PricingScope.MODEL, providerId = "prov", serviceId = "svc-1", modelId = "m1",
                 inputPricePerMillion = MoneyAmount.of(1500, "USD"),
                 outputPricePerMillion = MoneyAmount.of(3000, "USD"),
                 cachedInputPricePerMillion = null,
-                billingClass = com.example.domain.core.budget.BillingClass.CLOUD,
+                billingClass = com.example.domain.core.budget.BillingClass.PAID, // BF-10: CLOUD never existed in the enum (FREE/PAID/TRIAL/CREDIT/LOCAL/UNKNOWN)
                 pricingVersion = "v1",
                 effectiveFromEpochMs = 0, effectiveToEpochMs = null,
                 provenance = "test"
@@ -121,7 +126,7 @@ class EconomicGovernanceStage2IntegrationTest {
         // what RoomEconomicStore.upsertPricing would have written.
         db.pricingEntryDao().upsert(
             com.example.infrastructure.persistence.entities.PricingEntryEntity(
-                id = "pe-1", scopeType = "MODEL", providerId = "prov", serviceId = null, modelId = "m1",
+                id = "pe-1", scopeType = "MODEL", providerId = "prov", serviceId = "svc-1", modelId = "m1",
                 inputPriceMicroPerMillion = 1500L, outputPriceMicroPerMillion = 3000L,
                 cachedInputPriceMicroPerMillion = null,
                 currency = "USD", billingClass = "CLOUD", pricingVersion = "v1",
@@ -134,7 +139,7 @@ class EconomicGovernanceStage2IntegrationTest {
         //      (the 3:1 input:output split: 750k in × 1500 + 250k out × 3000 = 1125 + 750) ----
         val request = EconomicAuthorizationRequest(
             executionId = "exec-int-1", workspaceId = "ws-1", agentId = null, taskId = null,
-            providerId = "prov", serviceId = null, modelId = "m1", resourceId = null,
+            providerId = "prov", serviceId = "svc-1", modelId = "m1", resourceId = null,
             isLocalResource = false, expectedTotalTokens = 1_000_000, actionTypeCode = "LLM_STEP"
         )
         val decision = governance.authorize(request)
@@ -149,17 +154,19 @@ class EconomicGovernanceStage2IntegrationTest {
         val record = governance.accountUsageSuspend(
             UsageAccountingInput(
                 executionId = "exec-int-1", taskId = null, workspaceId = "ws-1", agentId = null,
-                providerId = "prov", serviceId = null, modelId = "m1", resourceId = null,
+                providerId = "prov", serviceId = "svc-1", modelId = "m1", resourceId = null,
                 usage = TokenUsageRecord(
-                    inputTokens = 1_000_000, outputTokens = 1_000_000, cachedTokens = 0,
-                    isActualProviderReport = true
+                    inputTokens = 1_000_000, outputTokens = 1_000_000, cachedTokens = 0
+                    // BF-11: TokenUsageRecord has no isActualProviderReport param
+                    // (that flag lives on UsageAccountingInput below); isEstimate
+                    // defaults to false = actual.
                 ),
                 isActualProviderReport = true,
                 timestampEpochMs = tick
             )
         )
         assertNotNull(record)
-        assertEquals(1500L + 3000L, record!!.cost.amountMicro) // legacy engine result
+        assertEquals(1500L + 3000L, record!!.cost!!.amountMicro) // legacy engine result (BF-12: cost is nullable)
 
         // 1) the hold is settled (actual 4500 > hold 1875 -> settle 1875
         //    + post 2625 overage) — the FULL actual is in the ledger

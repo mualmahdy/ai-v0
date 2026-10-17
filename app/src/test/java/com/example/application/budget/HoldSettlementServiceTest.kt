@@ -95,12 +95,17 @@ class HoldSettlementServiceTest {
     )
 
     /** authorize() equivalent: a hold with the gate's exact reason format. */
-    private suspend fun holdFor(executionId: String, amountMicro: Long) =
+    private suspend fun holdFor(
+        executionId: String,
+        amountMicro: Long,
+        expiresAtEpochMs: Long? = null
+    ) =
         ledger.authorizeAndReserve(
             scopeType = "WORKSPACE", platformObjectId = "ws-1",
             amountMicroUnits = amountMicro,
             reason = "exec:$executionId",
-            idempotencyKey = "auth:$executionId:WORKSPACE:ws-1"
+            idempotencyKey = "auth:$executionId:WORKSPACE:ws-1",
+            expiresAtEpochMs = expiresAtEpochMs
         ) as BudgetLedgerService.HoldReservation.Reserved
 
     @Test
@@ -189,7 +194,10 @@ class HoldSettlementServiceTest {
     @Test
     fun `expired hold - actual posted without the hold`() = runBlocking {
         val budget = createBudget(limitMicro = 1_000_000)
-        val hold = holdFor("exec-7", 300_000)
+        // BF-17: markExpired only expires holds that CARRY an expiry — a
+        // hold without expires_at_epoch_ms is open until settled/released.
+        // The original test forgot to give the hold its expiry window.
+        val hold = holdFor("exec-7", 300_000, expiresAtEpochMs = windowEnd)
         // force expiry behind the service's back (the lazy-expiry sweep)
         db.budgetHoldDao().markExpired(windowEnd + 1)
         assertEquals(BudgetLedgerService.HOLD_EXPIRED, db.budgetHoldDao().byId(hold.holdId)!!.status)

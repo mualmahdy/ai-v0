@@ -469,8 +469,12 @@ class EconomicGovernanceService(
             // because an auxiliary record failed. ----
             var breakdownUsageRecordId: String? = null
             if (costBreakdownRecorder != null) {
+                // Build-fix BF-8 (caught by the Stage-3 verification build):
+                // a member property's null-check does not smart-cast inside
+                // the runCatching lambda — snapshot to a local first.
+                val recorder = costBreakdownRecorder
                 runCatching {
-                    breakdownUsageRecordId = costBreakdownRecorder.record(input).usageRecordId
+                    breakdownUsageRecordId = recorder.record(input).usageRecordId
                 }.onFailure { failure ->
                     failure.rethrowIfCancellation()
                     telemetry?.let { tel ->
@@ -489,8 +493,12 @@ class EconomicGovernanceService(
                 }
             }
             if (holdSettlement != null && holdBasedBudgetCore != null) {
+                // Build-fix BF-9 (same family as BF-8, same root cause):
+                // member properties do not smart-cast into the runCatching
+                // lambda — snapshot to locals first.
+                val settlement = holdSettlement
                 runCatching {
-                    holdSettlement.settleExecutionUsage(
+                    settlement.settleExecutionUsage(
                         input = input,
                         actualCostMicroUnits = costMicro,
                         costCurrency = currency,
