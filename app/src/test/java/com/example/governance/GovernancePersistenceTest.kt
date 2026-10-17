@@ -252,7 +252,7 @@ class GovernancePersistenceTest {
     }
 
     @Test
-    fun `db version is 24 with all governance + execution-kernel + convergence + portability tables`() {
+    fun `db version is 25 with all governance + execution-kernel + convergence + portability tables`() {
         // Gap-closure: v11 added action_intents + agent_definitions + the
         // tasks.executionContextJson column (canonical execution kernel).
         // P0 convergence (v12): workspace-owned projects, RAG metadata
@@ -280,8 +280,10 @@ class GovernancePersistenceTest {
         // v24: budget_allocations.allocatedAmountMicro nullable (NF-2).
         // Build-fix 2026-10-16: this assert was missed when the Stage-1
         // commit raised the version asserts to 24 (22 -> 24).
+        // STAGE 2 v25 (2026-10-17): the twelve pricing/metering/itemized-
+        // cost tables + eighteen immutability triggers.
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(24, dbVersion)
+        assertEquals(25, dbVersion)
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))
@@ -304,7 +306,13 @@ class GovernancePersistenceTest {
             // CLOSURE FINAL STAGE (§5/item 4 — B6, v22): the central transfer
             // id-mapping ledger (every remapped import id, written inside the
             // import transaction).
-            "id_mappings"
+            "id_mappings",
+            // STAGE 2 v25 (roadmap Phase 2): pricing catalog + usage metering
+            // + itemized cost breakdown.
+            "unit_definition", "metric_definition",
+            "pricing_profile", "pricing_profile_version", "pricing_component", "pricing_tier",
+            "usage_record", "usage_measurement",
+            "cost_calculation", "cost_calculation_input", "cost_calculation_line", "cost_calculation_line_input"
         ).forEach { tableName ->
             assertTrue("missing table: $tableName", tables.contains(tableName))
         }

@@ -930,9 +930,47 @@ class AppContainer(context: Context) {
     /**
      * v23 — the accounting budget core (approved 2026-10-14, "أعتمد الكل").
      * Four atomic operations over the five-table core; append-only ledger.
+     * v25 (Stage 2): a fifth operation, postUsageActual, lands actual
+     * costs with no surviving hold (I-3 promise + I-11 overage).
      */
     val budgetLedgerService: com.example.application.budget.BudgetLedgerService by lazy {
         com.example.application.budget.BudgetLedgerService(database = database)
+    }
+
+    /**
+     * v25 — STAGE 2 pricing catalog (roadmap Phase 2): versioned pricing
+     * profiles with an idempotent mirror of the legacy pricing_entries
+     * surface (I-13). Resolution reproduces the engine's MODEL > SERVICE >
+     * PROVIDER precedence — the parity the Phase-2 exit criterion tests.
+     */
+    val pricingCatalogService: com.example.application.budget.PricingCatalogService by lazy {
+        com.example.application.budget.PricingCatalogService(database = database)
+    }
+
+    /**
+     * v25 — STAGE 2 usage metering + itemized cost breakdown (roadmap
+     * Phase 2): usage facts + line-by-line cost calculations with exact
+     * decimal evidence and the G08 HALF_UP rounding policy.
+     */
+    val costBreakdownService: com.example.application.budget.CostBreakdownService by lazy {
+        com.example.application.budget.CostBreakdownService(
+            database = database,
+            pricingCatalog = pricingCatalogService
+        )
+    }
+
+    /**
+     * v25 — STAGE 2 settlement hooks (I-5, the registered FIRST Stage-2
+     * item): accountUsage settles the execution's holds against the actual
+     * cost (settle + release + overage posting), closing the
+     * authorize → accountUsage cycle that Stage 1 left open.
+     */
+    val holdSettlementService: com.example.application.budget.HoldSettlementService by lazy {
+        com.example.application.budget.HoldSettlementService(
+            database = database,
+            ledger = budgetLedgerService,
+            telemetry = telemetryService
+        )
     }
 
     /**
@@ -947,6 +985,12 @@ class AppContainer(context: Context) {
      * budget_allocations path VERBATIM (full retro-compatibility, و.6).
      * Set to false to isolate any issue by returning to the pure legacy
      * behavior with zero database involvement.
+     *
+     * v25 (I-17): the Stage-2 breakdown recorder is wired ON — its writes
+     * are additive-only and failure-isolated, so existing behavior is
+     * untouched; the settlement hooks activate together with the hold gate
+     * (no new flag — without holds there is nothing to settle, and the
+     * no-hold posting path only fires under an active accounting policy).
      */
     val economicGovernanceService: com.example.application.budget.EconomicGovernanceService by lazy {
         com.example.application.budget.EconomicGovernanceService(
@@ -960,7 +1004,9 @@ class AppContainer(context: Context) {
                 com.example.application.budget.HoldBasedBudgetGate(budgetLedgerService)
             } else {
                 null
-            }
+            },
+            holdSettlement = holdSettlementService,
+            costBreakdownRecorder = costBreakdownService
         )
     }
 

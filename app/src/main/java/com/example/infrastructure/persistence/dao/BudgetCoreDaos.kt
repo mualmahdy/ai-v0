@@ -155,6 +155,27 @@ interface BudgetHoldDao {
 
     @Query("SELECT * FROM budget_hold WHERE budget_period_id = :periodId ORDER BY created_at_epoch_ms")
     suspend fun forPeriod(periodId: String): List<BudgetHoldEntity>
+
+    /**
+     * Stage-2 (I-5 settlement hooks): the holds a specific execution's
+     * authorize() created (reason = "exec:{executionId}"), still in a
+     * settleable state. Ordered oldest-first — the gate creates at most
+     * one, the order makes multi-hold behavior deterministic.
+     */
+    @Query(
+        "SELECT * FROM budget_hold WHERE reason = :reason " +
+            "AND status IN ('ACTIVE','PARTIALLY_SETTLED') ORDER BY created_at_epoch_ms"
+    )
+    suspend fun mutableHoldsForReason(reason: String): List<BudgetHoldEntity>
+
+    /**
+     * Stage-2 replay detection: ALL holds an execution created, in ANY
+     * lifecycle state — a terminal hold plus a SETTLE settlement with the
+     * execution's settle key proves the accountUsage hook already ran;
+     * replaying must be a no-op, never a second posting.
+     */
+    @Query("SELECT * FROM budget_hold WHERE reason = :reason ORDER BY created_at_epoch_ms")
+    suspend fun allForReason(reason: String): List<BudgetHoldEntity>
 }
 
 @Dao

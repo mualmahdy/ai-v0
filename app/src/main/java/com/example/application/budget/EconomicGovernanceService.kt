@@ -76,7 +76,23 @@ class EconomicGovernanceService(
      * accounting policy covers the request's scope, and falls back to the
      * legacy comparison verbatim otherwise (full retro-compatibility).
      */
-    private val holdBasedBudgetCore: HoldBasedBudgetGate? = null
+    private val holdBasedBudgetCore: HoldBasedBudgetGate? = null,
+    /**
+     * Stage-2 (I-5): production settlement hooks. When the hold gate is
+     * wired, accountUsage settles the execution's holds against the
+     * actual cost (settle + release + overage posting). NULL = the
+     * legacy post-execution path verbatim. Failure-isolated: a
+     * settlement failure never breaks accounting.
+     */
+    private val holdSettlement: HoldSettlementService? = null,
+    /**
+     * Stage-2: itemized cost breakdown recorder (usage facts + line-by-
+     * line cost calculations, G08 deterministic decimals). NULL = off
+     * (tests/default constructions); the AppContainer wires it on — the
+     * writes are additive-only and failure-isolated, so enabling it does
+     * not alter any existing behavior (I-17).
+     */
+    private val costBreakdownRecorder: CostBreakdownService? = null
 ) {
 
     private val ledgerMutex = Mutex()
@@ -447,6 +463,56 @@ class EconomicGovernanceService(
                 timestampEpochMs = input.timestampEpochMs
             )
             costLedger.insert(record)
+
+            // ---- Stage-2 hooks (I-5 + breakdown). Both are best-effort by
+            // the same discipline as telemetry: accounting must never break
+            // because an auxiliary record failed. ----
+            var breakdownUsageRecordId: String? = null
+            if (costBreakdownRecorder != null) {
+                runCatching {
+                    breakdownUsageRecordId = costBreakdownRecorder.record(input).usageRecordId
+                }.onFailure { failure ->
+                    failure.rethrowIfCancellation()
+                    telemetry?.let { tel ->
+                        runCatching {
+                            tel.incrementCounter(
+                                action = "BUDGET_BREAKDOWN_RECORD_FAILED",
+                                dimensions = MetricDimensions(
+                                    executionId = input.executionId,
+                                    workspaceId = input.workspaceId,
+                                    providerId = input.providerId,
+                                    agentId = input.agentId
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            if (holdSettlement != null && holdBasedBudgetCore != null) {
+                runCatching {
+                    holdSettlement.settleExecutionUsage(
+                        input = input,
+                        actualCostMicroUnits = costMicro,
+                        costCurrency = currency,
+                        usageRecordId = breakdownUsageRecordId
+                    )
+                }.onFailure { failure ->
+                    failure.rethrowIfCancellation()
+                    telemetry?.let { tel ->
+                        runCatching {
+                            tel.incrementCounter(
+                                action = "BUDGET_SETTLEMENT_FAILED",
+                                dimensions = MetricDimensions(
+                                    executionId = input.executionId,
+                                    workspaceId = input.workspaceId,
+                                    providerId = input.providerId,
+                                    agentId = input.agentId
+                                )
+                            )
+                        }
+                    }
+                }
+            }
 
             // Rate-limit window accounting (real interaction happened).
             // P1-12 FIX: TOKENS ONLY — the request slot was already reserved

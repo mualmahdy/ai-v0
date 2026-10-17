@@ -243,7 +243,31 @@ class MigrationChainValidationTest {
             // FUNCTIONAL CLOSURE Phase 1 §9).
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(24, c.getInt(0))
+                assertEquals(25, c.getInt(0))
+            }
+
+            // STAGE 2 (v25): the pricing/metering/itemized-cost group exists
+            // after the full chain, with its seed reference data and all
+            // eighteen immutability triggers.
+            for (table in listOf(
+                "unit_definition", "metric_definition", "pricing_profile", "pricing_profile_version",
+                "pricing_component", "pricing_tier", "usage_record", "usage_measurement",
+                "cost_calculation", "cost_calculation_input", "cost_calculation_line", "cost_calculation_line_input"
+            )) {
+                db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='" + table + "'").use { c ->
+                    assertTrue("Stage-2 table " + table + " must exist after the full chain", c.moveToFirst())
+                }
+            }
+            db.query("SELECT COUNT(*) FROM metric_definition").use { c ->
+                assertTrue(c.moveToFirst()); assertEquals("seed metrics present", 4, c.getInt(0))
+            }
+            db.query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name IN " +
+                    "('pricing_profile_version','pricing_component','pricing_tier','usage_record'," +
+                    "'usage_measurement','cost_calculation','cost_calculation_input'," +
+                    "'cost_calculation_line','cost_calculation_line_input')"
+            ).use { c ->
+                assertTrue(c.moveToFirst()); assertEquals("18 Stage-2 immutability triggers", 18, c.getInt(0))
             }
 
             // Room accepted the migrated schema: it wrote its identity hash.
@@ -374,7 +398,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(24, c.getInt(0))
+                assertEquals(25, c.getInt(0))
             }
             // Validation accepted → identity hash written.
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
@@ -422,7 +446,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(24, c.getInt(0))
+                assertEquals(25, c.getInt(0))
             }
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
                 assertTrue(c.moveToFirst())

@@ -171,6 +171,23 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.BudgetHoldEntity::class,
         com.example.infrastructure.persistence.entities.BudgetLedgerEntryEntity::class,
         com.example.infrastructure.persistence.entities.BudgetHoldSettlementEntity::class,
+        // v25 — STAGE 2 (roadmap Phase 2): pricing catalog (unit/metric/
+        // profile/version/component/tier) + usage metering (record/
+        // measurement) + itemized cost (calculation/input/line/line_input).
+        // Micro units, epochMs, precise decimal TEXT evidence, append-only
+        // fact tables protected by eighteen immutability triggers (ADR-B2).
+        com.example.infrastructure.persistence.entities.UnitDefinitionEntity::class,
+        com.example.infrastructure.persistence.entities.MetricDefinitionEntity::class,
+        com.example.infrastructure.persistence.entities.PricingProfileEntity::class,
+        com.example.infrastructure.persistence.entities.PricingProfileVersionEntity::class,
+        com.example.infrastructure.persistence.entities.PricingComponentEntity::class,
+        com.example.infrastructure.persistence.entities.PricingTierEntity::class,
+        com.example.infrastructure.persistence.entities.UsageRecordEntity::class,
+        com.example.infrastructure.persistence.entities.UsageMeasurementEntity::class,
+        com.example.infrastructure.persistence.entities.CostCalculationEntity::class,
+        com.example.infrastructure.persistence.entities.CostCalculationInputEntity::class,
+        com.example.infrastructure.persistence.entities.CostCalculationLineEntity::class,
+        com.example.infrastructure.persistence.entities.CostCalculationLineInputEntity::class,
         // Gap-closure — canonical durable agent registry (P1-08/P1-09)
         com.example.infrastructure.persistence.entities.ActionIntentEntity::class,
         com.example.infrastructure.persistence.entities.AgentDefinitionEntity::class,
@@ -280,6 +297,20 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun budgetHoldSettlementDao(): com.example.infrastructure.persistence.dao.BudgetHoldSettlementDao
     abstract fun budgetAllocationDao(): com.example.infrastructure.persistence.dao.BudgetAllocationDao
 
+    // v25 — STAGE 2 DAOs (pricing catalog + usage metering + itemized cost)
+    abstract fun unitDefinitionDao(): com.example.infrastructure.persistence.dao.UnitDefinitionDao
+    abstract fun metricDefinitionDao(): com.example.infrastructure.persistence.dao.MetricDefinitionDao
+    abstract fun pricingProfileDao(): com.example.infrastructure.persistence.dao.PricingProfileDao
+    abstract fun pricingProfileVersionDao(): com.example.infrastructure.persistence.dao.PricingProfileVersionDao
+    abstract fun pricingComponentDao(): com.example.infrastructure.persistence.dao.PricingComponentDao
+    abstract fun pricingTierDao(): com.example.infrastructure.persistence.dao.PricingTierDao
+    abstract fun usageRecordDao(): com.example.infrastructure.persistence.dao.UsageRecordDao
+    abstract fun usageMeasurementDao(): com.example.infrastructure.persistence.dao.UsageMeasurementDao
+    abstract fun costCalculationDao(): com.example.infrastructure.persistence.dao.CostCalculationDao
+    abstract fun costCalculationInputDao(): com.example.infrastructure.persistence.dao.CostCalculationInputDao
+    abstract fun costCalculationLineDao(): com.example.infrastructure.persistence.dao.CostCalculationLineDao
+    abstract fun costCalculationLineInputDao(): com.example.infrastructure.persistence.dao.CostCalculationLineInputDao
+
     // Gap-closure — action idempotency ledger (P0-05/P0-06)
     abstract fun actionIntentDao(): com.example.infrastructure.persistence.dao.ActionIntentDao
 
@@ -323,7 +354,11 @@ abstract class AppDatabase : RoomDatabase() {
         // tables + 10 triggers (PDM v0.2 Stage-1 subset). v24: the
         // budget_allocations nullability fix (NF-2/ج-4) as an isolated
         // rebuild — see MIGRATION_23_TO_24 for why it is a separate step.
-        const val SCHEMA_VERSION = 24
+        // v25 (Stage 2, roadmap Phase 2): pricing catalog + usage metering
+        // + itemized cost breakdown — 12 additive tables, 18 immutability
+        // triggers, seed reference data, and the one-shot pricing_entries
+        // data mirror (I-13/I-16).
+        const val SCHEMA_VERSION = 25
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -2058,6 +2093,22 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v25 — STAGE 2 (roadmap Phase 2, approved scope): purely additive.
+         * DDL + named indices + seed reference data + eighteen immutability
+         * triggers all live in [Stage2MigrationSql] (single source, verified
+         * standalone by scripts/verify_stage2_ddl.py); the one-shot
+         * pricing_entries → pricing_profile/version/component data mirror
+         * runs right after (I-13/I-16, deterministic ids, INSERT OR IGNORE
+         * — idempotent by construction). No existing table is touched.
+         */
+        private val MIGRATION_24_TO_25: Migration = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                Stage2MigrationSql.STATEMENTS.forEach(db::execSQL)
+                com.example.application.budget.Stage2PricingMigrator.migrate(db)
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -2084,6 +2135,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_21_TO_22,
             MIGRATION_22_TO_23,
             MIGRATION_23_TO_24,
+            MIGRATION_24_TO_25,
         )
 
         fun getInstance(context: Context): AppDatabase {
@@ -2104,6 +2156,18 @@ abstract class AppDatabase : RoomDatabase() {
                     .addCallback(object : androidx.room.RoomDatabase.Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             BudgetCoreMigrationSql.TRIGGERS.forEach(db::execSQL)
+                            // v25: fresh installs also need the eighteen Stage-2
+                            // immutability triggers (same gap-closure pattern
+                            // as v23 — entity-created tables otherwise lack
+                            // the DB-level append-only protection).
+                            Stage2MigrationSql.TRIGGERS.forEach(db::execSQL)
+                            // v25: fresh installs seed the unit/metric
+                            // reference data the pricing and usage FKs depend
+                            // on (upgraded devices get them from the migration;
+                            // INSERT OR IGNORE keeps this idempotent).
+                            Stage2MigrationSql.STATEMENTS
+                                .filter { it.startsWith("INSERT") }
+                                .forEach(db::execSQL)
                         }
                     })
                     .build()

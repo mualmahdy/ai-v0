@@ -595,6 +595,83 @@ class BudgetLedgerService(
     }
 
     // ------------------------------------------------------------------
+    // Atomic operation 5 (Stage 2, I-5): postUsageActual
+    // ------------------------------------------------------------------
+
+    /** Outcome of posting an actual usage cost with no surviving hold. */
+    sealed class UsagePostingOutcome {
+        data class Posted(val entryId: String, val replayed: Boolean) : UsagePostingOutcome()
+        object NoActivePolicy : UsagePostingOutcome()
+    }
+
+    /**
+     * Posts an ACTUAL consumption entry against the active budget of a
+     * scope when NO hold is there to settle — the two production cases
+     * being (a) the I-3 path (UNKNOWN estimate was honestly ALLOWED with
+     * no hold; the actual cost lands here, as promised at authorization)
+     * and (b) the I-11 overage remainder (actual exceeded the hold; the
+     * excess is posted, never silently truncated). Same transaction,
+     * replay and fail-closed discipline as the other four operations.
+     */
+    suspend fun postUsageActual(
+        scopeType: String,
+        platformObjectId: String?,
+        amountMicroUnits: Long,
+        reason: String?,
+        idempotencyKey: String,
+        usageRecordId: String? = null,
+        nowEpochMs: Long = clock()
+    ): UsagePostingOutcome {
+        require(amountMicroUnits > 0) { "actual usage amount must be > 0" }
+        return try {
+            database.withTransaction {
+                val active = resolveActiveBudget(scopeType, platformObjectId, nowEpochMs)
+                    ?: return@withTransaction UsagePostingOutcome.NoActivePolicy
+
+                database.budgetLedgerEntryDao()
+                    .byIdempotencyKey(active.period.budgetPeriodId, idempotencyKey)
+                    ?.let { return@withTransaction UsagePostingOutcome.Posted(it.entryId, replayed = true) }
+
+                val entryId = idGenerator()
+                database.budgetLedgerEntryDao().insert(
+                    BudgetLedgerEntryEntity(
+                        entryId = entryId,
+                        budgetPeriodId = active.period.budgetPeriodId,
+                        entryType = ENTRY_CONSUMPTION,
+                        postingState = POSTING_POSTED,
+                        availableEffectMicroUnits = -amountMicroUnits,
+                        entryBasis = BASIS_ACTUAL,
+                        currency = active.policy.currency,
+                        originalAmountPrecise = null,
+                        originalCurrency = null,
+                        conversionRuleId = null,
+                        entryTimestampEpochMs = nowEpochMs,
+                        postedAtEpochMs = nowEpochMs,
+                        costCalculationLineId = null,
+                        usageRecordId = usageRecordId,
+                        reconciliationRecordId = null,
+                        holdId = null,
+                        reversalOfEntryId = null,
+                        allocationGroupId = null,
+                        allocationRole = null,
+                        idempotencyKey = idempotencyKey
+                    )
+                )
+                UsagePostingOutcome.Posted(entryId, replayed = false)
+            }
+        } catch (e: SQLiteConstraintException) {
+            // concurrent duplicate: replay whichever row won
+            val active = resolveActiveBudget(scopeType, platformObjectId, nowEpochMs)
+            if (active != null) {
+                database.budgetLedgerEntryDao()
+                    .byIdempotencyKey(active.period.budgetPeriodId, idempotencyKey)
+                    ?.let { return UsagePostingOutcome.Posted(it.entryId, replayed = true) }
+            }
+            throw e
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Reads & maintenance
     // ------------------------------------------------------------------
 
