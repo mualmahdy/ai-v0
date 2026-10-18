@@ -8,6 +8,7 @@ import com.example.domain.core.budget.UsageAccountingInput
 import com.example.infrastructure.persistence.AppDatabase
 import com.example.infrastructure.persistence.BudgetCoreMigrationSql
 import com.example.infrastructure.persistence.Stage2MigrationSql
+import com.example.infrastructure.persistence.Stage3MigrationSql
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -56,6 +57,7 @@ class HoldSettlementServiceTest {
                 override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
                     BudgetCoreMigrationSql.TRIGGERS.forEach(db::execSQL)
                     Stage2MigrationSql.TRIGGERS.forEach(db::execSQL)
+                    Stage3MigrationSql.TRIGGERS.forEach(db::execSQL)
                     Stage2MigrationSql.STATEMENTS.filter { it.startsWith("INSERT") }.forEach(db::execSQL)
                 }
             })
@@ -65,7 +67,11 @@ class HoldSettlementServiceTest {
             idGenerator = { "id-${tick++}" },
             clock = { tick }
         )
-        settlement = HoldSettlementService(database = db, ledger = ledger, telemetry = null, clock = { tick })
+        // Stage 3 (I-18 closure): the FX converter is wired — with no rule
+        // registered it stays fail-closed, so the mismatch test below is
+        // unaffected (no rule -> the same honest no-op).
+        val fx = CurrencyConversionService(database = db, clock = { tick })
+        settlement = HoldSettlementService(database = db, ledger = ledger, telemetry = null, fx = fx, clock = { tick })
     }
 
     @After
@@ -224,6 +230,32 @@ class HoldSettlementServiceTest {
         )
         assertEquals("the hold keeps protecting the budget", 700_000L,
             ledger.availableForPeriod(budget.periodId).availableMicroUnits)
+    }
+
+    @Test
+    fun `currency mismatch WITH a covering rule - I-18 closed with an evidenced conversion (Stage 3)`() = runBlocking {
+        val budget = createBudget(currency = "EUR")
+        holdFor("exec-fx", 300_000)
+
+        // the treasury rule covering the settlement instant
+        CurrencyConversionService(database = db, clock = { tick }).apply {
+            registerRule("USD", "EUR", "0.9", 0L, null, "treasury")
+        }
+
+        val summary = settlement.settleExecutionUsage(
+            usage("exec-fx"), actualCostMicroUnits = 120_000, costCurrency = "USD"
+        )
+
+        // 120_000 USD × 0.9 = 108_000 EUR: settled against the 300_000 EUR
+        // hold, the remainder released, the ledger in the policy currency.
+        assertTrue(
+            "expected SettledAndReleased, got $summary",
+            summary is HoldSettlementService.SettlementSummary.SettledAndReleased
+        )
+        summary as HoldSettlementService.SettlementSummary.SettledAndReleased
+        assertEquals(108_000L, summary.settledMicroUnits)
+        assertEquals(192_000L, summary.releasedMicroUnits)
+        assertEquals(892_000L, ledger.availableForPeriod(budget.periodId).availableMicroUnits)
     }
 
     @Test

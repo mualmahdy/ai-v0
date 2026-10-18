@@ -243,7 +243,7 @@ class MigrationChainValidationTest {
             // FUNCTIONAL CLOSURE Phase 1 §9).
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(25, c.getInt(0))
+                assertEquals(26, c.getInt(0))
             }
 
             // STAGE 2 (v25): the pricing/metering/itemized-cost group exists
@@ -268,6 +268,27 @@ class MigrationChainValidationTest {
                     "'cost_calculation_line','cost_calculation_line_input')"
             ).use { c ->
                 assertTrue(c.moveToFirst()); assertEquals("18 Stage-2 immutability triggers", 18, c.getInt(0))
+            }
+
+            // STAGE 3 (v26): the reconciliation/billing/FX/entitlement group
+            // exists after the full chain, with the seventeen G03/G04/ADR-B2
+            // triggers (immutability + finality machine + draft guards).
+            for (table in listOf(
+                "currency_conversion_rule", "provider_billing_record", "reconciliation_record",
+                "reconciliation_inclusion", "reconciliation_adjustment",
+                "entitlement_record", "entitlement_consumption"
+            )) {
+                db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='" + table + "'").use { c ->
+                    assertTrue("Stage-3 table " + table + " must exist after the full chain", c.moveToFirst())
+                }
+            }
+            db.query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name IN " +
+                    "('currency_conversion_rule','provider_billing_record','reconciliation_record'," +
+                    "'reconciliation_inclusion','reconciliation_adjustment','entitlement_consumption')"
+            ).use { c ->
+                assertTrue(c.moveToFirst())
+                assertEquals("17 Stage-3 triggers (G03 direction, G04 finality, ADR-B2 immutability)", 17, c.getInt(0))
             }
 
             // Room accepted the migrated schema: it wrote its identity hash.
@@ -398,7 +419,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(25, c.getInt(0))
+                assertEquals(26, c.getInt(0))
             }
             // Validation accepted → identity hash written.
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
@@ -446,7 +467,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(25, c.getInt(0))
+                assertEquals(26, c.getInt(0))
             }
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
                 assertTrue(c.moveToFirst())

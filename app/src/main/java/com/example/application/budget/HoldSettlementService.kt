@@ -26,14 +26,19 @@ import com.example.infrastructure.persistence.AppDatabase
  *         nothing is fabricated into the ledger).
  *   I-11  actual > hold → settle the full hold, post the excess as an
  *         ACTUAL consumption entry — actuals are never truncated.
- *   I-18  hold currency ≠ cost currency → no settlement (an honest FX
- *         conversion arrives with Stage 3); the hold survives until
- *         expiry and the mismatch is reported to telemetry.
+ *   I-18  hold currency ≠ cost currency → NO SILENT CONVERSION (an
+ *         assumed 1:1 rate is a fabricated fact); Stage 3 closes this
+ *         honestly: when a [CurrencyConversionService] is wired AND a
+ *         windowed rule covers the settlement instant, the actual is
+ *         converted with the recorded rate (evidence lives on the rule +
+ *         the reconciliation layer); without a rule the honest no-op
+ *         stands — UNKNOWN is never one.
  */
 class HoldSettlementService(
     private val database: AppDatabase,
     private val ledger: BudgetLedgerService,
     private val telemetry: com.example.application.observability.TelemetryService? = null,
+    private val fx: CurrencyConversionService? = null,
     private val clock: () -> Long = System::currentTimeMillis
 ) {
 
@@ -96,7 +101,8 @@ class HoldSettlementService(
             // hook already ran (a SETTLE settlement with the execution's
             // settle key exists) — replaying is a no-op, never a second
             // posting. The first settlement is authoritative; revised
-            // provider reports supersede in Stage 3, not by double-posting.
+            // provider reports supersede via Stage-3 reconciliation, not
+            // by double-posting.
             val anyHold = database.budgetHoldDao()
                 .allForReason(executionReason(input.executionId)).firstOrNull()
             if (anyHold != null && database.budgetHoldSettlementDao()
@@ -111,29 +117,42 @@ class HoldSettlementService(
         // exist, settle against the oldest and release the rest (documented
         // deterministic choice).
         val hold = holds.first()
+        var effectiveActualMicro = actualCostMicroUnits
         if (hold.currency != costCurrency) {
-            // I-18: honest refusal to convert currencies silently.
-            telemetry?.incrementCounter(
-                action = "BUDGET_SETTLEMENT_CURRENCY_MISMATCH",
-                dimensions = com.example.domain.core.observability.MetricDimensions(
-                    executionId = input.executionId,
-                    workspaceId = input.workspaceId,
-                    providerId = input.providerId,
-                    agentId = input.agentId
+            // I-18 (Stage-3 closure): convert the actual into the hold's
+            // currency ONLY with a recorded windowed rule; never assume
+            // 1:1. No rule → the Stage-2 honest no-op stands.
+            val converted = fx?.convert(
+                amountMicroUnits = actualCostMicroUnits,
+                fromCurrency = costCurrency,
+                toCurrency = hold.currency,
+                atEpochMs = now
+            )
+            if (converted is CurrencyConversionService.ConversionResult.Converted) {
+                effectiveActualMicro = converted.targetMicroUnits
+            } else {
+                telemetry?.incrementCounter(
+                    action = "BUDGET_SETTLEMENT_CURRENCY_MISMATCH",
+                    dimensions = com.example.domain.core.observability.MetricDimensions(
+                        executionId = input.executionId,
+                        workspaceId = input.workspaceId,
+                        providerId = input.providerId,
+                        agentId = input.agentId
+                    )
                 )
-            )
-            return SettlementSummary.NoAction(
-                "CURRENCY_MISMATCH:${hold.currency}!=$costCurrency"
-            )
+                return SettlementSummary.NoAction(
+                    "CURRENCY_MISMATCH:${hold.currency}!=$costCurrency"
+                )
+            }
         }
 
         val settledSoFar = database.budgetHoldSettlementDao().totalSettledMicro(hold.holdId)
         val remaining = hold.holdAmountMicroUnits - settledSoFar
         if (remaining <= 0) {
-            return postActualWithoutHold(input, actualCostMicroUnits, usageRecordId, now)
+            return postActualWithoutHold(input, effectiveActualMicro, usageRecordId, now)
         }
 
-        val settleable = minOf(actualCostMicroUnits, remaining)
+        val settleable = minOf(effectiveActualMicro, remaining)
 
         return when (
             val outcome = ledger.settleHold(
@@ -144,7 +163,7 @@ class HoldSettlementService(
             )
         ) {
             is BudgetLedgerService.SettlementOutcome.Settled -> {
-                val overage = actualCostMicroUnits - settleable
+                val overage = effectiveActualMicro - settleable
                 if (overage > 0) {
                     // I-11: the excess is a real cost — post it, never truncate.
                     val scope = holdScope(hold.holdId)
@@ -193,8 +212,9 @@ class HoldSettlementService(
             is BudgetLedgerService.SettlementOutcome.HoldNotFound,
             is BudgetLedgerService.SettlementOutcome.InvalidHoldState ->
                 // expired/settled between the read and the settle — the
-                // actual still belongs in the ledger of the active policy.
-                postActualWithoutHold(input, actualCostMicroUnits, usageRecordId, now)
+                // actual still belongs in the ledger of the active policy
+                // (in the hold's currency when FX applied, else as reported).
+                postActualWithoutHold(input, effectiveActualMicro, usageRecordId, now)
 
             is BudgetLedgerService.SettlementOutcome.OverSettlement ->
                 // cannot happen (settleable ≤ remaining by construction);

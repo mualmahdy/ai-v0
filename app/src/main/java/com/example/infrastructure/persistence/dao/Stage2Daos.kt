@@ -176,6 +176,31 @@ interface CostCalculationDao {
             "ORDER BY calculated_at_epoch_ms"
     )
     suspend fun forAttempt(attemptId: String): List<CostCalculationEntity>
+
+    /**
+     * Stage-3 reconciliation feed: the provider-attributed calculations in
+     * a billing window. Provider linkage rides the pricing chain
+     * (calculation -> version -> profile -> provider_id); the attribution
+     * instant for REQUEST_ATTEMPT-level rows is calculated_at_epoch_ms
+     * (interpretation I-23 — period-level rows will carry their own
+     * windows when a period-level writer exists).
+     */
+    @Query(
+        "SELECT cc.* FROM cost_calculation cc " +
+            "JOIN pricing_profile_version v ON v.pricing_profile_version_id = cc.pricing_profile_version_id " +
+            "JOIN pricing_profile p ON p.pricing_profile_id = v.pricing_profile_id " +
+            "WHERE p.provider_id = :providerId " +
+            "AND cc.calculation_status = :calculationStatus " +
+            "AND cc.calculated_at_epoch_ms >= :fromEpochMs " +
+            "AND cc.calculated_at_epoch_ms < :untilEpochMs " +
+            "ORDER BY cc.calculated_at_epoch_ms"
+    )
+    suspend fun forProviderWindow(
+        providerId: String,
+        calculationStatus: String,
+        fromEpochMs: Long,
+        untilEpochMs: Long
+    ): List<CostCalculationEntity>
 }
 
 @Dao
@@ -199,6 +224,14 @@ interface CostCalculationLineDao {
             "ORDER BY line_order"
     )
     suspend fun forCalculation(calculationId: String): List<CostCalculationLineEntity>
+
+    /** Stage-3 reconciliation feed: active lines of many calculations. */
+    @Query(
+        "SELECT * FROM cost_calculation_line WHERE cost_calculation_id IN (:calculationIds) " +
+            "AND line_status = 'ACTIVE' AND final_amount_micro_units IS NOT NULL " +
+            "ORDER BY cost_calculation_id, line_order"
+    )
+    suspend fun activeLinesForCalculations(calculationIds: List<String>): List<CostCalculationLineEntity>
 }
 
 @Dao

@@ -969,8 +969,55 @@ class AppContainer(context: Context) {
         com.example.application.budget.HoldSettlementService(
             database = database,
             ledger = budgetLedgerService,
-            telemetry = telemetryService
+            telemetry = telemetryService,
+            fx = currencyConversionService
         )
+    }
+
+    /**
+     * v26 — STAGE 3 currency conversion (roadmap Phase 3, gate G03):
+     * windowed, directional FX rules with exact-decimal rates and the
+     * versioned HALF_UP micro rounding policy. Fail-closed: no covering
+     * rule is NEVER an assumed 1:1. Also feeds the I-18 settlement
+     * conversion path.
+     */
+    val currencyConversionService: com.example.application.budget.CurrencyConversionService by lazy {
+        com.example.application.budget.CurrencyConversionService(database = database)
+    }
+
+    /**
+     * v26 — STAGE 3 provider billing import (roadmap Phase 3): the
+     * programmatic landing surface for invoice data — immutable records,
+     * external-id dedup (I-14), amount-consistency honesty, corrections
+     * via adjusts_billing_record_id chains.
+     */
+    val providerBillingService: com.example.application.budget.ProviderBillingService by lazy {
+        com.example.application.budget.ProviderBillingService(database = database)
+    }
+
+    /**
+     * v26 — STAGE 3 reconciliation (roadmap Phase 3, gates G03 + G04):
+     * provider invoice vs internal itemized cost — comparison currency =
+     * provider billing currency, single windowed conversion, difference
+     * classification via adjustments, and the DRAFT → FINALIZED / REVOKED
+     * finality machine with DB-level enforcement.
+     */
+    val reconciliationService: com.example.application.budget.ReconciliationService by lazy {
+        com.example.application.budget.ReconciliationService(
+            database = database,
+            fx = currencyConversionService
+        )
+    }
+
+    /**
+     * v26 — STAGE 3 entitlements (the accruals layer): auditable
+     * entitlement records with exactly-one-of value shapes and
+     * idempotent append-only consumption. Spend routing (which
+     * entitlement pays first) is the Stage-4 intelligence — this layer
+     * records, it does not decide (I-29).
+     */
+    val entitlementService: com.example.application.budget.EntitlementService by lazy {
+        com.example.application.budget.EntitlementService(database = database)
     }
 
     /**

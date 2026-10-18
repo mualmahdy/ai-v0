@@ -252,7 +252,7 @@ class GovernancePersistenceTest {
     }
 
     @Test
-    fun `db version is 25 with all governance + execution-kernel + convergence + portability tables`() {
+    fun `db version is 26 with all governance + execution-kernel + convergence + portability tables`() {
         // Gap-closure: v11 added action_intents + agent_definitions + the
         // tasks.executionContextJson column (canonical execution kernel).
         // P0 convergence (v12): workspace-owned projects, RAG metadata
@@ -283,7 +283,7 @@ class GovernancePersistenceTest {
         // STAGE 2 v25 (2026-10-17): the twelve pricing/metering/itemized-
         // cost tables + eighteen immutability triggers.
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(25, dbVersion)
+        assertEquals(26, dbVersion) // v26: Stage-3 reconciliation/billing/FX/entitlements
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))

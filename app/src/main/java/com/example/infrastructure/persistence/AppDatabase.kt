@@ -188,6 +188,19 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.CostCalculationInputEntity::class,
         com.example.infrastructure.persistence.entities.CostCalculationLineEntity::class,
         com.example.infrastructure.persistence.entities.CostCalculationLineInputEntity::class,
+        // v26 — STAGE 3 (roadmap Phase 3): currency conversion rules,
+        // provider billing records, reconciliation (record + inclusions +
+        // adjustments — gates PDM-G03/G04) and entitlements (record +
+        // consumption). Micro units, epochMs, exact-decimal TEXT evidence,
+        // append-only fact tables protected by the ADR-B2 trigger family
+        // plus the G04 finality machine.
+        com.example.infrastructure.persistence.entities.CurrencyConversionRuleEntity::class,
+        com.example.infrastructure.persistence.entities.ProviderBillingRecordEntity::class,
+        com.example.infrastructure.persistence.entities.ReconciliationRecordEntity::class,
+        com.example.infrastructure.persistence.entities.ReconciliationInclusionEntity::class,
+        com.example.infrastructure.persistence.entities.ReconciliationAdjustmentEntity::class,
+        com.example.infrastructure.persistence.entities.EntitlementRecordEntity::class,
+        com.example.infrastructure.persistence.entities.EntitlementConsumptionEntity::class,
         // Gap-closure — canonical durable agent registry (P1-08/P1-09)
         com.example.infrastructure.persistence.entities.ActionIntentEntity::class,
         com.example.infrastructure.persistence.entities.AgentDefinitionEntity::class,
@@ -311,6 +324,15 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun costCalculationLineDao(): com.example.infrastructure.persistence.dao.CostCalculationLineDao
     abstract fun costCalculationLineInputDao(): com.example.infrastructure.persistence.dao.CostCalculationLineInputDao
 
+    // v26 — STAGE 3 DAOs (currencies + provider billing + reconciliation + entitlements)
+    abstract fun currencyConversionRuleDao(): com.example.infrastructure.persistence.dao.CurrencyConversionRuleDao
+    abstract fun providerBillingRecordDao(): com.example.infrastructure.persistence.dao.ProviderBillingRecordDao
+    abstract fun reconciliationRecordDao(): com.example.infrastructure.persistence.dao.ReconciliationRecordDao
+    abstract fun reconciliationInclusionDao(): com.example.infrastructure.persistence.dao.ReconciliationInclusionDao
+    abstract fun reconciliationAdjustmentDao(): com.example.infrastructure.persistence.dao.ReconciliationAdjustmentDao
+    abstract fun entitlementRecordDao(): com.example.infrastructure.persistence.dao.EntitlementRecordDao
+    abstract fun entitlementConsumptionDao(): com.example.infrastructure.persistence.dao.EntitlementConsumptionDao
+
     // Gap-closure — action idempotency ledger (P0-05/P0-06)
     abstract fun actionIntentDao(): com.example.infrastructure.persistence.dao.ActionIntentDao
 
@@ -358,7 +380,10 @@ abstract class AppDatabase : RoomDatabase() {
         // + itemized cost breakdown — 12 additive tables, 18 immutability
         // triggers, seed reference data, and the one-shot pricing_entries
         // data mirror (I-13/I-16).
-        const val SCHEMA_VERSION = 25
+        // v26 (Stage 3, roadmap Phase 3): reconciliation + provider
+        // invoicing + currency conversion + entitlements — 7 additive
+        // tables, the G03/G04 trigger family (gates closed this stage).
+        const val SCHEMA_VERSION = 26
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -2109,6 +2134,20 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v26 — STAGE 3 (roadmap Phase 3, approved scope): purely additive.
+         * DDL + named indices + the seventeen G03/G04/ADR-B2 triggers all
+         * live in [Stage3MigrationSql] (single source, verified standalone
+         * by scripts/verify_stage3_ddl.py). No data migration (no legacy
+         * surface to mirror — invoices/FX rules/entitlements are imported,
+         * not derived). No existing table is touched.
+         */
+        private val MIGRATION_25_TO_26: Migration = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                Stage3MigrationSql.STATEMENTS.forEach(db::execSQL)
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -2136,6 +2175,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_22_TO_23,
             MIGRATION_23_TO_24,
             MIGRATION_24_TO_25,
+            MIGRATION_25_TO_26,
         )
 
         fun getInstance(context: Context): AppDatabase {
@@ -2161,6 +2201,12 @@ abstract class AppDatabase : RoomDatabase() {
                             // as v23 — entity-created tables otherwise lack
                             // the DB-level append-only protection).
                             Stage2MigrationSql.TRIGGERS.forEach(db::execSQL)
+                            // v26: fresh installs also need the seventeen
+                            // Stage-3 triggers (reconciliation finality,
+                            // billing immutability, FX-rule freezing,
+                            // append-only evidence — same gap-closure
+                            // pattern as v23/v25).
+                            Stage3MigrationSql.TRIGGERS.forEach(db::execSQL)
                             // v25: fresh installs seed the unit/metric
                             // reference data the pricing and usage FKs depend
                             // on (upgraded devices get them from the migration;
