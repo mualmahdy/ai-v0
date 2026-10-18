@@ -243,7 +243,7 @@ class MigrationChainValidationTest {
             // FUNCTIONAL CLOSURE Phase 1 §9).
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(26, c.getInt(0))
+                assertEquals(27, c.getInt(0))
             }
 
             // STAGE 2 (v25): the pricing/metering/itemized-cost group exists
@@ -288,7 +288,50 @@ class MigrationChainValidationTest {
                     "'reconciliation_inclusion','reconciliation_adjustment','entitlement_consumption')"
             ).use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals("17 Stage-3 triggers (G03 direction, G04 finality, ADR-B2 immutability)", 17, c.getInt(0))
+                // 18 = the seventeen Stage-3 triggers PLUS the Stage-4
+                // finalize guard that lives on reconciliation_record (I-35).
+                assertEquals("17 Stage-3 triggers + the Stage-4 finalize guard", 18, c.getInt(0))
+            }
+
+            // STAGE 4 (v27): the evidence & sources network — the acquisition
+            // chain, canonical model registry, observation domain, metric
+            // relations, resource constraints, evidence + the 12 typed link
+            // tables, with the seventeen Stage-4 triggers (evidence/observation
+            // immutability, provider coherence, cycle guards, and the
+            // PRIMARY-evidence-at-authorization guard family I-35).
+            for (table in listOf(
+                "provider", "provider_integration", "provider_scope_node",
+                "provider_capability_manifest", "capability_statement",
+                "credential_reference", "credential_binding", "access_context",
+                "acquisition_run", "model", "provider_model_record",
+                "model_identity_match", "model_offering", "request_operation",
+                "provider_request_attempt", "freshness_policy", "metric_relationship",
+                "resource_constraint", "observation", "evidence",
+                "currency_conversion_rule_evidence", "entitlement_evidence",
+                "metric_relationship_evidence", "model_identity_match_evidence",
+                "observation_evidence", "pricing_component_evidence",
+                "pricing_profile_evidence", "pricing_profile_version_evidence",
+                "provider_billing_record_evidence", "reconciliation_evidence",
+                "resource_constraint_evidence", "usage_record_evidence"
+            )) {
+                db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='" + table + "'").use { c ->
+                    assertTrue("Stage-4 table " + table + " must exist after the full chain", c.moveToFirst())
+                }
+            }
+            db.query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN " +
+                    "('trg_provider_scope_no_cycle_insert','trg_provider_scope_no_cycle_update'," +
+                    "'trg_manifest_provider_integration_insert','trg_acquisition_provider_integration_insert'," +
+                    "'trg_observation_subject_provider_insert','trg_credential_binding_provider_match_insert'," +
+                    "'trg_credential_binding_provider_match_update','trg_attempt_context_offering_provider_insert'," +
+                    "'trg_attempt_credential_context_insert','trg_no_update_evidence','trg_no_delete_evidence'," +
+                    "'trg_no_update_observation','trg_no_delete_observation','trg_finalize_requires_primary_evidence'," +
+                    "'trg_match_verified_requires_primary_evidence'," +
+                    "'trg_metric_relation_active_requires_primary_evidence'," +
+                    "'trg_resource_constraint_active_requires_primary_evidence')"
+            ).use { c ->
+                assertTrue(c.moveToFirst())
+                assertEquals("17 Stage-4 triggers (I-32/I-35 families, by name — reconciliation_record also carries the Stage-3 G04 family)", 17, c.getInt(0))
             }
 
             // Room accepted the migrated schema: it wrote its identity hash.
@@ -419,7 +462,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(26, c.getInt(0))
+                assertEquals(27, c.getInt(0))
             }
             // Validation accepted → identity hash written.
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
@@ -467,7 +510,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(26, c.getInt(0))
+                assertEquals(27, c.getInt(0))
             }
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
                 assertTrue(c.moveToFirst())

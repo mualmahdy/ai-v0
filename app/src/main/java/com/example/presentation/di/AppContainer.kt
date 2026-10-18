@@ -1021,6 +1021,56 @@ class AppContainer(context: Context) {
     }
 
     /**
+     * v27 — STAGE 4 evidence & sources network (the ONLY Phase-4 gap-matrix
+     * row: "evidence + 12 جدول ربط بأدوار وثقة وفترات وشرط دليل أساسي عند
+     * النشر"). Immutable typed evidence, the twelve link tables, and the
+     * service half of the PRIMARY-evidence-at-authorization guard (I-35 —
+     * the DB half is the trigger family).
+     */
+    val evidenceService: com.example.application.budget.EvidenceService by lazy {
+        com.example.application.budget.EvidenceService(database = database)
+    }
+
+    /**
+     * v27 — STAGE 4 budget-depletion forecast (roadmap Phase-4 exit
+     * criterion: the warning is issued at least 7 days before depletion,
+     * with acceptable accuracy, on actual data). Daily burn from the
+     * posted ledger, weighted moving average, projection + confidence,
+     * early-warning audit events over the EXISTING telemetry channel.
+     */
+    val budgetForecastService: com.example.application.budget.BudgetForecastService by lazy {
+        com.example.application.budget.BudgetForecastService(
+            ledger = budgetLedgerService,
+            database = database,
+            telemetry = telemetryService
+        )
+    }
+
+    /**
+     * v27 — STAGE 4 live dashboard feeds (Flows straight from Room: the
+     * per-period balance equation, the ledger/holds feeds, calculated
+     * cost by provider over the pricing chain).
+     */
+    val budgetDashboardService: com.example.application.budget.BudgetDashboardService by lazy {
+        com.example.application.budget.BudgetDashboardService(database = database)
+    }
+
+    /**
+     * v27 — STAGE 4 accounting-actuals feed (the decision-engine bridge,
+     * roadmap Circle 1): the REAL balance-equation state as context
+     * features — the engine learns from accounting, not estimates.
+     * Monetary credits only; never absolute money in the feature vector
+     * (I-39).
+     */
+    val budgetActualsFeed: com.example.application.budget.BudgetActualsFeed by lazy {
+        com.example.application.budget.BudgetActualsFeed(
+            ledger = budgetLedgerService,
+            entitlements = entitlementService,
+            database = database
+        )
+    }
+
+    /**
      * The economic governance facade: pricing resolution, cost ledger,
      * hierarchical budgets with enforceable policies, rate-limit gate,
      * pre-execution authorization and post-execution accounting.
@@ -1326,6 +1376,7 @@ class AppContainer(context: Context) {
             registry = componentRegistry,
             securityGuard = securityGuardService,
             decisionService = decisionService,
+            budgetActualsFeed = budgetActualsFeed,
             executionService = executionService,
             observationService = observationService,
             outcomeService = outcomeService,

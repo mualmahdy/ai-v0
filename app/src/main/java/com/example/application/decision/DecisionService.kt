@@ -109,6 +109,15 @@ class DecisionService(
     var liveToolNamesProvider: () -> List<String> = { emptyList() }
 
     /**
+     * Stage-4 (I-39, roadmap Circle 1): late-bound accounting-actuals feed.
+     * When wired, buildDecisionContext merges the REAL balance-equation
+     * state (available ratio, exhaustion, monetary credits) into the
+     * context features — the engine learns from accounting, not estimates.
+     * Null (default) keeps the pre-Stage-4 behavior untouched.
+     */
+    var budgetActualsFeed: com.example.application.budget.BudgetActualsFeed? = null
+
+    /**
      * Backwards-compat constructor: takes a `ComponentRegistry` and uses its
      * `resourceCapabilityGraph`. This is used by tests that pre-date the Phase 4
      * refactor. Production code uses the primary constructor with
@@ -153,7 +162,11 @@ class DecisionService(
         taskContract: com.example.domain.core.task.TaskContract? = null,
         agentAllowedCapabilities: Set<CapabilityType>? = null,
         effectiveAutonomyPolicy: com.example.domain.core.task.AutonomyPolicy? = null,
-        hasKnowledgeCorpus: Boolean = false
+        hasKnowledgeCorpus: Boolean = false,
+        /** Stage-4 (I-39): accounting-actuals features computed by the
+         *  (suspend) caller — BudgetActualsFeed. Default empty keeps every
+         *  existing call site compiling and behaving identically. */
+        budgetActuals: Map<String, Float> = emptyMap()
     ): DecisionContext {
         val effectiveRequirements = resolveTaskRequirements(task)
         val taskWithRequirements = if (task.requirements == effectiveRequirements) task else task.copy(requirements = effectiveRequirements)
@@ -244,7 +257,8 @@ class DecisionService(
             agentAllowedCapabilities = agentAllowedCapabilities,
             effectiveAutonomyPolicy = effectiveAutonomyPolicy,
             // GAP-07 — corpus flag for CHAT grounding candidacy.
-            hasKnowledgeCorpus = hasKnowledgeCorpus
+            hasKnowledgeCorpus = hasKnowledgeCorpus,
+            budgetActuals = budgetActuals
         )
     }
 

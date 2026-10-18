@@ -147,6 +147,21 @@ interface EntitlementRecordDao {
 
     @Query("SELECT * FROM entitlement_record WHERE entitlement_id = :entitlementId LIMIT 1")
     suspend fun byId(entitlementId: String): EntitlementRecordEntity?
+
+    /**
+     * Stage-4 (I-39, the BudgetActualsFeed bridge): the ACTIVE monetary
+     * credits whose applicability scope is exactly [scopeId] and whose
+     * validity window covers [nowEpochMs]. Only MONETARY_CREDIT rows —
+     * quantity/provider-credit remainings are not money and never enter
+     * the money balance.
+     */
+    @Query(
+        "SELECT * FROM entitlement_record WHERE applicability_scope_id = :scopeId " +
+            "AND status = 'ACTIVE' AND value_kind = 'MONETARY_CREDIT' " +
+            "AND (starts_at_epoch_ms IS NULL OR starts_at_epoch_ms <= :nowEpochMs) " +
+            "AND (expires_at_epoch_ms IS NULL OR expires_at_epoch_ms > :nowEpochMs)"
+    )
+    suspend fun activeMonetaryCreditsForScope(scopeId: String, nowEpochMs: Long): List<EntitlementRecordEntity>
 }
 
 @Dao

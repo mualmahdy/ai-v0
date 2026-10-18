@@ -28,6 +28,8 @@ import com.example.infrastructure.persistence.AppDatabase
 import com.example.infrastructure.persistence.BudgetCoreMigrationSql
 import com.example.infrastructure.persistence.Stage2MigrationSql
 import com.example.infrastructure.persistence.Stage3MigrationSql
+import com.example.infrastructure.persistence.Stage4MigrationSql
+import com.example.application.budget.EvidenceService
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -69,6 +71,7 @@ class BudgetReconciliationE2ETest {
     private lateinit var reconciliation: ReconciliationService
     private lateinit var billing: ProviderBillingService
     private lateinit var entitlements: EntitlementService
+    private lateinit var evidence: EvidenceService
 
     private var tick = 1_000L
     private val windowStart = 0L
@@ -84,6 +87,7 @@ class BudgetReconciliationE2ETest {
                     BudgetCoreMigrationSql.TRIGGERS.forEach(db::execSQL)
                     Stage2MigrationSql.TRIGGERS.forEach(db::execSQL)
                     Stage3MigrationSql.TRIGGERS.forEach(db::execSQL)
+                    Stage4MigrationSql.TRIGGERS.forEach(db::execSQL)
                     Stage2MigrationSql.STATEMENTS.filter { it.startsWith("INSERT") }.forEach(db::execSQL)
                 }
             })
@@ -96,6 +100,7 @@ class BudgetReconciliationE2ETest {
         billing = ProviderBillingService(database = db, clock = { tick })
         reconciliation = ReconciliationService(database = db, fx = fx, clock = { tick })
         entitlements = EntitlementService(database = db, clock = { tick })
+        evidence = com.example.application.budget.EvidenceService(database = db, clock = { tick })
         val pricing = FakePricingRepository()
         kotlinx.coroutines.runBlocking {
             pricing.upsertPricing(
@@ -283,6 +288,29 @@ class BudgetReconciliationE2ETest {
         )
 
         // ---- 9) the finance sign-off, then the freeze (G04) ----
+        // Stage-4 (I-35): no sign-off without PRIMARY evidence — the guard
+        // family rejects first, the invoice PDF link unlocks it.
+        val blocked = reconciliation.finalize(outcome.reconciliationId)
+        assertTrue(
+            "finalize without PRIMARY evidence is rejected by the guard",
+            blocked is ReconciliationService.FinalizeOutcome.Rejected &&
+                (blocked as ReconciliationService.FinalizeOutcome.Rejected).reason.contains("PRIMARY evidence")
+        )
+        evidence.record(
+            EvidenceService.EvidenceSpec(
+                evidenceId = "ev-e2e-invoice",
+                evidenceType = EvidenceService.Vocab.TYPE_PROVIDER_INVOICE,
+                payloadStorageMode = EvidenceService.Vocab.MODE_EXTERNAL_POINTER,
+                sourceReference = "invoices/2026-10/prov-e2e.pdf",
+                securityClassification = EvidenceService.Vocab.CLASSIFICATION_INTERNAL
+            )
+        )
+        evidence.linkReconciliation(
+            reconciliationId = outcome.reconciliationId,
+            evidenceId = "ev-e2e-invoice",
+            role = EvidenceService.Vocab.ROLE_PRIMARY,
+            confidence = EvidenceService.Vocab.CONFIDENCE_HIGH
+        )
         val finalized = reconciliation.finalize(outcome.reconciliationId)
         assertTrue(finalized is ReconciliationService.FinalizeOutcome.Finalized)
         val record = reconciliation.byId(outcome.reconciliationId)!!

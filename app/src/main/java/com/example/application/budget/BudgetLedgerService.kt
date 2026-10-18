@@ -703,6 +703,18 @@ class BudgetLedgerService(
         return ActiveBudget(policy, period)
     }
 
+    /**
+     * Stage-4 (I-39): resolve the canonical scope id for a (type, object)
+     * pair WITHOUT creating anything — the BudgetActualsFeed bridge needs
+     * it to look up entitlements for the same scope the policy ride on.
+     * Returns null when no descriptor exists yet (honest absence).
+     */
+    suspend fun scopeIdFor(
+        scopeType: String,
+        platformObjectId: String?,
+        nowEpochMs: Long = clock()
+    ): String? = findDescriptor(scopeType, platformObjectId)?.scopeId
+
     /** Marks expired holds EXPIRED (bookkeeping only — availability already
      *  ignores them lazily since the balance query filters by expiry). */
     suspend fun expireHolds(nowEpochMs: Long = clock()): Int =

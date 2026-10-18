@@ -344,7 +344,7 @@ class Migration22to23Test {
 
     @Test
     fun `schema version is 24 and both new steps are registered continuously`() {
-        assertEquals(26, AppDatabase.SCHEMA_VERSION) // v26: Stage-3 reconciliation/billing/FX/entitlements
+        assertEquals(27, AppDatabase.SCHEMA_VERSION) // v27: Stage-4 evidence network + first intelligence increment
         val allField = AppDatabase::class.java.getDeclaredField("ALL_MIGRATIONS")
         allField.isAccessible = true
         val migrations = allField.get(null) as Array<androidx.room.migration.Migration>

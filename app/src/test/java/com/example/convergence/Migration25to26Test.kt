@@ -93,14 +93,14 @@ class Migration25to26Test {
 
         val context = ApplicationProvider.getApplicationContext<Context>()
         val room = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(migration("MIGRATION_25_TO_26"))
+            .addMigrations(migration("MIGRATION_25_TO_26"), migration("MIGRATION_26_TO_27")) // v27: the entity set moved on — both steps run (the 22to23 precedent)
             .allowMainThreadQueries()
             .build()
         try {
             val db = room.openHelper.writableDatabase // open -> migrate -> Room validates
 
             db.query("PRAGMA user_version").use { c ->
-                assertTrue(c.moveToFirst()); assertEquals(26, c.getInt(0))
+                assertTrue(c.moveToFirst()); assertEquals(27, c.getInt(0))
             }
 
             // ---- 7 Stage-3 tables ----
@@ -156,6 +156,19 @@ class Migration25to26Test {
                 "rule_version,recorded_at_epoch_ms) VALUES ('rec-m','pbr-m','sd-s3',0,10000,'USD','USD','USD'," +
                 "NULL,'COMPLETE','MATCHED','DRAFT','v',0)"
             db.execSQL(insertRec)
+            // Stage-4 (I-35): the sign-off now requires PRIMARY evidence —
+            // the v27 guard lives on this table. Link it before the UPDATE.
+            db.execSQL(
+                "INSERT INTO evidence (evidence_id, evidence_type, payload_digest, hash_algorithm, " +
+                    "payload_storage_mode, verification_available, redaction_status, evidence_status, " +
+                    "security_classification, recorded_at_epoch_ms) VALUES " +
+                    "('ev-s3x','PROVIDER_INVOICE','ds3','SHA-256','DIGEST_ONLY',0,'NONE','ACTIVE','INTERNAL',0)"
+            )
+            db.execSQL(
+                "INSERT INTO reconciliation_evidence (reconciliation_id, evidence_id, evidence_role, " +
+                    "confidence_state, is_primary, created_at_epoch_ms) VALUES " +
+                    "('rec-m','ev-s3x','PRIMARY','HIGH',1,0)"
+            )
             // legal: DRAFT -> FINALIZED
             db.execSQL("UPDATE reconciliation_record SET finality_status='FINALIZED', reconciled_at_epoch_ms=1 WHERE reconciliation_id='rec-m'")
             // frozen: any further UPDATE rejected

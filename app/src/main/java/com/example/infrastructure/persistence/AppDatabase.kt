@@ -228,7 +228,49 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.ArtifactVersionEntity::class,
         // v22 — CLOSURE FINAL STAGE (§5/item 4 — B6): central transfer id
         // mapping table (every remapped import id, written in the import tx)
-        com.example.infrastructure.persistence.entities.IdMappingEntity::class
+        com.example.infrastructure.persistence.entities.IdMappingEntity::class,
+        // v27 (Stage 4, roadmap Phase 4): the evidence & sources network —
+        // 32 additive tables (acquisition chain, canonical model registry,
+        // observation domain, metric relations, resource constraints,
+        // evidence + the 12 typed link tables). Purely additive; no existing
+        // table is touched (the deferred FKs of live tables stay deferred
+        // forever in place — I-34, no rebuilds of live financial tables).
+        // (I-42: class named PdmProviderEntity — the pre-existing
+        // ProviderEntity/table "providers" is the app's RUNTIME provider
+        // registry, a different concept; the PDM "provider" table is the
+        // evidence-domain canonical registry.)
+        com.example.infrastructure.persistence.entities.PdmProviderEntity::class,
+        com.example.infrastructure.persistence.entities.ProviderIntegrationEntity::class,
+        com.example.infrastructure.persistence.entities.ProviderScopeNodeEntity::class,
+        com.example.infrastructure.persistence.entities.ProviderCapabilityManifestEntity::class,
+        com.example.infrastructure.persistence.entities.CapabilityStatementEntity::class,
+        com.example.infrastructure.persistence.entities.CredentialReferenceEntity::class,
+        com.example.infrastructure.persistence.entities.AccessContextEntity::class,
+        com.example.infrastructure.persistence.entities.CredentialBindingEntity::class,
+        com.example.infrastructure.persistence.entities.AcquisitionRunEntity::class,
+        com.example.infrastructure.persistence.entities.ModelEntity::class,
+        com.example.infrastructure.persistence.entities.ProviderModelRecordEntity::class,
+        com.example.infrastructure.persistence.entities.ModelIdentityMatchEntity::class,
+        com.example.infrastructure.persistence.entities.ModelOfferingEntity::class,
+        com.example.infrastructure.persistence.entities.RequestOperationEntity::class,
+        com.example.infrastructure.persistence.entities.ProviderRequestAttemptEntity::class,
+        com.example.infrastructure.persistence.entities.FreshnessPolicyEntity::class,
+        com.example.infrastructure.persistence.entities.MetricRelationshipEntity::class,
+        com.example.infrastructure.persistence.entities.ResourceConstraintEntity::class,
+        com.example.infrastructure.persistence.entities.ObservationEntity::class,
+        com.example.infrastructure.persistence.entities.EvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.CurrencyConversionRuleEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.EntitlementEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.MetricRelationshipEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.ModelIdentityMatchEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.ObservationEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.PricingComponentEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.PricingProfileEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.PricingProfileVersionEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.ProviderBillingRecordEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.ReconciliationEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.ResourceConstraintEvidenceEntity::class,
+        com.example.infrastructure.persistence.entities.UsageRecordEvidenceEntity::class
     ],
     version = AppDatabase.SCHEMA_VERSION,
     // GAP-01 (Design Closure 2026, ADR-1): schema export is now enabled and
@@ -333,6 +375,16 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun entitlementRecordDao(): com.example.infrastructure.persistence.dao.EntitlementRecordDao
     abstract fun entitlementConsumptionDao(): com.example.infrastructure.persistence.dao.EntitlementConsumptionDao
 
+    // v27 — STAGE 4 DAOs (evidence & sources network + first intelligence increment)
+    abstract fun evidenceDao(): com.example.infrastructure.persistence.dao.EvidenceDao
+    abstract fun evidenceLinkDao(): com.example.infrastructure.persistence.dao.EvidenceLinkDao
+    abstract fun providerRegistryDao(): com.example.infrastructure.persistence.dao.ProviderRegistryDao
+    abstract fun modelRegistryDao(): com.example.infrastructure.persistence.dao.ModelRegistryDao
+    abstract fun observationDao(): com.example.infrastructure.persistence.dao.ObservationDao
+    abstract fun semanticsDao(): com.example.infrastructure.persistence.dao.SemanticsDao
+    abstract fun budgetForecastDao(): com.example.infrastructure.persistence.dao.BudgetForecastDao
+    abstract fun budgetDashboardDao(): com.example.infrastructure.persistence.dao.BudgetDashboardDao
+
     // Gap-closure — action idempotency ledger (P0-05/P0-06)
     abstract fun actionIntentDao(): com.example.infrastructure.persistence.dao.ActionIntentDao
 
@@ -383,7 +435,10 @@ abstract class AppDatabase : RoomDatabase() {
         // v26 (Stage 3, roadmap Phase 3): reconciliation + provider
         // invoicing + currency conversion + entitlements — 7 additive
         // tables, the G03/G04 trigger family (gates closed this stage).
-        const val SCHEMA_VERSION = 26
+        // v27 (Stage 4, roadmap Phase 4): the evidence & sources network +
+        // first intelligence increment — 32 additive tables, the
+        // PRIMARY-evidence-at-authorization guard family (I-35).
+        const val SCHEMA_VERSION = 27
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -2148,6 +2203,22 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v27 (Stage 4, roadmap Phase 4): the evidence & sources network —
+         * the ONLY Phase-4 gap-matrix row ("evidence + 12 جدول ربط بأدوار
+         * وثقة وفترات وشرط دليل أساسي عند النشر") plus the acquisition
+         * chain, canonical model registry, observation domain, metric
+         * relations and resource constraints those links require by FK.
+         * All statements live in [Stage4MigrationSql] (single source,
+         * verified standalone by scripts/verify_stage4_ddl.py). Purely
+         * additive; no data migration (no legacy surface to mirror).
+         */
+        private val MIGRATION_26_TO_27: Migration = object : Migration(26, 27) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                Stage4MigrationSql.STATEMENTS.forEach(db::execSQL)
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -2176,6 +2247,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_23_TO_24,
             MIGRATION_24_TO_25,
             MIGRATION_25_TO_26,
+            MIGRATION_26_TO_27,
         )
 
         fun getInstance(context: Context): AppDatabase {
@@ -2207,6 +2279,12 @@ abstract class AppDatabase : RoomDatabase() {
                             // append-only evidence — same gap-closure
                             // pattern as v23/v25).
                             Stage3MigrationSql.TRIGGERS.forEach(db::execSQL)
+                            // v27: fresh installs also need the seventeen
+                            // Stage-4 triggers (evidence + observation
+                            // immutability, provider/integration coherence,
+                            // cycle guards, and the PRIMARY-evidence guard
+                            // family — same gap-closure pattern as v23/v25/v26).
+                            Stage4MigrationSql.TRIGGERS.forEach(db::execSQL)
                             // v25: fresh installs seed the unit/metric
                             // reference data the pricing and usage FKs depend
                             // on (upgraded devices get them from the migration;

@@ -86,6 +86,9 @@ class AgentOrchestrator(
     private val registry: ComponentRegistry,
     private val securityGuard: SecurityGuardService,
     private val decisionService: DecisionService,
+    /** Stage-4 (I-39): the accounting-actuals feed. Null (default) keeps the
+     *  pre-Stage-4 context features untouched (tests, JVM-only setups). */
+    private val budgetActualsFeed: com.example.application.budget.BudgetActualsFeed? = null,
     private val executionService: ExecutionService = ExecutionService(
         runtimeAdapterResolver = registry.runtimeAdapterResolver,
         resourceRegistry = registry.resourceRegistry,
@@ -866,7 +869,12 @@ class AgentOrchestrator(
             isNetworkAvailable = isNetworkAvailable,
             remainingTokens = currentTask.budget.tokenLimit - accumulatedTokens,
             consecutiveFailures = 0,
-            uncertaintyScore = 0.2f
+            uncertaintyScore = 0.2f,
+            budgetActuals = budgetActualsFeed?.featuresFor(
+                workspaceObjectId = currentTask.input.parameters["workspaceId"]?.toString(),
+                agentObjectId = currentTask.assignedAgentId.value,
+                taskObjectId = currentTask.id.value
+            ) ?: emptyMap()
         ).toDecisionState()
 
         var isTerminal = false
@@ -944,7 +952,12 @@ class AgentOrchestrator(
                 taskContract = taskContract ?: effectiveContract,
                 agentAllowedCapabilities = agent.allowedCapabilities,
                 effectiveAutonomyPolicy = effectiveAutonomyPolicy ?: currentTask.constraints.autonomyPolicy,
-                hasKnowledgeCorpus = hasKnowledgeCorpus
+                hasKnowledgeCorpus = hasKnowledgeCorpus,
+                budgetActuals = budgetActualsFeed?.featuresFor(
+                    workspaceObjectId = currentTask.input.parameters["workspaceId"]?.toString(),
+                    agentObjectId = currentTask.assignedAgentId.value,
+                    taskObjectId = currentTask.id.value
+                ) ?: emptyMap()
             )
 
             // 2. CBR-MDP Evaluation

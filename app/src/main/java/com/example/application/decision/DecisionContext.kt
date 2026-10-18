@@ -43,6 +43,11 @@ data class DecisionContext(
     val retrievedMemoriesCount: Int = 0,
     val taskComplexity: Float = 0.5f,
     val accumulatedEvidence: Map<String, Any?> = emptyMap(),
+    /** Stage-4 (I-39): the accounting-actuals features (available ratio,
+     *  exhaustion, monetary credits) for this run's scope chain, computed
+     *  by BudgetActualsFeed at the SUSPEND call site. Empty = honestly
+     *  absent (no active policy) — never zero-filled. */
+    val budgetActuals: Map<String, Float> = emptyMap(),
     val lastAction: DecisionAction? = null,
     val lastObservation: EnvironmentObservation? = null,
     val decisionHistory: List<DecisionResult> = emptyList(),
@@ -184,7 +189,7 @@ data class DecisionContext(
                 "missingCapabilitiesCount" to missingCapabilities.size.toFloat(),
                 "satisfiedCapabilitiesCount" to satisfiedCapabilities.size.toFloat(),
                 "capabilityStatusOrdinal" to capabilityGap.status.ordinal.toFloat()
-            )
+            ) + budgetActuals
         )
     }
 }

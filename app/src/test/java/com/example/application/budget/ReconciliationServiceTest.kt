@@ -7,6 +7,7 @@ import com.example.infrastructure.persistence.AppDatabase
 import com.example.infrastructure.persistence.BudgetCoreMigrationSql
 import com.example.infrastructure.persistence.Stage2MigrationSql
 import com.example.infrastructure.persistence.Stage3MigrationSql
+import com.example.infrastructure.persistence.Stage4MigrationSql
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -33,6 +34,7 @@ class ReconciliationServiceTest {
     private lateinit var db: AppDatabase
     private lateinit var fx: CurrencyConversionService
     private lateinit var reconciliation: ReconciliationService
+    private lateinit var evidence: EvidenceService
 
     @Before
     fun setup() {
@@ -44,12 +46,14 @@ class ReconciliationServiceTest {
                     BudgetCoreMigrationSql.TRIGGERS.forEach(db::execSQL)
                     Stage2MigrationSql.TRIGGERS.forEach(db::execSQL)
                     Stage3MigrationSql.TRIGGERS.forEach(db::execSQL)
+                    Stage4MigrationSql.TRIGGERS.forEach(db::execSQL)
                     Stage2MigrationSql.STATEMENTS.filter { it.startsWith("INSERT") }.forEach(db::execSQL)
                 }
             })
             .build()
         fx = CurrencyConversionService(database = db, clock = { 0L })
         reconciliation = ReconciliationService(database = db, fx = fx, clock = { 0L })
+        evidence = EvidenceService(database = db, clock = { 0L })
         seedScope()
     }
 
@@ -263,6 +267,35 @@ class ReconciliationServiceTest {
 
         val conflict = reconciliation.buildReconciliation(billingId, "sd-r", 0L, 10_000L)
                 as ReconciliationService.BuildOutcome.Recorded
+
+        // Stage-4 (I-35): the sign-off is REJECTED until the reconciliation
+        // carries PRIMARY evidence — the guard family speaks first.
+        val noEvidence = reconciliation.finalize(conflict.reconciliationId)
+        assertTrue(noEvidence is ReconciliationService.FinalizeOutcome.Rejected)
+        assertTrue(
+            "the guard names the missing PRIMARY evidence",
+            (noEvidence as ReconciliationService.FinalizeOutcome.Rejected).reason.contains("PRIMARY evidence")
+        )
+
+        // link the invoice PDF as the PRIMARY evidence, then sign off.
+        val rec = evidence.record(
+            EvidenceService.EvidenceSpec(
+                evidenceId = "ev-rec-1",
+                evidenceType = EvidenceService.Vocab.TYPE_PROVIDER_INVOICE,
+                payloadStorageMode = EvidenceService.Vocab.MODE_EXTERNAL_POINTER,
+                sourceReference = "invoices/2026-10/prov-r.pdf",
+                securityClassification = EvidenceService.Vocab.CLASSIFICATION_INTERNAL
+            )
+        )
+        assertTrue(rec is EvidenceService.RecordOutcome.Recorded)
+        val linked = evidence.linkReconciliation(
+            reconciliationId = conflict.reconciliationId,
+            evidenceId = "ev-rec-1",
+            role = EvidenceService.Vocab.ROLE_PRIMARY,
+            confidence = EvidenceService.Vocab.CONFIDENCE_HIGH
+        )
+        assertTrue(linked is EvidenceService.LinkOutcome.Linked)
+
         val finalized = reconciliation.finalize(conflict.reconciliationId)
         assertTrue(finalized is ReconciliationService.FinalizeOutcome.Finalized)
         assertEquals(
@@ -347,6 +380,20 @@ class ReconciliationServiceTest {
         val billingId = importBilling(1000L)
         val outcome = reconciliation.buildReconciliation(billingId, "sd-r", 0L, 10_000L)
                 as ReconciliationService.BuildOutcome.Recorded
+        // Stage-4 (I-35): the sign-off needs its PRIMARY evidence first.
+        evidence.record(
+            EvidenceService.EvidenceSpec(
+                evidenceId = "ev-draft-guard",
+                evidenceType = EvidenceService.Vocab.TYPE_PROVIDER_INVOICE,
+                payloadStorageMode = EvidenceService.Vocab.MODE_EXTERNAL_POINTER,
+                sourceReference = "invoices/draft-guard.pdf"
+            )
+        )
+        evidence.linkReconciliation(
+            reconciliationId = outcome.reconciliationId,
+            evidenceId = "ev-draft-guard",
+            role = EvidenceService.Vocab.ROLE_PRIMARY
+        )
         reconciliation.finalize(outcome.reconciliationId)
 
         try {
