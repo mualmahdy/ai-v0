@@ -188,7 +188,7 @@ class Migration18to19Test {
 
     @Test
     fun `the schema version is 19 and the migration is registered in the chain`() {
-        assertEquals(27, AppDatabase.SCHEMA_VERSION) // v27: Stage-4 evidence network + first intelligence increment
+        assertEquals(28, AppDatabase.SCHEMA_VERSION) // v28: Stage-5 derived-state projection + G05 whole-version freeze
         val allField = AppDatabase::class.java.getDeclaredField("ALL_MIGRATIONS")
         allField.isAccessible = true
         val migrations = allField.get(null) as Array<androidx.room.migration.Migration>

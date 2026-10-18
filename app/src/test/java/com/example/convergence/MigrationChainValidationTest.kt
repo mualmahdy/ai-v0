@@ -243,7 +243,7 @@ class MigrationChainValidationTest {
             // FUNCTIONAL CLOSURE Phase 1 §9).
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(27, c.getInt(0))
+                assertEquals(28, c.getInt(0))
             }
 
             // STAGE 2 (v25): the pricing/metering/itemized-cost group exists
@@ -462,7 +462,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(27, c.getInt(0))
+                assertEquals(28, c.getInt(0))
             }
             // Validation accepted → identity hash written.
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
@@ -510,7 +510,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(27, c.getInt(0))
+                assertEquals(28, c.getInt(0))
             }
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
                 assertTrue(c.moveToFirst())

@@ -270,7 +270,17 @@ import com.example.infrastructure.persistence.entities.MdpQValueEntity
         com.example.infrastructure.persistence.entities.ProviderBillingRecordEvidenceEntity::class,
         com.example.infrastructure.persistence.entities.ReconciliationEvidenceEntity::class,
         com.example.infrastructure.persistence.entities.ResourceConstraintEvidenceEntity::class,
-        com.example.infrastructure.persistence.entities.UsageRecordEvidenceEntity::class
+        com.example.infrastructure.persistence.entities.UsageRecordEvidenceEntity::class,
+        // v28 (Stage 5, roadmap Phase 4 second increment): the derived-state
+        // projection (current_resource_state + sources — the DERIVED half
+        // of Group D) + the full G01 scope dimension tables. Purely
+        // additive; no existing table's shape is touched — budget_policy
+        // gains the G05 whole-version-freeze TRIGGER only (triggers are
+        // invisible to Room's TableInfo identity check).
+        com.example.infrastructure.persistence.entities.CurrentResourceStateEntity::class,
+        com.example.infrastructure.persistence.entities.CurrentResourceStateSourceEntity::class,
+        com.example.infrastructure.persistence.entities.ScopeInternalDimensionEntity::class,
+        com.example.infrastructure.persistence.entities.ScopeCustomDimensionEntity::class
     ],
     version = AppDatabase.SCHEMA_VERSION,
     // GAP-01 (Design Closure 2026, ADR-1): schema export is now enabled and
@@ -385,6 +395,12 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun budgetForecastDao(): com.example.infrastructure.persistence.dao.BudgetForecastDao
     abstract fun budgetDashboardDao(): com.example.infrastructure.persistence.dao.BudgetDashboardDao
 
+    // v28 (Stage 5): the derived-state projection, the scope dimension
+    // tables and the rationalization inputs
+    abstract fun currentStateDao(): com.example.infrastructure.persistence.dao.CurrentStateDao
+    abstract fun scopeDimensionDao(): com.example.infrastructure.persistence.dao.ScopeDimensionDao
+    abstract fun rationalizationDao(): com.example.infrastructure.persistence.dao.RationalizationDao
+
     // Gap-closure — action idempotency ledger (P0-05/P0-06)
     abstract fun actionIntentDao(): com.example.infrastructure.persistence.dao.ActionIntentDao
 
@@ -438,7 +454,11 @@ abstract class AppDatabase : RoomDatabase() {
         // v27 (Stage 4, roadmap Phase 4): the evidence & sources network +
         // first intelligence increment — 32 additive tables, the
         // PRIMARY-evidence-at-authorization guard family (I-35).
-        const val SCHEMA_VERSION = 27
+        // v28 (Stage 5, roadmap Phase 4 second increment): the derived-state
+        // projection + the full G01 scope dimensions + the G05
+        // whole-version-freeze trigger — 4 additive tables, 10 named
+        // indices, 4 triggers.
+        const val SCHEMA_VERSION = 28
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -2219,6 +2239,23 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v28 (Stage 5, the roadmap Phase-4 second increment). The DDL
+         * lives in [Stage5MigrationSql] (single source, verified standalone
+         * by scripts/verify_stage5_ddl.py). Purely additive: 4 new tables
+         * (the derived-state projection + its sources, the two scope
+         * dimension tables) + the four triggers (the two
+         * at-most-one-active guards, the PDM defense-in-depth subject
+         * guard, and the G05 whole-version freeze on budget_policy — a
+         * trigger-only change to an EXISTING table; no column of any live
+         * table is touched).
+         */
+        private val MIGRATION_27_TO_28: Migration = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                Stage5MigrationSql.STATEMENTS.forEach(db::execSQL)
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -2248,6 +2285,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_24_TO_25,
             MIGRATION_25_TO_26,
             MIGRATION_26_TO_27,
+            MIGRATION_27_TO_28,
         )
 
         fun getInstance(context: Context): AppDatabase {
@@ -2285,6 +2323,11 @@ abstract class AppDatabase : RoomDatabase() {
                             // cycle guards, and the PRIMARY-evidence guard
                             // family — same gap-closure pattern as v23/v25/v26).
                             Stage4MigrationSql.TRIGGERS.forEach(db::execSQL)
+                            // v28: fresh installs also need the four Stage-5
+                            // triggers (the two at-most-one-active guards, the
+                            // defense-in-depth subject guard, and the G05
+                            // whole-version freeze — same gap-closure pattern).
+                            Stage5MigrationSql.TRIGGERS.forEach(db::execSQL)
                             // v25: fresh installs seed the unit/metric
                             // reference data the pricing and usage FKs depend
                             // on (upgraded devices get them from the migration;

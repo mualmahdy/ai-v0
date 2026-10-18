@@ -283,7 +283,7 @@ class GovernancePersistenceTest {
         // STAGE 2 v25 (2026-10-17): the twelve pricing/metering/itemized-
         // cost tables + eighteen immutability triggers.
         val dbVersion = db.openHelper.writableDatabase.version
-        assertEquals(27, dbVersion) // v27: Stage-4 evidence network + first intelligence increment
+        assertEquals(28, dbVersion) // v28: Stage-5 derived-state projection + G05 whole-version freeze
         val tables = mutableSetOf<String>()
         db.openHelper.readableDatabase.query("SELECT name FROM sqlite_master WHERE type='table'").use { cursor ->
             while (cursor.moveToNext()) tables.add(cursor.getString(0))
