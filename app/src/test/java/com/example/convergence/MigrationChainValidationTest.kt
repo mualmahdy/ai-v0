@@ -334,6 +334,37 @@ class MigrationChainValidationTest {
                 assertEquals("17 Stage-4 triggers (I-32/I-35 families, by name — reconciliation_record also carries the Stage-3 G04 family)", 17, c.getInt(0))
             }
 
+            // STAGE 5 (v28): the derived-state projection + the G05 policy
+            // freeze — the second Phase-4 increment. The four tables and
+            // their four triggers (the two unique-active guards with the
+            // seven CASE arms, the defensive subject guard, and the G05
+            // governing-version freeze) complete the cumulative chain.
+            for (table in listOf(
+                "current_resource_state", "current_resource_state_source",
+                "scope_internal_dimension", "scope_custom_dimension"
+            )) {
+                db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='" + table + "'").use { c ->
+                    assertTrue("Stage-5 table " + table + " must exist after the full chain", c.moveToFirst())
+                }
+            }
+            db.query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN " +
+                    "('trg_current_state_unique_active_insert','trg_current_state_unique_active_update'," +
+                    "'trg_current_state_subject_provider_insert'," +
+                    "'trg_budget_policy_version_freeze_when_governing')"
+            ).use { c ->
+                assertTrue(c.moveToFirst())
+                assertEquals("the four Stage-5 triggers (incl. the G05 freeze)", 4, c.getInt(0))
+            }
+
+            // G10 cumulative integrity: the migrated database passes
+            // SQLite's own consistency self-check — no index corruption,
+            // no orphaned pages across the whole v1→v28 path.
+            db.query("PRAGMA integrity_check").use { c ->
+                assertTrue(c.moveToFirst())
+                assertEquals("integrity_check must report ok after the full chain", "ok", c.getString(0))
+            }
+
             // Room accepted the migrated schema: it wrote its identity hash.
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
                 assertTrue("room_master_table must contain the identity hash after validation", c.moveToFirst())
