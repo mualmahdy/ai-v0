@@ -494,9 +494,23 @@ class ChatCapabilitiesViewModel(
             }
 
             try {
+                // STAGE 7 (user round 4 — the unread folder): the chat
+                // folder attach now opts INTO grounding. The default
+                // (groundFolder = false) imported the folder as
+                // reference-only — the turn's digest then honestly told
+                // the model «مجلد مرفق كمرجع فقط — لم يُقرأ محتواه», so
+                // the assistant could only reply that the project files
+                // were «not uploaded» (the user's report). A user who
+                // attaches a folder to a chat EXPECTS its readable text
+                // files to ride the request; the honest per-folder report
+                // (files read vs skipped, bounded) is still produced by
+                // the coordinator and persisted with the attachment —
+                // and in test configurations without folderUnderstanding
+                // the import stays honestly ATTACHMENT_ONLY.
                 val attachment = attachmentCoordinator.importFolderAttachment(
                     treeUri = treeUri,
-                    scope = acceptedScope
+                    scope = acceptedScope,
+                    groundFolder = true
                 )
                 // HOTFIX R2: LIVE completion-time scope comparison (see the
                 // file path) — never the stale bind-time pair.

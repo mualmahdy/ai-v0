@@ -682,6 +682,98 @@ class ChatAttachmentCoordinator(
         }
     }
 
+    /**
+     * STAGE 7 (user round 4 — the workspace-files folder import): imports a
+     * picked phone-storage DIRECTORY into the caller's project sandbox as a
+     * REAL browsable folder tree — the same governed pipeline the chat
+     * folder attach rides (serialize → staging → atomic promotion, entry/
+     * byte caps, audit), but landing under `uploads/` next to the file
+     * imports (a workspace-files import, NOT a chat draft) and registering
+     * an honest FOLDER artifact row. The caller (the Files explorer) never
+     * receives a TurnAttachment — this is not a chat attach.
+     *
+     * Honesty contract: a missing zipper seam, an unreadable source, or a
+     * governed refusal (caps/traversal) is a per-import FAILURE result —
+     * never a silent no-op, never a partial tree.
+     */
+    suspend fun importWorkspaceFolder(
+        directoryUri: String,
+        scope: ScopeSnapshot? = null
+    ): WorkspaceImportResult {
+        if (directoryUri.isBlank()) {
+            return WorkspaceImportResult(
+                displayName = "folder",
+                importedRelativePath = null,
+                sizeBytes = 0L,
+                errorMessage = "مسار مجلد فارغ."
+            )
+        }
+        val effectiveScope = scope ?: ensureActiveScope()
+        val workspaceId = effectiveScope.workspaceId
+            ?: return WorkspaceImportResult(
+                displayName = "folder",
+                importedRelativePath = null,
+                sizeBytes = 0L,
+                errorMessage = "استيراد المجلد يتطلب مساحة عمل مُسندة (نطاق غير مُسند)."
+            )
+        val projectId = effectiveScope.projectId
+            ?: return WorkspaceImportResult(
+                displayName = "folder",
+                importedRelativePath = null,
+                sizeBytes = 0L,
+                errorMessage = "استيراد المجلد يتطلب مشروعاً مُسنداً (نطاق غير مُسند)."
+            )
+        val displayName = contentPort.queryDisplayName(directoryUri)
+            ?: directoryUri.substringAfterLast('/').ifBlank { "folder" }
+        val zipper = folderZipSource
+            ?: return WorkspaceImportResult(
+                displayName = displayName,
+                importedRelativePath = null,
+                sizeBytes = 0L,
+                errorMessage = "استيراد المجلدات غير متاح في هذا التكوين."
+            )
+        // Same off-main-thread serialization contract as the chat folder
+        // attach (the binder/file traversal must never freeze the caller).
+        val zipStream = withContext(Dispatchers.IO) { zipper(directoryUri) }
+            ?: return WorkspaceImportResult(
+                displayName = displayName,
+                importedRelativePath = null,
+                sizeBytes = 0L,
+                errorMessage = "تعذر قراءة المجلد المحدد من التخزين."
+            )
+        val safeName = sanitizeFileName(displayName)
+        val targetDir = "uploads/${System.currentTimeMillis()}_$safeName"
+        val outcome = fileTransferService.importFolderZip(
+            workspaceId = workspaceId,
+            projectId = projectId,
+            zipStream = zipStream,
+            targetSubDirectory = targetDir
+        )
+        return when (outcome) {
+            is TransferOutcome.Success -> {
+                val artifact = artifactService.registerFileArtifact(
+                    workspaceId = workspaceId,
+                    projectId = projectId,
+                    relativePath = targetDir,
+                    name = displayName,
+                    forceType = ArtifactType.FOLDER
+                )
+                WorkspaceImportResult(
+                    displayName = displayName,
+                    importedRelativePath = targetDir,
+                    sizeBytes = artifact.sizeBytes,
+                    errorMessage = null
+                )
+            }
+            is TransferOutcome.Failure -> WorkspaceImportResult(
+                displayName = displayName,
+                importedRelativePath = null,
+                sizeBytes = 0L,
+                errorMessage = outcome.message
+            )
+        }
+    }
+
     private fun sanitizeFileName(name: String): String =
         name.replace(Regex("[^\\p{L}\\p{N}\\s._()-]"), "_")
             .trim()

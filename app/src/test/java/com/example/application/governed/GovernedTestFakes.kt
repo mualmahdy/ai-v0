@@ -275,3 +275,85 @@ object GovernedPipelineFactory {
         val workspaceRoots: MutableMap<Long, String>
     )
 }
+
+/**
+ * STAGE 7 (user round 4 — the real file manager): a NAVIGABLE in-memory
+ * workspace storage. Unlike [FakeWorkspaceStorage] (flat file map), this
+ * fake models the directory TREE the Files explorer now navigates —
+ * listFiles(projectId, subDirectory) returns the DIRECT children of the
+ * requested directory (the storage port's own subDirectory seam, mirroring
+ * the production SandboxWorkspaceStorageAdapter), with honest isDirectory
+ * flags derived from the seeded tree. Containment is enforced the same way
+ * production enforces it (a traversal attempt is refused).
+ */
+class FakeNavigableWorkspaceStorage : WorkspaceStoragePort {
+    private val files = ConcurrentHashMap<String, String>() // "projectId/relPath" -> content
+
+    private fun key(projectId: Long, relativePath: String) = "$projectId/$relativePath"
+
+    /** All known paths for a project (files only — dirs are implied). */
+    private fun projectPaths(projectId: Long): List<String> =
+        files.keys.filter { it.startsWith("$projectId/") }
+            .map { it.removePrefix("$projectId/") }
+
+    override suspend fun readFile(projectId: Long, relativePath: String): Outcome<String, StorageFailure> {
+        if (relativePath.contains("..")) {
+            return Outcome.Error(StorageFailure.AccessDenied(relativePath, "خارج نطاق المشروع."))
+        }
+        val content = files[key(projectId, relativePath)]
+        return if (content == null) {
+            Outcome.Error(StorageFailure.FileNotFound(relativePath))
+        } else Outcome.Success(content)
+    }
+
+    override suspend fun writeFile(projectId: Long, relativePath: String, content: String): Outcome<Unit, StorageFailure> {
+        if (relativePath.contains("..")) {
+            return Outcome.Error(StorageFailure.AccessDenied(relativePath, "خارج نطاق المشروع."))
+        }
+        files[key(projectId, relativePath)] = content
+        return Outcome.Success(Unit)
+    }
+
+    override suspend fun listFiles(projectId: Long, subDirectory: String?): Outcome<List<WorkspaceFileEntry>, StorageFailure> {
+        if (subDirectory != null && subDirectory.contains("..")) {
+            return Outcome.Error(StorageFailure.AccessDenied(subDirectory, "خارج نطاق المشروع."))
+        }
+        val prefix = subDirectory?.trimEnd('/')?.plus("/") ?: ""
+        val directChildren = mutableMapOf<String, Boolean>() // name -> isDirectory
+        projectPaths(projectId).forEach { rel ->
+            if (!rel.startsWith(prefix)) return@forEach
+            val rest = rel.removePrefix(prefix)
+            if (rest.isEmpty()) return@forEach
+            val slash = rest.indexOf('/')
+            if (slash < 0) {
+                directChildren[rest] = false
+            } else {
+                val dirName = rest.substring(0, slash)
+                directChildren[dirName] = true
+            }
+        }
+        val entries = directChildren.entries.map { (name, isDir) ->
+            val childRel = if (prefix.isEmpty()) name else prefix.trimEnd('/') + "/" + name
+            WorkspaceFileEntry(
+                relativePath = childRel,
+                isDirectory = isDir,
+                sizeBytes = if (isDir) 0L else (files[key(projectId, childRel)]?.length ?: 0).toLong()
+            )
+        }.sortedBy { it.relativePath }
+        return Outcome.Success(entries)
+    }
+
+    override suspend fun deleteFile(projectId: Long, relativePath: String): Outcome<Unit, StorageFailure> {
+        val k = key(projectId, relativePath)
+        val removed = files.keys.removeAll { it == k || it.startsWith("$k/") }
+        return if (removed) Outcome.Success(Unit)
+        else Outcome.Error(StorageFailure.FileNotFound(relativePath))
+    }
+
+    override suspend fun fileExists(projectId: Long, relativePath: String): Boolean =
+        files.containsKey(key(projectId, relativePath))
+
+    fun seed(projectId: Long, relativePath: String, content: String) {
+        files[key(projectId, relativePath)] = content
+    }
+}

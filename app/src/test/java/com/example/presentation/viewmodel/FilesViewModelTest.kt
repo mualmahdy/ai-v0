@@ -298,4 +298,163 @@ class FilesViewModelTest {
         viewModel.dismissBanner()
         assertNull(viewModel.state.value.diagnosticBanner)
     }
+    // ------------------------------------------------------------------
+    // STAGE 7 (user round 4) — the real file manager navigation
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `openDirectory switches the listing to the directory direct children and navigateUp pops`() {
+        val navigable = com.example.application.governed.FakeNavigableWorkspaceStorage()
+        navigable.seed(7L, "attachments/folder_1/a.md", "أ")
+        navigable.seed(7L, "attachments/folder_1/sub/b.md", "ب")
+        navigable.seed(7L, "generated/result.md", "ج")
+        navigable.seed(7L, "notes.md", "د")
+        val navViewModel = FilesViewModel(
+            manageWorkspaceFilesUseCase = ManageWorkspaceFilesUseCase(navigable),
+            activeWorkspace = activeWorkspace,
+            bootstrapState = bootstrapState,
+            refreshOnProjectChange = false
+        )
+        bindProject(7L)
+        navViewModel.refreshFiles()
+
+        // Root listing: the two sandbox directories + the one root file.
+        val root = navViewModel.state.value
+        assertNull(root.currentDirectory)
+        assertEquals(
+            listOf("attachments", "generated", "notes.md"),
+            root.files.map { it.relativePath }
+        )
+        assertEquals(listOf(true, true, false), root.files.map { it.isDirectory })
+
+        // ENTER the imported folder (the user's report: this was impossible).
+        navViewModel.openDirectory("attachments/folder_1")
+        val inside = navViewModel.state.value
+        assertEquals("attachments/folder_1", inside.currentDirectory)
+        assertEquals(
+            listOf("attachments/folder_1/a.md", "attachments/folder_1/sub"),
+            inside.files.map { it.relativePath }
+        )
+        assertEquals(listOf(false, true), inside.files.map { it.isDirectory })
+        // Entering a directory NEVER opens the file editor.
+        assertNull(inside.selectedFilePath)
+
+        // UP one level: the parent listing (attachments' children).
+        navViewModel.navigateUp()
+        val parent = navViewModel.state.value
+        assertEquals("attachments", parent.currentDirectory)
+        assertEquals(listOf("attachments/folder_1"), parent.files.map { it.relativePath })
+        assertEquals(listOf(true), parent.files.map { it.isDirectory })
+
+        // UP again: back at the sandbox root.
+        navViewModel.navigateUp()
+        val rootAgain = navViewModel.state.value
+        assertNull(rootAgain.currentDirectory)
+        assertEquals(
+            listOf("attachments", "generated", "notes.md"),
+            rootAgain.files.map { it.relativePath }
+        )
+    }
+
+    @Test
+    fun `refreshFiles lists the CURRENT directory not the sandbox root`() {
+        val navigable = com.example.application.governed.FakeNavigableWorkspaceStorage()
+        navigable.seed(7L, "attachments/folder_1/a.md", "أ")
+        navigable.seed(7L, "notes.md", "د")
+        val navViewModel = FilesViewModel(
+            manageWorkspaceFilesUseCase = ManageWorkspaceFilesUseCase(navigable),
+            activeWorkspace = activeWorkspace,
+            bootstrapState = bootstrapState,
+            refreshOnProjectChange = false
+        )
+        bindProject(7L)
+        navViewModel.openDirectory("attachments/folder_1")
+        navViewModel.refreshFiles()
+
+        assertEquals("attachments/folder_1", navViewModel.state.value.currentDirectory)
+        assertEquals(
+            listOf("attachments/folder_1/a.md"),
+            navViewModel.state.value.files.map { it.relativePath }
+        )
+    }
+
+    @Test
+    fun `a project switch resets the explorer to the NEW sandbox root`() {
+        val navigable = com.example.application.governed.FakeNavigableWorkspaceStorage()
+        navigable.seed(7L, "attachments/folder_1/a.md", "أ")
+        navigable.seed(9L, "other/only.md", "آخر مشروع")
+        val navViewModel = FilesViewModel(
+            manageWorkspaceFilesUseCase = ManageWorkspaceFilesUseCase(navigable),
+            activeWorkspace = activeWorkspace,
+            bootstrapState = bootstrapState,
+            refreshOnProjectChange = true
+        )
+        bindProject(7L)
+        navViewModel.openDirectory("attachments/folder_1")
+        assertEquals("attachments/folder_1", navViewModel.state.value.currentDirectory)
+
+        // Switch the workspace to ANOTHER project (a different sandbox tree).
+        activeWorkspace.value = Workspace(
+            id = "ws_test_2",
+            name = "المساحة الثانية",
+            description = "",
+            activeProjectId = 9L
+        )
+
+        // The explorer is at the NEW project's ROOT — never silently inside
+        // a same-named directory of the new sandbox.
+        val switched = navViewModel.state.value
+        assertNull(switched.currentDirectory)
+        assertEquals(listOf("other"), switched.files.map { it.relativePath })
+        assertEquals(listOf(true), switched.files.map { it.isDirectory })
+    }
+
+    @Test
+    fun `deleting a directory removes the whole tree and the listing refreshes`() {
+        val navigable = com.example.application.governed.FakeNavigableWorkspaceStorage()
+        navigable.seed(7L, "attachments/folder_1/a.md", "أ")
+        navigable.seed(7L, "attachments/folder_1/sub/b.md", "ب")
+        navigable.seed(7L, "notes.md", "د")
+        val navViewModel = FilesViewModel(
+            manageWorkspaceFilesUseCase = ManageWorkspaceFilesUseCase(navigable),
+            activeWorkspace = activeWorkspace,
+            bootstrapState = bootstrapState,
+            refreshOnProjectChange = false
+        )
+        bindProject(7L)
+        navViewModel.refreshFiles()
+
+        navViewModel.deleteWorkspaceFile("attachments/folder_1")
+
+        val after = navViewModel.state.value
+        // The navigable fake derives directories from FILE paths (an EMPTY
+        // directory does not exist in its model — the REAL adapter lists
+        // empty dirs too), so with folder_1 gone the emptied "attachments"
+        // parent vanishes from the fake's listing: only the root file is
+        // left. The deleted tree is gone — that is the pin.
+        assertEquals(
+            listOf("notes.md"),
+            after.files.map { it.relativePath }
+        )
+        // The nested files are GONE (the recursive delete contract).
+        val storageAfterDelete = kotlinx.coroutines.runBlocking {
+            val readBack = navigable.readFile(7L, "attachments/folder_1/a.md")
+            val listed = navigable.listFiles(7L, null)
+            readBack to listed
+        }
+        assertTrue(
+            "the deleted file must read back as an honest error, got $storageAfterDelete",
+            storageAfterDelete.first is com.example.domain.core.Outcome.Error
+        )
+        val listedOutcome = storageAfterDelete.second
+        assertTrue(
+            "the listing must be a Success outcome, got $listedOutcome",
+            listedOutcome is com.example.domain.core.Outcome.Success
+        )
+        assertTrue(
+            "the deleted tree's files must be gone from storage",
+            (listedOutcome as com.example.domain.core.Outcome.Success)
+                .value.none { it.relativePath.startsWith("attachments/folder_1") }
+        )
+    }
 }

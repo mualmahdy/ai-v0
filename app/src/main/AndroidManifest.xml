@@ -44,17 +44,23 @@
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.MyApplication">
-            <!-- IME (§4A companion): the edge-to-edge window must RESIZE with
-                 the soft keyboard so WindowInsets.ime and the actual window
-                 layout never desynchronize (the desync shows as a persistent
-                 blank strip between the composer and the keyboard — the
-                 window pans while imePadding() also pads, double-booking the
-                 keyboard region). adjustResize is the canonical edge-to-edge
-                 companion; on API 35+ it is already the forced behavior and
-                 this declaration is a no-op, while on API 24–34 it is what
-                 makes the single imePadding() land exactly at the keyboard's
-                 top edge on every device. -->
-            android:windowSoftInputMode="adjustResize">
+            <!-- IME (§4A, user round 4): the window must NEVER resize for the
+                 soft keyboard — WindowInsets.ime is the SINGLE source of
+                 truth and the composer's imePadding() is the SINGLE bottom
+                 contributor of the chain. adjustResize was the surviving
+                 double-booker on the reported ROM: the window panned
+                 (resized) for the keyboard while imePadding() ALSO padded
+                 by the reported ime inset — the composer rode a full
+                 keyboard-height of blank above the keyboard, exactly the
+                 user's report (the round-3 Scaffold pin killed the injected
+                 systemBars.bottom but not the window resize itself).
+                 adjustNothing keeps the window laid out full-screen at all
+                 times (edge-to-edge stays honest), the IME insets are
+                 dispatched as before, and nothing else in the chain moves:
+                 on API 35+ this is already the forced behavior (a no-op
+                 declaration), while on API 24–34 it removes the resize
+                 contributor on every device. -->
+            android:windowSoftInputMode="adjustNothing">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 

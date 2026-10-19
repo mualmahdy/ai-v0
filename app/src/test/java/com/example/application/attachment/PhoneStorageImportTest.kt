@@ -297,4 +297,151 @@ class PhoneStorageImportTest {
         }
         return names
     }
+    // ------------------------------------------------------------------
+    // STAGE 7 (user round 4) — the GROUNDED folder attach + the workspace
+    // folder import (the two links the user's report proved missing).
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `a grounded folder attach rides the send digest with its real files`() = runBlocking {
+        // The coordinator WITH the folder understanding service — the
+        // production wiring (AppContainer wires it since round 3); the
+        // plain coordinator in setUp stays reference-only (the honest
+        // default of the API seam).
+        val groundedCoordinator = ChatAttachmentCoordinator(
+            fileTransferService = fileTransferService,
+            artifactService = artifactService,
+            workspaceRuntimeService = workspaceService,
+            fileStore = fileStore,
+            contentPort = realPort,
+            folderZipSource = { uri ->
+                if (uri.startsWith("file:")) realPort.openDirectoryAsZipStream(uri)
+                else realPort.openTreeAsZipStream(uri)
+            },
+            folderUnderstanding = FolderUnderstandingService(fileStore)
+        )
+        val dir = File(phoneRoot, "Documents/نظام").apply { mkdirs() }
+        File(dir, "README.md").writeText("# نظام CODP — نظرة عامة")
+        File(dir, "src").apply { mkdirs() }.let { File(it, "main.py").writeText("def main(): pass") }
+        File(dir, "ملاحظات.txt").writeText("ملاحظات المشروع")
+
+        // THE FIX: groundFolder = true — the chat pickFolder call passes it
+        // since round 4; before it the folder rode as reference-only and the
+        // assistant could only reply that the files were «not uploaded».
+        val scope = groundedCoordinator.captureActiveScope()
+        val attachment = groundedCoordinator.importFolderAttachment(
+            treeUri = android.net.Uri.fromFile(dir).toString(),
+            scope = scope,
+            groundFolder = true
+        )
+
+        assertEquals("PHONE_STORAGE_DIR_ZIP", attachment.provenance)
+        assertEquals(
+            "the folder must be GROUNDED when understanding is wired — got ${attachment.folderReportJson}",
+            "GROUNDED",
+            attachment.groundingState
+        )
+        val reportJson = attachment.folderReportJson
+        assertNotNull(reportJson)
+        val report = org.json.JSONObject(reportJson!!)
+        assertTrue(
+            "groundedFiles must be > 0, got ${report.optString("groundedFiles")}",
+            report.optInt("groundedFiles") > 0
+        )
+
+        // THE USER-VISIBLE CONTRACT: the send digest (what the model
+        // actually receives) contains the folder's real file contents.
+        val outcome = groundedCoordinator.buildGroundingDigest(
+            workspaceId = scope.workspaceId!!,
+            projectId = scope.projectId!!,
+            attachments = listOf(attachment)
+        )
+        assertTrue("digest failures must be empty: ${outcome.failures}", outcome.failures.isEmpty())
+        assertTrue(
+            "the digest must carry the <user_folder header",
+            outcome.digest.contains("<user_folder")
+        )
+        assertTrue(
+            "the digest must carry the actual README content",
+            outcome.digest.contains("نظرة عامة")
+        )
+        assertTrue(
+            "the digest must carry the actual source content",
+            outcome.digest.contains("def main(): pass")
+        )
+    }
+
+    @Test
+    fun `a reference-only folder attach honestly says its content was not read`() = runBlocking {
+        // The SAME seam, groundFolder = false (the API default): the honest
+        // reference-only mode — the digest says so, never claims analysis.
+        val dir = File(phoneRoot, "Documents/مرجع").apply { mkdirs() }
+        File(dir, "a.txt").writeText("محتوى")
+
+        val scope = coordinator.captureActiveScope()
+        val attachment = coordinator.importFolderAttachment(
+            treeUri = android.net.Uri.fromFile(dir).toString(),
+            scope = scope
+        )
+        assertEquals("ATTACHMENT_ONLY", attachment.groundingState)
+
+        val outcome = coordinator.buildGroundingDigest(
+            workspaceId = scope.workspaceId!!,
+            projectId = scope.projectId!!,
+            attachments = listOf(attachment)
+        )
+        assertTrue(outcome.failures.isEmpty())
+        assertTrue(
+            "the digest must honestly say the content was not read",
+            outcome.digest.contains("لم يُقرأ محتواه")
+        )
+    }
+
+    @Test
+    fun `workspace folder import lands a real browsable tree under uploads`() = runBlocking {
+        val dir = File(phoneRoot, "Documents/حزمة_مشروع").apply { mkdirs() }
+        File(dir, "README.md").writeText("# الحزمة")
+        File(dir, "src").apply { mkdirs() }.let { File(it, "app.py").writeText("print(1)") }
+        File(dir, "data.json").writeText("{}")
+
+        val result = coordinator.importWorkspaceFolder(
+            android.net.Uri.fromFile(dir).toString()
+        )
+
+        assertTrue("import must succeed: ${result.errorMessage}", result.isSuccess)
+        assertTrue(
+            "the destination must be the uploads/ namespace, got ${result.importedRelativePath}",
+            result.importedRelativePath!!.startsWith("uploads/")
+        )
+        assertEquals("حزمة_مشروع", result.displayName)
+
+        // The tree is REAL on disk in the ACTIVE project's sandbox — every
+        // nested file exists at its own path (browsable by the explorer).
+        val projectId = workspaceService.activeProjectIdOrNull()!!
+        val target = result.importedRelativePath!!
+        val root = fileStore.projectRoot(projectId)
+        assertTrue(fileStore.stat(root, target).exists)
+        assertTrue(fileStore.stat(root, "$target/README.md").exists)
+        assertTrue(fileStore.stat(root, "$target/src/app.py").exists)
+        assertTrue(fileStore.stat(root, "$target/data.json").exists)
+
+        // The FOLDER artifact row is registered (honest type, real landing).
+        val artifacts = artifactService.forProject(projectId)
+        val folderArtifact = artifacts.firstOrNull { it.storageUri == target }
+        assertNotNull("the folder artifact must be registered at $target", folderArtifact)
+        assertEquals(
+            com.example.domain.core.artifact.ArtifactType.FOLDER,
+            folderArtifact!!.type
+        )
+    }
+
+    @Test
+    fun `workspace folder import fails honestly for a missing directory`() = runBlocking {
+        val result = coordinator.importWorkspaceFolder("file:///no/such/folder")
+        assertFalse(result.isSuccess)
+        assertTrue(
+            "the real reason, verbatim: ${result.errorMessage}",
+            result.errorMessage!!.contains("تعذر قراءة المجلد")
+        )
+    }
 }

@@ -198,14 +198,17 @@ fun SettingsScreen(
                     },
                     tag = "settings_cat_privacy",
                     expanded = expandedCategory == "privacy",
-                    onToggle = { expandedCategory = if (expandedCategory == "privacy") null else "privacy" },
-                    trailing = if (appLockViewModel != null) {{
-                        Switch(
-                            checked = lockPolicy?.enabled == true,
-                            onCheckedChange = { appLockViewModel.setEnabled(it) },
-                            modifier = Modifier.testTag("switch_app_lock_enabled")
-                        )
-                    }} else null
+                    onToggle = { expandedCategory = if (expandedCategory == "privacy") null else "privacy" }
+                    // STAGE 7 (user round 4 — the privacy scoping): the lock
+                    // switch NO LONGER lives on the category header. On the
+                    // tab row it read as a master switch governing the WHOLE
+                    // privacy tab (the user's report: «المفتاح لتشغيل القفل
+                    // يطبق على تبويب الخصوصية كاملاً») — while it actually
+                    // controls only the app lock. It is now a labeled row
+                    // INSIDE the lock section, scoped exactly like every
+                    // other setting (the mode radios, the timeouts, the
+                    // screenshot-protection row — each its own control, none
+                    // implying it governs the tab).
                 ) {
                     if (appLockViewModel == null || appLockState == null) {
                         HonestNote(text = stringResource(R.string.settings_cat_privacy_body))
@@ -235,6 +238,35 @@ fun SettingsScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(4.dp))
+                        // STAGE 7 (user round 4): the lock's OWN switch — one
+                        // labeled row, scoped to the lock section only (never
+                        // on the category header where it read as governing
+                        // the whole privacy tab).
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("row_app_lock_enabled")
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "تفعيل قفل التطبيق",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    text = "يطلب المصادقة عند العودة إلى التطبيق وفق النمط المختار أدناه",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Switch(
+                                checked = lockPolicy?.enabled == true,
+                                onCheckedChange = { appLockViewModel.setEnabled(it) },
+                                modifier = Modifier.testTag("switch_app_lock_enabled")
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
                         // Mode selection (only meaningful while enabled).
                         SettingsRadioRow(
                             label = stringResource(R.string.settings_cat_privacy_lock_mode_immediate),

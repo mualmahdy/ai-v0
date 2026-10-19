@@ -71,6 +71,16 @@ class FilesViewModel(
     /** The files feature's own slice of UI state (was 4 fields of UiState). */
     data class FilesUiState(
         val files: List<WorkspaceFileEntry> = emptyList(),
+        /**
+         * STAGE 7 (user round 4 — the real file manager): the directory the
+         * explorer is currently INSIDE (null ⇒ the project sandbox root).
+         * Every listing, search scope, stats header, delete and import
+         * refresh is bound to THIS directory — the flat-list explorer that
+         * could not enter a folder is gone (the imported folders under
+         * attachments/, the chat results under generated/ and the phone
+         * imports under uploads/ are all browsable now).
+         */
+        val currentDirectory: String? = null,
         val selectedFilePath: String? = null,
         val selectedFileContent: String? = null,
         val isFileLoading: Boolean = false,
@@ -93,6 +103,13 @@ class FilesViewModel(
                     activeWorkspace.collect { workspace ->
                         val projectId = workspace?.activeProjectId?.takeIf { it > 0L }
                         if (projectId != null && projectId != lastListedProjectId) {
+                            // STAGE 7 (user round 4): a project switch is a
+                            // SANDBOX switch — the old currentDirectory belongs
+                            // to the previous project's tree. The explorer
+                            // resets to the new sandbox's root before listing
+                            // (never silently lists a same-named directory in
+                            // the NEW project).
+                            _state.update { it.copy(currentDirectory = null) }
                             refreshFiles()
                         }
                     }
@@ -103,12 +120,19 @@ class FilesViewModel(
         }
     }
 
-    /** Lists the active project's sandbox files (governed, fail-closed). */
+    /**
+     * Lists the CURRENT directory's entries (governed, fail-closed). The
+     * STAGE 7 (user round 4) navigation contract: null currentDirectory ⇒
+     * the sandbox root; otherwise the listing is the direct children of
+     * that directory through the storage port's own subDirectory seam
+     * (containment-checked — a traversal attempt is refused honestly).
+     */
     fun refreshFiles() {
         val projectId = projectIdOrInform() ?: return
+        val directory = state.value.currentDirectory
         viewModelScope.launch {
             _state.update { it.copy(isFileLoading = true) }
-            when (val outcome = manageWorkspaceFilesUseCase.listProjectFiles(projectId)) {
+            when (val outcome = manageWorkspaceFilesUseCase.listProjectFiles(projectId, directory)) {
                 is Outcome.Success -> {
                     lastListedProjectId = projectId
                     _state.update { it.copy(files = outcome.value, isFileLoading = false) }
@@ -128,6 +152,45 @@ class FilesViewModel(
                 }
             }
         }
+    }
+
+    /**
+     * STAGE 7 (user round 4 — the real file manager): enters a directory.
+     * The editor is closed first (the previous file's editor state never
+     * leaks into the new listing) and the listing is reloaded from the
+     * directory's own children.
+     */
+    fun openDirectory(relativePath: String) {
+        if (relativePath.isBlank()) return
+        _state.update {
+            it.copy(
+                currentDirectory = relativePath,
+                selectedFilePath = null,
+                selectedFileContent = null
+            )
+        }
+        refreshFiles()
+    }
+
+    /**
+     * STAGE 7 (user round 4): pops one level (the breadcrumb's up action).
+     * At the root this is an honest no-op — the explorer is already at the
+     * sandbox root. A TOP-LEVEL directory (no '/' in its path — e.g.
+     * "attachments") pops to the ROOT, not to itself: the parent is derived
+     * from the last '/', and a path without one has NO parent by definition.
+     */
+    fun navigateUp() {
+        val current = state.value.currentDirectory ?: return
+        val slash = current.lastIndexOf('/')
+        val parent = if (slash <= 0) null else current.substring(0, slash)
+        _state.update {
+            it.copy(
+                currentDirectory = parent,
+                selectedFilePath = null,
+                selectedFileContent = null
+            )
+        }
+        refreshFiles()
     }
 
     /** Opens a file into the editor (loads its current content). */
@@ -223,9 +286,18 @@ class FilesViewModel(
         viewModelScope.launch {
             when (val outcome = manageWorkspaceFilesUseCase.deleteProjectFile(projectId, relativePath)) {
                 is Outcome.Success -> {
+                    // STAGE 7 (user round 4): honest per-kind banner — a
+                    // directory delete is recursive and says so.
+                    val wasDirectory = state.value.files.any {
+                        it.relativePath == relativePath && it.isDirectory
+                    }
                     _state.update {
                         it.copy(
-                            diagnosticBanner = "تم حذف الملف: $relativePath",
+                            diagnosticBanner = if (wasDirectory) {
+                                "تم حذف المجلد بكل ما بداخله: $relativePath"
+                            } else {
+                                "تم حذف الملف: $relativePath"
+                            },
                             selectedFilePath = null,
                             selectedFileContent = null
                         )
@@ -293,6 +365,62 @@ class FilesViewModel(
                     it.copy(
                         isImportingFromDevice = false,
                         errorMessage = "فشل الاستيراد: ${e.localizedMessage ?: e.message}"
+                    )
+                }
+            } finally {
+                _state.update { it.copy(isImportingFromDevice = false) }
+            }
+        }
+    }
+
+    /**
+     * STAGE 7 (user round 4 — the workspace-files folder import): imports a
+     * picked phone-storage DIRECTORY through the governed pipeline as a real
+     * browsable folder tree under uploads/. The honest per-import result is
+     * surfaced (the folder's landing path is named in the banner so the
+     * user can navigate to it), and the CURRENT listing is refreshed.
+     */
+    fun importFolderFromDevice(directoryUri: String) {
+        if (directoryUri.isBlank()) return
+        val coordinator = workspaceImportCoordinator
+        if (coordinator == null) {
+            _state.update {
+                it.copy(
+                    errorMessage = "استيراد المجلدات من الهاتف غير متاح في هذا التكوين — أنشئ مشروعاً نشطاً ثم أعد المحاولة."
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(isImportingFromDevice = true) }
+            try {
+                val result = coordinator.importWorkspaceFolder(directoryUri)
+                if (result.isSuccess) {
+                    _state.update {
+                        it.copy(
+                            isImportingFromDevice = false,
+                            errorMessage = null,
+                            diagnosticBanner = "تم استيراد مجلد «${result.displayName}» إلى ${result.importedRelativePath} — يمكنك تصفحه الآن من متصفح الملفات."
+                        )
+                    }
+                    refreshFiles()
+                } else {
+                    _state.update {
+                        it.copy(
+                            isImportingFromDevice = false,
+                            errorMessage = "تعذّر استيراد المجلد «${result.displayName}»: ${result.errorMessage}"
+                        )
+                    }
+                }
+            } catch (e: com.example.application.attachment.ChatAttachmentCoordinator.AttachmentImportException) {
+                _state.update {
+                    it.copy(isImportingFromDevice = false, errorMessage = e.message)
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isImportingFromDevice = false,
+                        errorMessage = "فشل استيراد المجلد: ${e.localizedMessage ?: e.message}"
                     )
                 }
             } finally {

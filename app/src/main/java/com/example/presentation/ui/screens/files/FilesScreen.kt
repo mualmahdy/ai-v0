@@ -107,15 +107,43 @@ fun FilesScreen(
             filesViewModel.importFromDevice(uris.map { it.toString() })
         }
     }
+    // STAGE 7 (user round 4 — the workspace-files FOLDER import): the SAF
+    // tree picker — a picked directory rides the same governed serialize →
+    // staging → atomic-promotion pipeline and lands as a REAL browsable
+    // folder tree under uploads/ (NOT a zip blob, NOT a chat draft).
+    val deviceFolderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) filesViewModel.importFolderFromDevice(uri.toString())
+    }
     // STAGE 7 (user round 3 — the DocumentsUI-less device): the IN-APP
     // storage browser fallback. A device with no DocumentsUI activity gets
     // the REAL browser instead of the dead-end error; the selection rides
     // the SAME governed import (file:// uris through importFromDevice).
     var phoneBrowserOpen by rememberSaveable { mutableStateOf(false) }
+    // USER ROUND 4: the browser now serves BOTH import kinds from this
+    // screen — files (multi-select) and a whole folder (pick-current-
+    // directory) — the mode the user chose in the import menu.
+    var phoneBrowserMode by rememberSaveable {
+        mutableStateOf(com.example.presentation.ui.components.PhoneStorageBrowserMode.FILES)
+    }
+
     fun launchDeviceFilePickerSafely() {
         runCatching { deviceFilePicker.launch(arrayOf("*/*")) }
             .onFailure {
                 android.util.Log.e("FilesScreen", "device file picker launch failed", it)
+                phoneBrowserMode =
+                    com.example.presentation.ui.components.PhoneStorageBrowserMode.FILES
+                phoneBrowserOpen = true
+            }
+    }
+
+    fun launchDeviceFolderPickerSafely() {
+        runCatching { deviceFolderPicker.launch(null) }
+            .onFailure {
+                android.util.Log.e("FilesScreen", "device folder picker launch failed", it)
+                phoneBrowserMode =
+                    com.example.presentation.ui.components.PhoneStorageBrowserMode.FOLDER
                 phoneBrowserOpen = true
             }
     }
@@ -186,26 +214,17 @@ fun FilesScreen(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    // STAGE 7: upload from phone storage (SAF → governed
-                    // import into `uploads/`).
-                    IconButton(
-                        onClick = ::launchDeviceFilePickerSafely,
+                    // STAGE 7 (user round 4): the import menu — FILES or a
+                    // WHOLE FOLDER from the phone (both guarded; both fall
+                    // back to the in-app browser on a DocumentsUI-less
+                    // device). The folder import lands as a REAL browsable
+                    // tree under uploads/.
+                    ImportMenu(
                         enabled = !state.isImportingFromDevice,
-                        modifier = Modifier.testTag("btn_import_from_device")
-                    ) {
-                        if (state.isImportingFromDevice) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp
-                            )
-                        } else {
-                            Icon(
-                                Icons.Default.UploadFile,
-                                contentDescription = "استيراد من تخزين الهاتف",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
+                        busy = state.isImportingFromDevice,
+                        onPickFiles = ::launchDeviceFilePickerSafely,
+                        onPickFolder = ::launchDeviceFolderPickerSafely
+                    )
                     IconButton(
                         onClick = { createFileOpen = true },
                         modifier = Modifier.testTag("btn_create_file")
@@ -218,6 +237,42 @@ fun FilesScreen(
                     }
                 }
             )
+
+            // STAGE 7 (user round 4 — the real file manager): the breadcrumb
+            // bar — where the explorer IS and how to get one level out. The
+            // up action is disabled at the sandbox root (an honest no-op
+            // there, never a dead-looking button that pretends to work).
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .testTag("files_breadcrumb_bar")
+            ) {
+                IconButton(
+                    onClick = filesViewModel::navigateUp,
+                    enabled = state.currentDirectory != null,
+                    modifier = Modifier.testTag("btn_navigate_up")
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "الخروج من المجلد",
+                        tint = if (state.currentDirectory != null) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outlineVariant
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = state.currentDirectory
+                        ?: "الجذر (ملعب المشروع)",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    modifier = Modifier.testTag("breadcrumb_current_path")
+                )
+            }
 
             OutlinedTextField(
                 value = searchQuery,
@@ -302,9 +357,13 @@ fun FilesScreen(
                             )
                         }
                         items(directories, key = { it.relativePath }) { file ->
+                            // STAGE 7 (user round 4 — the real file manager):
+                            // a directory row ENTERS the directory (the
+                            // storage port's own subDirectory seam), never
+                            // a file read that would honestly fail.
                             FileRow(
                                 entry = file,
-                                onOpen = { filesViewModel.openFile(file.relativePath) },
+                                onOpen = { filesViewModel.openDirectory(file.relativePath) },
                                 onDelete = { deleteFileTarget = file.relativePath }
                             )
                         }
@@ -345,23 +404,39 @@ fun FilesScreen(
     // STAGE 7 (user round 3): the IN-APP phone-storage browser — the
     // working fallback when the SAF import picker cannot launch on this
     // device. Selection rides the SAME governed import path (uploads/).
+    // USER ROUND 4: the sheet's MODE follows the import kind the user
+    // chose (files / a whole folder) and the folder branch is REAL now
+    // (it used to be a silent no-op that ate the pick).
     if (phoneBrowserOpen) {
         com.example.presentation.ui.components.PhoneStorageBrowserSheet(
-            mode = com.example.presentation.ui.components.PhoneStorageBrowserMode.FILES,
+            mode = phoneBrowserMode,
             fallbackNote = "تعذّر فتح منتقي النظام (لا يوجد تطبيق مستندات على هذا الجهاز) — هذا المتصفح الداخلي بديل كامل.",
             onConfirmFiles = { uris ->
                 phoneBrowserOpen = false
                 filesViewModel.importFromDevice(uris)
             },
-            onConfirmFolder = {},
+            onConfirmFolder = { directoryUri ->
+                phoneBrowserOpen = false
+                filesViewModel.importFolderFromDevice(directoryUri)
+            },
             onDismiss = { phoneBrowserOpen = false }
         )
     }
 
     deleteFileTarget?.let { target ->
+        // STAGE 7 (user round 4): an honest per-kind confirmation — a
+        // FOLDER deletion is recursive (the governed delete removes the
+        // whole tree) and the message says exactly that. The editor's
+        // delete target is always a FILE (directories never open the
+        // editor), so directory detection is the CURRENT listing only.
+        val isDirectory = state.files.any { it.relativePath == target && it.isDirectory }
         ConfirmDialog(
-            title = "حذف الملف",
-            message = "سيُحذف «$target» نهائياً من ملعب مساحة العمل الحالية.",
+            title = if (isDirectory) "حذف المجلد" else "حذف الملف",
+            message = if (isDirectory) {
+                "سيُحذف المجلد «$target» بكل ما بداخله نهائياً من ملعب مساحة العمل الحالية."
+            } else {
+                "سيُحذف «$target» نهائياً من ملعب مساحة العمل الحالية."
+            },
             confirmLabel = "حذف",
             onConfirm = {
                 filesViewModel.deleteWorkspaceFile(target)
@@ -415,6 +490,77 @@ private fun SortMenu(sortOrder: FileSort, onSelect: (FileSort) -> Unit) {
                 }
             )
         }
+    }
+}
+
+/**
+ * STAGE 7 (user round 4): the import menu — the phone-storage import kind
+ * chooser (FILES multi-select or a whole FOLDER as a real browsable tree).
+ * Both branches are guarded at launch (DocumentsUI-less devices fall back
+ * to the in-app browser in the matching mode) and both ride the SAME
+ * governed transfer pipeline.
+ */
+@Composable
+private fun ImportMenu(
+    enabled: Boolean,
+    busy: Boolean,
+    onPickFiles: () -> Unit,
+    onPickFolder: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    IconButton(
+        onClick = { expanded = true },
+        enabled = enabled,
+        modifier = Modifier.testTag("btn_import_from_device")
+    ) {
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                strokeWidth = 2.dp
+            )
+        } else {
+            Icon(
+                Icons.Default.UploadFile,
+                contentDescription = "استيراد من تخزين الهاتف",
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = { expanded = false },
+        modifier = Modifier.testTag("import_menu_dropdown")
+    ) {
+        DropdownMenuItem(
+            text = { Text("ملفات من الهاتف…", style = MaterialTheme.typography.bodyMedium) },
+            leadingIcon = {
+                Icon(
+                    Icons.Default.UploadFile,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            },
+            onClick = {
+                expanded = false
+                onPickFiles()
+            }
+        )
+        DropdownMenuItem(
+            text = { Text("مجلد كامل من الهاتف…", style = MaterialTheme.typography.bodyMedium) },
+            leadingIcon = {
+                Icon(
+                    Icons.Default.Folder,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.secondary
+                )
+            },
+            onClick = {
+                expanded = false
+                onPickFolder()
+            }
+        )
     }
 }
 
@@ -477,20 +623,22 @@ private fun FileRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (!entry.isDirectory) {
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier
-                            .size(28.dp)
-                            .testTag("btn_delete_file_${entry.relativePath}")
-                    ) {
-                        Icon(
-                            Icons.Default.Delete,
-                            contentDescription = "حذف",
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(15.dp)
-                        )
-                    }
+                // STAGE 7 (user round 4): the delete action is offered for
+                // DIRECTORIES too — the governed delete is recursive and the
+                // confirm dialog says exactly that (never a dead-looking
+                // folder row that cannot be removed).
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .testTag("btn_delete_file_${entry.relativePath}")
+                ) {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = if (entry.isDirectory) "حذف المجلد" else "حذف",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(15.dp)
+                    )
                 }
             }
         }

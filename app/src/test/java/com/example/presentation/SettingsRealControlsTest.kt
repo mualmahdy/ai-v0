@@ -186,13 +186,20 @@ class SettingsRealControlsTest {
     }
 
     @Test
-    fun `the privacy category carries the lock switch ON the row and the honest availability`() {
+    fun `the lock switch lives INSIDE the lock section and the honest availability shows`() {
         composeScreen()
         composeRule.onNodeWithTag("settings_cat_privacy").performScrollTo().performClick()
         composeRule.waitForIdle()
 
-        // The master switch is ON the row (the conventional pattern).
-        composeRule.onNodeWithTag("switch_app_lock_enabled").performScrollTo().assertIsDisplayed()
+        // STAGE 7 (user round 4 — the privacy scoping): the switch is a
+        // labeled row INSIDE the lock section — NOT on the category header
+        // where it read as a master switch governing the whole privacy tab.
+        composeRule.onNodeWithTag("row_app_lock_enabled")
+            .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithTag("switch_app_lock_enabled")
+            .performScrollTo()
+            .assertIsDisplayed()
         // The honest READY availability line.
         composeRule.waitUntil(timeoutMillis = 30_000) {
             composeRule
@@ -200,6 +207,31 @@ class SettingsRealControlsTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+    }
+
+    @Test
+    fun `the lock switch is scoped to the lock - flipping it never touches the screenshot policy`() {
+        screenshotPolicy = true
+        composeScreen()
+        composeRule.onNodeWithTag("settings_cat_privacy").performScrollTo().performClick()
+        composeRule.waitForIdle()
+
+        // BOTH controls are visible INSIDE the one expanded privacy tab —
+        // each its own scoped setting (the user's report: the lock switch
+        // used to read as governing the entire tab).
+        composeRule.onNodeWithTag("row_app_lock_enabled").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("switch_screenshot_protection").performScrollTo().assertIsDisplayed()
+
+        // Flipping the LOCK switch flips ONLY the lock policy.
+        composeRule.onNodeWithTag("switch_app_lock_enabled").performScrollTo().performClick()
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            appLockService.policyFlow.value.enabled
+        }
+        // The screenshot policy is untouched by the lock flip.
+        assertEquals(java.lang.Boolean.TRUE, screenshotPolicy)
+        composeRule.onNodeWithTag("switch_screenshot_protection")
+            .performScrollTo()
+            .assertIsOn()
     }
 
     @Test
