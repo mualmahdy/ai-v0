@@ -5,10 +5,12 @@ import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -287,13 +289,21 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        // FIX P2 (audit c03919d): FLAG_SECURE — the app renders live model
-        // streams, user prompts, workspace files, and (masked) credential
-        // dialogs; screenshots/recents previews must not capture them.
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_SECURE
-        )
+        // FIX P2 (audit c03919d) → STAGE 7 (user round 3): FLAG_SECURE is
+        // now a REAL user preference (Settings → الخصوصية) instead of a
+        // hardcoded flag — SECURE BY DEFAULT: the one-time blocking read
+        // applies the flag BEFORE the first frame (a protection that
+        // starts as ON must never flash OFF while a flow warms up), and
+        // the collector below re-applies it live whenever the policy
+        // changes. The read goes through the container's SINGLE instance —
+        // a second DataStore on the same file would throw (the Stage-7
+        // theme lesson, applied here from the start).
+        if (runBlocking { appContainer.privacySettings.loadScreenshotProtection() }) {
+            window.setFlags(
+                WindowManager.LayoutParams.FLAG_SECURE,
+                WindowManager.LayoutParams.FLAG_SECURE
+            )
+        }
         // Audit 2026 fix: actually RUN the runtime bootstrap (previously dead
         // code) — adapter restore, MDP Q-table load, memory decay, and
         // process-death task recovery now happen on every app start.
@@ -307,6 +317,22 @@ class MainActivity : FragmentActivity() {
             val themeMode by appContainer.themeSettings.mode.collectAsState(
                 initial = com.example.domain.core.ui.ThemeMode.SYSTEM
             )
+            // STAGE 7 (user round 3): the screenshot-protection POLICY —
+            // collected live so the flag re-applies the moment the user
+            // flips the Settings toggle (no restart, no re-lock).
+            val screenshotProtection by appContainer.privacySettings.screenshotProtection.collectAsState(
+                initial = com.example.infrastructure.preferences.PrivacySettingsDataStore.DEFAULT_SCREENSHOT_PROTECTION
+            )
+            LaunchedEffect(screenshotProtection) {
+                if (screenshotProtection) {
+                    window.setFlags(
+                        WindowManager.LayoutParams.FLAG_SECURE,
+                        WindowManager.LayoutParams.FLAG_SECURE
+                    )
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
+            }
             val systemDark = androidx.compose.foundation.isSystemInDarkTheme()
             val darkTheme = when (themeMode) {
                 com.example.domain.core.ui.ThemeMode.SYSTEM -> systemDark
@@ -359,6 +385,12 @@ class MainActivity : FragmentActivity() {
                                 onThemeMode = { mode ->
                                     lifecycleScope.launch {
                                         appContainer.themeSettings.saveMode(mode)
+                                    }
+                                },
+                                screenshotProtection = screenshotProtection,
+                                onScreenshotProtection = { enabled ->
+                                    lifecycleScope.launch {
+                                        appContainer.privacySettings.saveScreenshotProtection(enabled)
                                     }
                                 }
                             )

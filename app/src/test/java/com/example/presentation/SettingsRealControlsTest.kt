@@ -3,9 +3,12 @@ package com.example.presentation
 import android.content.Context
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertIsToggleable
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -92,6 +95,11 @@ class SettingsRealControlsTest {
     private lateinit var lockDataStoreFile: File
     private var serviceScope: CoroutineScope? = null
     private var capturedThemeMode: ThemeMode? = null
+    private var capturedScreenshotProtection: Boolean? = null
+    // Live policy holder — the settings surface reads it in composition,
+    // so flipping it recomposes the switch exactly like the shell's live
+    // policy flow would (one setContent per test rule).
+    private var screenshotPolicy by androidx.compose.runtime.mutableStateOf(true)
 
     @Before
     fun setUp() = runBlocking {
@@ -168,6 +176,8 @@ class SettingsRealControlsTest {
                         appLockViewModel = appLockViewModel,
                         themeMode = ThemeMode.SYSTEM,
                         onThemeMode = { capturedThemeMode = it },
+                        screenshotProtection = screenshotPolicy,
+                        onScreenshotProtection = { capturedScreenshotProtection = it },
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -229,5 +239,42 @@ class SettingsRealControlsTest {
 
         composeRule.onNodeWithTag("radio_theme_system").performClick()
         assertEquals(ThemeMode.SYSTEM, capturedThemeMode)
+    }
+
+    /**
+     * STAGE 7 user round 3: the screenshot-protection (FLAG_SECURE) toggle
+     * is a REAL control inside the privacy category — ON by default (secure
+     * by default), flips through the provided lambda (the shell owns the
+     * store AND the window flag).
+     */
+    @Test
+    fun `the privacy category carries the screenshot-protection toggle and a flip writes the policy`() {
+        screenshotPolicy = true
+        composeScreen()
+        composeRule.onNodeWithTag("settings_cat_privacy").performScrollTo().performClick()
+        composeRule.waitForIdle()
+
+        // The toggle is visible INSIDE the expanded privacy section.
+        composeRule.onNodeWithTag("switch_screenshot_protection")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .assertIsOn()
+
+        // Flipping it OFF writes the inverted policy through the lambda.
+        composeRule.onNodeWithTag("switch_screenshot_protection").performClick()
+        assertEquals(java.lang.Boolean.FALSE, capturedScreenshotProtection)
+
+        // The shell persisted and re-projected the new policy — the live
+        // holder flips the switch OFF without any re-composition of the
+        // test harness (exactly the production flow's behavior).
+        screenshotPolicy = false
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("switch_screenshot_protection")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .assertIsOff()
+
+        composeRule.onNodeWithTag("switch_screenshot_protection").performClick()
+        assertEquals(java.lang.Boolean.TRUE, capturedScreenshotProtection)
     }
 }

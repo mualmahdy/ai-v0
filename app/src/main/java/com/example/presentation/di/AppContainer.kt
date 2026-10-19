@@ -330,7 +330,18 @@ class AppContainer(context: Context) {
             workspaceRuntimeService = workspaceRuntimeService,
             fileStore = sandboxFileStore,
             contentPort = androidContentPort,
-            folderZipSource = { treeUri -> androidContentPort.openTreeAsZipStream(treeUri) },
+            // STAGE 7 (user round 3 — DocumentsUI-less devices): the folder
+            // bridge now serves BOTH sources through the same bounded ZIP
+            // serialization — a SAF document TREE (content://) and a PLAIN
+            // PHONE DIRECTORY picked in the in-app storage browser
+            // (file://). Same entry/byte caps, same honest failure path.
+            folderZipSource = { treeUri ->
+                if (treeUri.startsWith("file:")) {
+                    androidContentPort.openDirectoryAsZipStream(treeUri)
+                } else {
+                    androidContentPort.openTreeAsZipStream(treeUri)
+                }
+            },
             folderUnderstanding = folderUnderstandingService
         )
     }
@@ -1064,6 +1075,18 @@ class AppContainer(context: Context) {
     val themeSettings: com.example.infrastructure.preferences.ThemeSettingsDataStore by lazy {
         com.example.infrastructure.preferences.ThemeSettingsDataStore(
             dataStoreFile = java.io.File(appContext.filesDir, com.example.infrastructure.preferences.ThemeSettingsDataStore.FILE_NAME)
+        )
+    }
+
+    /**
+     * STAGE 7 (user round 3): the screenshot-protection (FLAG_SECURE)
+     * policy store — secure by default, toggled from the Settings privacy
+     * category, applied by the shell (MainActivity). Same file-scoped
+     * DataStore pattern as the theme settings.
+     */
+    val privacySettings: com.example.infrastructure.preferences.PrivacySettingsDataStore by lazy {
+        com.example.infrastructure.preferences.PrivacySettingsDataStore(
+            dataStoreFile = java.io.File(appContext.filesDir, com.example.infrastructure.preferences.PrivacySettingsDataStore.FILE_NAME)
         )
     }
 

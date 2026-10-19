@@ -195,6 +195,11 @@ fun MainAppScreen(
     // owns the store; the settings surface reads and writes it).
     themeMode: com.example.domain.core.ui.ThemeMode = com.example.domain.core.ui.ThemeMode.SYSTEM,
     onThemeMode: (com.example.domain.core.ui.ThemeMode) -> Unit = {},
+    // STAGE 7 (user round 3): the screenshot-protection policy (value +
+    // lambda — the shell/Activity owns the store AND the window flag; the
+    // settings privacy surface reads and writes the policy only).
+    screenshotProtection: Boolean = true,
+    onScreenshotProtection: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -364,7 +369,7 @@ fun MainAppScreen(
     val isCompact = widthClass == com.example.presentation.ui.navigation.NavWidthClass.COMPACT
 
     // ------------------------------------------------------------------
-    // IME / INSETS (Chat Workspace Task 1 §4A):
+    // IME / INSETS (Chat Workspace Task 1 §4A + user round 3):
     // ONE clear inset chain, no accumulation:
     //   - statusBars: consumed once at the Scaffold modifier (below);
     //   - navigationBars: owned by the bottom NavigationBar itself;
@@ -374,6 +379,20 @@ fun MainAppScreen(
     // to the keyboard and the content insets are consumed for descendants
     // so the composer's imePadding lands EXACTLY at the keyboard's top
     // edge — no double padding, no keyboard-sized blank after send.
+    //
+    // USER ROUND 3 (the keyboard-sized blank on a DocumentsUI-less ROM):
+    // the Scaffold's contentWindowInsets is now PINNED TO ZERO. It
+    // previously defaulted to systemBars, which meant the moment the
+    // bottom bar slot went empty (the keyboard-open state) the Scaffold
+    // silently injected a ROM-controlled systemBars.bottom into the
+    // content's innerPadding — and on ROMs that inflate systemBars while
+    // the IME is visible (or resize the window adjustResize-style AND
+    // report inflated bars), that injected value double-booked the
+    // keyboard region: the composer padded by ime while the content ALSO
+    // lost the same strip — the persistent blank the user reported. With
+    // the pin, the bottom chain contains EXACTLY two contributors: the
+    // bar's own height (bar visible) or zero (bar yielded) — both ours,
+    // both consumed downstream before the composer's single imePadding.
     // Portrait and landscape share the math (insets are edge-based, not
     // orientation-based).
     //
@@ -400,6 +419,11 @@ fun MainAppScreen(
         modifier = modifier
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars),
+        // STAGE 7 (user round 3): PINNED TO ZERO — see the inset-chain note
+        // above. The bar slot's presence/absence is now the ONLY source of
+        // the content's bottom padding; no ROM-controlled fallback sneaks
+        // into the chain when the bar yields to the keyboard.
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             WorkspaceTopBar(
@@ -540,6 +564,8 @@ fun MainAppScreen(
                     appLockSettingsViewModel = appLockSettingsViewModel,
                     themeMode = themeMode,
                     onThemeMode = onThemeMode,
+                    screenshotProtection = screenshotProtection,
+                    onScreenshotProtection = onScreenshotProtection,
                     modifier = Modifier.weight(1f)
                 )
                 }
@@ -672,6 +698,9 @@ private fun WorkspaceNavHost(
     appLockSettingsViewModel: com.example.presentation.viewmodel.AppLockSettingsViewModel? = null,
     themeMode: com.example.domain.core.ui.ThemeMode = com.example.domain.core.ui.ThemeMode.SYSTEM,
     onThemeMode: (com.example.domain.core.ui.ThemeMode) -> Unit = {},
+    // STAGE 7 (user round 3): the screenshot-protection policy pair.
+    screenshotProtection: Boolean = true,
+    onScreenshotProtection: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
@@ -868,6 +897,9 @@ private fun WorkspaceNavHost(
                 appLockViewModel = appLockSettingsViewModel,
                 themeMode = themeMode,
                 onThemeMode = onThemeMode,
+                // STAGE 7 (user round 3): the screenshot-protection policy.
+                screenshotProtection = screenshotProtection,
+                onScreenshotProtection = onScreenshotProtection,
                 modifier = Modifier.fillMaxSize()
             )
         }

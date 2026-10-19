@@ -45,6 +45,13 @@ class AndroidContentPort(
         // Document trees expose their display name via the document URI.
         if (DocumentsContract.isDocumentUri(context, parsed)) {
             queryDisplayNameOfDocument(parsed)
+        } else if (parsed.scheme == "file") {
+            // A plain phone-storage file (the in-app browser's source): the
+            // DECODED path's last segment IS the display name. Uri.fromFile()
+            // percent-encodes non-ASCII names, so the callers' raw-string
+            // fallback would surface encoded garbage («%D8%AA…» instead of
+            // the real Arabic file name) — caught by the round-3 pins.
+            parsed.path?.let { path -> java.io.File(path).name }
         } else {
             null
         }
@@ -105,6 +112,85 @@ class AndroidContentPort(
         var entries = 0
         var totalBytes = 0L
         val exceeded: Boolean get() = entries > MAX_TREE_ENTRIES || totalBytes > MAX_TREE_TOTAL_BYTES
+    }
+
+    /**
+     * STAGE 7 (user round 3 — the DocumentsUI-less device): the SAME
+     * folder bridge for a PLAIN PHONE DIRECTORY chosen in the in-app
+     * storage browser, serialized into the ZIP stream the backend's
+     * [FileTransferService.importFolderZip] contract consumes. Devices
+     * without a DocumentsUI activity (no SAF picker at all) still get the
+     * REAL governed folder import — the browser hands back a `file://`
+     * directory URI and this bridge turns it into the same bounded ZIP.
+     *
+     * Identical honesty rules as the SAF tree bridge: at most
+     * [MAX_TREE_ENTRIES] entries and [MAX_TREE_TOTAL_BYTES] of content,
+     * exceeded budgets surface as the honest null (never a truncated
+     * partial ZIP, never an OOM).
+     */
+    fun openDirectoryAsZipStream(directoryUriString: String): InputStream? = runCatching {
+        val directory = java.io.File(
+            requireNotNull(Uri.parse(directoryUriString).path) {
+                "مسار المجلد غير صالح: $directoryUriString"
+            }
+        )
+        check(directory.isDirectory && directory.canRead()) {
+            "تعذر قراءة المجلد المحدد."
+        }
+        serializeDirectoryToZip(directory)
+    }.getOrNull()
+
+    /** The public budget; the test seam below allows tighter bounds. */
+    internal fun serializeDirectoryToZip(
+        root: java.io.File,
+        maxEntries: Int = MAX_TREE_ENTRIES,
+        maxTotalBytes: Long = MAX_TREE_TOTAL_BYTES
+    ): InputStream? = runCatching {
+        val budget = TreeSerializationBudget()
+        val buffer = ByteArrayOutputStream()
+        ZipOutputStream(buffer).use { zip ->
+            writeDirectoryEntries(zip, root, basePath = "", budget, maxEntries, maxTotalBytes)
+        }
+        ByteArrayInputStream(buffer.toByteArray())
+    }.getOrNull()
+
+    private fun writeDirectoryEntries(
+        zip: ZipOutputStream,
+        directory: java.io.File,
+        basePath: String,
+        budget: TreeSerializationBudget,
+        maxEntries: Int,
+        maxTotalBytes: Long
+    ) {
+        val children = directory.listFiles()
+            ?.sortedWith(compareByDescending<java.io.File> { it.isDirectory }.thenBy { it.name.lowercase() })
+            ?: return
+        for (child in children) {
+            if (budget.entries > maxEntries || budget.totalBytes > maxTotalBytes) {
+                throw TreeBudgetExceededException()
+            }
+            val entryPath = if (basePath.isBlank()) child.name else "$basePath/${child.name}"
+            if (child.isDirectory) {
+                zip.putNextEntry(ZipEntry("$entryPath/"))
+                zip.closeEntry()
+                writeDirectoryEntries(zip, child, entryPath, budget, maxEntries, maxTotalBytes)
+            } else {
+                budget.entries++
+                if (budget.entries > maxEntries) throw TreeBudgetExceededException()
+                zip.putNextEntry(ZipEntry(entryPath))
+                child.inputStream().use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        if (budget.totalBytes > maxTotalBytes) throw TreeBudgetExceededException()
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        budget.totalBytes += n
+                        zip.write(buf, 0, n)
+                    }
+                }
+                zip.closeEntry()
+            }
+        }
     }
 
     private fun writeTreeEntries(

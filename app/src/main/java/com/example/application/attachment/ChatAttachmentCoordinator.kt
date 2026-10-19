@@ -298,7 +298,10 @@ class ChatAttachmentCoordinator(
             sizeBytes = artifact.sizeBytes,
             storageUri = targetDir,
             artifactId = artifact.id,
-            provenance = "SAF_FOLDER_ZIP",
+            // STAGE 7 (user round 3): an in-app phone-storage directory is
+            // labeled honestly — the audit trail must distinguish a plain
+            // directory from a SAF document TREE at a glance.
+            provenance = if (treeUri.startsWith("file:")) "PHONE_STORAGE_DIR_ZIP" else "SAF_FOLDER_ZIP",
             groundingState = groundingState,
             folderReportJson = folderReportJson
         )

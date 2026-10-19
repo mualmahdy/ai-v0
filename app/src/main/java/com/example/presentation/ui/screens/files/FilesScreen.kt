@@ -107,11 +107,16 @@ fun FilesScreen(
             filesViewModel.importFromDevice(uris.map { it.toString() })
         }
     }
+    // STAGE 7 (user round 3 — the DocumentsUI-less device): the IN-APP
+    // storage browser fallback. A device with no DocumentsUI activity gets
+    // the REAL browser instead of the dead-end error; the selection rides
+    // the SAME governed import (file:// uris through importFromDevice).
+    var phoneBrowserOpen by rememberSaveable { mutableStateOf(false) }
     fun launchDeviceFilePickerSafely() {
         runCatching { deviceFilePicker.launch(arrayOf("*/*")) }
             .onFailure {
                 android.util.Log.e("FilesScreen", "device file picker launch failed", it)
-                filesViewModel.reportDevicePickerUnavailable()
+                phoneBrowserOpen = true
             }
     }
 
@@ -334,6 +339,22 @@ fun FilesScreen(
                 createFileOpen = false
             },
             onDismiss = { createFileOpen = false }
+        )
+    }
+
+    // STAGE 7 (user round 3): the IN-APP phone-storage browser — the
+    // working fallback when the SAF import picker cannot launch on this
+    // device. Selection rides the SAME governed import path (uploads/).
+    if (phoneBrowserOpen) {
+        com.example.presentation.ui.components.PhoneStorageBrowserSheet(
+            mode = com.example.presentation.ui.components.PhoneStorageBrowserMode.FILES,
+            fallbackNote = "تعذّر فتح منتقي النظام (لا يوجد تطبيق مستندات على هذا الجهاز) — هذا المتصفح الداخلي بديل كامل.",
+            onConfirmFiles = { uris ->
+                phoneBrowserOpen = false
+                filesViewModel.importFromDevice(uris)
+            },
+            onConfirmFolder = {},
+            onDismiss = { phoneBrowserOpen = false }
         )
     }
 

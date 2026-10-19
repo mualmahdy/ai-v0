@@ -226,12 +226,24 @@ class SandboxProjectFileStore(
      * paths, backslash tricks, device/control chars).
      */
     fun validateZipEntryName(entryName: String): Boolean {
-        if (entryName.isBlank()) return false
-        if (entryName.contains('\\')) return false
-        if (entryName.startsWith("/")) return false
-        if (entryName.contains(":")) return false
-        if (entryName.split('/').any { it == ".." || it == "." || it.isBlank() && entryName.split('/').size > 1 }) return false
-        if (entryName.any { it.code < 0x20 }) return false
+        // STAGE 7 user round 3 (caught by the phone-storage import pins): a
+        // single trailing slash is the ZIP directory-entry convention
+        // (java.util.zip writes "src/" for a directory). The previous check
+        // split "src/" into ["src", ""] and rejected the blank segment —
+        // which means EVERY folder import containing a subdirectory failed
+        // with «مدخل أرشيف غير آمن» (the SAF tree bridge writes directory
+        // entries the same way — a latent defect on that path too). The
+        // marker is stripped and the PATH it names is validated; every
+        // traversal rule still applies to the stripped path.
+        val name =
+            if (entryName.length > 1 && entryName.endsWith("/")) entryName.dropLast(1)
+            else entryName
+        if (name.isBlank()) return false
+        if (name.contains('\\')) return false
+        if (name.startsWith("/")) return false
+        if (name.contains(":")) return false
+        if (name.split('/').any { it == ".." || it == "." || it.isBlank() }) return false
+        if (name.any { it.code < 0x20 }) return false
         return true
     }
 

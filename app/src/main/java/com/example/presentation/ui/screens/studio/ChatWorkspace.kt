@@ -218,6 +218,16 @@ fun ChatWorkspace(
         if (uri != null) onPickFolder(uri.toString())
     }
 
+    // STAGE 7 (user round 3 — the DocumentsUI-less device): the IN-APP
+    // phone-storage browser, opened as the working fallback whenever a
+    // SAF picker cannot launch. The selection rides the SAME callbacks
+    // the SAF pickers fill (file:// uris through the same governed import
+    // path; a directory through the same folder-attachment path).
+    var phoneBrowserOpen by rememberSaveable { mutableStateOf(false) }
+    var phoneBrowserMode by rememberSaveable {
+        mutableStateOf(com.example.presentation.ui.components.PhoneStorageBrowserMode.FILES)
+    }
+
     // HOTFIX (attach-crash hardening): the launch call itself is now guarded
     // too — a device/ROM without a DocumentsUI activity for
     // ACTION_OPEN_DOCUMENT / ACTION_OPEN_DOCUMENT_TREE throws
@@ -232,9 +242,13 @@ fun ChatWorkspace(
         runCatching { filePicker.launch(arrayOf("*/*")) }
             .onFailure {
                 android.util.Log.e("ChatWorkspace", "file picker launch failed", it)
-                onPickLaunchFailed(
-                    "تعذر فتح منتقي الملفات على هذا الجهاز (لا يوجد تطبيق مستندات) — تعذّر اختيار ملف للإرفاق."
-                )
+                // USER ROUND 3: a device without DocumentsUI gets the REAL
+                // fallback — the in-app storage browser — instead of a dead
+                // end. The note in the browser header tells the user exactly
+                // why it opened (honest fallback, never a silent swap).
+                phoneBrowserMode =
+                    com.example.presentation.ui.components.PhoneStorageBrowserMode.FILES
+                phoneBrowserOpen = true
             }
     }
 
@@ -242,9 +256,9 @@ fun ChatWorkspace(
         runCatching { folderPicker.launch(null) }
             .onFailure {
                 android.util.Log.e("ChatWorkspace", "folder picker launch failed", it)
-                onPickLaunchFailed(
-                    "تعذر فتح منتقي المجلدات على هذا الجهاز (لا يوجد تطبيق مستندات) — تعذّر اختيار مجلد للإرفاق."
-                )
+                phoneBrowserMode =
+                    com.example.presentation.ui.components.PhoneStorageBrowserMode.FOLDER
+                phoneBrowserOpen = true
             }
     }
 
@@ -620,6 +634,33 @@ fun ChatWorkspace(
                     ChatCapabilityKey.RESULT_TO_ARTIFACT -> Unit
                 }
             }
+        )
+    }
+
+    // STAGE 7 (user round 3): the IN-APP phone-storage browser — the
+    // working fallback for devices without a DocumentsUI activity. It opens
+    // from the guarded launcher failures above and hands its selection to
+    // the SAME callbacks the SAF pickers feed (file:// uris / directory).
+    if (phoneBrowserOpen) {
+        com.example.presentation.ui.components.PhoneStorageBrowserSheet(
+            mode = phoneBrowserMode,
+            fallbackNote = "تعذّر فتح منتقي النظام (لا يوجد تطبيق مستندات على هذا الجهاز) — هذا المتصفح الداخلي بديل كامل عبر مسار الاستيراد المحكوم نفسه.",
+            onConfirmFiles = { uris ->
+                phoneBrowserOpen = false
+                onPickFiles(
+                    uris,
+                    uris.map { uri ->
+                        runCatching {
+                            context.contentResolver.getType(android.net.Uri.parse(uri))
+                        }.getOrNull()
+                    }
+                )
+            },
+            onConfirmFolder = { directoryUri ->
+                phoneBrowserOpen = false
+                onPickFolder(directoryUri)
+            },
+            onDismiss = { phoneBrowserOpen = false }
         )
     }
 

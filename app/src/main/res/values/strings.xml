@@ -119,7 +119,10 @@
     <string name="settings_cat_account">الحساب</string>
     <string name="settings_cat_account_honest">التطبيق محلي بالكامل ولا يستخدم حساب مستخدم — لا يوجد ما يُضبط هنا حاليًا.</string>
     <string name="settings_cat_privacy">الخصوصية والأمان</string>
-    <string name="settings_cat_privacy_body">الشاشة محمية (FLAG_SECURE) فلا تظهر المحادثات والاعتمادات في لقطات الشاشة وقائمة التطبيقات الحديثة، وكل عمليات الشبكة تمر ببوابات خروج مُحكمة.</string>
+    <string name="settings_cat_privacy_body">حماية لقطات الشاشة قابلة للتحكم أعلاه (مفعّلة افتراضياً)، وكل عمليات الشبكة تمر ببوابات خروج مُحكمة، والبيانات محلية بالكامل.</string>
+    <string name="settings_cat_privacy_screenshot_title">حماية لقطات الشاشة</string>
+    <string name="settings_cat_privacy_screenshot_label">منع لقطات الشاشة والتسجيل</string>
+    <string name="settings_cat_privacy_screenshot_hint">تُخفي المحادثات والاعتمادات من لقطات الشاشة وقائمة التطبيقات الحديثة — مفعّلة افتراضياً وتُطبّق فوراً.</string>
     <string name="settings_cat_appearance">المظهر</string>
     <string name="settings_cat_appearance_body">يتبع التطبيق سمة النظام (فاتح/داكن) تلقائيًا بلوحة «مساحة عمل سبرانية» واحدة.</string>
     <string name="settings_cat_language">اللغة وإمكانية الوصول</string>

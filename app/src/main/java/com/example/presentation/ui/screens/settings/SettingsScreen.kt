@@ -127,6 +127,13 @@ fun SettingsScreen(
     /** STAGE 7: the persisted theme mode (value + lambda — the shell owns it). */
     themeMode: ThemeMode = ThemeMode.SYSTEM,
     onThemeMode: (ThemeMode) -> Unit = {},
+    /**
+     * STAGE 7 (user round 3): the screenshot-protection policy (FLAG_SECURE)
+     * — value + lambda; the shell owns the store AND the window flag, this
+     * surface reads and writes the policy only.
+     */
+    screenshotProtection: Boolean = true,
+    onScreenshotProtection: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -184,8 +191,8 @@ fun SettingsScreen(
                     icon = Icons.Default.Security,
                     title = stringResource(R.string.settings_cat_privacy),
                     summary = if (lockPolicy?.enabled == true) {
-                        "قفل التطبيق مفعّل (${if (lockPolicy.mode == AppLockMode.IMMEDIATE) "فوري" else "بعد مهلة"})" +
-                            " • " + stringResource(R.string.settings_cat_privacy_lock_summary)
+                        "قفل التطبيق مفعّل (${if (lockPolicy.mode == AppLockMode.IMMEDIATE) "فوري" else "بعد مهلة"}) • " +
+                            stringResource(R.string.settings_cat_privacy_lock_summary)
                     } else {
                         stringResource(R.string.settings_cat_privacy_lock_summary)
                     },
@@ -274,6 +281,43 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        HorizontalRule()
+                        Spacer(modifier = Modifier.height(8.dp))
+                        // STAGE 7 (user round 3): the SCREENSHOT-PROTECTION
+                        // toggle — a REAL preference now (FLAG_SECURE),
+                        // secure by default, applied live by the shell the
+                        // moment it flips (no restart).
+                        Text(
+                            text = stringResource(R.string.settings_cat_privacy_screenshot_title),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("row_screenshot_protection")
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(R.string.settings_cat_privacy_screenshot_label),
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    text = stringResource(R.string.settings_cat_privacy_screenshot_hint),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Switch(
+                                checked = screenshotProtection,
+                                onCheckedChange = onScreenshotProtection,
+                                modifier = Modifier.testTag("switch_screenshot_protection")
+                            )
+                        }
                         Spacer(modifier = Modifier.height(8.dp))
                         HorizontalRule()
                         Spacer(modifier = Modifier.height(8.dp))
@@ -567,7 +611,7 @@ fun SettingsScreen(
                     // truth — the card previously hardcoded "Room v12" while
                     // the database had already reached v17.
                     InfoRow(label = "قاعدة البيانات", value = "Room v${AppDatabase.SCHEMA_VERSION} — كل حالة حقيقية قابلة للتحقق")
-                    InfoRow(label = "الخصوصية", value = "شاشة محمية (FLAG_SECURE) — لا لقطات للبيانات")
+                    InfoRow(label = "الخصوصية", value = if (screenshotProtection) "حماية لقطات الشاشة مفعّلة (قابلة للتعطيل من الخصوصية)" else "حماية لقطات الشاشة معطّلة (من الخصوصية)")
                     InfoRow(
                         label = "المحرك",
                         value = "حلقة قرار CBR-MDP + بوابات أمن وقدرة وميزانية قبل كل فعل"
