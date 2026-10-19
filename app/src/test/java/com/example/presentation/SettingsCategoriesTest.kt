@@ -194,7 +194,17 @@ class SettingsCategoriesTest {
         composeRule.onNodeWithTag("settings_cat_network").performScrollTo().performClick()
         composeRule.waitForIdle()
 
-        // The REAL mutation through the authoritative VM: CLOUD_ONLY lands
+        // STAGE-7 USER-BUILD FIX hardening: the write itself is now
+        // bootstrap-aware in the service (bounded wait + honest timeout),
+        // but this test must not let its 15s window depend on the 5s
+        // product bound under a loaded full-suite run — the exact load
+        // condition that produced the user's ComposeTimeoutException. The
+        // REAL bootstrap landing is awaited FIRST, then the mutation.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            settingsViewModel.activeWorkspace.value != null
+        }
+
+        // The REAL mutation through the authoritative VM: OFFLINE lands
         // in the workspace's durable network-policy column (read through
         // the DAO — exactly what a process restart would read).
         settingsViewModel.updateWorkspaceNetworkPolicy(NetworkPolicy.OFFLINE)

@@ -414,13 +414,41 @@ class WorkspaceRuntimeService(
     }
 
     /**
+     * STAGE-7 USER-BUILD FIX — bounded wait for the startup bootstrap before
+     * a user-facing workspace mutation is allowed to give up. Overridable in
+     * tests (the P1-14 `drainTimeoutMs` pattern); default matches the P0-02
+     * `awaitActiveWorkspaceId` bound.
+     */
+    var startupMutationWaitMs: Long = 5_000L
+
+    /**
      * Updates the network policy of the active workspace. Emits a new
      * activeWorkspace StateFlow value so the UI reacts immediately.
+     *
+     * STAGE-7 USER-BUILD FIX (the startup write race, caught by the user's
+     * full-suite build): a user-facing mutation that landed while the init
+     * bootstrap was still in flight used to be SILENTLY DROPPED by the
+     * `?: return` guard — the settings radio tap evaporated, the bootstrap
+     * then surfaced the OLD policy from the durable column, and the UI wait
+     * timed out (the ComposeTimeoutException the user's build hit; reproduced
+     * deterministically by delaying only the bootstrap). Same defect family
+     * as the decorative toggle (REPAIR ORDER §20): the write path is now
+     * bootstrap-aware (the P0-02 bounded-await pattern) and fails HONESTLY
+     * (fail-closed, the P0-03 contract) when the bootstrap never lands —
+     * the caller's runCatching surfaces the error to the user instead of
+     * pretending success. The bounded wait also closes the clobber window:
+     * the await can only observe a non-null value AFTER the init refresh's
+     * assignment (its last statement), so no late refresh can overwrite the
+     * write's StateFlow emission.
      */
     suspend fun updateNetworkPolicy(policy: NetworkPolicy) {
-        val active = _activeWorkspace.value ?: return
+        val active: Workspace? = _activeWorkspace.value
+            ?: withTimeoutOrNull(startupMutationWaitMs) { _activeWorkspace.first { ws -> ws != null } }
+        val workspace = active ?: throw NoActiveWorkspaceStateException(
+            "UPDATE_NETWORK_POLICY_TIMEOUT: لم تكتمل تهيئة مساحة العمل النشطة خلال المهلة — رفض الكتابة الصادقة بدلًا من إسقاطها صامتًا كما كان يحدث قبل هذا الإصلاح."
+        )
         val now = System.currentTimeMillis()
-        val entity = workspaceDao.getWorkspaceById(active.id) ?: return
+        val entity = workspaceDao.getWorkspaceById(workspace.id) ?: return
         workspaceDao.update(entity.copy(networkPolicy = policy.name, lastAccessedEpochMs = now))
         _activeWorkspace.update { it?.copy(networkPolicy = policy) }
     }
@@ -431,10 +459,21 @@ class WorkspaceRuntimeService(
      * consumed by the execution pipeline). Previously NO update path
      * existed: the column was frozen at creation and the UI toggle was
      * decorative (UI-local state with zero runtime consumers).
+     *
+     * STAGE-7 USER-BUILD FIX (the startup write race): identical family and
+     * identical fix as [updateNetworkPolicy] above — this is the SECOND
+     * user-facing mutation exposed by the redesigned settings screen (the
+     * chat-AI autonomy rows), so it gets the same bootstrap-aware bounded
+     * wait and the same honest fail-closed timeout instead of the silent
+     * pre-fix drop.
      */
     suspend fun updateAutonomyPolicy(policy: com.example.domain.core.task.AutonomyPolicy) {
-        val active = _activeWorkspace.value ?: return
-        workspaceDao.updateAutonomyPolicy(active.id, policy.name, System.currentTimeMillis())
+        val active: Workspace? = _activeWorkspace.value
+            ?: withTimeoutOrNull(startupMutationWaitMs) { _activeWorkspace.first { ws -> ws != null } }
+        val workspace = active ?: throw NoActiveWorkspaceStateException(
+            "UPDATE_AUTONOMY_POLICY_TIMEOUT: لم تكتمل تهيئة مساحة العمل النشطة خلال المهلة — رفض الكتابة الصادقة بدلًا من إسقاطها صامتًا كما كان يحدث قبل هذا الإصلاح."
+        )
+        workspaceDao.updateAutonomyPolicy(workspace.id, policy.name, System.currentTimeMillis())
         // Refresh so the surfaced domain model carries the new policy.
         refreshActiveWorkspace()
     }
