@@ -32,6 +32,13 @@ object WorkspaceRoutes {
     const val EXTENSIONS = "extensions"
     const val SETTINGS = "settings"
 
+    /**
+     * STAGE 7 — the accounting budget surface: period balances, the
+     * append-only ledger, holds, and per-provider calculated cost (the
+     * Stage-1..6 budget intelligence system's first UI consumer).
+     */
+    const val BUDGET = "budget"
+
     /** CLOSURE §11 — System Health (repair / recovery surface). */
     const val HEALTH = "health"
 

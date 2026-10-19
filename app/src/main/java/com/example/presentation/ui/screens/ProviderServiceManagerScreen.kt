@@ -930,6 +930,13 @@ private fun ConnectProviderWizardDialog(
                         onApiKey = { apiKey = it },
                         keyVisible = keyVisible,
                         onToggleKey = { keyVisible = it },
+                        // STAGE 7: the pre-creation discovery surface.
+                        isProbing = state.isProbingModels,
+                        probedModels = state.probedModels,
+                        probeMessage = state.probeMessage,
+                        autoDiscover = state.autoDiscover,
+                        onToggleAutoDiscover = viewModel::setAutoDiscover,
+                        onProbe = { viewModel.probeModels(selectedPreset!!, endpointUrl, apiKey) },
                         onBack = { selectedPreset = null },
                         onConfirm = {
                             viewModel.connectProviderFullChain(
@@ -1013,6 +1020,47 @@ private fun PresetSelectionPanel(onSelect: (ProviderPreset) -> Unit) {
     }
 }
 
+/**
+ * STAGE 7 — the capability chips a probed/discovered model renders: the
+ * honestly-derived capabilities (never fabricated) + the context window
+ * when the endpoint published one. This is the "show the user every
+ * available capability" surface.
+ */
+@Composable
+private fun ModelCapabilityChips(offering: com.example.domain.core.provider.offering.ServiceOffering) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.horizontalScroll(rememberScrollState())
+    ) {
+        offering.supportedCapabilities.forEach { capability ->
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
+            ) {
+                Text(
+                    text = capability.displayName,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+        offering.contextWindowTokens?.let { tokens ->
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
+            ) {
+                Text(
+                    text = "سياق ${tokens / 1000}k",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun WizardConfigForm(
     preset: ProviderPreset,
@@ -1026,6 +1074,13 @@ private fun WizardConfigForm(
     onApiKey: (String) -> Unit,
     keyVisible: Boolean,
     onToggleKey: (Boolean) -> Unit,
+    /** STAGE 7: the pre-creation discovery surface. */
+    isProbing: Boolean,
+    probedModels: List<com.example.domain.core.provider.offering.ServiceOffering>,
+    probeMessage: String?,
+    autoDiscover: Boolean,
+    onToggleAutoDiscover: (Boolean) -> Unit,
+    onProbe: () -> Unit,
     onBack: () -> Unit,
     onConfirm: () -> Unit
 ) {
@@ -1038,12 +1093,88 @@ private fun WizardConfigForm(
             onChange = onEndpointUrl,
             placeholder = preset.defaultEndpoint
         )
+
+        // ---------- STAGE 7: the pre-creation discovery ("show me everything
+        // available") — probes the endpoint+key BEFORE anything is created
+        // and renders every available model with its honest capabilities.
+        if (preset.serviceType != com.example.domain.core.provider.ServiceType.SEARCH) {
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onProbe,
+                enabled = !isProbing && endpointUrl.isNotBlank(),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("wizard_probe_models_button")
+            ) {
+                if (isProbing) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                } else {
+                    Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(14.dp))
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("اكتشف النماذج المتاحة الآن", style = MaterialTheme.typography.labelMedium)
+            }
+            probeMessage?.let { message ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("wizard_probe_message")
+                )
+            }
+            if (probedModels.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "النماذج المتاحة لدى هذا العنوان (${probedModels.size}) — اضغط لاختيار أحدها:",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    probedModels.take(12).forEach { model ->
+                        val chosen = modelName == model.name
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (chosen) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onModelName(model.name) }
+                                .testTag("wizard_probed_model_${model.id}")
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                                Text(
+                                    text = model.name,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (chosen) FontWeight.Bold else FontWeight.SemiBold,
+                                    color = if (chosen) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface
+                                )
+                                ModelCapabilityChips(offering = model)
+                            }
+                        }
+                    }
+                    if (probedModels.size > 12) {
+                        Text(
+                            text = "…و${probedModels.size - 12} نموذجاً آخر — اكتب اسم أي منها يدوياً",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
+        // ---------- STAGE 7: the model name is now OPTIONAL ----------
         WizardLabeledField(
-            label = preset.offeringIdLabel,
+            label = preset.offeringIdLabel + " (اختياري)",
             value = modelName,
             onChange = onModelName,
-            placeholder = preset.defaultModel
+            placeholder = if (preset.defaultModel.isNotBlank()) preset.defaultModel
+            else "اتركه فارغاً ليكتشف النظام النموذج تلقائياً"
         )
         if (preset.suggestedModels.isNotEmpty()) {
             Spacer(modifier = Modifier.height(6.dp))
@@ -1072,6 +1203,33 @@ private fun WizardConfigForm(
                     }
                 }
             }
+        }
+        // The auto-discovery switch ( rides the connect call when the name
+        // is blank — the chain then discovers and registers real models).
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("wizard_auto_discover_row")
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "الاكتشاف التلقائي عند الربط",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "عند ترك اسم النموذج فارغاً: يستعلم النظام عن نماذج المزوّد الفعلية ويفعّل الافتراضي منها",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = autoDiscover,
+                onCheckedChange = onToggleAutoDiscover,
+                modifier = Modifier.testTag("wizard_auto_discover_switch")
+            )
         }
         Spacer(modifier = Modifier.height(8.dp))
         OutlinedTextField(
@@ -1116,9 +1274,12 @@ private fun WizardConfigForm(
                 modifier = Modifier
                     .weight(1.4f)
                     .testTag("wizard_connect_button"),
+                // STAGE 7: the model name is NO LONGER required — a blank
+                // name + auto-discovery is a REAL path (or a blank name
+                // without it is rejected honestly by the use case).
                 enabled = providerName.isNotBlank() &&
                     endpointUrl.isNotBlank() &&
-                    modelName.isNotBlank() &&
+                    (modelName.isNotBlank() || autoDiscover) &&
                     (!preset.requiresApiKey || apiKey.isNotBlank())
             ) {
                 Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(16.dp))

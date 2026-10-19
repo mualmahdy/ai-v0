@@ -1056,6 +1056,18 @@ class AppContainer(context: Context) {
     }
 
     /**
+     * STAGE 7 — the THEME settings store (the appearance policy): one
+     * DataStore-backed key (theme_mode) consumed by the shell to resolve
+     * the dark/light scheme at composition time. The AppLockSettingsDataStore
+     * precedent applied to appearance.
+     */
+    val themeSettings: com.example.infrastructure.preferences.ThemeSettingsDataStore by lazy {
+        com.example.infrastructure.preferences.ThemeSettingsDataStore(
+            dataStoreFile = java.io.File(appContext.filesDir, com.example.infrastructure.preferences.ThemeSettingsDataStore.FILE_NAME)
+        )
+    }
+
+    /**
      * v27 — STAGE 4 accounting-actuals feed (the decision-engine bridge,
      * roadmap Circle 1): the REAL balance-equation state as context
      * features — the engine learns from accounting, not estimates.
@@ -2529,7 +2541,10 @@ class FilesViewModelFactory(
                 activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace,
                 bootstrapState = appContainer.workspaceRuntimeService.bootstrapState,
                 // CLOSURE §9: governed file saves land as artifact versions.
-                artifactService = appContainer.artifactService
+                artifactService = appContainer.artifactService,
+                // STAGE 7: the phone-storage import rides the SAME governed
+                // transfer pipeline as chat attachments (uploads/ namespace).
+                workspaceImportCoordinator = appContainer.chatAttachmentCoordinator
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
@@ -2768,6 +2783,49 @@ class SystemHealthViewModelFactory(
             return com.example.presentation.viewmodel.SystemHealthViewModel(
                 repairCenterService = appContainer.repairCenterService,
                 agentOrchestrator = appContainer.agentOrchestrator
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * STAGE 7 — factory for the BUDGET feature ViewModel: the accounting
+ * budget observatory's state owner (period balances, the selected period's
+ * ledger + holds feeds, per-provider calculated cost) over the REAL
+ * BudgetDashboardService (the Stage-1..6 budget intelligence system's
+ * first UI consumer).
+ */
+class BudgetViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.BudgetViewModel::class.java)) {
+            return com.example.presentation.viewmodel.BudgetViewModel(
+                dashboardService = appContainer.budgetDashboardService
+            ) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
+    }
+}
+
+/**
+ * STAGE 7 — factory for the APP-LOCK SETTINGS feature ViewModel: the lock's
+ * REAL control surface (live policy, enable/disable, mode, timeout, the
+ * device's honest authenticator availability) over the AUTHORITATIVE
+ * AppLockService — the backend that shipped complete but unreachable.
+ */
+class AppLockSettingsViewModelFactory(
+    private val appContainer: AppContainer
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.AppLockSettingsViewModel::class.java)) {
+            return com.example.presentation.viewmodel.AppLockSettingsViewModel(
+                appLockService = appContainer.appLockService,
+                authenticator = appContainer.appLockAuthenticator,
+                appContext = appContainer.appContext
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

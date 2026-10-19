@@ -53,7 +53,15 @@ class FilesViewModel(
      * every governed file save lands as an artifact VERSION (append-only
      * history with rollback). Null (tests) ⇒ versioning is honestly off.
      */
-    private val artifactService: com.example.application.artifacts.ArtifactService? = null
+    private val artifactService: com.example.application.artifacts.ArtifactService? = null,
+    /**
+     * STAGE 7 (upload from phone storage): the governed import pipeline —
+     * SAF→sandbox (staged + atomic promotion + limits + audit) through the
+     * SAME coordinator the chat attachment path uses, landing under
+     * `uploads/`. Null (legacy tests/preview compositions) ⇒ the import
+     * action reports its honest unavailability instead of failing dark.
+     */
+    private val workspaceImportCoordinator: com.example.application.attachment.ChatAttachmentCoordinator? = null
 ) : ViewModel() {
 
     /** The resolved workspace id for the version writes. */
@@ -67,7 +75,9 @@ class FilesViewModel(
         val selectedFileContent: String? = null,
         val isFileLoading: Boolean = false,
         val errorMessage: String? = null,
-        val diagnosticBanner: String? = null
+        val diagnosticBanner: String? = null,
+        /** STAGE 7: honest in-flight flag for the phone-storage import. */
+        val isImportingFromDevice: Boolean = false
     )
 
     private val _state = MutableStateFlow(FilesUiState())
@@ -228,6 +238,75 @@ class FilesViewModel(
                     refreshFiles()
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // STAGE 7 — UPLOAD FROM PHONE STORAGE (the file explorer's import).
+    // The REAL governed transfer path per file (staging + atomic promotion
+    // + size limits + audit) through the attachment coordinator's
+    // workspace-import arm — one file's failure never aborts the batch.
+    // ------------------------------------------------------------------
+
+    fun importFromDevice(uris: List<String>) {
+        if (uris.isEmpty()) return
+        val coordinator = workspaceImportCoordinator
+        if (coordinator == null) {
+            _state.update {
+                it.copy(
+                    errorMessage = "استيراد الملفات من الهاتف غير متاح في هذا التكوين — أنشئ مشروعاً نشطاً ثم أعد المحاولة."
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(isImportingFromDevice = true) }
+            try {
+                val results = coordinator.importWorkspaceFiles(uris)
+                val succeeded = results.filter { it.isSuccess }
+                val failed = results.filter { !it.isSuccess }
+                val banner = buildString {
+                    if (succeeded.isNotEmpty()) {
+                        append("تم استيراد ${succeeded.size} ملفاً إلى مجلد uploads")
+                        if (failed.isEmpty()) append(".")
+                    }
+                    if (failed.isNotEmpty()) {
+                        if (succeeded.isNotEmpty()) append(" — ")
+                        append("تعذّر استيراد ${failed.size}: ")
+                        append(failed.joinToString("؛ ") { "«${it.displayName}» — ${it.errorMessage}" })
+                    }
+                }
+                _state.update {
+                    it.copy(
+                        isImportingFromDevice = false,
+                        errorMessage = if (failed.isNotEmpty() && succeeded.isEmpty()) banner else null,
+                        diagnosticBanner = if (succeeded.isNotEmpty() || failed.isEmpty()) banner else null
+                    )
+                }
+                if (succeeded.isNotEmpty()) refreshFiles()
+            } catch (e: com.example.application.attachment.ChatAttachmentCoordinator.AttachmentImportException) {
+                _state.update {
+                    it.copy(isImportingFromDevice = false, errorMessage = e.message)
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isImportingFromDevice = false,
+                        errorMessage = "فشل الاستيراد: ${e.localizedMessage ?: e.message}"
+                    )
+                }
+            } finally {
+                _state.update { it.copy(isImportingFromDevice = false) }
+            }
+        }
+    }
+
+    /** STAGE 7: the honest picker-unavailable channel (guarded launch). */
+    fun reportDevicePickerUnavailable() {
+        _state.update {
+            it.copy(
+                errorMessage = "تعذر فتح منتقي الملفات على هذا الجهاز (لا يوجد تطبيق مستندات) — تعذّر اختيار ملفات للاستيراد."
+            )
         }
     }
 

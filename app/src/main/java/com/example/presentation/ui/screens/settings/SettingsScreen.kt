@@ -1,8 +1,10 @@
 package com.example.presentation.ui.screens.settings
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
@@ -25,6 +28,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Security
@@ -35,6 +39,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -42,6 +47,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -61,36 +67,41 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.domain.core.network.NetworkPolicy
+import com.example.domain.core.security.applock.AppLockMode
+import com.example.domain.core.security.applock.AppLockTimeout
 import com.example.domain.core.task.AutonomyPolicy
+import com.example.domain.core.ui.ThemeMode
 import com.example.infrastructure.persistence.AppDatabase
 import com.example.presentation.ui.components.InfoRow
 import com.example.presentation.ui.components.StatusBadge
 import com.example.presentation.ui.navigation.WorkspaceRoutes
+import com.example.presentation.viewmodel.AppLockSettingsViewModel
 import com.example.presentation.viewmodel.MainViewModel
 import com.example.presentation.viewmodel.SettingsViewModel
 
 /**
  * ============================================================================
- * SettingsScreen — the 12-CATEGORY settings hub (UI Design Closure, phase
- * C — defect D-07)
+ * SettingsScreen — STAGE 7: the CONVENTIONAL settings redesign
  * ============================================================================
  *
- * The previous flat four-section list is organized into the package's
- * twelve categories. Every category is honest about what it actually
- * governs:
+ * The 12-category hub (UI Design Closure phase C — defect D-07) is redrawn
+ * as the settings surface users know: every category row carries an icon
+ * tile, a title, and a one-line SUMMARY of what the section governs; rows
+ * that ARE a single preference carry their control ON the row (the app-lock
+ * master switch); expanding a section reveals its real controls.
  *
- *  - Categories with REAL controls (chat & AI policies / semantic engine,
- *    workspace manager, network policy, providers, tools & extensions,
- *    about) expose exactly their existing mutations — nothing new is
- *    faked, nothing existing is deleted;
- *  - Categories whose capability is NOT a settings surface (account,
- *    appearance, language & accessibility, budget & usage, data) render an
- *    HONEST state note — "لا شيء يُضبط هنا حاليًا" or a deep link to the
- *    real owner surface — instead of decorative toggles (the no-fabricated-
- *    data rule).
+ * STAGE 7 converts two former "honest note" categories into REAL ones:
+ *  - PRIVACY & SECURITY — the app-lock settings (enable switch, mode,
+ *    timeout, the device's honest authenticator availability) through the
+ *    authoritative [AppLockSettingsViewModel];
+ *  - APPEARANCE — the real theme mode (system / light / dark) persisted
+ *    through the theme settings port and resolved by the shell;
+ *  - BUDGET — deep links BOTH to the new accounting budget surface (the
+ *    Stage-7 BudgetScreen) and the governance observatory.
  *
- * One category expands at a time (accordion). All new copy is
- * resource-backed Arabic (the D-12 rule).
+ * The honesty rule is unchanged: categories with NO real capability (account,
+ * language, data) still render honest notes — never fabricated toggles.
+ * All category testTags are pinned (SettingsCategoriesTest).
  */
 @Composable
 fun SettingsScreen(
@@ -111,12 +122,18 @@ fun SettingsScreen(
     isProvisioningSemanticModel: Boolean,
     /** ADR-6 slice 3: delegates the mutation to the knowledge feature VM. */
     onProvisionSemanticModel: () -> Unit,
+    /** STAGE 7: the app-lock settings feature VM (the lock's REAL controls). */
+    appLockViewModel: AppLockSettingsViewModel? = null,
+    /** STAGE 7: the persisted theme mode (value + lambda — the shell owns it). */
+    themeMode: ThemeMode = ThemeMode.SYSTEM,
+    onThemeMode: (ThemeMode) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
     val allWorkspaces by settingsViewModel.allWorkspaces.collectAsState()
     val activeWorkspace by settingsViewModel.activeWorkspace.collectAsState()
     val settingsState by settingsViewModel.state.collectAsState()
+    val appLockState = appLockViewModel?.state?.collectAsState()?.value
     var createWorkspaceOpen by rememberSaveable { mutableStateOf(false) }
     // One expanded category at a time (accordion).
     var expandedCategory by rememberSaveable { mutableStateOf<String?>(null) }
@@ -128,6 +145,12 @@ fun SettingsScreen(
             settingsViewModel.dismissError()
         }
     }
+    LaunchedEffect(appLockState?.errorMessage) {
+        appLockState?.errorMessage?.let { error ->
+            snackbarHostState.showSnackbar(error)
+            appLockViewModel?.dismissError()
+        }
+    }
 
     Scaffold(
         modifier = modifier.testTag("screen_settings"),
@@ -136,14 +159,16 @@ fun SettingsScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(innerPadding)
+                .testTag("settings_categories_list"),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             // ===================== 1. Account (honest) =====================
             item {
                 SettingsCategory(
                     icon = Icons.Default.AccountCircle,
                     title = stringResource(R.string.settings_cat_account),
+                    summary = "تطبيق محلي بلا حسابات",
                     tag = "settings_cat_account",
                     expanded = expandedCategory == "account",
                     onToggle = { expandedCategory = if (expandedCategory == "account") null else "account" }
@@ -152,29 +177,153 @@ fun SettingsScreen(
                 }
             }
 
-            // ===================== 2. Privacy & security =====================
+            // ===================== 2. Privacy & security (REAL: app lock) =====================
             item {
+                val lockPolicy = appLockState?.policy
                 SettingsCategory(
                     icon = Icons.Default.Security,
                     title = stringResource(R.string.settings_cat_privacy),
+                    summary = if (lockPolicy?.enabled == true) {
+                        "قفل التطبيق مفعّل (${if (lockPolicy.mode == AppLockMode.IMMEDIATE) "فوري" else "بعد مهلة"})" +
+                            " • " + stringResource(R.string.settings_cat_privacy_lock_summary)
+                    } else {
+                        stringResource(R.string.settings_cat_privacy_lock_summary)
+                    },
                     tag = "settings_cat_privacy",
                     expanded = expandedCategory == "privacy",
-                    onToggle = { expandedCategory = if (expandedCategory == "privacy") null else "privacy" }
+                    onToggle = { expandedCategory = if (expandedCategory == "privacy") null else "privacy" },
+                    trailing = if (appLockViewModel != null) {{
+                        Switch(
+                            checked = lockPolicy?.enabled == true,
+                            onCheckedChange = { appLockViewModel.setEnabled(it) },
+                            modifier = Modifier.testTag("switch_app_lock_enabled")
+                        )
+                    }} else null
                 ) {
-                    HonestNote(text = stringResource(R.string.settings_cat_privacy_body))
+                    if (appLockViewModel == null || appLockState == null) {
+                        HonestNote(text = stringResource(R.string.settings_cat_privacy_body))
+                    } else {
+                        // The device's honest authentication capability.
+                        when {
+                            !appLockState.initialized -> Text(
+                                "جارٍ تحميل سياسة القفل…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            appLockState.availabilityReady -> Text(
+                                stringResource(R.string.settings_cat_privacy_lock_ready),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.tertiary
+                            )
+                            appLockState.availability != null -> Text(
+                                stringResource(R.string.settings_cat_privacy_lock_not_ready),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = stringResource(R.string.settings_cat_privacy_lock_title),
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        // Mode selection (only meaningful while enabled).
+                        SettingsRadioRow(
+                            label = stringResource(R.string.settings_cat_privacy_lock_mode_immediate),
+                            hint = "سلوك التطبيقات المصرفية — أي خروج من التطبيق ثم العودة يطلب المصادقة",
+                            selected = lockPolicy?.mode == AppLockMode.IMMEDIATE,
+                            enabled = lockPolicy?.enabled == true,
+                            tag = "radio_lock_immediate"
+                        ) { appLockViewModel.setMode(AppLockMode.IMMEDIATE) }
+                        SettingsRadioRow(
+                            label = stringResource(R.string.settings_cat_privacy_lock_mode_timeout),
+                            hint = "يبقى مفتوحاً إذا عدت قبل انقضاء المهلة",
+                            selected = lockPolicy?.mode == AppLockMode.AFTER_TIMEOUT,
+                            enabled = lockPolicy?.enabled == true,
+                            tag = "radio_lock_timeout"
+                        ) { appLockViewModel.setMode(AppLockMode.AFTER_TIMEOUT) }
+                        // Timeout catalogue (only for AFTER_TIMEOUT).
+                        if (lockPolicy?.mode == AppLockMode.AFTER_TIMEOUT && lockPolicy.enabled) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = stringResource(R.string.settings_cat_privacy_lock_timeout_label),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf(
+                                    AppLockTimeout.S30 to stringResource(R.string.settings_cat_privacy_lock_timeout_s30),
+                                    AppLockTimeout.M1 to stringResource(R.string.settings_cat_privacy_lock_timeout_m1),
+                                    AppLockTimeout.M5 to stringResource(R.string.settings_cat_privacy_lock_timeout_m5),
+                                    AppLockTimeout.M15 to stringResource(R.string.settings_cat_privacy_lock_timeout_m15)
+                                ).forEach { (timeout, label) ->
+                                    FilterChip(
+                                        selected = lockPolicy.timeout == timeout,
+                                        onClick = { appLockViewModel.setTimeout(timeout) },
+                                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                        modifier = Modifier.testTag("chip_lock_timeout_${timeout.name}")
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = stringResource(R.string.settings_cat_privacy_lock_instant_note),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        HorizontalRule()
+                        Spacer(modifier = Modifier.height(8.dp))
+                        HonestNote(text = stringResource(R.string.settings_cat_privacy_body))
+                    }
                 }
             }
 
-            // ===================== 3. Appearance =====================
+            // ===================== 3. Appearance (REAL: theme mode) =====================
             item {
+                val themeSummary = when (themeMode) {
+                    ThemeMode.SYSTEM -> stringResource(R.string.settings_cat_appearance_theme_system)
+                    ThemeMode.LIGHT -> stringResource(R.string.settings_cat_appearance_theme_light)
+                    ThemeMode.DARK -> stringResource(R.string.settings_cat_appearance_theme_dark)
+                }
                 SettingsCategory(
                     icon = Icons.Default.Palette,
                     title = stringResource(R.string.settings_cat_appearance),
+                    summary = "وضع العرض: $themeSummary",
                     tag = "settings_cat_appearance",
                     expanded = expandedCategory == "appearance",
                     onToggle = { expandedCategory = if (expandedCategory == "appearance") null else "appearance" }
                 ) {
-                    HonestNote(text = stringResource(R.string.settings_cat_appearance_body))
+                    Text(
+                        text = stringResource(R.string.settings_cat_appearance_theme_title),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    SettingsRadioRow(
+                        label = stringResource(R.string.settings_cat_appearance_theme_system),
+                        hint = "يتبع إعداد النظام تلقائياً ويتغير فور تغيّره",
+                        selected = themeMode == ThemeMode.SYSTEM,
+                        tag = "radio_theme_system",
+                        onClick = { onThemeMode(ThemeMode.SYSTEM) }
+                    )
+                    SettingsRadioRow(
+                        label = stringResource(R.string.settings_cat_appearance_theme_light),
+                        hint = "لوحة فاتحة ثابتة مهما كان إعداد النظام",
+                        selected = themeMode == ThemeMode.LIGHT,
+                        tag = "radio_theme_light",
+                        onClick = { onThemeMode(ThemeMode.LIGHT) }
+                    )
+                    SettingsRadioRow(
+                        label = stringResource(R.string.settings_cat_appearance_theme_dark),
+                        hint = "لوحة داكنة ثابتة — ألطف للعين في الإضاءة المنخفضة",
+                        selected = themeMode == ThemeMode.DARK,
+                        tag = "radio_theme_dark",
+                        onClick = { onThemeMode(ThemeMode.DARK) }
+                    )
                 }
             }
 
@@ -183,6 +332,7 @@ fun SettingsScreen(
                 SettingsCategory(
                     icon = Icons.Default.Language,
                     title = stringResource(R.string.settings_cat_language),
+                    summary = "العربية فقط • RTL مثبّت",
                     tag = "settings_cat_language",
                     expanded = expandedCategory == "language",
                     onToggle = { expandedCategory = if (expandedCategory == "language") null else "language" }
@@ -196,6 +346,7 @@ fun SettingsScreen(
                 SettingsCategory(
                     icon = Icons.Default.Psychology,
                     title = stringResource(R.string.settings_cat_chat_ai),
+                    summary = "سياسات الشبكة والاستقلالية والنموذج الدلالي",
                     tag = "settings_cat_chat_ai",
                     expanded = expandedCategory == "chat_ai",
                     onToggle = { expandedCategory = if (expandedCategory == "chat_ai") null else "chat_ai" }
@@ -271,6 +422,7 @@ fun SettingsScreen(
                 SettingsCategory(
                     icon = Icons.Default.Workspaces,
                     title = stringResource(R.string.settings_cat_workspace),
+                    summary = "${allWorkspaces.size} مساحة • النشطة: ${activeWorkspace?.name ?: "—"}",
                     tag = "settings_cat_workspace",
                     expanded = expandedCategory == "workspace",
                     onToggle = { expandedCategory = if (expandedCategory == "workspace") null else "workspace" },
@@ -304,6 +456,7 @@ fun SettingsScreen(
                 SettingsCategory(
                     icon = Icons.Default.Language,
                     title = stringResource(R.string.settings_cat_network),
+                    summary = "سياسة الخروج المحفوظة لمساحة العمل النشطة",
                     tag = "settings_cat_network",
                     expanded = expandedCategory == "network",
                     onToggle = { expandedCategory = if (expandedCategory == "network") null else "network" }
@@ -330,11 +483,16 @@ fun SettingsScreen(
                 SettingsCategory(
                     icon = Icons.Default.AttachMoney,
                     title = stringResource(R.string.settings_cat_budget),
+                    summary = "الدفتر والحجوزات والتكلفة لكل مزوّد",
                     tag = "settings_cat_budget",
                     expanded = expandedCategory == "budget",
                     onToggle = { expandedCategory = if (expandedCategory == "budget") null else "budget" }
                 ) {
                     HonestNote(text = stringResource(R.string.settings_cat_budget_body))
+                    DeepLinkRow(
+                        label = stringResource(R.string.settings_cat_budget_open_ledger),
+                        tag = "btn_settings_open_budget"
+                    ) { onNavigate(WorkspaceRoutes.BUDGET) }
                     DeepLinkRow(
                         label = stringResource(R.string.settings_cat_budget_open),
                         tag = "btn_settings_open_governance"
@@ -347,6 +505,7 @@ fun SettingsScreen(
                 SettingsCategory(
                     icon = Icons.Default.Dns,
                     title = stringResource(R.string.settings_cat_providers),
+                    summary = "ربط المزوّدين والموارد المفعّلة",
                     tag = "settings_cat_providers",
                     expanded = expandedCategory == "providers",
                     onToggle = { expandedCategory = if (expandedCategory == "providers") null else "providers" }
@@ -364,6 +523,7 @@ fun SettingsScreen(
                 SettingsCategory(
                     icon = Icons.Default.Construction,
                     title = stringResource(R.string.settings_cat_tools),
+                    summary = "MCP والمهارات والإضافات",
                     tag = "settings_cat_tools",
                     expanded = expandedCategory == "tools",
                     onToggle = { expandedCategory = if (expandedCategory == "tools") null else "tools" }
@@ -381,6 +541,7 @@ fun SettingsScreen(
                 SettingsCategory(
                     icon = Icons.Default.Download,
                     title = stringResource(R.string.settings_cat_data),
+                    summary = "محلي بالكامل — لا سحاب",
                     tag = "settings_cat_data",
                     expanded = expandedCategory == "data",
                     onToggle = { expandedCategory = if (expandedCategory == "data") null else "data" }
@@ -394,6 +555,7 @@ fun SettingsScreen(
                 SettingsCategory(
                     icon = Icons.Default.Info,
                     title = stringResource(R.string.settings_cat_about),
+                    summary = "AI-V0 Ultimate • Room v${AppDatabase.SCHEMA_VERSION}",
                     tag = "settings_cat_about",
                     expanded = expandedCategory == "about",
                     onToggle = { expandedCategory = if (expandedCategory == "about") null else "about" }
@@ -436,17 +598,21 @@ fun SettingsScreen(
 }
 
 // ---------------------------------------------------------------------------
-// Category chrome
+// Category chrome — the conventional settings row
 // ---------------------------------------------------------------------------
 
 /**
- * One expandable settings category (accordion row). One category is open
- * at a time; the expand/collapse affordance is screen-reader described.
+ * One settings category: a circular icon tile, the title, a one-line
+ * summary (the conventional pattern — the user knows what a section
+ * governs BEFORE opening it), an optional trailing control (a switch that
+ * IS the preference), and the expand/collapse chevron. One category is
+ * open at a time.
  */
 @Composable
 private fun SettingsCategory(
     icon: ImageVector,
     title: String,
+    summary: String,
     tag: String,
     expanded: Boolean,
     onToggle: () -> Unit,
@@ -458,7 +624,7 @@ private fun SettingsCategory(
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
             .testTag(tag),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
         )
@@ -470,19 +636,39 @@ private fun SettingsCategory(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f)
-            )
+            // The conventional circular icon tile.
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .background(
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                        CircleShape
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                if (summary.isNotBlank()) {
+                    Text(
+                        text = summary,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2
+                    )
+                }
+            }
             if (trailing != null) {
                 trailing()
             }
@@ -517,6 +703,59 @@ private fun DeepLinkRow(label: String, tag: String, onClick: () -> Unit) {
     Spacer(modifier = Modifier.height(6.dp))
     TextButton(onClick = onClick, modifier = Modifier.testTag(tag)) {
         Text(label, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** A subtle divider used inside expanded sections. */
+@Composable
+private fun HorizontalRule() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+    )
+}
+
+/** A conventional radio settings row (label + hint + radio, clickable). */
+@Composable
+private fun SettingsRadioRow(
+    label: String,
+    hint: String,
+    selected: Boolean,
+    tag: String,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 2.dp)
+            .testTag(tag),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = selected, enabled = enabled, onClick = onClick)
+        Spacer(modifier = Modifier.width(4.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = when {
+                    !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    selected -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.onSurface
+                }
+            )
+            if (hint.isNotBlank()) {
+                Text(
+                    text = hint,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }
 

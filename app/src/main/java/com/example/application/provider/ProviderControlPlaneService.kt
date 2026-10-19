@@ -354,6 +354,60 @@ class ProviderControlPlaneService(
         }
     }
 
+    /**
+     * STAGE 7 (wizard pre-creation discovery — "show the user everything
+     * available BEFORE anything is created"): probes a candidate
+     * (serviceType, protocol, endpoint, key) combination through the SAME
+     * discovery adapter the post-creation path uses, against TRANSIENT
+     * in-memory service/configuration instances.
+     *
+     * PERSISTENCE-FREE BY CONSTRUCTION: nothing is written — no provider,
+     * no service, no configuration, no offering rows. The caller receives
+     * the discovered [ServiceOffering]s purely to SHOW the user what the
+     * endpoint+key actually expose (ids, descriptions, context windows,
+     * the honestly-derived capabilities). A failed probe is an honest
+     * [Outcome.Error] with the real reason — never an empty success.
+     */
+    suspend fun probeOfferings(
+        serviceType: ServiceType,
+        protocolId: ServiceProtocolId,
+        endpointUrl: String,
+        apiKey: String?
+    ): Outcome<List<ServiceOffering>, String> {
+        if (endpointUrl.isBlank()) {
+            return Outcome.Error("BLANK_ENDPOINT", "أدخل عنوان الخدمة (Endpoint) قبل الاكتشاف")
+        }
+        val transientService = ProviderService(
+            id = "probe_transient",
+            providerId = "probe_transient",
+            name = "probe",
+            serviceType = serviceType,
+            supportedProtocolIds = listOf(protocolId.code),
+            isEnabled = true
+        )
+        val transientConfig = ServiceConfiguration(
+            id = "probe_transient_cfg",
+            serviceId = transientService.id,
+            protocolId = protocolId,
+            endpointUrl = endpointUrl,
+            defaultOfferingId = "",
+            authAlias = null,
+            isEnabled = true,
+            isDefault = true
+        )
+        return try {
+            withContext(Dispatchers.IO) {
+                discoveryAdapterFactory.discover(
+                    transientService,
+                    transientConfig
+                ) { apiKey?.takeIf { it.isNotBlank() } }
+            }
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
+            Outcome.Error("PROBE_EXCEPTION", "فشل الاستكشاف: ${e.message}")
+        }
+    }
+
     private suspend fun discoverLlmOrEmbeddingOfferings(
         service: ProviderService,
         config: ServiceConfiguration,

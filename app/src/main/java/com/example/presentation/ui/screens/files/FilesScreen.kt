@@ -26,10 +26,12 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -49,10 +51,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.example.domain.core.storage.WorkspaceFileEntry
 import com.example.presentation.ui.components.BusyIndicator
 import com.example.presentation.ui.components.ConfirmDialog
@@ -88,6 +93,27 @@ fun FilesScreen(
     var deleteFileTarget by rememberSaveable { mutableStateOf<String?>(null) }
     var sortOrder by rememberSaveable { mutableStateOf(FileSort.NAME) }
     val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
+
+    // STAGE 7 — UPLOAD FROM PHONE STORAGE: the SAF picker (the platform
+    // boundary). Resolved uris go through the governed transfer pipeline
+    // (staging + atomic promotion + size limits + audit) into `uploads/`.
+    // The launch itself is guarded the same way the chat pickers are — a
+    // device without a DocumentsUI activity gets the honest message
+    // instead of a crash (and never a dead-looking button).
+    val deviceFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (!uris.isNullOrEmpty()) {
+            filesViewModel.importFromDevice(uris.map { it.toString() })
+        }
+    }
+    fun launchDeviceFilePickerSafely() {
+        runCatching { deviceFilePicker.launch(arrayOf("*/*")) }
+            .onFailure {
+                android.util.Log.e("FilesScreen", "device file picker launch failed", it)
+                filesViewModel.reportDevicePickerUnavailable()
+            }
+    }
 
     // The listing refreshes on every visit to this route and on every
     // active-project switch (FilesViewModel observes the workspace).
@@ -154,6 +180,26 @@ fun FilesScreen(
                             contentDescription = "تحديث",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                    // STAGE 7: upload from phone storage (SAF → governed
+                    // import into `uploads/`).
+                    IconButton(
+                        onClick = ::launchDeviceFilePickerSafely,
+                        enabled = !state.isImportingFromDevice,
+                        modifier = Modifier.testTag("btn_import_from_device")
+                    ) {
+                        if (state.isImportingFromDevice) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.UploadFile,
+                                contentDescription = "استيراد من تخزين الهاتف",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                     IconButton(
                         onClick = { createFileOpen = true },

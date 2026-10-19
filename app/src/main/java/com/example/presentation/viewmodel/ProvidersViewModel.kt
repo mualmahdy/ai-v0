@@ -72,6 +72,16 @@ class ProvidersViewModel(
         val wizardResult: String? = null,
         val wizardResultIsSuccess: Boolean = true,
 
+        // STAGE 7 (optional model + pre-creation discovery): the wizard's
+        // "discover now" probe — SHOWS the user everything the endpoint+key
+        // actually expose BEFORE anything is created, and its result feeds
+        // the model chips. autoDiscover rides the connect call so a blank
+        // model name becomes a REAL discovery path, not a blocked button.
+        val autoDiscover: Boolean = true,
+        val isProbingModels: Boolean = false,
+        val probedModels: List<ServiceOffering> = emptyList(),
+        val probeMessage: String? = null,
+
         // FIX F-4 (audit c03919d): credential input dialog state — a real
         // user path to store an API key for a service configuration.
         val credentialDialogServiceId: String? = null,
@@ -272,7 +282,10 @@ class ProvidersViewModel(
                 wizardRunning = false,
                 wizardStep = 0,
                 wizardStepLabel = null,
-                wizardResult = null
+                wizardResult = null,
+                // STAGE 7: a fresh wizard resets the probe surface too.
+                probedModels = emptyList(),
+                probeMessage = null
             )
         }
     }
@@ -290,12 +303,86 @@ class ProvidersViewModel(
         }
     }
 
+    // ------------------------------------------------------------------
+    // STAGE 7 — the wizard's PRE-CREATION model probe ("show the user
+    // everything available"): hits the SAME discovery adapter the
+    // post-creation path uses, against TRANSIENT service/config instances
+    // (persistence-free — nothing is created, nothing is written). The
+    // result feeds the wizard's model chips so the user picks from what the
+    // endpoint+key ACTUALLY expose.
+    // ------------------------------------------------------------------
+
+    fun setAutoDiscover(enabled: Boolean) {
+        _state.update { it.copy(autoDiscover = enabled) }
+    }
+
+    fun probeModels(preset: ProviderPreset, endpointUrl: String, apiKey: String?) {
+        viewModelScope.launch {
+            _state.update { it.copy(isProbingModels = true, probeMessage = null) }
+            try {
+                when (
+                    val outcome = providerControlPlaneService.probeOfferings(
+                        serviceType = preset.serviceType,
+                        protocolId = preset.protocolId,
+                        endpointUrl = endpointUrl.trim(),
+                        apiKey = apiKey?.trim()?.takeIf { it.isNotBlank() }
+                    )
+                ) {
+                    is Outcome.Success -> {
+                        val models = outcome.value
+                        _state.update {
+                            it.copy(
+                                isProbingModels = false,
+                                probedModels = models,
+                                probeMessage = if (models.isEmpty()) {
+                                    "لم يُرجع هذا العنوان أي نماذج — أدخل الاسم يدوياً أو تحقق من العنوان والمفتاح."
+                                } else {
+                                    "اكتُشف ${models.size} نموذجاً متاحاً — اختر واحداً أو اترك الحقل فارغاً ليختار النظام تلقائياً."
+                                }
+                            )
+                        }
+                    }
+                    is Outcome.Error -> _state.update {
+                        it.copy(
+                            isProbingModels = false,
+                            probedModels = emptyList(),
+                            probeMessage = "فشل الاكتشاف: ${outcome.diagnosticMessage}"
+                        )
+                    }
+                    else -> _state.update { it.copy(isProbingModels = false) }
+                }
+            } finally {
+                _state.update { it.copy(isProbingModels = false) }
+            }
+        }
+    }
+
     fun connectProviderFullChain(
         preset: ProviderPreset,
         providerName: String,
         endpointUrl: String,
         modelName: String,
         apiKey: String?
+    ) {
+        // STAGE 7: the auto-discovery preference rides the call — a blank
+        // model name becomes a real discovery path inside the use case.
+        connectProviderFullChain(
+            preset = preset,
+            providerName = providerName,
+            endpointUrl = endpointUrl,
+            modelName = modelName,
+            apiKey = apiKey,
+            autoDiscover = _state.value.autoDiscover
+        )
+    }
+
+    fun connectProviderFullChain(
+        preset: ProviderPreset,
+        providerName: String,
+        endpointUrl: String,
+        modelName: String,
+        apiKey: String?,
+        autoDiscover: Boolean
     ) {
         // GAP-19 (ADR-6 step 2): the 7-step connection chain (id scheme,
         // domain construction, capability map, materialize+validate) lives
@@ -313,6 +400,7 @@ class ProvidersViewModel(
                     endpointUrl = endpointUrl,
                     modelName = modelName,
                     apiKey = apiKey,
+                    autoDiscover = autoDiscover,
                     onStep = { step, label ->
                         _state.update { it.copy(wizardStep = step, wizardStepLabel = label) }
                     }
@@ -445,5 +533,10 @@ class ProvidersViewModel(
     /** Dismisses the feature's transient diagnostic banner. */
     fun dismissDiagnosticBanner() {
         _state.update { it.copy(diagnosticBanner = null) }
+    }
+
+    /** STAGE 7: dismisses the wizard probe's transient message. */
+    fun dismissProbeMessage() {
+        _state.update { it.copy(probeMessage = null) }
     }
 }

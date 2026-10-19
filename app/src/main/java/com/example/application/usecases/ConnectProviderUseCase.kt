@@ -55,18 +55,40 @@ class ConnectProviderUseCase(
         endpointUrl: String,
         modelName: String,
         apiKey: String?,
+        /**
+         * STAGE 7 (auto-discovery — the model name becomes OPTIONAL): when
+         * true and the model name is blank, step 4 turns into a real
+         * discovery against the SAVED configuration (GET /models with the
+         * stored key), every discovered model is REGISTERED as an offering,
+         * and the chain materializes the preset's default model when the
+         * endpoint exposes it (otherwise the first discovered model).
+         */
+        autoDiscover: Boolean = false,
         onStep: suspend (step: Int, label: String) -> Unit = { _, _ -> }
     ): Result {
         if (preset.requiresApiKey && apiKey.isNullOrBlank()) {
             return Result.Rejected("هذا المزوّد يتطلب مفتاح API — أدخل المفتاح ثم أعد المحاولة")
         }
+        val discoveryEligible = preset.serviceType == ServiceType.LLM ||
+            preset.serviceType == ServiceType.EMBEDDING
+        if (modelName.isBlank() && !autoDiscover && preset.serviceType != ServiceType.SEARCH) {
+            return Result.Rejected(
+                "أدخل اسم النموذج أو فعّل الاكتشاف التلقائي ليختار النظام نموذجاً متاحاً"
+            )
+        }
+        if (modelName.isBlank() && autoDiscover && !discoveryEligible) {
+            return Result.Rejected(
+                "الاكتشاف التلقائي غير متاح لهذا النوع من الخدمات — أدخل الاسم/النقطة يدوياً"
+            )
+        }
 
         val providerId = "prov_${System.currentTimeMillis()}"
         val serviceId = "${providerId}_${preset.serviceType.code}"
         val authAlias = "${providerId}_key"
+        val effectiveModelName = modelName.trim()
         val offeringId = when (preset.serviceType) {
             ServiceType.SEARCH -> "${providerId}_search"
-            else -> "${providerId}_${modelName.replace(Regex("[^A-Za-z0-9._-]"), "_")}"
+            else -> "${providerId}_${effectiveModelName.replace(Regex("[^A-Za-z0-9._-]"), "_")}"
         }
 
         // 1. Provider
@@ -122,59 +144,116 @@ class ConnectProviderUseCase(
             }
         }
 
-        // 4. Offering
-        onStep(4, "تسجيل النموذج/النقطة…")
-        val offering = ServiceOffering(
-            id = offeringId,
-            serviceId = serviceId,
-            offeringType = when (preset.serviceType) {
-                ServiceType.SEARCH -> OfferingType.ENDPOINT
-                else -> OfferingType.MODEL
-            },
-            name = modelName.ifBlank { preset.displayName },
-            description = preset.description,
-            contextWindowTokens = preset.contextWindowTokens,
-            // ------------------------------------------------------------------
-            // GAP-25 → CLOSED (CLOSURE P1-1, audit §5 item 8): capability
-            // declarations are now EVIDENCE-DERIVED, never assumed.
-            //
-            // The OLD behavior declared REASONING + STREAMING for EVERY LLM
-            // offering as unverified defaults — gemini-2.0-flash received
-            // REASONING even though the curated thinking table itself says
-            // that family has no thinkingConfig.
-            //
-            // The NEW behavior declares the DOCUMENTED FLOOR at registration
-            // (LLM_GENERATION always; STREAMING documented by both adapter
-            // families' implemented SSE paths; REASONING documented ONLY by
-            // the curated Gemini thinking table — never for OpenAI-compatible
-            // presets, whose reasoning support this stage simply does not
-            // know), and step 6's validation UPGRADES the declaration with
-            // the runtime snapshot (floor ∪ verified − runtime-rejected) via
-            // [OperationalResourceSnapshot.declaredCapabilities].
-            // ------------------------------------------------------------------
-            supportedCapabilities = when (preset.serviceType) {
-                ServiceType.LLM -> documentedLlmCapabilityFloor(
-                    preset.protocolId, modelName
+        // 4. Offering — manual registration OR real discovery.
+        // `materializedOffering` is the registered row the resource will be
+        // materialized from (and whose capabilities step 6 may upgrade).
+        val materializedOffering: ServiceOffering
+        if (effectiveModelName.isBlank()) {
+            // ---------- STAGE 7: the auto-discovery arm ----------
+            onStep(4, "اكتشاف النماذج المتاحة من المزوّد… (طلب شبكة واحد)")
+            val discovered: List<ServiceOffering> = when (
+                val discovery = providerControlPlaneService.discoverOfferings(serviceId)
+            ) {
+                is Outcome.Success -> discovery.value
+                is Outcome.Degraded -> return Result.Failed(
+                    4,
+                    "فشل اكتشاف النماذج: ${discovery.diagnosticMessage} — " +
+                        "أدخل اسم النموذج يدوياً وأعد المحاولة."
                 )
-                ServiceType.EMBEDDING -> setOf(
-                    CapabilityType.EMBEDDING,
-                    CapabilityType.MEMORY_RETRIEVAL
+                is Outcome.Error -> return Result.Failed(
+                    4,
+                    "فشل اكتشاف النماذج: ${discovery.diagnosticMessage} — " +
+                        "تأكد من العنوان والمفتاح، أو أدخل اسم النموذج يدوياً."
                 )
-                else -> setOf(CapabilityType.SEARCH)
-            },
-            isLocal = preset.isLocal,
-            isAvailable = true,
-            discoverySource = "USER_CONNECT_WIZARD"
-        )
-        when (val r = providerControlPlaneService.registerOffering(offering)) {
-            is Outcome.Error -> return Result.Failed(4, "تعذر تسجيل النموذج: ${r.diagnosticMessage}")
-            else -> Unit
+            }
+            val models = discovered.filter {
+                it.offeringType == OfferingType.MODEL && it.isAvailable
+            }
+            if (models.isEmpty()) {
+                return Result.Failed(
+                    4,
+                    "لم يكتشف النظام أي نموذج من هذا العنوان — قد لا يدعم المزوّد الاكتشاف التلقائي. " +
+                        "أدخل اسم النموذج يدوياً وأعد المحاولة."
+                )
+            }
+            // The preset's curated default (when the endpoint really exposes
+            // it) wins; otherwise the first discovered model.
+            val chosen = models.firstOrNull {
+                preset.defaultModel.isNotBlank() && it.name == preset.defaultModel
+            } ?: models.first()
+            materializedOffering = chosen
+            // Pin the chosen model as the configuration's default offering
+            // (upsert — version bump, the repo contract).
+            when (
+                val r = providerControlPlaneService.saveConfiguration(
+                    config.copy(defaultOfferingId = chosen.id)
+                )
+            ) {
+                is Outcome.Error -> return Result.Failed(
+                    4,
+                    "تعذّر تثبيت النموذج المكتشف (${chosen.name}) في الإعدادات: ${r.diagnosticMessage}"
+                )
+                else -> Unit
+            }
+        } else {
+            // ---------- The manual arm (unchanged behavior) ----------
+            onStep(4, "تسجيل النموذج/النقطة…")
+            val offering = ServiceOffering(
+                id = offeringId,
+                serviceId = serviceId,
+                offeringType = when (preset.serviceType) {
+                    ServiceType.SEARCH -> OfferingType.ENDPOINT
+                    else -> OfferingType.MODEL
+                },
+                name = effectiveModelName.ifBlank { preset.displayName },
+                description = preset.description,
+                contextWindowTokens = preset.contextWindowTokens,
+                // ------------------------------------------------------------------
+                // GAP-25 → CLOSED (CLOSURE P1-1, audit §5 item 8): capability
+                // declarations are now EVIDENCE-DERIVED, never assumed.
+                //
+                // The OLD behavior declared REASONING + STREAMING for EVERY
+                // LLM offering as unverified defaults — gemini-2.0-flash
+                // received REASONING even though the curated thinking table
+                // itself says that family has no thinkingConfig.
+                //
+                // The NEW behavior declares the DOCUMENTED FLOOR at
+                // registration (LLM_GENERATION always; STREAMING documented
+                // by both adapter families' implemented SSE paths; REASONING
+                // documented ONLY by the curated Gemini thinking table —
+                // never for OpenAI-compatible presets, whose reasoning
+                // support this stage simply does not know), and step 6's
+                // validation UPGRADES the declaration with the runtime
+                // snapshot (floor ∪ verified − runtime-rejected) via
+                // [OperationalResourceSnapshot.declaredCapabilities].
+                // ------------------------------------------------------------------
+                supportedCapabilities = when (preset.serviceType) {
+                    ServiceType.LLM -> documentedLlmCapabilityFloor(
+                        preset.protocolId, effectiveModelName
+                    )
+                    ServiceType.EMBEDDING -> setOf(
+                        CapabilityType.EMBEDDING,
+                        CapabilityType.MEMORY_RETRIEVAL
+                    )
+                    else -> setOf(CapabilityType.SEARCH)
+                },
+                isLocal = preset.isLocal,
+                isAvailable = true,
+                discoverySource = "USER_CONNECT_WIZARD"
+            )
+            when (val r = providerControlPlaneService.registerOffering(offering)) {
+                is Outcome.Error -> return Result.Failed(4, "تعذر تسجيل النموذج: ${r.diagnosticMessage}")
+                else -> Unit
+            }
+            materializedOffering = offering
         }
 
         // 5. Materialize
         onStep(5, "تهيئة المورد التشغيلي…")
         val resourceId = when (
-            val r = providerControlPlaneService.materializeResource(providerId, serviceId, offeringId)
+            val r = providerControlPlaneService.materializeResource(
+                providerId, serviceId, materializedOffering.id
+            )
         ) {
             is Outcome.Success -> r.value.resourceId
             is Outcome.Error -> return Result.Failed(5, "تعذر تهيئة المورد: ${r.diagnosticMessage}")
@@ -201,11 +280,11 @@ class ConnectProviderUseCase(
                     var upgradeNote = ""
                     val snapshot = result.operationalSnapshot
                     if (snapshot != null && preset.serviceType == ServiceType.LLM) {
-                        val floor = documentedLlmCapabilityFloor(preset.protocolId, modelName)
+                        val floor = documentedLlmCapabilityFloor(preset.protocolId, effectiveModelName)
                         val declared = snapshot.declaredCapabilities(floor)
-                        if (declared != offering.supportedCapabilities) {
+                        if (declared != materializedOffering.supportedCapabilities) {
                             when (val up = providerControlPlaneService.registerOffering(
-                                offering.copy(supportedCapabilities = declared)
+                                materializedOffering.copy(supportedCapabilities = declared)
                             )) {
                                 is Outcome.Error -> upgradeNote =
                                     " (تعذّر تحديث إعلانات القدرات: ${up.diagnosticMessage})"
@@ -216,7 +295,9 @@ class ConnectProviderUseCase(
                     // validateResource auto-promoted the record to ENABLED.
                     Result.Connected(
                         resourceId = resourceId.value,
-                        message = "تم ربط «${preset.displayName}» بنجاح — المورد مُفعّل وجاهز للاستخدام (${result.message})" +
+                        message = "تم ربط «${preset.displayName}» بنجاح — المورد مُفعّل وجاهز للاستخدام" +
+                            (if (effectiveModelName.isBlank()) " (النموذج المكتشف تلقائياً)" else "") +
+                            " (${result.message})" +
                             upgradeNote
                     )
                 } else {

@@ -180,4 +180,23 @@
     <string name="projects_transfer_progress">جارٍ نقل المشروع…</string>
     <string name="projects_export_progress">جارٍ التصدير…</string>
     <string name="projects_import_progress">جارٍ الاستيراد…</string>
+
+    <!-- ============ STAGE 7 — real settings: app lock + theme ============ -->
+    <string name="settings_cat_privacy_lock_title">قفل التطبيق</string>
+    <string name="settings_cat_privacy_lock_summary">اطلب مصادقة النظام (بصمة قوية أو قفل الجهاز) عند العودة إلى التطبيق</string>
+    <string name="settings_cat_privacy_lock_mode_immediate">فوري — عند كل عودة للتطبيق</string>
+    <string name="settings_cat_privacy_lock_mode_timeout">بعد مهلة الغياب</string>
+    <string name="settings_cat_privacy_lock_timeout_label">مهلة إعادة القفل</string>
+    <string name="settings_cat_privacy_lock_timeout_s30">30 ثانية</string>
+    <string name="settings_cat_privacy_lock_timeout_m1">دقيقة</string>
+    <string name="settings_cat_privacy_lock_timeout_m5">5 دقائق</string>
+    <string name="settings_cat_privacy_lock_timeout_m15">15 دقيقة</string>
+    <string name="settings_cat_privacy_lock_ready">المصادقة متاحة على هذا الجهاز — بصمة قوية أو قفل الجهاز</string>
+    <string name="settings_cat_privacy_lock_not_ready">تنبيه: لا يوجد أسلوب مصادقة مسجّل على الجهاز — سجّل بصمة أو قفل شاشة من إعدادات الجهاز وإلا سيبقى التطبيق مقفلاً بلا طريقة فتح</string>
+    <string name="settings_cat_privacy_lock_instant_note">عند التفعيل قد يُطلب القفل فوراً في هذه الجلسة — الصدق قبل الراحة، وهذا سلوك المصادقة الآمن.</string>
+    <string name="settings_cat_appearance_theme_title">وضع العرض</string>
+    <string name="settings_cat_appearance_theme_system">حسب النظام (تلقائي)</string>
+    <string name="settings_cat_appearance_theme_light">فاتح دائماً</string>
+    <string name="settings_cat_appearance_theme_dark">داكن دائماً</string>
+    <string name="settings_cat_budget_open_ledger">فتح الميزانية المحاسبية (الدفتر والحجوزات)</string>
 </resources>

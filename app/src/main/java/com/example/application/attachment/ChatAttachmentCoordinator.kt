@@ -7,6 +7,7 @@ import com.example.application.workspace.WorkspaceRuntimeService
 import com.example.domain.core.artifact.ArtifactType
 import com.example.domain.core.execution.ScopeSnapshot
 import com.example.domain.core.session.TurnAttachment
+import com.example.domain.core.rethrowIfCancellation
 import com.example.infrastructure.storage.SandboxProjectFileStore
 import java.io.InputStream
 import java.util.UUID
@@ -572,6 +573,110 @@ class ChatAttachmentCoordinator(
                 fileStore.delete(fileStore.projectRoot(projectId), attachment.storageUri)
         }.getOrDefault(false)
         return deleted || fileGone || artifactId == null
+    }
+
+    // ------------------------------------------------------------------
+    // STAGE 7 — the WORKSPACE IMPORT path (the file explorer's "upload from
+    // phone storage" action). Same governed transfer pipeline as chat
+    // attachments, a different destination directory and NO turn binding:
+    // these files belong to the PROJECT WORKSPACE, not to a conversation.
+    // ------------------------------------------------------------------
+
+    /**
+     * The per-file result of [importWorkspaceFiles] — honest on both sides:
+     * a success carries the durable sandbox path; a failure carries the real
+     * reason and NEVER aborts the remaining files.
+     */
+    data class WorkspaceImportResult(
+        val displayName: String,
+        val importedRelativePath: String?,
+        val sizeBytes: Long,
+        val errorMessage: String?
+    ) {
+        val isSuccess: Boolean get() = errorMessage == null && importedRelativePath != null
+    }
+
+    /**
+     * Imports PICKED phone-storage files into the ACTIVE project sandbox
+     * under `uploads/` (distinct from the chat `attachments/` namespace) —
+     * the REAL transfer path per file (staging + atomic promotion + size
+     * limits + audit trail + an artifact row for scope/audit truth).
+     *
+     * Honesty contract: one file's failure never aborts the batch — each
+     * result says exactly what happened to its file. A missing active
+     * project is repaired first through [ensureActiveProjectBinding] (the
+     * same reconciliation the chat attach path uses — EMERGENCY HOTFIX R2),
+     * and a scope that cannot be established fails the WHOLE call with the
+     * honest [AttachmentImportException] (nothing was imported, so nothing
+     * is half-reported).
+     */
+    suspend fun importWorkspaceFiles(
+        uris: List<String>,
+        scope: ScopeSnapshot? = null
+    ): List<WorkspaceImportResult> {
+        if (uris.isEmpty()) return emptyList()
+        // The caller may pass a scope captured BEFORE launching the picker
+        // (the ownership contract); a null scope is resolved NOW through the
+        // same reconcile-or-refuse path the chat attach path uses.
+        val effectiveScope = scope ?: ensureActiveScope()
+        val workspaceId = effectiveScope.workspaceId
+            ?: throw AttachmentImportException("استيراد الملفات يتطلب مساحة عمل مُسندة (نطاق غير مُسند).")
+        val projectId = effectiveScope.projectId
+            ?: throw AttachmentImportException("استيراد الملفات يتطلب مشروعاً مُسنداً (نطاق غير مُسند).")
+        return uris.map { uri ->
+            val displayName = contentPort.queryDisplayName(uri)
+                ?: uri.substringAfterLast('/').ifBlank { "file" }
+            try {
+                val stream = contentPort.openRead(uri)
+                    ?: return@map WorkspaceImportResult(
+                        displayName = displayName,
+                        importedRelativePath = null,
+                        sizeBytes = 0L,
+                        errorMessage = "تعذر فتح الملف من تخزين الهاتف (المصدر لم يعد متاحاً)."
+                    )
+                val safeName = sanitizeFileName(displayName)
+                val relativePath = "uploads/${System.currentTimeMillis()}_$safeName"
+                val outcome = stream.use { ownedStream ->
+                    fileTransferService.importFile(
+                        workspaceId = workspaceId,
+                        projectId = projectId,
+                        source = ownedStream,
+                        relativePath = relativePath
+                    )
+                }
+                when (outcome) {
+                    is TransferOutcome.Success -> {
+                        val artifact = artifactService.registerFileArtifact(
+                            workspaceId = workspaceId,
+                            projectId = projectId,
+                            relativePath = relativePath,
+                            name = displayName,
+                            mimeType = guessMimeType(displayName)
+                        )
+                        WorkspaceImportResult(
+                            displayName = displayName,
+                            importedRelativePath = relativePath,
+                            sizeBytes = artifact.sizeBytes,
+                            errorMessage = null
+                        )
+                    }
+                    is TransferOutcome.Failure -> WorkspaceImportResult(
+                        displayName = displayName,
+                        importedRelativePath = null,
+                        sizeBytes = 0L,
+                        errorMessage = outcome.message
+                    )
+                }
+            } catch (e: Exception) {
+                e.rethrowIfCancellation()
+                WorkspaceImportResult(
+                    displayName = displayName,
+                    importedRelativePath = null,
+                    sizeBytes = 0L,
+                    errorMessage = "فشل استيراد «$displayName»: ${e.message}"
+                )
+            }
+        }
     }
 
     private fun sanitizeFileName(name: String): String =

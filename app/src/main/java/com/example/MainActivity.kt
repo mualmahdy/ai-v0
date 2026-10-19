@@ -5,6 +5,10 @@ import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -204,6 +208,20 @@ class MainActivity : FragmentActivity() {
         ProjectsViewModelFactory(appContainer)
     }
 
+    // STAGE 7: the BUDGET feature ViewModel — the accounting budget
+    // observatory (period balances, ledger, holds, per-provider cost) over
+    // the REAL BudgetDashboardService. Follows the same ADR-6 freeze rule.
+    private val budgetViewModel: com.example.presentation.viewmodel.BudgetViewModel by viewModels {
+        com.example.presentation.di.BudgetViewModelFactory(appContainer)
+    }
+
+    // STAGE 7: the APP-LOCK SETTINGS feature ViewModel — the lock's real
+    // control surface over the authoritative AppLockService (the backend
+    // that shipped complete but had NO reachable UI until now).
+    private val appLockSettingsViewModel: com.example.presentation.viewmodel.AppLockSettingsViewModel by viewModels {
+        com.example.presentation.di.AppLockSettingsViewModelFactory(appContainer)
+    }
+
     // ------------------------------------------------------------------
     // APP LOCK (backend) — thin platform integration ONLY
     // ------------------------------------------------------------------
@@ -281,7 +299,21 @@ class MainActivity : FragmentActivity() {
         // process-death task recovery now happen on every app start.
         appContainer.bootstrapRuntime()
         setContent {
-            MyApplicationTheme {
+            // STAGE 7 — the REAL theme setting: the persisted policy resolves
+            // against the live system dark-mode at composition time (SYSTEM
+            // follows instantly; LIGHT/DARK pin the scheme). The Settings
+            // screen writes the policy; the shell resolves it — the same
+            // value+lambda ownership split as every other feature seam.
+            val themeMode by appContainer.themeSettings.mode.collectAsState(
+                initial = com.example.domain.core.ui.ThemeMode.SYSTEM
+            )
+            val systemDark = androidx.compose.foundation.isSystemInDarkTheme()
+            val darkTheme = when (themeMode) {
+                com.example.domain.core.ui.ThemeMode.SYSTEM -> systemDark
+                com.example.domain.core.ui.ThemeMode.LIGHT -> false
+                com.example.domain.core.ui.ThemeMode.DARK -> true
+            }
+            MyApplicationTheme(darkTheme = darkTheme) {
                 // The app is Arabic-first (all user-facing copy is Arabic), so the
                 // layout direction is pinned to RTL regardless of device locale —
                 // mirrors, paddings and navigation follow the reading direction.
@@ -318,7 +350,17 @@ class MainActivity : FragmentActivity() {
                                 extensionsViewModel = extensionsViewModel,
                                 activityViewModel = activityViewModel,
                                 projectsViewModel = projectsViewModel,
-                                systemHealthViewModel = systemHealthViewModel
+                                systemHealthViewModel = systemHealthViewModel,
+                                // STAGE 7: the budget observatory + the app-lock
+                                // settings surface + the theme policy.
+                                budgetViewModel = budgetViewModel,
+                                appLockSettingsViewModel = appLockSettingsViewModel,
+                                themeMode = themeMode,
+                                onThemeMode = { mode ->
+                                    lifecycleScope.launch {
+                                        appContainer.themeSettings.saveMode(mode)
+                                    }
+                                }
                             )
                         }
                     }

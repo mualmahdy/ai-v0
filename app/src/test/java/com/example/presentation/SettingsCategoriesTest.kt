@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.lifecycle.viewModelScope
 import androidx.room.Room
@@ -147,8 +148,12 @@ class SettingsCategoriesTest {
         composeScreen()
         categoryTags.forEach { tag ->
             // The accordion is a LazyColumn: below-the-fold categories are
-            // scrolled into composition first (they are real, just lazy).
-            composeRule.onNodeWithTag(tag).performScrollTo()
+            // scrolled into composition through the LIST's own scroll-to-node
+            // (works for not-yet-composed items; per-item performScrollTo
+            // only reaches already-composed ones — the taller STAGE-7 rows
+            // pushed the tail categories out of the composed viewport).
+            composeRule.onNodeWithTag("settings_categories_list")
+                .performScrollToNode(androidx.compose.ui.test.hasTestTag(tag))
             composeRule.onNodeWithTag(tag).assertIsDisplayed()
         }
     }

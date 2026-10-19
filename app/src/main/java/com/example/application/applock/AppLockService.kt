@@ -84,6 +84,19 @@ class AppLockService(
     private val _initialized = MutableStateFlow(false)
 
     /**
+     * STAGE 7 (the settings surface's live read): the policy as a live
+     * flow — replaced only through [initialize]/[setPolicy], exactly like
+     * the snapshot getter. The App-Lock settings UI observes THIS instead
+     * of polling the snapshot, so enabling the lock from Settings reflects
+     * immediately (and a policy changed elsewhere can never drift from what
+     * the UI shows).
+     */
+    private val _policyFlow = MutableStateFlow(AppLockPolicy.DISABLED)
+
+    /** The live lock policy (read-only projection for the settings surface). */
+    val policyFlow: StateFlow<AppLockPolicy> = _policyFlow.asStateFlow()
+
+    /**
      * Whether the persisted policy has been loaded. The machine starts
      * LOCKED and UNPROVEN: until initialization completes, the shell keeps
      * the cover WITHOUT prompting (fail-closed against the cold-start race
@@ -123,6 +136,7 @@ class AppLockService(
             authenticatedThisProcess = false
             _state.value = if (loaded.enabled) AppLockState.AUTHENTICATION_REQUIRED
             else AppLockState.UNLOCKED
+            _policyFlow.value = loaded
             _initialized.value = true
         }
         if (loaded.enabled) {
@@ -310,6 +324,7 @@ class AppLockService(
         synchronized(lock) {
             wasEnabled = currentPolicy.enabled
             currentPolicy = newPolicy
+            _policyFlow.value = newPolicy
             if (!newPolicy.enabled) {
                 backgroundedAtMs = null
                 _state.value = AppLockState.UNLOCKED

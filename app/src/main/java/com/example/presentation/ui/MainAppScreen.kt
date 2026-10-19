@@ -182,6 +182,19 @@ fun MainAppScreen(
     // its display state (owner-VM composition — the same pattern as every
     // other feature seam in this shell).
     projectsViewModel: com.example.presentation.viewmodel.ProjectsViewModel,
+    // STAGE 7: the BUDGET observatory VM (period balances / ledger / holds /
+    // per-provider cost over the REAL BudgetDashboardService). Nullable —
+    // same optional-feature pattern as systemHealthViewModel (the route
+    // renders its screen only when provided).
+    budgetViewModel: com.example.presentation.viewmodel.BudgetViewModel? = null,
+    // STAGE 7: the APP-LOCK settings VM (the lock's real control surface).
+    // Nullable — the settings category falls back to its honest note when
+    // not provided (same optional pattern).
+    appLockSettingsViewModel: com.example.presentation.viewmodel.AppLockSettingsViewModel? = null,
+    // STAGE 7: the persisted theme policy (value + lambda — the shell/Activity
+    // owns the store; the settings surface reads and writes it).
+    themeMode: com.example.domain.core.ui.ThemeMode = com.example.domain.core.ui.ThemeMode.SYSTEM,
+    onThemeMode: (com.example.domain.core.ui.ThemeMode) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -521,6 +534,12 @@ fun MainAppScreen(
                     // the HOME work center + PROJECTS screen compose on it.
                     projectsViewModel = projectsViewModel,
                     systemHealthViewModel = systemHealthViewModel,
+                    // STAGE 7: the budget observatory + app-lock settings +
+                    // the theme policy.
+                    budgetViewModel = budgetViewModel,
+                    appLockSettingsViewModel = appLockSettingsViewModel,
+                    themeMode = themeMode,
+                    onThemeMode = onThemeMode,
                     modifier = Modifier.weight(1f)
                 )
                 }
@@ -646,6 +665,13 @@ private fun WorkspaceNavHost(
     projectsViewModel: com.example.presentation.viewmodel.ProjectsViewModel,
     // CLOSURE §11: the system-health feature VM — the HEALTH surface.
     systemHealthViewModel: com.example.presentation.viewmodel.SystemHealthViewModel? = null,
+    // STAGE 7: the budget observatory VM (BUDGET surface) + the app-lock
+    // settings VM (the SETTINGS privacy category's real controls) + the
+    // theme policy — all optional-nullable, the systemHealth pattern.
+    budgetViewModel: com.example.presentation.viewmodel.BudgetViewModel? = null,
+    appLockSettingsViewModel: com.example.presentation.viewmodel.AppLockSettingsViewModel? = null,
+    themeMode: com.example.domain.core.ui.ThemeMode = com.example.domain.core.ui.ThemeMode.SYSTEM,
+    onThemeMode: (com.example.domain.core.ui.ThemeMode) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val navigate: (String) -> Unit = { route ->
@@ -838,8 +864,20 @@ private fun WorkspaceNavHost(
                 semanticModelReady = knowledgeViewModel.state.collectAsState().value.semanticModelReady,
                 isProvisioningSemanticModel = knowledgeViewModel.state.collectAsState().value.isProvisioningSemanticModel,
                 onProvisionSemanticModel = knowledgeViewModel::provisionLocalSemanticModel,
+                // STAGE 7: the app-lock settings surface + the theme policy.
+                appLockViewModel = appLockSettingsViewModel,
+                themeMode = themeMode,
+                onThemeMode = onThemeMode,
                 modifier = Modifier.fillMaxSize()
             )
+        }
+        composable(WorkspaceRoutes.BUDGET) {
+            budgetViewModel?.let { budgetVm ->
+                com.example.presentation.ui.screens.budget.BudgetScreen(
+                    viewModel = budgetVm,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         }
         composable(WorkspaceRoutes.EXPLORER) {
             com.example.presentation.ui.screens.explorer.WorkspaceExplorerScreen(
