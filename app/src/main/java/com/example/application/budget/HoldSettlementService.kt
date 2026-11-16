@@ -67,14 +67,68 @@ class HoldSettlementService(
         /** No hold survived; actual posted directly under the active policy. */
         data class PostedWithoutHold(val entryId: String) : SettlementSummary()
 
+        /**
+         * Stage 1A — the step's reservation was released WITHOUT settlement:
+         * the operation was proven never dispatched (D), or was conclusively
+         * known to cost zero (B). A RELEASE settlement exists, NO ledger
+         * entry is ever created (G06 — releasing is not a positive effect).
+         */
+        data class ReleasedAsUnused(
+            val holdId: String?,
+            val releasedMicroUnits: Long,
+            /** ZERO_ACTUAL_COST | UNDISPATCHED */
+            val cause: String,
+            val replayed: Boolean
+        ) : SettlementSummary()
+
         /** Nothing to do — honest no-op with the reason recorded. */
         data class NoAction(val reason: String) : SettlementSummary()
     }
 
     /**
-     * The post-execution hook. [actualCostMicroUnits] is the true cost of
-     * the execution (null = UNKNOWN); [usageRecordId] links the posted
-     * entries to the Stage-2 usage facts when available.
+     * The post-execution hook — the Stage 1A hold-lifecycle decision table.
+     * [actualCostMicroUnits] is the true cost of the billable operation
+     * (null = UNKNOWN); [usageRecordId] links the posted entries to the
+     * Stage-2 usage facts when available. The input carries the canonical
+     * (executionId, stepIndex, attempt) identity and the PROVEN dispatch
+     * state of the operation.
+     *
+     * Decision table (in order — the first matching arm wins):
+     *
+     *  A. actual > 0 (known positive cost):
+     *       settle against the matching reservation, release the unused
+     *       remainder, post any excess as actual consumption (I-11 — never
+     *       truncated). [Settled]/[SettledAndReleased]/[SettledWithOverage]
+     *
+     *  B. actual == 0 (CONCLUSIVELY known zero — a usage report that shows
+     *       zero consumption with pricing resolved): release the matching
+     *       reservation idempotently. A positive reservation must not stay
+     *       active merely because the real cost equals zero.
+     *       [ReleasedAsUnused(ZERO_ACTUAL_COST)]
+     *
+     *  C. actual == null (UNKNOWN — missing usage report, unresolvable
+     *       pricing, failed response): NOT evidence of zero. The hold is
+     *       KEPT under the bounded-expiry policy (I-10); nothing is
+     *       fabricated. [NoAction(UNKNOWN_ACTUAL_COST)]
+     *
+     *  D. dispatchState == NOT_DISPATCHED (the provider call definitely
+     *       never started — proven from execution state, not a generic
+     *       failure label): release the matching reservation idempotently.
+     *       [ReleasedAsUnused(UNDISPATCHED)]
+     *
+     *  E. dispatched but no usable usage report: identical to C — the
+     *       reservation is retained under the bounded TTL (UNKNOWN is never
+     *       zero and a dispatched request with unknown cost is never
+     *       "safely unsent").
+     *
+     * A-arm ordering note: a known POSITIVE cost always wins over the
+     * dispatch state — if real cost evidence exists it is recorded, even
+     * when the dispatch state disagrees (defensive; the two never contradict
+     * in practice). Every arm is idempotent under retries and concurrent
+     * operations via the unique (hold, idempotency_key) / (period,
+     * idempotency_key) indexes, and safe after the hold expired (the actual
+     * is posted without the hold — real known consumption is never
+     * discarded merely because its reservation expired).
      */
     suspend fun settleExecutionUsage(
         input: UsageAccountingInput,
@@ -83,38 +137,80 @@ class HoldSettlementService(
         usageRecordId: String? = null
     ): SettlementSummary {
         val now = clock()
+        val reason = HoldKeys.holdReason(input.executionId, input.stepIndex, input.attempt)
 
-        if (actualCostMicroUnits == null || actualCostMicroUnits <= 0) {
-            // I-10: UNKNOWN (or genuinely zero) actual — no ledger entry is
-            // fabricated; the hold keeps protecting the hard budget until
-            // its lazy expiry. Zero is a no-op by the same reasoning.
-            return SettlementSummary.NoAction(
-                if (actualCostMicroUnits == null) "UNKNOWN_ACTUAL_COST" else "ZERO_ACTUAL_COST"
+        // ---- A. known positive actual cost: the full settle machinery ----
+        if (actualCostMicroUnits != null && actualCostMicroUnits > 0) {
+            return settlePositiveActual(
+                input = input,
+                reason = reason,
+                actualCostMicroUnits = actualCostMicroUnits,
+                costCurrency = costCurrency,
+                usageRecordId = usageRecordId,
+                now = now
             )
         }
 
-        val holds = database.budgetHoldDao()
-            .mutableHoldsForReason(executionReason(input.executionId))
+        // ---- D. proven never dispatched: release, never fabricate ----
+        if (input.dispatchState == com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED) {
+            return releaseStepHolds(
+                reason = reason,
+                input = input,
+                now = now,
+                cause = "UNDISPATCHED"
+            )
+        }
+
+        // ---- C. UNKNOWN actual cost: conservative keep (I-10) ----
+        if (actualCostMicroUnits == null) {
+            return SettlementSummary.NoAction("UNKNOWN_ACTUAL_COST")
+        }
+
+        // ---- B. conclusively known zero cost: release the reservation ----
+        return releaseStepHolds(
+            reason = reason,
+            input = input,
+            now = now,
+            cause = "ZERO_ACTUAL_COST"
+        )
+    }
+
+    /**
+     * Stage 1A arm A — a known POSITIVE actual cost. This is the Stage-2/6
+     * machinery verbatim (settle against the oldest matching hold, I-11
+     * overage posting, F-1 multi-hold release, F-2 replay honesty, F-3
+     * stale-snapshot replay detection), keyed by the canonical per-step
+     * identity from [HoldKeys].
+     */
+    private suspend fun settlePositiveActual(
+        input: UsageAccountingInput,
+        reason: String,
+        actualCostMicroUnits: Long,
+        costCurrency: String,
+        usageRecordId: String?,
+        now: Long
+    ): SettlementSummary {
+        val holds = database.budgetHoldDao().mutableHoldsForReason(reason)
 
         if (holds.isEmpty()) {
-            // replay detection: this execution WAS hold-authorized and the
-            // hook already ran (a SETTLE settlement with the execution's
-            // settle key exists) — replaying is a no-op, never a second
-            // posting. The first settlement is authoritative; revised
-            // provider reports supersede via Stage-3 reconciliation, not
-            // by double-posting. F-3 (Stage 6): the key is checked on
-            // EVERY hold of the execution — with the multi-hold release
-            // (F-1) the settle may live on the oldest while firstOrNull
-            // returned another.
-            if (settleKeyAlreadyUsed(executionReason(input.executionId), input.executionId)) {
+            // replay detection: this step WAS hold-authorized and the hook
+            // already ran (a SETTLE settlement with the step's settle key
+            // exists) — replaying is a no-op, never a second posting. The
+            // first settlement is authoritative; revised provider reports
+            // supersede via Stage-3 reconciliation, not by double-posting.
+            // F-3 (Stage 6): the key is checked on EVERY hold of the step —
+            // with the multi-hold release (F-1) the settle may live on the
+            // oldest while firstOrNull returned another.
+            if (settleKeyAlreadyUsed(reason, input)) {
                 return SettlementSummary.NoAction("ALREADY_SETTLED")
             }
             return postActualWithoutHold(input, actualCostMicroUnits, usageRecordId, now)
         }
 
-        // The gate creates exactly one hold per execution; if more ever
-        // exist, settle against the oldest and release the rest (documented
-        // deterministic choice).
+        // The gate creates exactly one hold per billable operation; if more
+        // ever exist (e.g. the two gates resolved different scopes before
+        // Stage 1A unified them), settle against the oldest and release the
+        // rest (documented deterministic choice).
         val hold = holds.first()
 
         // F-3 (Stage 6, G09): a stale hold snapshot is NOT proof the settle
@@ -122,15 +218,14 @@ class HoldSettlementService(
         // worker's settle+release reaches this point with
         // totalSettledMicro == the full hold (SETTLE + RELEASE both count)
         // and would "post without hold" — a SECOND consumption entry for
-        // one actual. The execution's settle key is the identity: if it
-        // exists on ANY hold of this execution, this call is a replay.
-        // The release re-attempt (same key) completes a cycle whose
-        // original call died between settle and release — idempotent,
-        // never a fresh posting.
-        if (settleKeyAlreadyUsed(executionReason(input.executionId), input.executionId)) {
+        // one actual. The step's settle key is the identity: if it exists
+        // on ANY hold of this step, this call is a replay. The release
+        // re-attempt (same key) completes a cycle whose original call died
+        // between settle and release — idempotent, never a fresh posting.
+        if (settleKeyAlreadyUsed(reason, input)) {
             ledger.releaseHold(
                 holdId = hold.holdId,
-                idempotencyKey = "release:exec:${input.executionId}",
+                idempotencyKey = HoldKeys.releaseKey(input.executionId, input.stepIndex, input.attempt),
                 nowEpochMs = now
             )
             return SettlementSummary.NoAction("ALREADY_SETTLED")
@@ -177,75 +272,72 @@ class HoldSettlementService(
             val outcome = ledger.settleHold(
                 holdId = hold.holdId,
                 actualAmountMicroUnits = settleable,
-                idempotencyKey = "settle:exec:${input.executionId}",
+                idempotencyKey = HoldKeys.settleKey(input.executionId, input.stepIndex, input.attempt),
                 nowEpochMs = now
             )
         ) {
             is BudgetLedgerService.SettlementOutcome.Settled -> {
                 if (outcome.replayed) {
                     // F-2 (Stage 6, G06/G09): a REPLAYED settle means this
-                    // execution's settlement already ran to its settle —
-                    // the overage decision belonged to the original call,
-                    // and a fresh overage computed from THIS call's
-                    // (possibly stale) `settleable` would fabricate a
-                    // ledger entry (reproducible: a partial settle with
-                    // the execution's key, then a concurrent/late replay
-                    // whose remaining read trails the settle). Re-attempt
-                    // the release with the standard key only: idempotent
-                    // by the unique index, and it completes the release
-                    // if the original call died between settle and
+                    // step's settlement already ran to its settle — the
+                    // overage decision belonged to the original call, and a
+                    // fresh overage computed from THIS call's (possibly
+                    // stale) `settleable` would fabricate a ledger entry.
+                    // Re-attempt the release with the standard key only:
+                    // idempotent by the unique index, and it completes the
+                    // release if the original call died between settle and
                     // release. NEVER a fresh overage on a replay.
                     ledger.releaseHold(
                         holdId = hold.holdId,
-                        idempotencyKey = "release:exec:${input.executionId}",
+                        idempotencyKey = HoldKeys.releaseKey(input.executionId, input.stepIndex, input.attempt),
                         nowEpochMs = now
                     )
                     SettlementSummary.Settled(hold.holdId, outcome.amountMicroUnits, replayed = true)
                 } else {
-                val overage = effectiveActualMicro - settleable
-                if (overage > 0) {
-                    // I-11: the excess is a real cost — post it, never truncate.
-                    val scope = holdScope(hold.holdId)
-                    val posted = ledger.postUsageActual(
-                        scopeType = scope?.first ?: GLOBAL_APPLICATION,
-                        platformObjectId = scope?.second,
-                        amountMicroUnits = overage,
-                        reason = "overage:exec:${input.executionId}",
-                        idempotencyKey = "actual:exec:${input.executionId}:overage",
-                        usageRecordId = usageRecordId,
-                        nowEpochMs = now
-                    )
-                    if (posted is BudgetLedgerService.UsagePostingOutcome.Posted) {
-                        SettlementSummary.SettledWithOverage(hold.holdId, settleable, overage)
-                    } else {
-                        // policy raced away — the hold-side settle stands, the
-                        // overage has nowhere honest to land; report it.
-                        telemetry?.incrementCounter(
-                            action = "BUDGET_OVERAGE_UNPOSTED",
-                            dimensions = com.example.domain.core.observability.MetricDimensions(
-                                executionId = input.executionId,
-                                workspaceId = input.workspaceId,
-                                providerId = input.providerId,
-                                agentId = input.agentId
-                            )
-                        )
-                        SettlementSummary.SettledWithOverage(hold.holdId, settleable, 0)
-                    }
-                } else {
-                    val release = remaining - settleable
-                    if (release > 0) {
-                        // G06: release records a RELEASE settlement only —
-                        // never a positive ledger effect.
-                        ledger.releaseHold(
-                            holdId = hold.holdId,
-                            idempotencyKey = "release:exec:${input.executionId}",
+                    val overage = effectiveActualMicro - settleable
+                    if (overage > 0) {
+                        // I-11: the excess is a real cost — post it, never truncate.
+                        val scope = holdScope(hold.holdId)
+                        val posted = ledger.postUsageActual(
+                            scopeType = scope?.first ?: GLOBAL_APPLICATION,
+                            platformObjectId = scope?.second,
+                            amountMicroUnits = overage,
+                            reason = "overage:" + HoldKeys.holdReason(input.executionId, input.stepIndex, input.attempt),
+                            idempotencyKey = HoldKeys.overageKey(input.executionId, input.stepIndex, input.attempt),
+                            usageRecordId = usageRecordId,
                             nowEpochMs = now
                         )
-                        SettlementSummary.SettledAndReleased(hold.holdId, settleable, release)
+                        if (posted is BudgetLedgerService.UsagePostingOutcome.Posted) {
+                            SettlementSummary.SettledWithOverage(hold.holdId, settleable, overage)
+                        } else {
+                            // policy raced away — the hold-side settle stands, the
+                            // overage has nowhere honest to land; report it.
+                            telemetry?.incrementCounter(
+                                action = "BUDGET_OVERAGE_UNPOSTED",
+                                dimensions = com.example.domain.core.observability.MetricDimensions(
+                                    executionId = input.executionId,
+                                    workspaceId = input.workspaceId,
+                                    providerId = input.providerId,
+                                    agentId = input.agentId
+                                )
+                            )
+                            SettlementSummary.SettledWithOverage(hold.holdId, settleable, 0)
+                        }
                     } else {
-                        SettlementSummary.Settled(hold.holdId, settleable, outcome.replayed)
+                        val release = remaining - settleable
+                        if (release > 0) {
+                            // G06: release records a RELEASE settlement only —
+                            // never a positive ledger effect.
+                            ledger.releaseHold(
+                                holdId = hold.holdId,
+                                idempotencyKey = HoldKeys.releaseKey(input.executionId, input.stepIndex, input.attempt),
+                                nowEpochMs = now
+                            )
+                            SettlementSummary.SettledAndReleased(hold.holdId, settleable, release)
+                        } else {
+                            SettlementSummary.Settled(hold.holdId, settleable, outcome.replayed)
+                        }
                     }
-                }
                 }
             }
 
@@ -254,6 +346,8 @@ class HoldSettlementService(
                 // expired/settled between the read and the settle — the
                 // actual still belongs in the ledger of the active policy
                 // (in the hold's currency when FX applied, else as reported).
+                // Stage 1A: real known consumption is NEVER discarded merely
+                // because its original reservation expired.
                 postActualWithoutHold(input, effectiveActualMicro, usageRecordId, now)
 
             is BudgetLedgerService.SettlementOutcome.OverSettlement ->
@@ -264,18 +358,76 @@ class HoldSettlementService(
 
         // F-1 (Stage 6, G06): the documented deterministic choice — the
         // oldest hold takes the settlement; every OTHER mutable hold for
-        // the same execution is RELEASED so availability recovers
-        // deterministically instead of waiting for lazy expiry. A release
-        // records a RELEASE settlement only and never a positive ledger
-        // effect, exactly like the primary release path above.
+        // the same step is RELEASED so availability recovers
+        // deterministically instead of waiting for the bounded expiry. A
+        // release records a RELEASE settlement only and never a positive
+        // ledger effect, exactly like the primary release path above.
         for (other in holds.drop(1)) {
             ledger.releaseHold(
                 holdId = other.holdId,
-                idempotencyKey = "release:exec:${input.executionId}:${other.holdId}",
+                idempotencyKey = HoldKeys.releaseKey(input.executionId, input.stepIndex, input.attempt) +
+                    ":${other.holdId}",
                 nowEpochMs = now
             )
         }
         return summary
+    }
+
+    /**
+     * Stage 1A arms B and D — release the step's reservations WITHOUT
+     * settlement: the operation was conclusively zero-cost or proven never
+     * dispatched. Idempotent (unique release keys), never fabricates a
+     * ledger entry (G06), and honest when nothing is there to release
+     * (legacy workspaces / no active policy → no hold ever existed).
+     */
+    private suspend fun releaseStepHolds(
+        reason: String,
+        input: UsageAccountingInput,
+        now: Long,
+        cause: String
+    ): SettlementSummary {
+        val releaseKey = HoldKeys.releaseKey(input.executionId, input.stepIndex, input.attempt)
+        val mutable = database.budgetHoldDao().mutableHoldsForReason(reason)
+
+        if (mutable.isEmpty()) {
+            // Either no hold ever existed for this step (legacy path —
+            // honest no-op) or this call is a REPLAY of an earlier
+            // release whose hold is already terminal. Distinguish by the
+            // release key on any hold of this step's reason.
+            val alreadyReleased = database.budgetHoldDao().allForReason(reason).any { h ->
+                database.budgetHoldSettlementDao().byIdempotencyKey(h.holdId, releaseKey) != null ||
+                    database.budgetHoldSettlementDao()
+                        .byIdempotencyKey(h.holdId, "$releaseKey:${h.holdId}") != null
+            }
+            return if (alreadyReleased) {
+                SettlementSummary.ReleasedAsUnused(
+                    holdId = database.budgetHoldDao().allForReason(reason).firstOrNull()?.holdId,
+                    releasedMicroUnits = 0L,
+                    cause = cause,
+                    replayed = true
+                )
+            } else {
+                SettlementSummary.NoAction("NO_ACTIVE_HOLD")
+            }
+        }
+
+        // Release the FIRST mutable hold under the plain key; every other
+        // mutable hold (defensive multi-hold case) under a hold-qualified
+        // key — both idempotent by the unique (hold, idempotency_key) index.
+        var totalReleased = 0L
+        for ((index, hold) in mutable.withIndex()) {
+            val key = if (index == 0) releaseKey else "$releaseKey:${hold.holdId}"
+            when (val outcome = ledger.releaseHold(holdId = hold.holdId, idempotencyKey = key, nowEpochMs = now)) {
+                is BudgetLedgerService.ReleaseOutcome.Released -> totalReleased += outcome.releasedMicroUnits
+                else -> Unit // HoldNotFound/InvalidHoldState/NothingToRelease — raced terminal; honest
+            }
+        }
+        return SettlementSummary.ReleasedAsUnused(
+            holdId = mutable.first().holdId,
+            releasedMicroUnits = totalReleased,
+            cause = cause,
+            replayed = false
+        )
     }
 
     /**
@@ -297,8 +449,8 @@ class HoldSettlementService(
                     scopeType = scopeType,
                     platformObjectId = scopeId,
                     amountMicroUnits = actualCostMicroUnits,
-                    reason = "actual:exec:${input.executionId}",
-                    idempotencyKey = "actual:exec:${input.executionId}",
+                    reason = HoldKeys.actualKey(input.executionId, input.stepIndex, input.attempt),
+                    idempotencyKey = HoldKeys.actualKey(input.executionId, input.stepIndex, input.attempt),
                     usageRecordId = usageRecordId,
                     nowEpochMs = now
                 )
@@ -330,16 +482,15 @@ class HoldSettlementService(
         return policy.budgetScopeType to descriptor?.platformObjectId
     }
 
-    private fun executionReason(executionId: String): String = "exec:$executionId"
-
     /**
-     * F-3 (Stage 6): does ANY hold of this execution already carry the
-     * execution's settle key? The key embeds the executionId, so a hit
-     * means the accountUsage settlement already ran — whatever a stale
-     * mutable-holds snapshot said.
+     * F-3 (Stage 6, rekeyed Stage 1A): does ANY hold of this billable
+     * operation already carry its settle key? The key embeds the canonical
+     * (executionId, stepIndex, attempt) identity, so a hit means the
+     * settlement already ran — whatever a stale mutable-holds snapshot
+     * said.
      */
-    private suspend fun settleKeyAlreadyUsed(reason: String, executionId: String): Boolean {
-        val key = "settle:exec:$executionId"
+    private suspend fun settleKeyAlreadyUsed(reason: String, input: UsageAccountingInput): Boolean {
+        val key = HoldKeys.settleKey(input.executionId, input.stepIndex, input.attempt)
         return database.budgetHoldDao().allForReason(reason).any { h ->
             database.budgetHoldSettlementDao().byIdempotencyKey(h.holdId, key) != null
         }

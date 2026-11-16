@@ -166,7 +166,13 @@ class DecisionService(
         /** Stage-4 (I-39): accounting-actuals features computed by the
          *  (suspend) caller — BudgetActualsFeed. Default empty keeps every
          *  existing call site compiling and behaving identically. */
-        budgetActuals: Map<String, Float> = emptyMap()
+        budgetActuals: Map<String, Float> = emptyMap(),
+        /** Stage 1A — canonical execution identity for the economic gate's
+         *  reservation binding (see DecisionContext.executionId). Additive:
+         *  null keeps the legacy decide-time identity unchanged. */
+        executionId: String? = null,
+        /** Stage 1A — the canonical context's attempt counter. */
+        executionAttempt: Int? = null
     ): DecisionContext {
         val effectiveRequirements = resolveTaskRequirements(task)
         val taskWithRequirements = if (task.requirements == effectiveRequirements) task else task.copy(requirements = effectiveRequirements)
@@ -887,8 +893,17 @@ class DecisionService(
 
         val record = action.decisionRecord
         val workspaceId = context.task.input.parameters["workspaceId"]?.toString()
+        // Stage 1A — the canonical billable-operation identity. When the
+        // orchestrator supplies the execution identity, the decide-time
+        // hold is keyed by (executionId, stepIndex, attempt): the SAME
+        // reservation the pre-dispatch LLM-step gate replays (one hold per
+        // step, never a duplicate because the action is reconsidered) and
+        // settlement settles. Legacy callers without an execution identity
+        // keep the exact pre-Stage-1A `pre_{taskId}_{step}` grammar.
+        val canonicalExecutionId = context.executionId
         val request = EconomicAuthorizationRequest(
-            executionId = "pre_${context.task.id.value}_${context.task.currentStepIndex}",
+            executionId = canonicalExecutionId
+                ?: "pre_${context.task.id.value}_${context.task.currentStepIndex}",
             workspaceId = workspaceId,
             agentId = context.task.assignedAgentId.value,
             taskId = context.task.id.value,
@@ -898,7 +913,9 @@ class DecisionService(
             resourceId = record?.selectedResourceId?.value,
             isLocalResource = isLocalCandidate(action, context),
             expectedTotalTokens = (context.remainingTokenBudget / 4).coerceAtMost(4000),
-            actionTypeCode = action.type.code
+            actionTypeCode = action.type.code,
+            stepIndex = if (canonicalExecutionId != null) context.task.currentStepIndex else null,
+            attempt = if (canonicalExecutionId != null) (context.executionAttempt ?: 1) else null
         )
 
         val result = economics.authorize(request)
@@ -957,7 +974,14 @@ class DecisionService(
         DecisionActionType.EXECUTE_MCP
     )
 
-    private val ECONOMICALLY_GATED_ACTION_TYPES = setOf(
+    /**
+     * Stage 1A — the action types whose dispatch the decide-time economic
+     * gate authorizes (and therefore the types that can carry a hold).
+     * Public so the orchestrator's post-step lifecycle decision knows which
+     * steps must reach the settlement table even without a usage report
+     * (a missing report must not silently bypass the lifecycle decision).
+     */
+    val ECONOMICALLY_GATED_ACTION_TYPES = setOf(
         DecisionActionType.EXECUTE_STEP,
         DecisionActionType.SELECT_MODEL,
         DecisionActionType.SEARCH,

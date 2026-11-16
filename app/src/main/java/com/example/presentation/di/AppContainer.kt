@@ -2096,6 +2096,24 @@ class AppContainer(context: Context) {
                 durableResourceRegistryService.eagerLoad()
                 cbrMdpEngine.loadPersistedQTable()
             // ----------------------------------------------------------------------
+            // STAGE 1A — RESERVATION-LIFETIME BOOKKEEPING (failure-isolated):
+            // (a) pre-fix UNBOUNDED holds (written with expires_at = NULL
+            //     before the finite-TTL policy) are stamped with their
+            //     would-be expiry so the EXISTING lazy balance filter and
+            //     expiry sweep can reclaim them — no row is deleted, no
+            //     ledger entry rewritten (append-only, trigger-guarded);
+            // (b) holds whose expiry already elapsed are marked EXPIRED
+            //     (visibility bookkeeping only — availability already
+            //     ignored them lazily). This sweep is NOT the expiry
+            //     mechanism: enforcement is the gate's finite TTL + the
+            //     balance query's expiry filter, which need no restart and
+            //     no worker. Idempotent by construction.
+            // ----------------------------------------------------------------------
+            runCatching {
+                budgetLedgerService.boundLegacyHolds()
+                budgetLedgerService.expireHolds()
+            }.onFailure { recordBootstrapDegradation("HOLD_EXPIRY_SWEEP_FAILED", it) }
+            // ----------------------------------------------------------------------
             // EGRESS ENFORCEMENT WIRING (report gap: sandbox network-egress
             // restrictions) — REPAIRED (defect family 1): the workspace's
             // network policy is PINNED per workspace (a registry, so an

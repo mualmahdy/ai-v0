@@ -328,7 +328,22 @@ data class EconomicAuthorizationRequest(
     val isLocalResource: Boolean,
     /** Declared/estimated expected token magnitude, when known. */
     val expectedTotalTokens: Int?,
-    val actionTypeCode: String
+    val actionTypeCode: String,
+    /**
+     * Stage 1A — the billable-operation identity this authorization reserves
+     * for. One loop iteration performs at most one billable dispatch, so
+     * (executionId, stepIndex, attempt) uniquely names it. Null (default)
+     * keeps the pre-Stage-1A per-execution key grammar for legacy callers —
+     * additive and behavior-preserving.
+     */
+    val stepIndex: Int? = null,
+    /**
+     * Stage 1A — the canonical context's attempt counter (1 for a fresh
+     * execution, incremented on every durable resume). A re-dispatched step
+     * on a NEW attempt is a distinct billable attempt and must receive a
+     * fresh reservation, never a replay of the pre-crash one.
+     */
+    val attempt: Int? = null
 )
 
 /** The gate's verdict with the reasoning the decision engine needs. */
@@ -345,6 +360,24 @@ data class EconomicAuthorizationResult(
 )
 
 /**
+ * Stage 1A — what the execution layer PROVED about the provider dispatch of
+ * the billable operation this accounting input belongs to. The settlement
+ * lifecycle decision depends on it: a missing usage report is NOT evidence
+ * of zero cost (UNKNOWN is never zero), but a proven-never-dispatched
+ * operation can never have incurred a charge and its reservation is
+ * released idempotently.
+ */
+enum class UsageDispatchState {
+    /** The provider call was entered — cost may be anything, including unknown. */
+    DISPATCHED,
+    /** Proven from execution state that the provider call never started
+     *  (idempotent intent replay, pre-dispatch rejection/failure). */
+    NOT_DISPATCHED,
+    /** No proof either way — treated conservatively (like DISPATCHED). */
+    UNKNOWN
+}
+
+/**
  * Post-execution accounting input: what was actually consumed.
  */
 data class UsageAccountingInput(
@@ -358,5 +391,34 @@ data class UsageAccountingInput(
     val resourceId: String?,
     val usage: TokenUsageRecord,
     val isActualProviderReport: Boolean,
-    val timestampEpochMs: Long = System.currentTimeMillis()
-)
+    val timestampEpochMs: Long = System.currentTimeMillis(),
+    /**
+     * Stage 1A — the step this usage belongs to. Must equal the stepIndex
+     * the authorization carried, so settlement correlates with the exact
+     * reservation. Null (default) = legacy per-execution grammar.
+     */
+    val stepIndex: Int? = null,
+    /** Stage 1A — the canonical context's attempt counter (see
+     *  [com.example.domain.core.execution.CanonicalExecutionContext]). */
+    val attempt: Int? = null,
+    /**
+     * Stage 1A — what the execution layer proved about the dispatch (see
+     *  [UsageDispatchState]). Default UNKNOWN preserves the pre-Stage-1A
+     * conservative semantics for every existing caller.
+     */
+    val dispatchState: UsageDispatchState = UsageDispatchState.UNKNOWN,
+    /**
+     * Stage 1A — true when a usage attribution/report exists for this step
+     * (even an all-zero one: a completed call that consumed nothing is
+     * CONCLUSIVELY known zero-cost when pricing resolves). False = no usage
+     * report at all (cost UNKNOWN, never fabricated). Null (default)
+     * derives it as `usage.totalTokens > 0` — which matches every
+     * pre-Stage-1A caller (the orchestrator only accounted positive
+     * attributions).
+     */
+    val hasUsageReport: Boolean? = null
+) {
+    /** True when a usage report exists (explicit or derived). */
+    val usageReported: Boolean
+        get() = hasUsageReport ?: (usage.totalTokens > 0)
+}

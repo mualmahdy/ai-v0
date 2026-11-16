@@ -720,6 +720,22 @@ class BudgetLedgerService(
     suspend fun expireHolds(nowEpochMs: Long = clock()): Int =
         database.budgetHoldDao().markExpired(nowEpochMs)
 
+    /**
+     * Stage 1A — one-time bounding of PRE-FIX unbounded reservations: every
+     * mutable hold still carrying a NULL expiry (written before the
+     * finite-TTL policy shipped) is stamped `expires_at = created_at + TTL`.
+     * Non-destructive by construction: no row is deleted, no posted ledger
+     * entry is touched (the ledger is append-only and trigger-guarded
+     * anyway); the expiry stamp only lets the EXISTING lazy balance filter
+     * and [expireHolds] reclaim reservations that predate the fix. Idempotent
+     * — the WHERE clause matches only NULL-expiry rows, so re-running the
+     * bootstrap sweep is a no-op. New holds always carry a finite TTL
+     * (HoldBasedBudgetGate), so this is purely legacy remediation.
+     */
+    suspend fun boundLegacyHolds(
+        ttlMs: Long = HoldKeys.DEFAULT_HOLD_TTL_MS
+    ): Int = database.budgetHoldDao().stampExpiryForUnbounded(ttlMs)
+
     // ------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------

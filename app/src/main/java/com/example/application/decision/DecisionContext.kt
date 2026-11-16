@@ -78,7 +78,18 @@ data class DecisionContext(
      * REPAIR ORDER §3B/§20 — effective autonomy policy snapshot PINNED at
      * launch (workspace hierarchy resolved once, never re-read mid-run).
      */
-    val effectiveAutonomyPolicy: com.example.domain.core.task.AutonomyPolicy? = null
+    val effectiveAutonomyPolicy: com.example.domain.core.task.AutonomyPolicy? = null,
+    /**
+     * Stage 1A — the canonical execution identity the economic gate binds
+     * reservations to. When present, applyEconomicGate authorizes under the
+     * (executionId, stepIndex, attempt) grammar so the decide-time hold is
+     * the SAME reservation the LLM-step gate replays and settlement settles.
+     * Null (default) keeps the legacy `pre_{taskId}_{step}` identity for
+     * non-orchestrator callers — additive, behavior-preserving.
+     */
+    val executionId: String? = null,
+    /** Stage 1A — the canonical context's attempt counter (resume = +1). */
+    val executionAttempt: Int? = null
 ) {
     val hasSearchEvidence: Boolean
         get() = accumulatedEvidence.containsKey("searchResults") || (lastAction?.type == DecisionActionType.SEARCH && lastObservation?.isSuccess == true)

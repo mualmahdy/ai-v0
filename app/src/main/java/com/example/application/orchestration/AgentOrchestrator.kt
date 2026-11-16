@@ -521,6 +521,11 @@ class AgentOrchestrator(
         // the loop's emit() semantics onto the channel's send() (the channel
         // allows emission from the pinned ExecutionScope coroutine).
         val collector = kotlinx.coroutines.flow.FlowCollector<ExecutionEvent> { value -> send(value) }
+        // Stage 1A — live view of the CURRENT billable step, shared with the
+        // cancellation handler below: a cancellation proven to land BEFORE
+        // dispatch releases the step's reservation; during/after dispatch the
+        // reservation stays (UNKNOWN cost — conservative, bounded by TTL).
+        val inFlightStep = InFlightStep()
         try {
             executeTaskLoop(
                 collector = collector,
@@ -534,7 +539,8 @@ class AgentOrchestrator(
                 restoredContext = restoredContext,
                 pinnedWorkspaceId = pinnedWorkspaceId,
                 pinnedProjectId = pinnedProjectId,
-                pinnedSessionId = pinnedSessionId
+                pinnedSessionId = pinnedSessionId,
+                inFlightStep = inFlightStep
             )
         } catch (e: CancellationException) {
             // Truthful cancellation (audit 2026 fix): persist CANCELLED so the
@@ -573,6 +579,21 @@ class AgentOrchestrator(
                     }
                 }
             }
+            // ------------------------------------------------------------
+            // Stage 1A — truthful cancellation x hold lifecycle: a
+            // cancellation PROVEN to land before the step's provider
+            // dispatch releases that step's reservation idempotently
+            // (the provider call definitely never started). A cancellation
+            // during/after dispatch keeps the reservation — the cost is
+            // UNKNOWN (never fabricated zero) and the hold's bounded TTL
+            // reclaims it. Best-effort and failure-isolated like the
+            // CANCELLED write above.
+            // ------------------------------------------------------------
+            runCatching {
+                withContext(NonCancellable) {
+                    releaseIfUndispatched(inFlightStep)
+                }
+            }
             runCatching {
                 send(
                     ExecutionEvent.Cancelled(
@@ -605,7 +626,9 @@ class AgentOrchestrator(
         restoredContext: CanonicalExecutionContext?,
         pinnedWorkspaceId: String?,
         pinnedProjectId: Long? = null,
-        pinnedSessionId: String? = null
+        pinnedSessionId: String? = null,
+        /** Stage 1A — shared with the cancellation handler (see executeTaskStream). */
+        inFlightStep: InFlightStep = InFlightStep()
     ) {
         // ------------------------------------------------------------
         // CANONICAL CONTEXT BINDING (P0-02 / P0-03 / P1-01 / P1-03):
@@ -785,7 +808,10 @@ class AgentOrchestrator(
                 restoredCheckpoint = restoredCheckpoint,
                 taskContract = taskContract,
                 effectiveAutonomyPolicy = effectiveAutonomyPolicy,
-                hasKnowledgeCorpus = hasKnowledgeCorpus
+                hasKnowledgeCorpus = hasKnowledgeCorpus,
+                // Stage 1A — shared in-flight step tracker (cancellation-safe
+                // hold release; see executeTaskStream).
+                inFlightStep = inFlightStep
             )
         }
     }
@@ -824,7 +850,9 @@ class AgentOrchestrator(
          * loop for the PINNED workspace and passed down — CHAT contracts
          * ground on a non-empty corpus.
          */
-        hasKnowledgeCorpus: Boolean = false
+        hasKnowledgeCorpus: Boolean = false,
+        /** Stage 1A — shared with the cancellation handler (see executeTaskStream). */
+        inFlightStep: InFlightStep = InFlightStep()
     ) {
         val executionId = context.executionId
         val workspaceId = context.workspaceId.takeIf { it.isNotBlank() && it != UNATTRIBUTED_WORKSPACE }
@@ -874,7 +902,13 @@ class AgentOrchestrator(
                 workspaceObjectId = currentTask.input.parameters["workspaceId"]?.toString(),
                 agentObjectId = currentTask.assignedAgentId.value,
                 taskObjectId = currentTask.id.value
-            ) ?: emptyMap()
+            ) ?: emptyMap(),
+            // Stage 1A — the canonical execution identity rides the decision
+            // context so the decide-time economic gate reserves under the
+            // SAME (executionId, stepIndex, attempt) the pre-dispatch LLM
+            // gate and the settlement use.
+            executionId = executionId,
+            executionAttempt = context.attempt
         ).toDecisionState()
 
         var isTerminal = false
@@ -957,7 +991,23 @@ class AgentOrchestrator(
                     workspaceObjectId = currentTask.input.parameters["workspaceId"]?.toString(),
                     agentObjectId = currentTask.assignedAgentId.value,
                     taskObjectId = currentTask.id.value
-                ) ?: emptyMap()
+                ) ?: emptyMap(),
+                // Stage 1A — canonical identity for the decide-time gate.
+                executionId = executionId,
+                executionAttempt = context.attempt
+            )
+
+            // Stage 1A — arm the in-flight step tracker BEFORE the decision
+            // engine runs (the decide-time economic gate creates the step's
+            // reservation inside evaluate()): a cancellation landing between
+            // here and dispatch is PROVEN undispatched and releases it.
+            inFlightStep.resetForStep(
+                executionId = executionId,
+                stepIndex = stepIndex,
+                attempt = context.attempt,
+                taskId = currentTask.id.value,
+                workspaceId = workspaceId,
+                agentId = agent.identity.id.value
             )
 
             // 2. CBR-MDP Evaluation
@@ -1237,6 +1287,10 @@ class AgentOrchestrator(
                     isDegraded = true
                     degradedReason = DegradedReason.BUDGET_APPROACHING_LIMIT
                     accumulatedOutputText.append("\n[حوكمة ميزانية الوكيل]: $blockMsg")
+                    // Stage 1A: the break lands BEFORE this step's dispatch —
+                    // its reservation (if the decide gate created one) is
+                    // PROVEN undispatched and released idempotently.
+                    releaseIfUndispatched(inFlightStep)
                     break
                 }
             }
@@ -1272,6 +1326,8 @@ class AgentOrchestrator(
                 isDegraded = true
                 degradedReason = DegradedReason.BUDGET_APPROACHING_LIMIT
                 accumulatedOutputText.append("\n[حوكمة الاقتصاد]: $quotaMsg")
+                // Stage 1A: pre-dispatch break — release the step's hold.
+                releaseIfUndispatched(inFlightStep)
                 break
             }
             if (chosenAction.type in TOKEN_QUOTA_GATED_ACTIONS) {
@@ -1310,6 +1366,8 @@ class AgentOrchestrator(
                     isDegraded = true
                     degradedReason = DegradedReason.BUDGET_APPROACHING_LIMIT
                     accumulatedOutputText.append("\n[حوكمة الأمان]: $secMsg")
+                    // Stage 1A: pre-dispatch break — release the step's hold.
+                    releaseIfUndispatched(inFlightStep)
                     break
                 }
             }
@@ -1382,13 +1440,23 @@ class AgentOrchestrator(
                 else -> {
                     // Proceed (fresh intent, ungated action, or honestly
                     // ledger-less mode) — then record the outcome.
+                    // Stage 1A: dispatch is STARTING — from here on, a
+                    // cancellation can no longer prove the provider call
+                    // never happened (conservative: the reservation stays,
+                    // bounded by the TTL).
+                    inFlightStep.dispatchStarted = true
                     execResult = executionService.executeAction(
                         action = chosenAction,
                         context = decisionContext,
                         agent = agent,
                         conversationHistory = conversationHistory,
                         executionId = executionId,
-                        onEvent = { event -> collector.emit(event) }
+                        onEvent = { event -> collector.emit(event) },
+                        // Stage 1A — the SAME billable-operation identity the
+                        // decide-time gate used: the pre-dispatch LLM gate
+                        // REPLAYS the decide-time hold, never duplicates it.
+                        stepIndex = stepIndex,
+                        attempt = context.attempt
                     )
                     if (isGatedAction) {
                         // GAP-13 (Design Closure 2026): an outcome-write
@@ -1437,9 +1505,34 @@ class AgentOrchestrator(
             // attributed usage -> persistent cost ledger (+ telemetry +
             // RPM/TPM window) -> CostRecorded event on the bus.
             // Accounting uses the PINNED workspace (P0-02).
+            //
+            // Stage 1A — the hold-lifecycle decision is reached for EVERY
+            // billable step, never only when
+            // `attribution != null && attribution.totalTokens > 0`: a
+            // missing or zero usage report must NOT silently bypass the
+            // lifecycle (dispatched+unknown keeps the reservation under the
+            // TTL; proven-undispatched releases it; conclusively-zero
+            // releases it; positive settles it).
             // ------------------------------------------------------------
             val attribution = stepResult.usageDetail
-            if (attribution != null && attribution.totalTokens > 0) {
+            val isBillableStep =
+                chosenAction.type in decisionService.ECONOMICALLY_GATED_ACTION_TYPES ||
+                    chosenAction.type == DecisionActionType.RETRY
+            if (attribution != null || isBillableStep) {
+                val dispatchState = when {
+                    // The idempotency ledger replayed a COMPLETED intent —
+                    // the provider was definitely NOT called this attempt.
+                    gate is IntentGate.AlreadyCompleted ->
+                        com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED
+                    // The execution layer proved the provider call was entered.
+                    stepResult.providerDispatched ->
+                        com.example.domain.core.budget.UsageDispatchState.DISPATCHED
+                    // Every pre-dispatch rejection/failure path reports
+                    // providerDispatched = false honestly (the flag defaults
+                    // to false and is set only immediately before the call).
+                    else ->
+                        com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED
+                }
                 val record = runCatching {
                     economicGovernanceService?.accountUsageSuspend(
                         UsageAccountingInput(
@@ -1447,22 +1540,34 @@ class AgentOrchestrator(
                             taskId = currentTask.id.value,
                             workspaceId = workspaceId,
                             agentId = agent.identity.id.value,
-                            providerId = attribution.providerId,
-                            serviceId = attribution.serviceId,
-                            modelId = attribution.modelId,
-                            resourceId = attribution.resourceId,
-                            usage = com.example.domain.core.budget.TokenUsageRecord(
-                                inputTokens = attribution.inputTokens,
-                                outputTokens = attribution.outputTokens,
-                                cachedTokens = attribution.cachedTokens,
-                                providerTotalTokens = attribution.totalTokens,
-                                isEstimate = attribution.isEstimated
-                            ),
-                            isActualProviderReport = !attribution.isEstimated
+                            providerId = attribution?.providerId
+                                ?: chosenAction.decisionRecord?.providerId,
+                            serviceId = attribution?.serviceId
+                                ?: chosenAction.decisionRecord?.serviceId,
+                            modelId = attribution?.modelId
+                                ?: chosenAction.payload["modelId"],
+                            resourceId = attribution?.resourceId
+                                ?: chosenAction.decisionRecord?.selectedResourceId?.value,
+                            usage = attribution?.let {
+                                com.example.domain.core.budget.TokenUsageRecord(
+                                    inputTokens = it.inputTokens,
+                                    outputTokens = it.outputTokens,
+                                    cachedTokens = it.cachedTokens,
+                                    providerTotalTokens = it.totalTokens,
+                                    isEstimate = it.isEstimated
+                                )
+                            } ?: com.example.domain.core.budget.TokenUsageRecord(),
+                            isActualProviderReport = attribution != null && !attribution.isEstimated,
+                            // Stage 1A — the canonical billable-operation
+                            // identity + the proven dispatch state.
+                            stepIndex = stepIndex,
+                            attempt = context.attempt,
+                            dispatchState = dispatchState,
+                            hasUsageReport = attribution != null
                         )
                     )
                 }.getOrNull()
-                if (record != null) {
+                if (record != null && attribution != null) {
                     collector.emit(
                         ExecutionEvent.CostRecorded(
                             executionId = executionId,
@@ -1761,6 +1866,79 @@ class AgentOrchestrator(
      * 4096 is the documented heuristic bound, labeled as an estimate).
      */
     private val ESTIMATED_STEP_TOKENS = 4096
+
+    /**
+     * Stage 1A — the loop's live view of the CURRENT billable step, shared
+     * with executeTaskStream's cancellation handler so a cancellation proven
+     * to land BEFORE dispatch releases that step's reservation honestly,
+     * while a cancellation during/after dispatch keeps it conservative
+     * (UNKNOWN cost, reclaimed by the hold's bounded TTL).
+     */
+    private class InFlightStep(
+        @Volatile var executionId: String? = null,
+        @Volatile var stepIndex: Int? = null,
+        @Volatile var attempt: Int? = null,
+        @Volatile var taskId: String? = null,
+        @Volatile var workspaceId: String? = null,
+        @Volatile var agentId: String? = null,
+        /** True once executeAction was entered (conservative from there on:
+         *  the provider call may have started — never released as "unsent"). */
+        @Volatile var dispatchStarted: Boolean = false
+    ) {
+        fun resetForStep(
+            executionId: String,
+            stepIndex: Int,
+            attempt: Int,
+            taskId: String,
+            workspaceId: String?,
+            agentId: String
+        ) {
+            this.executionId = executionId
+            this.stepIndex = stepIndex
+            this.attempt = attempt
+            this.taskId = taskId
+            this.workspaceId = workspaceId
+            this.agentId = agentId
+            this.dispatchStarted = false
+        }
+    }
+
+    /**
+     * Stage 1A (lifecycle arm D) — best-effort release of the current step's
+     * reservations when it is PROVEN the provider call never started (the
+     * in-flight tracker was never marked dispatched). Called from the
+     * pre-dispatch governance breaks and the cancellation handler. Pure
+     * bookkeeping: idempotent, no fabricated ledger entry, an honest no-op
+     * when no hold exists (legacy workspaces / unpriced steps).
+     */
+    private suspend fun releaseIfUndispatched(inFlightStep: InFlightStep) {
+        val governance = economicGovernanceService ?: return
+        val execId = inFlightStep.executionId ?: return
+        val stepIdx = inFlightStep.stepIndex ?: return
+        // A step whose dispatch WAS started must never be released as
+        // "unsent" — its cost is UNKNOWN, and the bounded TTL reclaims it.
+        if (inFlightStep.dispatchStarted) return
+        runCatching {
+            governance.releaseUndispatchedStepHold(
+                UsageAccountingInput(
+                    executionId = execId,
+                    taskId = inFlightStep.taskId,
+                    workspaceId = inFlightStep.workspaceId,
+                    agentId = inFlightStep.agentId,
+                    providerId = null,
+                    serviceId = null,
+                    modelId = null,
+                    resourceId = null,
+                    usage = com.example.domain.core.budget.TokenUsageRecord(),
+                    isActualProviderReport = false,
+                    stepIndex = stepIdx,
+                    attempt = inFlightStep.attempt,
+                    dispatchState = com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED,
+                    hasUsageReport = false
+                )
+            )
+        }
+    }
 
     /**
      * Resumes execution of a previously persisted task from Room database.

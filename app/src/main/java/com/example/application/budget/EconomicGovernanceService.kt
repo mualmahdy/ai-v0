@@ -403,8 +403,9 @@ class EconomicGovernanceService(
 
     /**
      * Suspend variant used by the orchestrator's post-execution accounting:
-     * returns the persisted ledger record (or null on accounting failure) so
-     * the caller can surface a real CostRecorded event — usage AND cost are
+     * returns the persisted ledger record (or null on accounting failure,
+     * or null when there was no usage report to record — Stage 1A) so the
+     * caller can surface a real CostRecorded event — usage AND cost are
      * whatever they truly are (UNKNOWN stays UNKNOWN).
      */
     suspend fun accountUsageSuspend(input: UsageAccountingInput): UsageCostRecord? {
@@ -416,11 +417,50 @@ class EconomicGovernanceService(
         }
     }
 
+    /**
+     * Stage 1A (lifecycle arm D) — release the reservations of a billable
+     * step that was PROVEN never dispatched (the provider call definitely
+     * never started — an idempotent intent replay, a pre-dispatch rejection
+     * or a governance break that stopped the step before dispatch). Pure
+     * hold-lifecycle bookkeeping: no usage report, no cost-ledger record, no
+     * fabricated entry; the release itself is idempotent and records only a
+     * RELEASE settlement (G06). Best-effort by the accounting discipline —
+     * never breaks the caller — and an honest no-op without an active
+     * accounting policy (no hold ever existed).
+     */
+    suspend fun releaseUndispatchedStepHold(input: UsageAccountingInput) {
+        val settlement = holdSettlement ?: return
+        if (holdBasedBudgetCore == null) return
+        try {
+            settlement.settleExecutionUsage(
+                input = input.copy(
+                    dispatchState = com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED,
+                    hasUsageReport = input.hasUsageReport
+                ),
+                actualCostMicroUnits = null,
+                costCurrency = DEFAULT_CURRENCY
+            )
+        } catch (t: Throwable) {
+            t.rethrowIfCancellation()
+            // Accounting is best-effort by design; telemetry failure must
+            // not cascade.
+        }
+    }
+
     private suspend fun accountUsageInternal(input: UsageAccountingInput): UsageCostRecord? {
         return ledgerMutex.withLock {
             val resolution = resolvePricing(input.providerId, input.serviceId, input.modelId)
             val entry = resolution.resolvedEntry
             val isLocal = input.providerId != null && isLocalProviderId(input.providerId)
+
+            // Stage 1A — is there a usage REPORT at all? A missing report is
+            // NOT zero usage: cost stays UNKNOWN (never fabricated) and the
+            // hold-lifecycle decision below still runs (a proven-undispatched
+            // step releases its reservation; a dispatched one keeps it under
+            // the bounded TTL). A report — even an all-zero one — is real
+            // evidence: zero tokens with resolved pricing is CONCLUSIVELY
+            // zero cost (arm B of the settlement decision table).
+            val usageReported = input.usageReported
 
             val billingClass = when {
                 isLocal -> BillingClass.LOCAL
@@ -428,7 +468,9 @@ class EconomicGovernanceService(
                 else -> BillingClass.UNKNOWN
             }
 
-            val costMicro: Long? = if (entry == null || isLocal) null else computeCostMicro(
+            val costMicro: Long? = if (!usageReported) {
+                null // no usage report — the cost is UNKNOWN, never zero
+            } else if (entry == null || isLocal) null else computeCostMicro(
                 inputTokens = input.usage.inputTokens,
                 outputTokens = input.usage.outputTokens,
                 cachedTokens = input.usage.cachedTokens,
@@ -445,7 +487,10 @@ class EconomicGovernanceService(
                 else -> CostStatus.ESTIMATED
             }
 
-            val record = UsageCostRecord(
+            // Stage 1A: the legacy cost ledger records CONSUMPTION — no
+            // record is fabricated for a step with no usage report (the
+            // hold lifecycle below still runs for such steps).
+            val record: UsageCostRecord? = if (usageReported) UsageCostRecord(
                 id = "clr_${UUID.randomUUID()}",
                 executionId = input.executionId,
                 taskId = input.taskId,
@@ -461,14 +506,16 @@ class EconomicGovernanceService(
                 costStatus = costStatus,
                 billingClass = billingClass,
                 timestampEpochMs = input.timestampEpochMs
-            )
-            costLedger.insert(record)
+            ) else null
+            if (record != null) {
+                costLedger.insert(record)
+            }
 
             // ---- Stage-2 hooks (I-5 + breakdown). Both are best-effort by
             // the same discipline as telemetry: accounting must never break
             // because an auxiliary record failed. ----
             var breakdownUsageRecordId: String? = null
-            if (costBreakdownRecorder != null) {
+            if (costBreakdownRecorder != null && record != null) {
                 // Build-fix BF-8 (caught by the Stage-3 verification build):
                 // a member property's null-check does not smart-cast inside
                 // the runCatching lambda — snapshot to a local first.
@@ -492,6 +539,11 @@ class EconomicGovernanceService(
                     }
                 }
             }
+            // Stage 1A: the hold-lifecycle decision runs for EVERY accounted
+            // step — including steps with no usage report (their reservation
+            // is released when proven undispatched, retained under the TTL
+            // when dispatched with unknown cost). It must never be bypassed
+            // by an `attribution != null && totalTokens > 0`-style guard.
             if (holdSettlement != null && holdBasedBudgetCore != null) {
                 // Build-fix BF-9 (same family as BF-8, same root cause):
                 // member properties do not smart-cast into the runCatching
@@ -527,31 +579,35 @@ class EconomicGovernanceService(
             // atomically by RateLimitGovernor.tryAcquire() at admission
             // time; incrementing RPM here as well would double-count every
             // admitted request.
-            val rateKey = rateScopeKeyFor(input.providerId, input.modelId, input.resourceId)
-            if (rateKey != null) {
-                rateLimitGovernor.recordTokens(rateKey, input.usage.totalTokens)
+            if (record != null) {
+                val rateKey = rateScopeKeyFor(input.providerId, input.modelId, input.resourceId)
+                if (rateKey != null) {
+                    rateLimitGovernor.recordTokens(rateKey, input.usage.totalTokens)
+                }
             }
 
             // Telemetry (never blocking, never throwing into the runtime)
-            val dims = MetricDimensions(
-                executionId = input.executionId,
-                workspaceId = input.workspaceId,
-                providerId = input.providerId,
-                agentId = input.agentId
-            )
-            telemetry?.let { tel ->
-                runCatching {
-                    tel.recordTokenUsage(
-                        dimensions = dims,
-                        promptTokens = input.usage.inputTokens,
-                        completionTokens = input.usage.outputTokens,
-                        providerId = input.providerId ?: "unknown"
-                    )
-                    if (costMicro != null) {
-                        // Telemetry COST_USD is normalized micro-USD; only
-                        // recorded when the currency IS USD (no silent FX).
-                        if (currency == "USD") {
-                            tel.recordCost(dims, costMicro)
+            if (record != null) {
+                val dims = MetricDimensions(
+                    executionId = input.executionId,
+                    workspaceId = input.workspaceId,
+                    providerId = input.providerId,
+                    agentId = input.agentId
+                )
+                telemetry?.let { tel ->
+                    runCatching {
+                        tel.recordTokenUsage(
+                            dimensions = dims,
+                            promptTokens = input.usage.inputTokens,
+                            completionTokens = input.usage.outputTokens,
+                            providerId = input.providerId ?: "unknown"
+                        )
+                        if (costMicro != null) {
+                            // Telemetry COST_USD is normalized micro-USD; only
+                            // recorded when the currency IS USD (no silent FX).
+                            if (currency == "USD") {
+                                tel.recordCost(dims, costMicro)
+                            }
                         }
                     }
                 }

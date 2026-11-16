@@ -107,9 +107,23 @@ class HoldBasedBudgetGate(
                     scopeType = pdmScopeType,
                     platformObjectId = scopeId,
                     amountMicroUnits = estimatedMicro,
-                    reason = "exec:${request.executionId}",
-                    idempotencyKey = "auth:${request.executionId}:$pdmScopeType:$scopeId",
-                    expiresAtEpochMs = null,
+                    // Stage 1A — the reservation identity is the canonical
+                    // billable-operation triple (executionId, stepIndex,
+                    // attempt) carried by EXPLICIT request fields (never
+                    // reason-string parsing), centralized in HoldKeys so the
+                    // decide gate, the pre-dispatch LLM gate and settlement
+                    // can never diverge again. Legacy callers (stepIndex ==
+                    // null) keep the exact pre-Stage-1A key formats.
+                    reason = HoldKeys.holdReason(request.executionId, request.stepIndex, request.attempt),
+                    idempotencyKey = HoldKeys.authorizeIdempotencyKey(
+                        request.executionId, request.stepIndex, request.attempt, pdmScopeType, scopeId
+                    ),
+                    // Stage 1A — bounded reservation lifetime: an abandoned
+                    // hold stops suppressing availability after the TTL via
+                    // the EXISTING lazy balance filter (no sweep/restart
+                    // needed). A subsequent billable dispatch always
+                    // authorizes fresh (new step/attempt identity).
+                    expiresAtEpochMs = now + HoldKeys.DEFAULT_HOLD_TTL_MS,
                     nowEpochMs = now
                 )
             ) {
@@ -119,7 +133,10 @@ class HoldBasedBudgetGate(
                         reason = "HOLD-BASED BUDGET: حجز ${reservation.holdAmountMicroUnits} micro-" +
                             "${active.policy.currency} للنطاق ${pdmScopeType}:$scopeId " +
                             "(hold=${reservation.holdId})؛ المتاح بعده ${reservation.availableAfterMicroUnits}" +
-                            if (reservation.replayed) " [replay]" else "",
+                            (
+                                if (reservation.replayed) " [replay]"
+                                else " (ينتهي بعد ${HoldKeys.DEFAULT_HOLD_TTL_MS / 3_600_000L} ساعة)"
+                                ),
                         evaluatedScopes = evaluatedScopes,
                         rateLimitStatus = rateLimitStatus,
                         estimate = estimate,

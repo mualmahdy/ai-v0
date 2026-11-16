@@ -176,6 +176,21 @@ interface BudgetHoldDao {
      */
     @Query("SELECT * FROM budget_hold WHERE reason = :reason ORDER BY created_at_epoch_ms")
     suspend fun allForReason(reason: String): List<BudgetHoldEntity>
+
+    /**
+     * Stage 1A — bound pre-fix UNBOUNDED reservations: every mutable hold
+     * still carrying a NULL expiry (written before the finite-TTL policy)
+     * gets expires_at = created_at + TTL. Non-destructive bookkeeping:
+     * no row is deleted, no ledger entry rewritten; holds whose TTL window
+     * already elapsed become lazily-expired immediately (the balance query
+     * filter), recent ones keep their remaining window. Safe to re-run
+     * (the WHERE clause only matches NULL-expiry rows).
+     */
+    @Query(
+        "UPDATE budget_hold SET expires_at_epoch_ms = created_at_epoch_ms + :ttlMs " +
+            "WHERE status IN ('ACTIVE','PARTIALLY_SETTLED') AND expires_at_epoch_ms IS NULL"
+    )
+    suspend fun stampExpiryForUnbounded(ttlMs: Long): Int
 }
 
 @Dao

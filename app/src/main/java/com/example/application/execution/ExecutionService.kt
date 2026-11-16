@@ -50,7 +50,16 @@ data class ExecutionResult(
      * is provider-reported or estimated, plus cached-token detail. Null for
      * non-token actions (search/tool/…) whose cost is not token-metered.
      */
-    val usageDetail: TokenUsageAttribution? = null
+    val usageDetail: TokenUsageAttribution? = null,
+    /**
+     * Stage 1A — PROOF that the provider call of this step was ENTERED
+     * (set immediately before the adapter call starts). The hold-lifecycle
+     * decision depends on it: a step proven never dispatched releases its
+     * reservation; a dispatched step with no usable usage report keeps it
+     * (UNKNOWN is never zero). Default false = honestly not dispatched
+     * (every pre-dispatch rejection path).
+     */
+    val providerDispatched: Boolean = false
 )
 
 /**
@@ -72,6 +81,16 @@ data class TokenUsageAttribution(
 
 /** Returns this value when positive, otherwise [fallback]. */
 private fun Int.ifPositiveOr(fallback: Int): Int = if (this > 0) this else fallback
+
+/**
+ * Stage 1A — marks a result whose provider call was ENTERED (search /
+ * RAG-embedding / delegation child execution). The hold-lifecycle decision
+ * reads [ExecutionResult.providerDispatched]: a step proven never dispatched
+ * releases its reservation; a dispatched step without a usable usage report
+ * keeps it under the bounded-expiry policy (UNKNOWN is never zero).
+ */
+private fun dispatched(result: ExecutionResult): ExecutionResult =
+    result.copy(providerDispatched = true)
 
 /**
  * ============================================================================
@@ -681,13 +700,22 @@ class ExecutionService(
         agent: AgentDefinition,
         conversationHistory: List<LlmMessage> = emptyList(),
         executionId: String = UUID.randomUUID().toString(),
-        onEvent: suspend (ExecutionEvent) -> Unit = {}
+        onEvent: suspend (ExecutionEvent) -> Unit = {},
+        /**
+         * Stage 1A — the billable-operation identity the pre-dispatch LLM
+         * economic gate authorizes under ((executionId, stepIndex, attempt)).
+         * Must equal the decide-time gate's identity so the two authorizations
+         * share ONE reservation (the second replays, never duplicates).
+         * Null keeps the legacy per-execution grammar.
+         */
+        stepIndex: Int? = null,
+        attempt: Int? = null
     ): ExecutionResult {
         val startTime = System.currentTimeMillis()
 
         return when (action.type) {
             DecisionActionType.SELECT_MODEL, DecisionActionType.EXECUTE_STEP -> {
-                executeLlmStep(action, context, agent, conversationHistory, executionId, startTime, onEvent)
+                executeLlmStep(action, context, agent, conversationHistory, executionId, startTime, onEvent, stepIndex, attempt)
             }
             DecisionActionType.SEARCH -> {
                 executeSearch(action, context, startTime, onEvent, executionId)
@@ -714,7 +742,7 @@ class ExecutionService(
                 executePlanAction(action, context, startTime, onEvent, executionId)
             }
             DecisionActionType.RETRY -> {
-                executeRetryAction(action, context, agent, conversationHistory, executionId, startTime, onEvent)
+                executeRetryAction(action, context, agent, conversationHistory, executionId, startTime, onEvent, stepIndex, attempt)
             }
             DecisionActionType.ASK_USER -> {
                 val reason = action.payload["reason"] ?: "مطلوب تفاعل المستخدم."
@@ -814,7 +842,9 @@ class ExecutionService(
         conversationHistory: List<LlmMessage>,
         executionId: String,
         startTime: Long,
-        onEvent: suspend (ExecutionEvent) -> Unit
+        onEvent: suspend (ExecutionEvent) -> Unit,
+        stepIndex: Int? = null,
+        attempt: Int? = null
     ): ExecutionResult {
         // Per Phase 4: DecisionRecord is REQUIRED. No silent fallback.
         val (decisionRecord, rejection) = requireDecisionRecord(action, executionId, startTime, onEvent)
@@ -927,7 +957,13 @@ class ExecutionService(
                 // (DecisionService.applyEconomicGate) — one step is expected
                 // to consume about a quarter of the remaining budget, capped.
                 expectedTotalTokens = (context.remainingTokenBudget / 4).coerceAtMost(4000),
-                actionTypeCode = "LLM_STEP"
+                actionTypeCode = "LLM_STEP",
+                // Stage 1A — SAME identity as the decide-time gate for this
+                // step: the second authorization REPLAYS the decide-time
+                // hold (one reservation per billable operation), it never
+                // duplicates it.
+                stepIndex = stepIndex,
+                attempt = attempt
             )
             val gateVerdict = try {
                 economicGovernance.authorize(gateRequest)
@@ -1078,6 +1114,11 @@ class ExecutionService(
         var degradedReason: DegradedReason? = null
         var isSuccess = true
         var errorMessage: String? = null
+        // Stage 1A — set immediately before the provider call is ENTERED;
+        // every earlier exit (record required, adapter resolution, offline
+        // policy, circuit-open, economic-gate denial) honestly reports a
+        // NOT-dispatched step so its reservation is released.
+        var providerDispatched = false
 
         // FIX F-7 (delegation loop): tool results are fed back to the model for a
         // final synthesis round (bounded to MAX_TOOL_ROUNDS so a tool-requesting
@@ -1096,6 +1137,7 @@ class ExecutionService(
         var toolRounds = 0
 
         try {
+            providerDispatched = true
             provider.stream(request, executionId).collect { event ->
                 when (event) {
                     is ExecutionEvent.ContentChunk -> {
@@ -1373,7 +1415,17 @@ class ExecutionService(
             isDegraded = isDegraded,
             degradedReason = degradedReason,
             // GOVERNANCE PHASE: attributed usage for the cost ledger.
-            usageDetail = if (totalTokens > 0 || promptTokens > 0 || completionTokens > 0) {
+            // Stage 1A — a COMPLETED (successful) dispatched call always
+            // reports its usage attribution, even an all-zero one: a call
+            // that consumed nothing is CONCLUSIVELY known zero-cost and its
+            // reservation must be released, not left pinned. A FAILED call
+            // reports attribution only when tokens were actually seen —
+            // zero tokens on a failure is UNKNOWN (never fabricated zero).
+            providerDispatched = providerDispatched,
+            usageDetail = if (
+                providerDispatched &&
+                (isSuccess || totalTokens > 0 || promptTokens > 0 || completionTokens > 0)
+            ) {
                 TokenUsageAttribution(
                     providerId = attributionProviderId,
                     serviceId = attributionServiceId,
@@ -1496,7 +1548,7 @@ class ExecutionService(
                 val formattedItems = rankedItems.map { ranked ->
                     "[${ranked.item.title}] (${ranked.item.url}) [درجة=${"%.2f".format(ranked.finalScore)}]"
                 }
-                return ExecutionResult(
+                return dispatched(ExecutionResult(
                     isSuccess = true,
                     outputText = "تم استرجاع ${rankedItems.size} نتيجة عبر مسار البحث الذكي " +
                         "(${intelligentResult.decomposition.subQueries.size} استعلام فرعي، ${intelligentResult.citations.size} استشهاد).",
@@ -1507,13 +1559,14 @@ class ExecutionService(
                         "searchIntelligent" to true
                     ),
                     latencyMs = System.currentTimeMillis() - startTime
-                )
+                ))
             }
         }
 
         // Plain single-query path (honest fallback when the intelligence
-        // layer is unavailable or returned nothing).
-        return when (val outcome = searchProvider.search(SearchQuery(query = query))) {
+        // layer is unavailable or returned nothing). Stage 1A: every outcome
+        // below PROVES the search provider was called (dispatched).
+        return dispatched(when (val outcome = searchProvider.search(SearchQuery(query = query))) {
             is Outcome.Success -> {
                 val items = outcome.value.items
                 val formattedItems = items.map { "[${it.title}] (${it.url}): ${it.snippet}" }
@@ -1565,7 +1618,7 @@ class ExecutionService(
                     latencyMs = System.currentTimeMillis() - startTime
                 )
             }
-        }
+        })
     }
 
     /**
@@ -1615,7 +1668,9 @@ class ExecutionService(
         }
 
         if (ragContext != null && ragContext.retrievedChunks.isNotEmpty()) {
-            return ExecutionResult(
+            // Stage 1A: the RAG pipeline called the (billable) embedding
+            // provider — the step was dispatched.
+            return dispatched(ExecutionResult(
                 isSuccess = true,
                 outputText = "تم استرجاع ${ragContext.retrievedChunks.size} مقطع معرفي من قاعدة المعرفة " +
                     "(الوضع: ${ragContext.retrievedChunks.firstOrNull()?.retrievalMode?.name ?: "—"}).",
@@ -1626,7 +1681,7 @@ class ExecutionService(
                     "ragSources" to ragContext.retrievedChunks.map { it.chunk.documentTitle }
                 ),
                 latencyMs = System.currentTimeMillis() - startTime
-            )
+            ))
         }
 
         // Honest degradation: pipeline unavailable or returned nothing.
@@ -2183,7 +2238,9 @@ class ExecutionService(
         conversationHistory: List<LlmMessage>,
         executionId: String,
         startTime: Long,
-        onEvent: suspend (ExecutionEvent) -> Unit
+        onEvent: suspend (ExecutionEvent) -> Unit,
+        stepIndex: Int? = null,
+        attempt: Int? = null
     ): ExecutionResult {
         delay(300L) // Exponential backoff
         return executeLlmStep(
@@ -2193,7 +2250,9 @@ class ExecutionService(
             conversationHistory = conversationHistory,
             executionId = executionId,
             startTime = startTime,
-            onEvent = onEvent
+            onEvent = onEvent,
+            stepIndex = stepIndex,
+            attempt = attempt
         )
     }
 
@@ -2339,52 +2398,58 @@ class ExecutionService(
             )
         )
 
-        return try {
-            // The child executes with structured concurrency: cancelling the
-            // parent's coroutine cancels the child at the next suspension point.
-            val childOutcome = withTimeoutOrNull(context.task.constraints.timeoutMs.coerceAtLeast(1_000L)) {
-                delegateExecutor(childAgent, childTask)
-            }
-            when (childOutcome) {
-                null -> ExecutionResult(
-                    isSuccess = false,
-                    errorDescription = "CHILD_TIMEOUT: تجاوز الوكيل الابن '$targetAgentId' المهلة المخصصة (${childTask.constraints.timeoutMs}ms).",
-                    tokensConsumed = 0,
-                    latencyMs = System.currentTimeMillis() - startTime
-                )
-                else -> {
-                    val isFailure = childOutcome is Outcome.Error
-                    val childText = when (childOutcome) {
-                        is Outcome.Success -> childOutcome.value
-                        is Outcome.Degraded -> childOutcome.partialValue ?: ""
-                        is Outcome.Error -> childOutcome.failure
-                    }
-                    ExecutionResult(
-                        isSuccess = !isFailure,
-                        outputText = childText,
-                        outputData = mapOf(
-                            "delegatedToAgentId" to targetAgentId,
-                            "childTaskId" to childTask.id.value,
-                            "childOutput" to childText,
-                            "delegationDepth" to (depth + 1)
-                        ),
-                        tokensConsumed = childText.length / 4,
-                        errorDescription = (childOutcome as? Outcome.Error)?.failure,
-                        isDegraded = childOutcome is Outcome.Degraded,
-                        degradedReason = (childOutcome as? Outcome.Degraded)?.reason,
+        // Stage 1A: from this point on the delegation machinery actually
+        // launched the child execution — the step was dispatched (the
+        // parent's delegate-step reservation stays protected until bounded
+        // expiry; the child's own holds settle under the child identity).
+        return dispatched(
+            try {
+                // The child executes with structured concurrency: cancelling the
+                // parent's coroutine cancels the child at the next suspension point.
+                val childOutcome = withTimeoutOrNull(context.task.constraints.timeoutMs.coerceAtLeast(1_000L)) {
+                    delegateExecutor(childAgent, childTask)
+                }
+                when (childOutcome) {
+                    null -> ExecutionResult(
+                        isSuccess = false,
+                        errorDescription = "CHILD_TIMEOUT: تجاوز الوكيل الابن '$targetAgentId' المهلة المخصصة (${childTask.constraints.timeoutMs}ms).",
+                        tokensConsumed = 0,
                         latencyMs = System.currentTimeMillis() - startTime
                     )
+                    else -> {
+                        val isFailure = childOutcome is Outcome.Error
+                        val childText = when (childOutcome) {
+                            is Outcome.Success -> childOutcome.value
+                            is Outcome.Degraded -> childOutcome.partialValue ?: ""
+                            is Outcome.Error -> childOutcome.failure
+                        }
+                        ExecutionResult(
+                            isSuccess = !isFailure,
+                            outputText = childText,
+                            outputData = mapOf(
+                                "delegatedToAgentId" to targetAgentId,
+                                "childTaskId" to childTask.id.value,
+                                "childOutput" to childText,
+                                "delegationDepth" to (depth + 1)
+                            ),
+                            tokensConsumed = childText.length / 4,
+                            errorDescription = (childOutcome as? Outcome.Error)?.failure,
+                            isDegraded = childOutcome is Outcome.Degraded,
+                            degradedReason = (childOutcome as? Outcome.Degraded)?.reason,
+                            latencyMs = System.currentTimeMillis() - startTime
+                        )
+                    }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ExecutionResult(
+                    isSuccess = false,
+                    errorDescription = "CHILD_EXECUTION_ERROR: فشل تنفيذ الوكيل الابن '$targetAgentId': ${e.message}",
+                    latencyMs = System.currentTimeMillis() - startTime
+                )
             }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            ExecutionResult(
-                isSuccess = false,
-                errorDescription = "CHILD_EXECUTION_ERROR: فشل تنفيذ الوكيل الابن '$targetAgentId': ${e.message}",
-                latencyMs = System.currentTimeMillis() - startTime
-            )
-        }
+        )
     }
 
     /**
