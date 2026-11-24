@@ -33,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -131,8 +132,8 @@ fun BudgetScreen(
         item {
             BudgetEditorCard(
                 state = state,
-                onConfigure = { amount, overage, days ->
-                    viewModel.configureWorkspaceBudget(amount, overage, days)
+                onConfigure = { amount, currency, overage, days ->
+                    viewModel.configureWorkspaceBudget(amount, currency, overage, days)
                 }
             )
         }
@@ -155,6 +156,7 @@ fun BudgetScreen(
                 row = row,
                 selected = row.periodId == state.selectedPeriodId,
                 utilization = viewModel.utilization(row),
+                lifecycle = viewModel.lifecycleOf(row),
                 onClick = { viewModel.selectPeriod(row.periodId) }
             )
         }
@@ -216,7 +218,7 @@ fun BudgetScreen(
 
         // ---------- STAGE 2: pricing management ----------
         item {
-            SectionTitle(text = "إدارة التسعير الموثّق (${state.pricingEntries.size})")
+            SectionTitle(text = "إدارة التسعير — أدلة مُدخلة يدوياً (${state.pricingEntries.size})")
         }
         item {
             PricingManagementCard(
@@ -224,17 +226,19 @@ fun BudgetScreen(
                 onCheck = { provider, service, model ->
                     viewModel.checkPricing(provider, service, model)
                 },
-                onSave = { provider, service, model, inPrice, outPrice, cachedPrice, currency ->
+                onSave = { provider, service, model, inPrice, outPrice, currency, evidence ->
                     viewModel.savePricing(
                         providerId = provider,
                         serviceId = service,
                         modelId = model,
-                        inputPricePerMillionUsd = inPrice,
-                        outputPricePerMillionUsd = outPrice,
-                        cachedInputPricePerMillionUsd = cachedPrice,
-                        currency = currency
+                        inputPricePerMillionText = inPrice,
+                        outputPricePerMillionText = outPrice,
+                        cachedInputPricePerMillionText = null,
+                        currencyText = currency,
+                        evidenceReference = evidence
                     )
-                }
+                },
+                onResync = { viewModel.resyncPricingCatalog() }
             )
         }
         if (state.pricingEntries.isEmpty()) {
@@ -403,7 +407,9 @@ private fun AuthorityCard(
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = "ملاحظة أمانة (I-3): السقف النقدي يُفرض فقط عند معرفة التسعير؛ " +
-                    "التكاليف مجهولة التسعير تمضي بلا حجز وتُقيَّد فعلية عند التسوية.",
+                    "التكاليف مجهولة التسعير تمضي بلا حجز وتُقيَّد فعلية عند التسوية. " +
+                    "(WS-A) وإذا كان التسعير بعملة غير عملة السياسة وجب وجود قاعدة تحويل مسجّلة — " +
+                    "بدونها لا يُنشأ حجز ولا يُفترض سعر 1:1، وتُسجّل التكلفة الفعلية كدليل غير محوّل.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -414,9 +420,10 @@ private fun AuthorityCard(
 @Composable
 private fun BudgetEditorCard(
     state: com.example.presentation.viewmodel.BudgetViewModel.BudgetUiState,
-    onConfigure: (Double, String, Int) -> Unit
+    onConfigure: (String, String, String, String) -> Unit
 ) {
     var amountInput by remember { mutableStateOf("") }
+    var currencyInput by remember { mutableStateOf("USD") }
     var overagePolicy by remember {
         mutableStateOf(com.example.application.budget.BudgetLedgerService.OVERAGE_HARD_LIMIT)
     }
@@ -437,21 +444,33 @@ private fun BudgetEditorCard(
             )
             Text(
                 text = "إنشاء أول سياسة، أو إصدار نسخة جديدة عند التعديل، أو فتح فترة جديدة بعد انتهاء الحالية. " +
-                    "القيم بالدولار (USD) وتُحوَّل إلى micro بدقة.",
+                    "المبلغ يُقرأ بكسور عشرية بدقة مطلقة (حتى 6 خانات) ويُحوّل إلى micro — لا قيم سالبة، ولا NaN/Infinity، ولا اقتطاع ثنائي.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(10.dp))
-            OutlinedTextField(
-                value = amountInput,
-                onValueChange = { amountInput = it },
-                label = { Text("سقف الفترة (USD)") },
-                placeholder = { Text("مثال: 5.00") },
-                singleLine = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("budget_editor_amount")
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = amountInput,
+                    onValueChange = { amountInput = it },
+                    label = { Text("سقف الفترة") },
+                    placeholder = { Text("مثال: 5.00") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("budget_editor_amount")
+                )
+                OutlinedTextField(
+                    value = currencyInput,
+                    onValueChange = { currencyInput = it },
+                    label = { Text("العملة") },
+                    placeholder = { Text("USD") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .width(96.dp)
+                        .testTag("budget_editor_currency")
+                )
+            }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = "سلوك بلوغ السقف",
@@ -485,11 +504,10 @@ private fun BudgetEditorCard(
             Spacer(modifier = Modifier.height(10.dp))
             Button(
                 onClick = {
-                    val amount = amountInput.toDoubleOrNull()
-                    val days = periodDaysInput.toIntOrNull()?.coerceIn(1, 3650) ?: 30
-                    if (amount != null && amount >= 0) {
-                        onConfigure(amount, overagePolicy, days)
-                    }
+                    // STAGE 2B (WS-F): raw strings — the ViewModel validates
+                    // with exact decimal arithmetic and surfaces a VISIBLE
+                    // error; nothing invalid is silently ignored or coerced.
+                    onConfigure(amountInput, currencyInput, overagePolicy, periodDaysInput)
                 },
                 enabled = amountInput.isNotBlank() && !state.isSavingBudget,
                 modifier = Modifier.testTag("budget_editor_save")
@@ -505,6 +523,17 @@ private fun BudgetEditorCard(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("تكوين / تحديث الميزانية")
                 }
+            }
+            // STAGE 2B (WS-F): the editor's validation error channel —
+            // invalid input is DISPLAYED, never silently dropped.
+            state.inputError?.let { error ->
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag("budget_editor_validation")
+                )
             }
             state.managementMessage?.let {
                 Spacer(modifier = Modifier.height(6.dp))
@@ -522,7 +551,8 @@ private fun BudgetEditorCard(
 private fun PricingManagementCard(
     state: com.example.presentation.viewmodel.BudgetViewModel.BudgetUiState,
     onCheck: (String, String?, String?) -> Unit,
-    onSave: (String, String?, String?, Double?, Double?, Double?, String) -> Unit
+    onSave: (String, String?, String?, String?, String?, String, String?) -> Unit,
+    onResync: () -> Unit
 ) {
     var providerInput by remember { mutableStateOf("") }
     var serviceInput by remember { mutableStateOf("") }
@@ -530,6 +560,7 @@ private fun PricingManagementCard(
     var inputPriceInput by remember { mutableStateOf("") }
     var outputPriceInput by remember { mutableStateOf("") }
     var currencyInput by remember { mutableStateOf("USD") }
+    var evidenceInput by remember { mutableStateOf("") }
 
     Card(
         modifier = Modifier
@@ -540,13 +571,15 @@ private fun PricingManagementCard(
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Text(
-                text = "تسجيل تسعير موثّق (USER_CONFIG)",
+                text = "تسجيل تسعير مُدخل يدوياً (USER_CONFIG)",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
                 text = "أدخل الأسعار التي تحققت منها من نشرة أسعار مزوّدك — لكل مليون رمز. " +
-                    "الدليل يُوسم USER_CONFIG (وليس اكتشافاً من المزوّد) ويُنسخ إلى فهرس الإصدارات المؤرّخ.",
+                    "الوسم USER_CONFIG يعني: مصدر بشري مُدخل يدوياً (وليس اكتشافاً من المزوّد، وليس تحققاً مستقلاً) — " +
+                    "كل تسعير يُسجَّل غير مُتحقق منه بشكل مستقل، ويُنسخ إلى فهرس الإصدارات المؤرّخ. " +
+                    "استخدم حقل «مرجع الدليل» لتوثيق ما تحققت منه (رابط/مستند).",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -610,34 +643,72 @@ private fun PricingManagementCard(
                     onValueChange = { inputPriceInput = it },
                     label = { Text("دخل/مليون") },
                     singleLine = true,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("pricing_form_input_price")
                 )
                 OutlinedTextField(
                     value = outputPriceInput,
                     onValueChange = { outputPriceInput = it },
                     label = { Text("خرج/مليون") },
                     singleLine = true,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("pricing_form_output_price")
                 )
                 OutlinedTextField(
                     value = currencyInput,
                     onValueChange = { currencyInput = it },
                     label = { Text("العملة") },
                     singleLine = true,
-                    modifier = Modifier.width(88.dp)
+                    modifier = Modifier
+                        .width(88.dp)
+                        .testTag("pricing_form_currency")
                 )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = evidenceInput,
+                onValueChange = { evidenceInput = it },
+                label = { Text("مرجع الدليل (اختياري — رابط نشرة الأسعار/مستند)") },
+                placeholder = { Text("https://provider.example.com/pricing") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("pricing_form_evidence")
+            )
+            // STAGE 2B (WS-F/WS-C): the pricing form's validation + sync-
+            // failure channels (the resync action is the recovery path).
+            state.inputError?.let { error ->
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag("pricing_form_validation")
+                )
+            }
+            if (state.managementMessage?.contains("إعادة مزامنة") == true) {
+                Spacer(modifier = Modifier.height(6.dp))
+                TextButton(onClick = onResync, modifier = Modifier.testTag("pricing_form_resync")) {
+                    Text("إعادة مزامنة الفهرس")
+                }
             }
             Spacer(modifier = Modifier.height(10.dp))
             Button(
                 onClick = {
+                    // STAGE 2B (WS-F): raw strings — the ViewModel parses with
+                    // exact decimal arithmetic and shows a visible error for
+                    // invalid input; the currency default is EXPLICIT here in
+                    // the UI (never silently guessed downstream).
                     onSave(
                         providerInput.trim(),
                         serviceInput.trim(),
                         modelInput.trim(),
-                        inputPriceInput.toDoubleOrNull(),
-                        outputPriceInput.toDoubleOrNull(),
-                        null,
-                        currencyInput.ifBlank { "USD" }
+                        inputPriceInput,
+                        outputPriceInput,
+                        currencyInput.ifBlank { "USD" },
+                        evidenceInput.trim().ifBlank { null }
                     )
                 },
                 enabled = providerInput.isNotBlank() &&
@@ -719,13 +790,26 @@ private fun PricingEntryCard(entry: com.example.domain.core.budget.PricingEntry)
                     MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
                 }
             ) {
+                // STAGE 2B (WS-D): honest provenance — user-entered evidence is
+                // NOT independently verified. The badge says exactly that;
+                // the evidence reference (if recorded) is shown beneath it.
                 Text(
-                    text = if (entry.provenance.startsWith("USER_CONFIG")) "موثّق يدوياً" else entry.provenance,
+                    text = if (entry.provenance.startsWith("USER_CONFIG")) {
+                        "مُدخل يدوياً — غير مُتحقق بشكل مستقل"
+                    } else entry.provenance,
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
                 )
             }
         }
+    }
+    if (entry.provenance.startsWith("USER_CONFIG") && entry.provenance.contains("|ref=")) {
+        Text(
+            text = "مرجع الدليل: ${entry.provenance.substringAfter("|ref=")}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 28.dp)
+        )
     }
 }
 
@@ -776,6 +860,7 @@ private fun PeriodBalanceCard(
     row: PeriodBalanceRow,
     selected: Boolean,
     utilization: com.example.application.budget.BudgetDashboardService.Utilization,
+    lifecycle: com.example.application.budget.BudgetDashboardService.PeriodLifecycle,
     onClick: () -> Unit
 ) {
     Card(
@@ -805,7 +890,13 @@ private fun PeriodBalanceCard(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
                 )
+                // STAGE 2B (WS-B): the DERIVED lifecycle badge — the period's
+                // displayed state reflects its actual lifecycle (a window that
+                // passed never shows as merely OPEN; outstanding obligations
+                // are named).
+                PeriodLifecycleBadge(lifecycle = lifecycle)
                 if (selected) {
+                    Spacer(modifier = Modifier.width(4.dp))
                     Surface(
                         shape = RoundedCornerShape(6.dp),
                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
@@ -821,7 +912,10 @@ private fun PeriodBalanceCard(
             }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "الفترة: ${formatDate(row.periodStartEpochMs)} ← ${formatDate(row.periodEndEpochMs)}",
+                text = "الفترة: ${formatDate(row.periodStartEpochMs)} ← ${formatDate(row.periodEndEpochMs)}" +
+                    // STAGE 2B (WS-E): the scope of every displayed period is
+                    // distinguishable (workspace id when the row carries it).
+                    (row.scopePlatformObjectId?.let { " • نطاق: $it" } ?: ""),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -863,6 +957,38 @@ private fun PeriodBalanceCard(
 }
 
 /** The utilization derivation type alias keeps the card decoupled from VM internals. */
+
+/** STAGE 2B (WS-B) — the derived lifecycle badge of a displayed period. */
+@Composable
+private fun PeriodLifecycleBadge(
+    lifecycle: com.example.application.budget.BudgetDashboardService.PeriodLifecycle
+) {
+    val (label, color) = when (lifecycle) {
+        com.example.application.budget.BudgetDashboardService.PeriodLifecycle.ACTIVE ->
+            "نشطة" to MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+        com.example.application.budget.BudgetDashboardService.PeriodLifecycle.ENDED ->
+            "منتهية" to MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+        com.example.application.budget.BudgetDashboardService.PeriodLifecycle.ENDED_WITH_OUTSTANDING_HOLDS ->
+            "منتهية — حجوزات قائمة" to MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+        com.example.application.budget.BudgetDashboardService.PeriodLifecycle.SUPERSEDED ->
+            "مُستبدلة بإصدار أحدث" to MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+        com.example.application.budget.BudgetDashboardService.PeriodLifecycle.SUPERSEDED_WITH_OUTSTANDING_HOLDS ->
+            "مُستبدلة — حجوزات قائمة" to MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+        com.example.application.budget.BudgetDashboardService.PeriodLifecycle.CLOSED ->
+            "مغلقة" to MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+    }
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = color,
+        modifier = Modifier.testTag("period_lifecycle_badge")
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+        )
+    }
+}
 
 @Composable
 private fun UtilizationLine(postedToLimit: Float, holdsToLimit: Float) {

@@ -12,6 +12,32 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
+ * STAGE 2B (WS-B): the accepted PERIOD LIFECYCLE CONTRACT of the modern
+ * accounting core (documented here because this service is the authoring
+ * surface that drives every stored transition):
+ *
+ *  1. A period that reaches its end timestamp stops being ACTIVE for every
+ *     decision (resolveActiveBudget filters by window) — its DERIVED
+ *     lifecycle (BudgetDashboardService.PeriodLifecycle) is ENDED, or
+ *     ENDED_WITH_OUTSTANDING_HOLDS while mutable TTL-unexpired holds remain.
+ *  2. A period superseded by a new policy version (createPolicyVersion)
+ *     derives SUPERSEDED — it can never receive new holds (its policy is
+ *     RETIRED) but keeps owning its outstanding holds and late settlements.
+ *  3. A period replaced by a new period under the SAME policy version
+ *     (rollover) behaves exactly like (1) for the ended window.
+ *  4. The stored status CLOSED is an EXPLICIT terminal marker, written only
+ *     when the window ended AND no mutable unexpired hold remains
+ *     (closeExpiredSettledPeriods). It is bookkeeping convergence, never a
+ *     precondition for honesty — the derived state is correct without it.
+ *  5. Late actual-cost attribution (Stage 1A DEBT-6 contract): a late
+ *     actual settles against the period of its SURVIVING hold when one
+ *     exists; with no surviving hold it posts under the CURRENTLY-ACTIVE
+ *     period of the governing scope at post time (BudgetLedgerService.
+ *     postUsageActual). Financial entries are never moved between periods
+ *     after the fact — the ledger is append-only.
+ */
+
+/**
  * ============================================================================
  * BudgetPolicyManagementService — STAGE 2 (economic governance activation)
  * ============================================================================
@@ -227,7 +253,12 @@ class BudgetPolicyManagementService(
         // ---- Case 3: same policy, but the governing window ended → open the
         //      NEXT period for the CURRENT policy version (a new period is
         //      not a policy edit; the immutable version keeps governing).
+        //      STAGE 2B (WS-B): the ended, fully-settled periods of the SAME
+        //      policy are explicitly CLOSED at rollover so stale periods
+        //      do not linger visually OPEN (periods with outstanding holds
+        //      stay OPEN — they still own accounting obligations).
         if (materialFieldsEqual && coveringPeriod == null) {
+            database.budgetPeriodDao().closeExpiredSettledPeriods(activePolicy.budgetPolicyId, now)
             val periodId = openPeriod(
                 policy = activePolicy,
                 limitMicroUnits = request.limitMicroUnits,

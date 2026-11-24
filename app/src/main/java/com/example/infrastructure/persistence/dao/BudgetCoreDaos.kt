@@ -107,6 +107,29 @@ interface BudgetPeriodDao {
 
     @Query("SELECT * FROM budget_period WHERE budget_policy_id = :policyId ORDER BY period_start_epoch_ms")
     suspend fun forPolicy(policyId: String): List<BudgetPeriodEntity>
+
+    @Query("SELECT * FROM budget_period WHERE period_status = 'OPEN' ORDER BY period_start_epoch_ms")
+    suspend fun openPeriods(): List<BudgetPeriodEntity>
+
+    /**
+     * STAGE 2B (WS-B) — explicit stored-status closure for the ENDED,
+     * fully-settled periods of one policy: OPEN periods whose window has
+     * passed AND that carry no outstanding mutable (ACTIVE or
+     * PARTIALLY_SETTLED, TTL-unexpired) hold are marked CLOSED. A period
+     * that still owns accounting obligations is NEVER closed here — it
+     * stays OPEN and the DERIVED dashboard lifecycle keeps reporting it
+     * honestly (ENDED_WITH_OUTSTANDING_HOLDS).
+     */
+    @Query(
+        "UPDATE budget_period SET period_status = 'CLOSED', updated_at_epoch_ms = :nowEpochMs " +
+            "WHERE budget_policy_id = :policyId AND period_status = 'OPEN' " +
+            "AND period_end_epoch_ms <= :nowEpochMs " +
+            "AND NOT EXISTS (" +
+            "  SELECT 1 FROM budget_hold h WHERE h.budget_period_id = budget_period.budget_period_id " +
+            "  AND h.status IN ('ACTIVE','PARTIALLY_SETTLED') " +
+            "  AND (h.expires_at_epoch_ms IS NULL OR h.expires_at_epoch_ms > :nowEpochMs))"
+    )
+    suspend fun closeExpiredSettledPeriods(policyId: String, nowEpochMs: Long): Int
 }
 
 @Dao

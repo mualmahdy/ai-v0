@@ -385,7 +385,13 @@ data class DailyPostedEffect(val utcDay: Long, val postedEffectMicroUnits: Long)
  */
 @Dao
 interface BudgetDashboardDao {
-    /** One row per period, balance equation recomputed from raw rows. */
+    /** One row per period, balance equation recomputed from raw rows.
+     *  STAGE 2B (WS-B/WS-E): every row also carries its stored status,
+     *  its POLICY status (superseded derivation), its accounting scope
+     *  (type + platform object id) and its outstanding mutable-hold count
+     *  — the inputs of the DERIVED lifecycle state and the scope filter.
+     *  New columns are nullable/defaulted so the row type stays backward
+     *  compatible with every existing construction site. */
     @Query(
         "SELECT bp.budget_period_id AS periodId, " +
             "bp.period_start_epoch_ms AS periodStartEpochMs, " +
@@ -395,11 +401,55 @@ interface BudgetDashboardDao {
             "COALESCE((SELECT SUM(remaining) FROM (" +
             "  SELECT h.hold_amount_micro_units - COALESCE((SELECT SUM(s.amount_micro_units) FROM budget_hold_settlement s WHERE s.hold_id = h.hold_id), 0) AS remaining " +
             "  FROM budget_hold h WHERE h.budget_period_id = bp.budget_period_id AND h.status IN ('ACTIVE','PARTIALLY_SETTLED')" +
-            "   AND (h.expires_at_epoch_ms IS NULL OR h.expires_at_epoch_ms > :nowEpochMs))), 0) AS remainingHoldMicroUnits " +
-            "FROM budget_period bp WHERE bp.period_status IN ('OPEN','CLOSED') " +
+            "   AND (h.expires_at_epoch_ms IS NULL OR h.expires_at_epoch_ms > :nowEpochMs))), 0) AS remainingHoldMicroUnits, " +
+            "bp.period_status AS periodStatus, " +
+            "pol.policy_status AS policyStatus, " +
+            "pol.budget_scope_type AS scopeType, " +
+            "sd.platform_object_id AS scopePlatformObjectId, " +
+            "(SELECT COUNT(*) FROM budget_hold h2 WHERE h2.budget_period_id = bp.budget_period_id AND h2.status IN ('ACTIVE','PARTIALLY_SETTLED')" +
+            "   AND (h2.expires_at_epoch_ms IS NULL OR h2.expires_at_epoch_ms > :nowEpochMs)) AS outstandingHoldCount " +
+            "FROM budget_period bp " +
+            "JOIN budget_policy pol ON pol.budget_policy_id = bp.budget_policy_id " +
+            "LEFT JOIN scope_descriptor sd ON sd.scope_id = pol.scope_id " +
+            "WHERE bp.period_status IN ('OPEN','CLOSED') " +
             "ORDER BY bp.period_start_epoch_ms"
     )
     fun periodBalancesFlow(nowEpochMs: Long): Flow<List<PeriodBalanceRow>>
+
+    /** STAGE 2B (WS-E) — the WORKSPACE-scoped variant: only the periods of
+     *  policies whose accounting scope is [scopeType] with platform object
+     *  id [scopePlatformObjectId] (the Budget screen's product contract:
+     *  workspace periods only — never another workspace's periods
+     *  presented as the active workspace's). */
+    @Query(
+        "SELECT bp.budget_period_id AS periodId, " +
+            "bp.period_start_epoch_ms AS periodStartEpochMs, " +
+            "bp.period_end_epoch_ms AS periodEndEpochMs, " +
+            "bp.limit_micro_units AS limitMicroUnits, " +
+            "COALESCE((SELECT SUM(e.available_effect_micro_units) FROM budget_ledger_entry e WHERE e.budget_period_id = bp.budget_period_id AND e.posting_state='POSTED'), 0) AS postedEffectsMicroUnits, " +
+            "COALESCE((SELECT SUM(remaining) FROM (" +
+            "  SELECT h.hold_amount_micro_units - COALESCE((SELECT SUM(s.amount_micro_units) FROM budget_hold_settlement s WHERE s.hold_id = h.hold_id), 0) AS remaining " +
+            "  FROM budget_hold h WHERE h.budget_period_id = bp.budget_period_id AND h.status IN ('ACTIVE','PARTIALLY_SETTLED')" +
+            "   AND (h.expires_at_epoch_ms IS NULL OR h.expires_at_epoch_ms > :nowEpochMs))), 0) AS remainingHoldMicroUnits, " +
+            "bp.period_status AS periodStatus, " +
+            "pol.policy_status AS policyStatus, " +
+            "pol.budget_scope_type AS scopeType, " +
+            "sd.platform_object_id AS scopePlatformObjectId, " +
+            "(SELECT COUNT(*) FROM budget_hold h2 WHERE h2.budget_period_id = bp.budget_period_id AND h2.status IN ('ACTIVE','PARTIALLY_SETTLED')" +
+            "   AND (h2.expires_at_epoch_ms IS NULL OR h2.expires_at_epoch_ms > :nowEpochMs)) AS outstandingHoldCount " +
+            "FROM budget_period bp " +
+            "JOIN budget_policy pol ON pol.budget_policy_id = bp.budget_policy_id " +
+            "LEFT JOIN scope_descriptor sd ON sd.scope_id = pol.scope_id " +
+            "WHERE bp.period_status IN ('OPEN','CLOSED') " +
+            "AND pol.budget_scope_type = :scopeType " +
+            "AND ((:scopePlatformObjectId IS NULL AND sd.platform_object_id IS NULL) OR sd.platform_object_id = :scopePlatformObjectId) " +
+            "ORDER BY bp.period_start_epoch_ms"
+    )
+    fun periodBalancesForScopeFlow(
+        scopeType: String,
+        scopePlatformObjectId: String?,
+        nowEpochMs: Long
+    ): Flow<List<PeriodBalanceRow>>
 
     /** Entries of one period (live Flow — the ledger feed). */
     @Query(
@@ -438,7 +488,19 @@ data class PeriodBalanceRow(
     val periodEndEpochMs: Long,
     val limitMicroUnits: Long,
     val postedEffectsMicroUnits: Long,
-    val remainingHoldMicroUnits: Long
+    val remainingHoldMicroUnits: Long,
+    /** STAGE 2B — stored period status (OPEN/CLOSED). */
+    val periodStatus: String? = null,
+    /** STAGE 2B — owning policy status (ACTIVE/RETIRED) for the SUPERSEDED
+     *  lifecycle derivation. */
+    val policyStatus: String? = null,
+    /** STAGE 2B — the period's accounting scope type (WORKSPACE, ...) and
+     *  its platform object id — the dashboard's scope disambiguation. */
+    val scopeType: String? = null,
+    val scopePlatformObjectId: String? = null,
+    /** STAGE 2B — outstanding mutable (TTL-unexpired) holds; drives the
+     *  ENDED_WITH_OUTSTANDING_HOLDS lifecycle state. */
+    val outstandingHoldCount: Int = 0
 ) {
     /** available = limit + ΣPOSTED − Σremaining_holds (و.2). A function on
      *  purpose — Room must not try to map it as a query column. */

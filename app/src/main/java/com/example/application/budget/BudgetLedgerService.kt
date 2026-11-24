@@ -42,7 +42,15 @@ import java.security.MessageDigest
 class BudgetLedgerService(
     private val database: AppDatabase,
     private val idGenerator: () -> String = { java.util.UUID.randomUUID().toString() },
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    /** STAGE 2B (WS-A) — the single budget-currency conversion authority.
+     *  When injected, cross-currency actuals posted WITHOUT a surviving
+     *  hold are converted into the active policy's currency with the
+     *  recorded, effective-time-valid rule; when absent (or when no rule
+     *  covers the instant) the posting is UNCONVERTIBLE — never a silent
+     *  1:1 — and the original amount/currency is preserved on a DRAFT
+     *  ledger entry instead of being discarded. */
+    private val fx: CurrencyConversionService? = null
 ) {
 
     // ------------------------------------------------------------------
@@ -260,6 +268,14 @@ class BudgetLedgerService(
             database.budgetPolicyDao().familyHistory(familyId).forEach { version ->
                 if (version.budgetPolicyId != policyId && version.policyStatus == STATUS_ACTIVE) {
                     database.budgetPolicyDao().updateStatus(version.budgetPolicyId, STATUS_RETIRED, now)
+                    // STAGE 2B (WS-B): a superseded version's periods whose
+                    // window ended AND that carry no outstanding mutable
+                    // holds are explicitly CLOSED — a retired policy must not
+                    // leave its stale periods visually marked OPEN forever.
+                    // Periods with outstanding holds stay OPEN (they still
+                    // own accounting obligations) and surface their real
+                    // lifecycle through the DERIVED dashboard state.
+                    database.budgetPeriodDao().closeExpiredSettledPeriods(version.budgetPolicyId, now)
                 }
             }
             val periodId = idGenerator()
@@ -363,7 +379,11 @@ class BudgetLedgerService(
         holdId: String,
         actualAmountMicroUnits: Long,
         idempotencyKey: String,
-        nowEpochMs: Long = clock()
+        nowEpochMs: Long = clock(),
+        /** STAGE 2B (WS-A) — FX evidence for this settlement's consumption
+         *  entry when the settled amount was converted from another
+         *  currency; null = same-currency settlement (no attribution). */
+        fxAttribution: FxAttribution? = null
     ): SettlementOutcome {
         require(actualAmountMicroUnits > 0) { "settlement amount must be > 0" }
         try {
@@ -385,6 +405,20 @@ class BudgetLedgerService(
                     ?: return@withTransaction SettlementOutcome.HoldNotFound
                 if (hold.status !in MUTABLE_HOLD_STATUSES) {
                     return@withTransaction SettlementOutcome.InvalidHoldState(hold.status)
+                }
+                // STAGE 2B (Stage 1A DEBT-1 closure): TRUE-expiry validation —
+                // a hold whose TTL has passed behaves as EXPIRED regardless
+                // of whether the bookkeeping sweep (markExpired) already
+                // re-stamped its stored status. Before this guard, an
+                // un-swept but timestamp-expired hold settled normally while
+                // a swept one failed MUTABLE_HOLD_STATUSES and posted without
+                // the hold — the SAME late actual landed differently
+                // depending on sweep timing. Both paths now converge: the
+                // actual is posted WITHOUT the hold (exactly once, idempotent
+                // key) and availability is unaffected either way (lazy
+                // expiry already ignored the hold).
+                if (hold.expiresAtEpochMs != null && hold.expiresAtEpochMs <= nowEpochMs) {
+                    return@withTransaction SettlementOutcome.InvalidHoldState(HOLD_EXPIRED)
                 }
                 val settledSoFar = database.budgetHoldSettlementDao().totalSettledMicro(holdId)
                 val newTotal = settledSoFar + actualAmountMicroUnits
@@ -408,9 +442,9 @@ class BudgetLedgerService(
                         availableEffectMicroUnits = -actualAmountMicroUnits,
                         entryBasis = BASIS_ACTUAL,
                         currency = hold.currency,
-                        originalAmountPrecise = null,
-                        originalCurrency = null,
-                        conversionRuleId = null,
+                        originalAmountPrecise = fxAttribution?.originalAmountPrecise,
+                        originalCurrency = fxAttribution?.originalCurrency,
+                        conversionRuleId = fxAttribution?.conversionRuleId,
                         entryTimestampEpochMs = nowEpochMs,
                         postedAtEpochMs = nowEpochMs,
                         costCalculationLineId = null,
@@ -483,6 +517,13 @@ class BudgetLedgerService(
                     ?: return@withTransaction ReleaseOutcome.HoldNotFound
                 if (hold.status !in MUTABLE_HOLD_STATUSES) {
                     return@withTransaction ReleaseOutcome.InvalidHoldState(hold.status)
+                }
+                // STAGE 2B (DEBT-1): TRUE-expiry validation, symmetric with
+                // settleHold — an expired reservation is not releasable
+                // (availability already reclaimed it lazily; the release
+                // would only re-shuffle bookkeeping for a dead row).
+                if (hold.expiresAtEpochMs != null && hold.expiresAtEpochMs <= nowEpochMs) {
+                    return@withTransaction ReleaseOutcome.InvalidHoldState(HOLD_EXPIRED)
                 }
                 val settledSoFar = database.budgetHoldSettlementDao().totalSettledMicro(holdId)
                 val remaining = hold.holdAmountMicroUnits - settledSoFar
@@ -598,11 +639,29 @@ class BudgetLedgerService(
     // Atomic operation 5 (Stage 2, I-5): postUsageActual
     // ------------------------------------------------------------------
 
-    /** Outcome of posting an actual usage cost with no surviving hold. */
+    /** Verdict of [postUsageActual]. */
     sealed class UsagePostingOutcome {
         data class Posted(val entryId: String, val replayed: Boolean) : UsagePostingOutcome()
         object NoActivePolicy : UsagePostingOutcome()
+
+        /** STAGE 2B (WS-A) — the actual could NOT be converted into the
+         *  budget currency (no FX service or no covering rule). It was NOT
+         *  discarded: a DRAFT ledger entry preserves the original amount +
+         *  currency for the record, affects NO balance, and the monetary
+         *  ceiling is honestly NOT enforceable for this cost. */
+        data class RecordedUnconverted(val entryId: String, val originalCurrency: String) : UsagePostingOutcome()
     }
+
+    /** STAGE 2B (WS-A) — FX attribution carried on a ledger entry whenever
+     *  the posted amount was converted (or recorded) from another currency:
+     *  the exact original amount (text, never binary float), the original
+     *  ISO code, and the conversion rule that was applied (null when the
+     *  amount could not be converted — DRAFT record). */
+    data class FxAttribution(
+        val originalAmountPrecise: String,
+        val originalCurrency: String,
+        val conversionRuleId: String?
+    )
 
     /**
      * Posts an ACTUAL consumption entry against the active budget of a
@@ -612,6 +671,15 @@ class BudgetLedgerService(
      * and (b) the I-11 overage remainder (actual exceeded the hold; the
      * excess is posted, never silently truncated). Same transaction,
      * replay and fail-closed discipline as the other four operations.
+     *
+     * STAGE 2B (WS-A): [amountCurrency] names the currency the amount is
+     * denominated in. When it differs from the ACTIVE policy's currency,
+     * the amount is converted with the recorded, effective-time-valid FX
+     * rule (injected [fx]) and the entry carries the original amount /
+     * currency / rule id (reproducible attribution). Without a rule the
+     * cost is NEVER assumed 1:1 and NEVER discarded: a DRAFT entry
+     * (zero balance effect) preserves the original evidence and the
+     * outcome is [UsagePostingOutcome.RecordedUnconverted].
      */
     suspend fun postUsageActual(
         scopeType: String,
@@ -620,7 +688,11 @@ class BudgetLedgerService(
         reason: String?,
         idempotencyKey: String,
         usageRecordId: String? = null,
-        nowEpochMs: Long = clock()
+        nowEpochMs: Long = clock(),
+        /** The currency [amountMicroUnits] is denominated in; null = the
+         *  amount is already in the active policy's currency (the
+         *  documented pre-Stage-2B caller contract). */
+        amountCurrency: String? = null
     ): UsagePostingOutcome {
         require(amountMicroUnits > 0) { "actual usage amount must be > 0" }
         return try {
@@ -632,6 +704,65 @@ class BudgetLedgerService(
                     .byIdempotencyKey(active.period.budgetPeriodId, idempotencyKey)
                     ?.let { return@withTransaction UsagePostingOutcome.Posted(it.entryId, replayed = true) }
 
+                // ---- STAGE 2B (WS-A): budget-currency discipline. ----
+                val policyCurrency = active.policy.currency
+                var effectiveMicro = amountMicroUnits
+                var attribution: FxAttribution? = null
+                if (amountCurrency != null && amountCurrency != policyCurrency) {
+                    val converted = fx?.convert(
+                        amountMicroUnits = amountMicroUnits,
+                        fromCurrency = amountCurrency,
+                        toCurrency = policyCurrency,
+                        atEpochMs = nowEpochMs
+                    )
+                    if (converted is CurrencyConversionService.ConversionResult.Converted) {
+                        effectiveMicro = converted.targetMicroUnits
+                        attribution = FxAttribution(
+                            originalAmountPrecise = converted.preRoundedPrecise,
+                            originalCurrency = amountCurrency,
+                            conversionRuleId = converted.ruleId.ifEmpty { null }
+                        )
+                    } else {
+                        // No recorded, effective-time-valid rule: NEVER a 1:1
+                        // guess. The real cost is preserved on a DRAFT entry
+                        // (zero balance effect) instead of being silently
+                        // discarded from the accounting record.
+                        val draftId = recordUnconvertibleActual(
+                            periodId = active.period.budgetPeriodId,
+                            originalAmountMicroUnits = amountMicroUnits,
+                            originalCurrency = amountCurrency,
+                            reason = reason,
+                            idempotencyKey = "$idempotencyKey:FX-UNCONVERTIBLE",
+                            holdId = null,
+                            usageRecordId = usageRecordId,
+                            nowEpochMs = nowEpochMs
+                        )
+                        return@withTransaction UsagePostingOutcome.RecordedUnconverted(
+                            entryId = draftId,
+                            originalCurrency = amountCurrency
+                        )
+                    }
+                }
+                if (effectiveMicro <= 0) {
+                    // A converted amount that rounds down to zero micro is
+                    // still a real cost — but a zero effect would fabricate
+                    // "free". Record it honestly as DRAFT instead.
+                    val draftId = recordUnconvertibleActual(
+                        periodId = active.period.budgetPeriodId,
+                        originalAmountMicroUnits = amountMicroUnits,
+                        originalCurrency = amountCurrency ?: policyCurrency,
+                        reason = reason,
+                        idempotencyKey = "$idempotencyKey:FX-ROUNDING-ZERO",
+                        holdId = null,
+                        usageRecordId = usageRecordId,
+                        nowEpochMs = nowEpochMs
+                    )
+                    return@withTransaction UsagePostingOutcome.RecordedUnconverted(
+                        entryId = draftId,
+                        originalCurrency = amountCurrency ?: policyCurrency
+                    )
+                }
+
                 val entryId = idGenerator()
                 database.budgetLedgerEntryDao().insert(
                     BudgetLedgerEntryEntity(
@@ -639,12 +770,12 @@ class BudgetLedgerService(
                         budgetPeriodId = active.period.budgetPeriodId,
                         entryType = ENTRY_CONSUMPTION,
                         postingState = POSTING_POSTED,
-                        availableEffectMicroUnits = -amountMicroUnits,
+                        availableEffectMicroUnits = -effectiveMicro,
                         entryBasis = BASIS_ACTUAL,
-                        currency = active.policy.currency,
-                        originalAmountPrecise = null,
-                        originalCurrency = null,
-                        conversionRuleId = null,
+                        currency = policyCurrency,
+                        originalAmountPrecise = attribution?.originalAmountPrecise,
+                        originalCurrency = attribution?.originalCurrency,
+                        conversionRuleId = attribution?.conversionRuleId,
                         entryTimestampEpochMs = nowEpochMs,
                         postedAtEpochMs = nowEpochMs,
                         costCalculationLineId = null,
@@ -669,6 +800,61 @@ class BudgetLedgerService(
             }
             throw e
         }
+    }
+
+    /**
+     * STAGE 2B (WS-A) — the honest record for an actual cost that cannot be
+     * converted into the budget currency: a DRAFT ledger entry (posting
+     * state DRAFT — zero balance effect by the balance equation's POSTED
+     * filter) carrying the ORIGINAL amount and currency so a real cost is
+     * never silently discarded from the accounting record. The DRAFT row
+     * is queryable, idempotent, and reversible-by-corrections only through
+     * the normal append-only discipline. Public so the settlement hook can
+     * record the mismatch of a SURVIVING hold's actual (holdId set) and the
+     * ledger itself can record the no-hold case.
+     */
+    suspend fun recordUnconvertibleActual(
+        periodId: String,
+        originalAmountMicroUnits: Long,
+        originalCurrency: String,
+        reason: String?,
+        idempotencyKey: String,
+        holdId: String?,
+        usageRecordId: String?,
+        nowEpochMs: Long
+    ): String {
+        val existing = database.budgetLedgerEntryDao().byIdempotencyKey(periodId, idempotencyKey)
+        if (existing != null) return existing.entryId
+        val period = database.budgetPeriodDao().byId(periodId)
+            ?: throw IllegalArgumentException("unknown period $periodId")
+        val policy = database.budgetPolicyDao().byId(period.budgetPolicyId)
+            ?: throw IllegalArgumentException("period $periodId has no policy")
+        val entryId = idGenerator()
+        database.budgetLedgerEntryDao().insert(
+            BudgetLedgerEntryEntity(
+                entryId = entryId,
+                budgetPeriodId = periodId,
+                entryType = ENTRY_CONSUMPTION,
+                postingState = POSTING_DRAFT,
+                availableEffectMicroUnits = 0L,
+                entryBasis = BASIS_ACTUAL,
+                currency = policy.currency,
+                originalAmountPrecise = originalAmountMicroUnits.toString(),
+                originalCurrency = originalCurrency,
+                conversionRuleId = null,
+                entryTimestampEpochMs = nowEpochMs,
+                postedAtEpochMs = null,
+                costCalculationLineId = null,
+                usageRecordId = usageRecordId,
+                reconciliationRecordId = null,
+                holdId = holdId,
+                reversalOfEntryId = null,
+                allocationGroupId = null,
+                allocationRole = null,
+                idempotencyKey = idempotencyKey
+            )
+        )
+        return entryId
     }
 
     // ------------------------------------------------------------------
@@ -744,6 +930,29 @@ class BudgetLedgerService(
      *  ignores them lazily since the balance query filters by expiry). */
     suspend fun expireHolds(nowEpochMs: Long = clock()): Int =
         database.budgetHoldDao().markExpired(nowEpochMs)
+
+    /**
+     * STAGE 2B (WS-B) — stored-status bookkeeping for ENDED periods whose
+     * accounting obligations are complete: every OPEN period of EVERY
+     * policy whose window ended and that carries no outstanding mutable
+     * hold is marked CLOSED. Purely a stored-status convergence pass — the
+     * DERIVED lifecycle state shown by the dashboard was already honest
+     * before it runs, and periods with outstanding holds are left OPEN by
+     * design (they still own accounting obligations). Called from the same
+     * failure-isolated bootstrap sweep that stamps expired holds.
+     */
+    suspend fun closeEligiblePeriods(nowEpochMs: Long = clock()): Int {
+        var closed = 0
+        val openPeriods = database.budgetPeriodDao().openPeriods()
+        for (period in openPeriods) {
+            if (period.periodEndEpochMs <= nowEpochMs) {
+                closed += database.budgetPeriodDao().closeExpiredSettledPeriods(
+                    period.budgetPolicyId, nowEpochMs
+                )
+            }
+        }
+        return closed
+    }
 
     /**
      * Stage 1A — one-time bounding of PRE-FIX unbounded reservations: every
@@ -891,9 +1100,12 @@ class BudgetLedgerService(
         const val ENTRY_REVERSAL = "REVERSAL"
 
         const val POSTING_POSTED = "POSTED"
+        const val POSTING_DRAFT = "DRAFT"
         const val BASIS_ACTUAL = "ACTUAL"
         const val BASIS_ESTIMATE = "ESTIMATE"
         const val BASIS_UNKNOWN = "UNKNOWN"
+
+        const val PERIOD_CLOSED = "CLOSED"
 
         const val SETTLEMENT_SETTLE = "SETTLE"
         const val SETTLEMENT_RELEASE = "RELEASE"

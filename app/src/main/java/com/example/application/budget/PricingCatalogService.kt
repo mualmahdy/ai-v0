@@ -23,8 +23,18 @@ import java.security.MessageDigest
  * Resolution reproduces the engine's documented precedence
  * (MODEL > SERVICE > PROVIDER, most recent effective window wins) — the
  * parity property the roadmap Phase-2 exit criterion is tested against.
+ *
+ * STAGE 2B (WS-D) — verification semantics: the catalog stamps every
+ * mirrored version `verificationStatus = UNVERIFIED`, including
+ * USER_CONFIG evidence. That is CORRECT and stays: user-entered
+ * provenance is not independent verification, and nothing in this
+ * service (or the management path) ever promotes USER_CONFIG to
+ * VERIFIED — only a future independently-verified pricing pipeline may
+ * set that. The class is OPEN strictly as the test seam for the WS-C
+ * partial-failure/recovery acceptance tests (a subclass that fails the
+ * sync on demand); no behavior change.
  */
-class PricingCatalogService(
+open class PricingCatalogService(
     private val database: AppDatabase,
     private val clock: () -> Long = System::currentTimeMillis
 ) {
@@ -178,7 +188,7 @@ class PricingCatalogService(
      * as the next version of its profile — pricing corrections are version
      * rows, never UPDATEs (append-only, ADR-B2).
      */
-    suspend fun syncFromLegacyEntries(): SyncResult = database.withTransaction {
+    open suspend fun syncFromLegacyEntries(): SyncResult = database.withTransaction {
         val now = clock()
         var profiles = 0
         var versions = 0

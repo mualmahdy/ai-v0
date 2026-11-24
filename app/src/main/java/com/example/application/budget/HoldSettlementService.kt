@@ -33,6 +33,16 @@ import com.example.infrastructure.persistence.AppDatabase
  *         converted with the recorded rate (evidence lives on the rule +
  *         the reconciliation layer); without a rule the honest no-op
  *         stands — UNKNOWN is never one.
+ *
+ * STAGE 2B (WS-A) closes the I-18 remaining gap: without a covering rule
+ * the actual is no longer DROPPED from the accounting record — a DRAFT
+ * ledger entry (zero balance effect, append-only) preserves the original
+ * amount + currency, the hold is KEPT under its bounded TTL (the
+ * conservative I-10 family), and a later settlement retry after a rule
+ * is registered converts and settles normally (the DRAFT row stays as
+ * the historical mismatch record). The posted/settled entries carry the
+ * FX attribution columns (original amount, original currency, rule id)
+ * so historical conversions stay reproducible.
  */
 class HoldSettlementService(
     private val database: AppDatabase,
@@ -204,7 +214,7 @@ class HoldSettlementService(
             if (settleKeyAlreadyUsed(reason, input)) {
                 return SettlementSummary.NoAction("ALREADY_SETTLED")
             }
-            return postActualWithoutHold(input, actualCostMicroUnits, usageRecordId, now)
+            return postActualWithoutHold(input, actualCostMicroUnits, costCurrency, usageRecordId, now)
         }
 
         // The gate creates exactly one hold per billable operation; if more
@@ -232,10 +242,15 @@ class HoldSettlementService(
         }
 
         var effectiveActualMicro = actualCostMicroUnits
+        var effectiveActualCurrency = costCurrency
+        var fxAttribution: BudgetLedgerService.FxAttribution? = null
         if (hold.currency != costCurrency) {
             // I-18 (Stage-3 closure): convert the actual into the hold's
             // currency ONLY with a recorded windowed rule; never assume
-            // 1:1. No rule → the Stage-2 honest no-op stands.
+            // 1:1. STAGE 2B: without a rule the actual is PRESERVED on a
+            // DRAFT ledger entry (zero balance effect) instead of being
+            // silently discarded, and the hold is KEPT — a settlement
+            // retry after a rule is registered completes the cycle.
             val converted = fx?.convert(
                 amountMicroUnits = actualCostMicroUnits,
                 fromCurrency = costCurrency,
@@ -244,6 +259,12 @@ class HoldSettlementService(
             )
             if (converted is CurrencyConversionService.ConversionResult.Converted) {
                 effectiveActualMicro = converted.targetMicroUnits
+                effectiveActualCurrency = hold.currency
+                fxAttribution = BudgetLedgerService.FxAttribution(
+                    originalAmountPrecise = converted.preRoundedPrecise,
+                    originalCurrency = costCurrency,
+                    conversionRuleId = converted.ruleId.ifEmpty { null }
+                )
             } else {
                 telemetry?.incrementCounter(
                     action = "BUDGET_SETTLEMENT_CURRENCY_MISMATCH",
@@ -254,8 +275,26 @@ class HoldSettlementService(
                         agentId = input.agentId
                     )
                 )
+                // The real cost is recorded as DRAFT evidence under the
+                // hold's period (never discarded, never 1:1, zero balance
+                // effect) — distinct idempotency key so the eventual
+                // converted settlement (the standard settle key) can still
+                // run after a rule is registered.
+                runCatching {
+                    ledger.recordUnconvertibleActual(
+                        periodId = hold.budgetPeriodId,
+                        originalAmountMicroUnits = actualCostMicroUnits,
+                        originalCurrency = costCurrency,
+                        reason = reason,
+                        idempotencyKey = HoldKeys.settleKey(input.executionId, input.stepIndex, input.attempt) +
+                            ":FX-UNCONVERTIBLE",
+                        holdId = hold.holdId,
+                        usageRecordId = usageRecordId,
+                        nowEpochMs = now
+                    )
+                }
                 return SettlementSummary.NoAction(
-                    "CURRENCY_MISMATCH:${hold.currency}!=$costCurrency"
+                    "CURRENCY_MISMATCH_NO_RULE:${hold.currency}!=$costCurrency"
                 )
             }
         }
@@ -263,7 +302,7 @@ class HoldSettlementService(
         val settledSoFar = database.budgetHoldSettlementDao().totalSettledMicro(hold.holdId)
         val remaining = hold.holdAmountMicroUnits - settledSoFar
         if (remaining <= 0) {
-            return postActualWithoutHold(input, effectiveActualMicro, usageRecordId, now)
+            return postActualWithoutHold(input, effectiveActualMicro, effectiveActualCurrency, usageRecordId, now)
         }
 
         val settleable = minOf(effectiveActualMicro, remaining)
@@ -273,7 +312,8 @@ class HoldSettlementService(
                 holdId = hold.holdId,
                 actualAmountMicroUnits = settleable,
                 idempotencyKey = HoldKeys.settleKey(input.executionId, input.stepIndex, input.attempt),
-                nowEpochMs = now
+                nowEpochMs = now,
+                fxAttribution = fxAttribution
             )
         ) {
             is BudgetLedgerService.SettlementOutcome.Settled -> {
@@ -297,6 +337,9 @@ class HoldSettlementService(
                     val overage = effectiveActualMicro - settleable
                     if (overage > 0) {
                         // I-11: the excess is a real cost — post it, never truncate.
+                        // The overage is denominated in the HOLD's currency
+                        // (the converted actual) — postUsageActual re-checks
+                        // it against the ACTIVE policy's currency.
                         val scope = holdScope(hold.holdId)
                         val posted = ledger.postUsageActual(
                             scopeType = scope?.first ?: GLOBAL_APPLICATION,
@@ -305,7 +348,8 @@ class HoldSettlementService(
                             reason = "overage:" + HoldKeys.holdReason(input.executionId, input.stepIndex, input.attempt),
                             idempotencyKey = HoldKeys.overageKey(input.executionId, input.stepIndex, input.attempt),
                             usageRecordId = usageRecordId,
-                            nowEpochMs = now
+                            nowEpochMs = now,
+                            amountCurrency = hold.currency
                         )
                         if (posted is BudgetLedgerService.UsagePostingOutcome.Posted) {
                             SettlementSummary.SettledWithOverage(hold.holdId, settleable, overage)
@@ -348,7 +392,7 @@ class HoldSettlementService(
                 // (in the hold's currency when FX applied, else as reported).
                 // Stage 1A: real known consumption is NEVER discarded merely
                 // because its original reservation expired.
-                postActualWithoutHold(input, effectiveActualMicro, usageRecordId, now)
+                postActualWithoutHold(input, effectiveActualMicro, effectiveActualCurrency, usageRecordId, now)
 
             is BudgetLedgerService.SettlementOutcome.OverSettlement ->
                 // cannot happen (settleable ≤ remaining by construction);
@@ -435,11 +479,16 @@ class HoldSettlementService(
      * accounting policy covering the request's scopes (the gate's own
      * order — workspace → agent → task → provider → APPLICATION global),
      * honoring the I-3 promise that "the actual cost is posted at
-     * settlement". No active policy → honest no-op (legacy path).
+     * settlement". STAGE 2B (WS-A): the cost's currency is declared to
+     * the ledger — a policy in a different currency converts it with the
+     * recorded rule (attribution on the entry) or records it as DRAFT
+     * evidence when no rule covers the instant (never 1:1, never
+     * discarded). No active policy → honest no-op (legacy path).
      */
     private suspend fun postActualWithoutHold(
         input: UsageAccountingInput,
         actualCostMicroUnits: Long,
+        costCurrency: String,
         usageRecordId: String?,
         now: Long
     ): SettlementSummary {
@@ -452,11 +501,19 @@ class HoldSettlementService(
                     reason = HoldKeys.actualKey(input.executionId, input.stepIndex, input.attempt),
                     idempotencyKey = HoldKeys.actualKey(input.executionId, input.stepIndex, input.attempt),
                     usageRecordId = usageRecordId,
-                    nowEpochMs = now
+                    nowEpochMs = now,
+                    amountCurrency = costCurrency
                 )
             ) {
                 is BudgetLedgerService.UsagePostingOutcome.Posted ->
                     return SettlementSummary.PostedWithoutHold(posted.entryId)
+                is BudgetLedgerService.UsagePostingOutcome.RecordedUnconverted ->
+                    // The cost is preserved as DRAFT evidence (original
+                    // amount + currency) — recorded, not posted, never
+                    // silently dropped, never converted 1:1.
+                    return SettlementSummary.NoAction(
+                        "CURRENCY_MISMATCH_NO_RULE_RECORDED_AS_DRAFT:${posted.originalCurrency}"
+                    )
                 is BudgetLedgerService.UsagePostingOutcome.NoActivePolicy ->
                     continue // try the next, less specific scope
             }

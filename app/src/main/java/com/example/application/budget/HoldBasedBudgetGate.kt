@@ -36,6 +36,19 @@ import com.example.domain.core.budget.EconomicGateDecision
  * accidentally resurrect its legacy spending authority by letting its
  * period lapse (accepted transition behavior, BudgetPolicyManagementService).
  *
+ * STAGE 2B (WS-A) — BUDGET-CURRENCY DISCIPLINE AT AUTHORIZATION: the
+ * estimate's currency is checked against the ACTIVE policy's currency
+ * BEFORE any reservation. Same currency → reserve as before. Different
+ * currency → convert with the recorded, effective-time-valid FX rule
+ * (the same CurrencyConversionService the settlement path uses — one
+ * consistent rule for budget-currency conversion); the hold reserves the
+ * CONVERTED amount in the policy's currency. No covering rule → NO hold
+ * and NO silent 1:1: the verdict is an honest ALLOWED without reservation
+ * (the I-3 shape) stating plainly that the monetary ceiling is not
+ * enforceable for an interaction whose estimate cannot be converted into
+ * the budget currency; the actual lands at settlement (where the same
+ * discipline records it as DRAFT evidence when it cannot convert).
+ *
  * Overage mapping is FAIL-CLOSED: an unrecognized overage policy DENIES.
  * SOFT_LIMIT warns and proceeds WITHOUT a hold (the "holds never exceed
  * the limit" invariant is absolute — reservation protection belongs to
@@ -43,7 +56,11 @@ import com.example.domain.core.budget.EconomicGateDecision
  */
 class HoldBasedBudgetGate(
     private val ledger: BudgetLedgerService,
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    /** STAGE 2B (WS-A) — the FX evidence authority for cross-currency
+     *  estimates; null = cross-currency estimates are honestly
+     *  unconvertible (no hold, explicit reason — never 1:1). */
+    private val fx: CurrencyConversionService? = null
 ) {
 
     /**
@@ -112,7 +129,8 @@ class HoldBasedBudgetGate(
             }
             val active = BudgetLedgerService.ActiveBudget(policy, period)
 
-            val estimatedMicro = estimate.expectedCost?.amountMicro
+            val estimateMoney = estimate.expectedCost
+            val estimatedMicro = estimateMoney?.amountMicro
             if (estimatedMicro == null || estimatedMicro <= 0) {
                 // I-3: UNKNOWN estimate — no hold, honest ALLOWED.
                 return EconomicAuthorizationResult(
@@ -127,11 +145,51 @@ class HoldBasedBudgetGate(
                 )
             }
 
+            // ---- STAGE 2B (WS-A): convert the estimate into the BUDGET
+            //      currency before reserving. Micro-units of different
+            //      currencies are never compared or reserved as if
+            //      equivalent, and a missing conversion rule is never an
+            //      assumed 1:1 rate.
+            val estimateCurrency = estimateMoney!!.currency
+            val policyCurrency = active.policy.currency
+            var reserveMicro = estimatedMicro
+            var conversionNote = ""
+            if (estimateCurrency != policyCurrency) {
+                val converted = fx?.convert(
+                    amountMicroUnits = estimatedMicro,
+                    fromCurrency = estimateCurrency,
+                    toCurrency = policyCurrency,
+                    atEpochMs = now
+                )
+                if (converted is CurrencyConversionService.ConversionResult.Converted) {
+                    reserveMicro = converted.targetMicroUnits
+                    conversionNote = " (مُحوّل من $estimatedMicro micro-$estimateCurrency " +
+                        "بقاعدة ${converted.ruleId} بمعدل ${converted.ratePrecise})"
+                } else {
+                    // No recorded, effective-time-valid conversion rule: the
+                    // ceiling is honestly NOT enforceable for this
+                    // interaction. No hold is fabricated in mismatched
+                    // units; the actual lands at settlement under the same
+                    // discipline (DRAFT record when unconvertible).
+                    return EconomicAuthorizationResult(
+                        decision = EconomicGateDecision.ALLOWED,
+                        reason = "HOLD-BASED BUDGET (WS-A): تقدير التكلفة بعملة $estimateCurrency " +
+                            "ولا توجد قاعدة تحويل سارية إلى عملة السياسة $policyCurrency — " +
+                            "لا يُنشأ حجز (لا يُفترض سعر صرف 1:1 أبدًا)؛ " +
+                            "السقف النقدي غير قابل للفرض لهذا التفاعل، والتكلفة الفعلية تُسجّل بأمانة عند التسوية.",
+                        evaluatedScopes = evaluatedScopes,
+                        rateLimitStatus = rateLimitStatus,
+                        estimate = estimate,
+                        appliedPolicy = null
+                    )
+                }
+            }
+
             return when (
                 val reservation = ledger.authorizeAndReserve(
                     scopeType = pdmScopeType,
                     platformObjectId = scopeId,
-                    amountMicroUnits = estimatedMicro,
+                    amountMicroUnits = reserveMicro,
                     // Stage 1A — the reservation identity is the canonical
                     // billable-operation triple (executionId, stepIndex,
                     // attempt) carried by EXPLICIT request fields (never
@@ -158,6 +216,7 @@ class HoldBasedBudgetGate(
                         reason = "HOLD-BASED BUDGET: حجز ${reservation.holdAmountMicroUnits} micro-" +
                             "${active.policy.currency} للنطاق ${pdmScopeType}:$scopeId " +
                             "(hold=${reservation.holdId})؛ المتاح بعده ${reservation.availableAfterMicroUnits}" +
+                            conversionNote +
                             (
                                 if (reservation.replayed) " [replay]"
                                 else " (ينتهي بعد ${HoldKeys.DEFAULT_HOLD_TTL_MS / 3_600_000L} ساعة)"

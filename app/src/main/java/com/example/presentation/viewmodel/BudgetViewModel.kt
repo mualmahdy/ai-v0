@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.application.budget.BudgetDashboardService
 import com.example.application.budget.BudgetPolicyManagementService
+import com.example.application.budget.MoneyInput
 import com.example.application.budget.PricingManagementService
 import com.example.application.budget.BudgetLedgerService
 import com.example.application.budget.EconomicGovernanceService
@@ -15,19 +16,24 @@ import com.example.infrastructure.persistence.dao.ProviderCostRow
 import com.example.infrastructure.persistence.entities.BudgetHoldEntity
 import com.example.infrastructure.persistence.entities.BudgetLedgerEntryEntity
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
  * ============================================================================
- * BudgetViewModel — STAGE 7 wiring + STAGE 2 governance activation
+ * BudgetViewModel — STAGE 7 wiring + STAGE 2 governance activation + 2B
  * ============================================================================
  *
  * STAGE 7 (unchanged): the READ-ONLY projection over
@@ -37,25 +43,32 @@ import kotlinx.coroutines.launch
  * (I-37). Every feed is the service's Room-backed flow; nothing is cached
  * in the VM, nothing is fabricated.
  *
- * STAGE 2 (this stage): the Budget screen becomes the AUTHORITATIVE budget
- * management surface. The ViewModel exposes:
+ * STAGE 2: the Budget screen becomes the AUTHORITATIVE budget management
+ * surface (authority card, budget editor, pricing management — see the
+ * class doc of [BudgetPolicyManagementService] / [PricingManagementService]).
  *
- *  - [authority] — what governs the workspace RIGHT NOW: a modern
- *    accounting policy (with its live balance equation), a modern policy
- *    whose period has ended (spending denied until a new period opens), the
- *    legacy allocation (transition not started), or nothing (costs tracked,
- *    never denied). Reads only — observing never writes.
- *  - [configureWorkspaceBudget] — the production authoring action through
- *    [BudgetPolicyManagementService] (first policy / immutable new version /
- *    period rollover; repeated identical writes are verified no-ops).
- *  - [pricingEntries] + [savePricing] + [checkPricing] — the verified
- *    pricing management path ([PricingManagementService]): user-entered
- *    prices are stored as USER_CONFIG evidence, mirrored into the versioned
- *    catalog, and UNKNOWN pricing stays honestly UNKNOWN.
+ * STAGE 2B:
+ *  - WORKSPACE-AWARE STATE (WS-E): when constructed with the
+ *    [activeWorkspace] STREAM (the production wiring), every
+ *    workspace-specific projection — the authority card AND the period
+ *    balances feed — re-binds to the CURRENT workspace as it changes;
+ *    in-flight reads of the previous workspace are discarded (guarded
+ *    before every state write); the selected period is cleared on switch;
+ *    the balances feed is SCOPE-FILTERED (this workspace's periods only —
+ *    another workspace's periods are never presented as this one's) and
+ *    TTL-fresh (the service re-binds with a new clock value on its
+ *    refresh signal — expired reservations stop counting WITHOUT any
+ *    database mutation or ViewModel recreation).
+ *  - MONETARY INPUT INTEGRITY (WS-F): the editors submit raw STRINGS;
+ *    [MoneyInput] converts them with exact decimal arithmetic — NaN,
+ *    ±Infinity, out-of-range values and >6-decimal precision are REJECTED
+ *    with a visible error (never a silent no-op, never a double-multiply
+ *    truncation); the currency is an explicit field (never a silent
+ *    guess); period length is validated before persistence.
  *
- * The Stage 2 dependencies are OPTIONAL (null default): a ViewModel
- * constructed without them behaves exactly like the Stage 7 read-only
- * observatory (tests and any legacy construction site stay valid).
+ * Backward compatibility: a ViewModel constructed with only the one-shot
+ * [activeWorkspaceId] provider (tests, legacy wiring) keeps the Stage-7
+ * behavior — the unscoped observatory feed and refresh-on-action reads.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class BudgetViewModel(
@@ -68,8 +81,12 @@ class BudgetViewModel(
     private val pricingManagement: PricingManagementService? = null,
     /** Stage 2 — the pricing RESOLUTION authority (read-only probe). */
     private val legacyEconomics: EconomicGovernanceService? = null,
-    /** Stage 2 — the active workspace id provider (null = no workspace yet). */
-    private val activeWorkspaceId: suspend () -> String? = { null }
+    /** Legacy one-shot workspace provider (null = no workspace yet). */
+    private val activeWorkspaceId: suspend () -> String? = { null },
+    /** STAGE 2B (WS-E) — the active workspace as a REAL stream
+     *  (production wiring: WorkspaceRuntimeService.activeWorkspace). When
+     *  present, the feature observes workspace changes live. */
+    private val activeWorkspace: Flow<String?>? = null
 ) : ViewModel() {
 
     data class BudgetUiState(
@@ -91,16 +108,46 @@ class BudgetViewModel(
         /** Stage 2 — management action in flight (pricing editor). */
         val isSavingPricing: Boolean = false,
         /** Stage 2 — the last management outcome (transient, honest). */
-        val managementMessage: String? = null
+        val managementMessage: String? = null,
+        /** STAGE 2B (WS-F) — a validation error of the editors, shown next
+         *  to the offending input (never a silent no-op). */
+        val inputError: String? = null,
+        /** STAGE 2B (WS-E) — the workspace id the period feed is scoped to
+         *  (null in legacy observatory mode = unscoped feed). */
+        val periodsWorkspaceId: String? = null
     )
 
     private val _state = MutableStateFlow(BudgetUiState())
     val state: StateFlow<BudgetUiState> = _state.asStateFlow()
 
-    /** All period balance rows (live, Room-backed). */
+    /** STAGE 2B (WS-E) — the live workspace context. In STREAM mode this is
+     *  the collected stream; in legacy mode it is the one-shot provider's
+     *  cached value (refreshed by management actions, Stage-2 behavior). */
+    private val currentWorkspace = MutableStateFlow<String?>(null)
+
+    /** True when the real workspace STREAM drives the feature. */
+    private val workspaceStreamMode = activeWorkspace != null
+
+    /** Management refresh signal — initial, after every write, and on
+     *  workspace switch (STREAM mode re-reads authority per workspace). */
+    private val refreshes = MutableSharedFlow<Unit>(replay = 1, extraBufferCapacity = 16)
+
+    /** All period balance rows (live, Room-backed).
+     *  STREAM mode: SCOPE-FILTERED to the current workspace + TTL-fresh
+     *  (the service re-binds its Room query with a new clock value on the
+     *  refresh signal). Legacy mode: the Stage-7 unscoped observatory. */
     val periodBalances: StateFlow<List<PeriodBalanceRow>> =
-        dashboardService.periodBalances(nowEpochMs())
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        if (workspaceStreamMode) {
+            currentWorkspace.flatMapLatest { ws ->
+                if (ws == null) flowOf(emptyList())
+                else dashboardService.periodBalancesForScope(
+                    scopeType = BudgetPolicyManagementService.WORKSPACE_SCOPE_TYPE,
+                    scopePlatformObjectId = ws
+                )
+            }
+        } else {
+            dashboardService.periodBalances(nowEpochMs())
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** The calculated cost by provider over the pricing chain (live). */
     val costByProvider: StateFlow<List<ProviderCostRow>> =
@@ -131,10 +178,54 @@ class BudgetViewModel(
                 }
             }
         }
-        // Stage 2 — the authority + pricing READS on entry. Observing never
-        // writes: no policy, period or pricing row is ever created by a
-        // refresh (only explicit user actions write).
-        refreshManagementState()
+        if (workspaceStreamMode) {
+            // STAGE 2B (WS-E): the active workspace as a REAL stream — every
+            // switch rebinds authority + scoped projections, clears the stale
+            // selected period, and requests a fresh authority read.
+            viewModelScope.launch {
+                activeWorkspace!!.collect { ws ->
+                    val previous = currentWorkspace.value
+                    currentWorkspace.value = ws
+                    if (previous != ws) {
+                        // A stale selected period of the PREVIOUS workspace
+                        // must never carry over (WS-E requirement 8).
+                        _state.update {
+                            it.copy(
+                                selectedPeriodId = null,
+                                periodsWorkspaceId = ws,
+                                authority = if (ws == null) null else it.authority,
+                                authorityWorkspaceId = if (ws == null) null else it.authorityWorkspaceId
+                            )
+                        }
+                        refreshes.tryEmit(Unit)
+                    }
+                }
+            }
+            // Authority + pricing re-projection per (workspace, refresh).
+            viewModelScope.launch {
+                combine(currentWorkspace, refreshes) { ws, _ -> ws }
+                    .flatMapLatest { ws -> authorityAndPricingFor(ws) }
+                    .collect { projection ->
+                        // WS-E requirement 3: an in-flight read of a PREVIOUS
+                        // workspace must never overwrite the new one's state.
+                        if (currentWorkspace.value == projection.workspaceId) {
+                            _state.update {
+                                it.copy(
+                                    authority = projection.authority,
+                                    authorityWorkspaceId = projection.workspaceId,
+                                    pricingEntries = projection.pricingEntries
+                                )
+                            }
+                        }
+                    }
+            }
+            _state.update { it.copy(periodsWorkspaceId = currentWorkspace.value) }
+        } else {
+            // Legacy mode: the Stage-2 one-shot reads (refresh on entry and
+            // after management actions). Observing never writes.
+            refreshManagementState()
+        }
+        refreshes.tryEmit(Unit)
     }
 
     /** Selects the period whose ledger + holds feeds the screen renders. */
@@ -146,67 +237,122 @@ class BudgetViewModel(
     fun utilization(row: PeriodBalanceRow): BudgetDashboardService.Utilization =
         dashboardService.utilization(row)
 
+    /** STAGE 2B (WS-B) — the derived lifecycle of a displayed period. */
+    fun lifecycleOf(row: PeriodBalanceRow): BudgetDashboardService.PeriodLifecycle =
+        dashboardService.lifecycleOf(row, nowEpochMs())
+
     /**
      * Stage 2 — reload the authority projection and the pricing list.
-     * READ-ONLY: repeated calls never create or mutate anything.
+     * READ-ONLY: repeated calls never create or mutate anything. In STREAM
+     * mode the flows already rebind; this forces an immediate re-read.
      */
     fun refreshManagementState() {
+        if (workspaceStreamMode) {
+            refreshes.tryEmit(Unit)
+            return
+        }
         viewModelScope.launch {
             val wsId = runCatching { activeWorkspaceId() }.getOrNull()
-            if (wsId != null && policyManagement != null) {
-                runCatching { policyManagement.workspaceAuthority(wsId) }
-                    .onSuccess { authority ->
-                        _state.update {
-                            it.copy(
-                                authority = authority,
-                                authorityWorkspaceId = wsId
-                            )
-                        }
+            currentWorkspace.value = wsId
+            loadAuthorityAndPricing(wsId)?.let { projection ->
+                if (currentWorkspace.value == projection.workspaceId) {
+                    _state.update {
+                        it.copy(
+                            authority = projection.authority,
+                            authorityWorkspaceId = projection.workspaceId,
+                            pricingEntries = projection.pricingEntries
+                        )
                     }
-                    .onFailure { failure ->
-                        _state.update {
-                            it.copy(
-                                errorMessage = "تعذر تحميل سلطة الميزانية: ${failure.localizedMessage}"
-                            )
-                        }
-                    }
-            }
-            if (pricingManagement != null) {
-                runCatching { pricingManagement.listPricing() }
-                    .onSuccess { entries ->
-                        _state.update { it.copy(pricingEntries = entries) }
-                    }
-                    .onFailure { failure ->
-                        _state.update {
-                            it.copy(
-                                errorMessage = "تعذر تحميل قائمة التسعير: ${failure.localizedMessage}"
-                            )
-                        }
-                    }
+                }
             }
         }
     }
 
+    private data class ManagementProjection(
+        val workspaceId: String?,
+        val authority: BudgetPolicyManagementService.WorkspaceBudgetAuthority?,
+        val pricingEntries: List<PricingEntry>
+    )
+
+    private fun authorityAndPricingFor(wsId: String?): Flow<ManagementProjection> = flow {
+        emit(loadAuthorityAndPricing(wsId) ?: ManagementProjection(wsId, null, emptyList()))
+    }
+
+    private suspend fun loadAuthorityAndPricing(wsId: String?): ManagementProjection? {
+        var authority: BudgetPolicyManagementService.WorkspaceBudgetAuthority? = null
+        val management = policyManagement
+        if (wsId != null && management != null) {
+            runCatching { management.workspaceAuthority(wsId) }
+                .onSuccess { authority = it }
+                .onFailure { failure ->
+                    // A cancelled load (workspace switched mid-read — the
+                    // flatMapLatest cancellation) is NOT an error: the next
+                    // projection for the NEW workspace is already loading.
+                    if (failure !is kotlinx.coroutines.CancellationException) {
+                        _state.update {
+                            it.copy(errorMessage = "تعذر تحميل سلطة الميزانية: ${failure.localizedMessage}")
+                        }
+                    }
+                }
+        }
+        var pricing: List<PricingEntry> = emptyList()
+        val pricingService = pricingManagement
+        if (pricingService != null) {
+            runCatching { pricingService.listPricing() }
+                .onSuccess { pricing = it }
+                .onFailure { failure ->
+                    if (failure !is kotlinx.coroutines.CancellationException) {
+                        _state.update {
+                            it.copy(errorMessage = "تعذر تحميل قائمة التسعير: ${failure.localizedMessage}")
+                        }
+                    }
+                }
+        }
+        return ManagementProjection(wsId, authority, pricing)
+    }
+
     /**
-     * Stage 2 — the production authoring action: configure the workspace's
-     * modern accounting budget (create the first policy, or edit → a new
-     * immutable version, or roll over into a new period). [amountUsd] is
-     * converted to micro units exactly like the legacy editor; the overage
-     * policy and period length are explicit.
+     * STAGE 2B (WS-F) — the production authoring action with EXACT decimal
+     * input integrity: [amountText] and [currencyText] are raw editor
+     * strings parsed by [MoneyInput.parseMicroUnits] / [parseCurrency]
+     * (NaN, ±Infinity, negatives, >6-decimal precision and out-of-range
+     * values are rejected with a VISIBLE error; the currency is explicit);
+     * [periodDaysText] is validated in 1..3650 (never silently coerced).
      */
     fun configureWorkspaceBudget(
-        amountUsd: Double,
+        amountText: String,
+        currencyText: String,
         overagePolicy: String = BudgetLedgerService.OVERAGE_HARD_LIMIT,
-        periodDays: Int = 30
+        periodDaysText: String = "30"
     ) {
         val management = policyManagement
         if (management == null) {
             _state.update { it.copy(errorMessage = "إدارة السياسات غير متاحة في هذا البناء.") }
             return
         }
-        _state.update { it.copy(isSavingBudget = true, managementMessage = null) }
+        // ---- WS-F: validate BEFORE any write; display errors, never
+        //      silently ignore an invalid submission.
+        val amount = when (val parsed = MoneyInput.parseMicroUnits(amountText)) {
+            is MoneyInput.Parsed.Micro -> parsed.microUnits
+            is MoneyInput.Parsed.Invalid -> {
+                _state.update { it.copy(inputError = parsed.reason) }
+                return
+            }
+        }
+        val currency = MoneyInput.parseCurrency(currencyText)
+        if (currency == null) {
+            _state.update { it.copy(inputError = "رمز عملة غير صالح — ثلاثة أحرف لاتينية (مثال: USD)") }
+            return
+        }
+        val days = periodDaysText.trim().toIntOrNull()
+        if (days == null || days < 1 || days > 3650) {
+            _state.update { it.copy(inputError = "طول الفترة يجب أن يكون يوماً صحيحاً بين 1 و3650") }
+            return
+        }
+        _state.update { it.copy(isSavingBudget = true, managementMessage = null, inputError = null) }
         viewModelScope.launch {
-            val wsId = runCatching { activeWorkspaceId() }.getOrNull()
+            val wsId = currentWorkspace.value
+                ?: runCatching { activeWorkspaceId() }.getOrNull()
             if (wsId == null) {
                 _state.update {
                     it.copy(
@@ -220,11 +366,11 @@ class BudgetViewModel(
                 management.configureWorkspaceBudget(
                     BudgetPolicyManagementService.ConfigureWorkspaceBudgetRequest(
                         workspaceId = wsId,
-                        limitMicroUnits = (amountUsd * 1_000_000.0).toLong(),
-                        currency = "USD",
+                        limitMicroUnits = amount,
+                        currency = currency,
                         overagePolicy = overagePolicy,
                         periodStartEpochMs = nowEpochMs(),
-                        periodEndEpochMs = nowEpochMs() + periodDays.toLong() * 86_400_000L
+                        periodEndEpochMs = nowEpochMs() + days.toLong() * 86_400_000L
                     )
                 )
             }.onSuccess { outcome ->
@@ -256,28 +402,66 @@ class BudgetViewModel(
     }
 
     /**
-     * Stage 2 — save verified pricing evidence through the management path.
-     * Prices are per MILLION tokens in [currency]; the entry is stamped
-     * USER_CONFIG and mirrored into the versioned catalog.
+     * STAGE 2B (WS-F) — save verified pricing evidence through the
+     * management path. Prices are per MILLION tokens entered as STRINGS
+     * and parsed with exact decimal arithmetic; the currency is explicit
+     * (WS-F: a missing currency is never silently guessed — the caller
+     * supplies its explicit default and the parser validates it);
+     * [evidenceReference] (WS-D) records what the price was attested
+     * against (user-attested accuracy, never independent verification).
      */
     fun savePricing(
         providerId: String,
         serviceId: String?,
         modelId: String?,
-        inputPricePerMillionUsd: Double?,
-        outputPricePerMillionUsd: Double?,
-        cachedInputPricePerMillionUsd: Double?,
-        currency: String,
+        inputPricePerMillionText: String?,
+        outputPricePerMillionText: String?,
+        cachedInputPricePerMillionText: String?,
+        currencyText: String,
         billingClass: BillingClass = BillingClass.PAID,
         effectiveUntilEpochMs: Long? = null,
-        sourceNote: String? = null
+        sourceNote: String? = null,
+        evidenceReference: String? = null
     ) {
         val management = pricingManagement
         if (management == null) {
             _state.update { it.copy(errorMessage = "إدارة التسعير غير متاحة في هذا البناء.") }
             return
         }
-        _state.update { it.copy(isSavingPricing = true, managementMessage = null) }
+        // ---- WS-F: exact-decimal parsing of the optional price fields.
+        //      Empty text = price not published (null); invalid text =
+        //      VISIBLE error, never a silent zero.
+        fun parseOptional(text: String?, label: String): MoneyInput.Parsed? {
+            val trimmed = text?.trim().orEmpty()
+            if (trimmed.isEmpty()) return null
+            return MoneyInput.parseMicroUnits(trimmed).also { parsed ->
+                if (parsed is MoneyInput.Parsed.Invalid) {
+                    _state.update { it.copy(inputError = "$label: ${parsed.reason}") }
+                }
+            }
+        }
+
+        val inputParsed = parseOptional(inputPricePerMillionText, "سعر الدخل")
+        if (inputParsed is MoneyInput.Parsed.Invalid) return
+        val outputParsed = parseOptional(outputPricePerMillionText, "سعر الخرج")
+        if (outputParsed is MoneyInput.Parsed.Invalid) return
+        val cachedParsed = parseOptional(cachedInputPricePerMillionText, "سعر الدخل المخزّن")
+        if (cachedParsed is MoneyInput.Parsed.Invalid) return
+
+        val currency = MoneyInput.parseCurrency(currencyText)
+        if (currency == null) {
+            _state.update { it.copy(inputError = "رمز عملة غير صالح — ثلاثة أحرف لاتينية (مثال: USD)") }
+            return
+        }
+        val inputMicro = (inputParsed as? MoneyInput.Parsed.Micro)?.microUnits
+        val outputMicro = (outputParsed as? MoneyInput.Parsed.Micro)?.microUnits
+        val cachedMicro = (cachedParsed as? MoneyInput.Parsed.Micro)?.microUnits
+        if (inputMicro == null && outputMicro == null && cachedMicro == null) {
+            _state.update { it.copy(inputError = "أدخل سعراً واحداً على الأقل — التسعير المجهول لا يُسجَّل أبداً") }
+            return
+        }
+
+        _state.update { it.copy(isSavingPricing = true, managementMessage = null, inputError = null) }
         viewModelScope.launch {
             runCatching {
                 management.registerUserConfiguredPricing(
@@ -285,17 +469,15 @@ class BudgetViewModel(
                         providerId = providerId,
                         serviceId = serviceId?.takeIf { it.isNotBlank() },
                         modelId = modelId?.takeIf { it.isNotBlank() },
-                        inputPriceMicroPerMillion = inputPricePerMillionUsd
-                            ?.let { (it * 1_000_000.0).toLong() },
-                        outputPriceMicroPerMillion = outputPricePerMillionUsd
-                            ?.let { (it * 1_000_000.0).toLong() },
-                        cachedInputPriceMicroPerMillion = cachedInputPricePerMillionUsd
-                            ?.let { (it * 1_000_000.0).toLong() },
+                        inputPriceMicroPerMillion = inputMicro,
+                        outputPriceMicroPerMillion = outputMicro,
+                        cachedInputPriceMicroPerMillion = cachedMicro,
                         currency = currency,
                         billingClass = billingClass,
                         effectiveFromEpochMs = nowEpochMs(),
                         effectiveUntilEpochMs = effectiveUntilEpochMs,
-                        sourceNote = sourceNote
+                        sourceNote = sourceNote,
+                        evidenceReference = evidenceReference?.takeIf { it.isNotBlank() }
                     )
                 )
             }.onSuccess { outcome ->
@@ -303,8 +485,21 @@ class BudgetViewModel(
                     it.copy(
                         isSavingPricing = false,
                         managementMessage = when (outcome) {
-                            is PricingManagementService.RegisterOutcome.Registered ->
-                                "سُجّل تسعير موثّق (USER_CONFIG) واعتُمد في فهرس الإصدارات."
+                            is PricingManagementService.RegisterOutcome.Registered -> buildString {
+                                append("سُجّل تسعير مُدخل يدوياً (USER_CONFIG")
+                                if (outcome.catalogSyncFailure != null) {
+                                    append(") — لكن تعذّرت مزامنة فهرس الإصدارات؛ استخدم «إعادة مزامنة الفهرس» للتعافي")
+                                } else {
+                                    append(") واعتُمد في فهرس الإصدارات")
+                                }
+                                when (outcome.identityStatus) {
+                                    PricingManagementService.PricingIdentityStatus.PROVIDER_UNKNOWN ->
+                                        append("؛ تحذير: المزوّد غير معروف في السجل")
+                                    PricingManagementService.PricingIdentityStatus.PROVIDER_FOUND_SERVICE_UNKNOWN ->
+                                        append("؛ تحذير: الخدمة غير معروفة تحت هذا المزوّد")
+                                    else -> Unit
+                                }
+                            }
                             is PricingManagementService.RegisterOutcome.Unchanged ->
                                 "لا تغيير — تسعير مطابق موجود فعلاً."
                         }
@@ -319,6 +514,27 @@ class BudgetViewModel(
                     )
                 }
             }
+        }
+    }
+
+    /** STAGE 2B (WS-C) — the catalog-mirror recovery action. */
+    fun resyncPricingCatalog() {
+        val management = pricingManagement ?: return
+        viewModelScope.launch {
+            runCatching { management.resyncPricingCatalog() }
+                .onSuccess { sync ->
+                    _state.update {
+                        it.copy(
+                            managementMessage = "أُعيدت مزامنة الفهرس: +${sync.versionsCreated} نسخة تسعير."
+                        )
+                    }
+                    refreshManagementState()
+                }
+                .onFailure { failure ->
+                    _state.update {
+                        it.copy(errorMessage = "تعذّرت إعادة المزامنة: ${failure.localizedMessage}")
+                    }
+                }
         }
     }
 
@@ -355,5 +571,10 @@ class BudgetViewModel(
     /** Dismisses the transient management message. */
     fun dismissManagementMessage() {
         _state.update { it.copy(managementMessage = null) }
+    }
+
+    /** Dismisses the editor validation error (WS-F). */
+    fun dismissInputError() {
+        _state.update { it.copy(inputError = null) }
     }
 }

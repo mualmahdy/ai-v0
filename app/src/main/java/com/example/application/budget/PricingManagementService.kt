@@ -44,8 +44,28 @@ import com.example.domain.ports.budget.PricingRepositoryPort
 class PricingManagementService(
     private val pricingRepository: PricingRepositoryPort,
     private val pricingCatalog: PricingCatalogService,
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    /** STAGE 2B (WS-D) — optional identity probe against the provider
+     *  registry: a pricing entry referencing a nonexistent provider (or a
+     *  service that does not exist under it) must not silently appear
+     *  valid while failing to match actual runtime requests. The probe
+     *  does NOT reject the write (pre-registration stays possible) — it
+     *  attaches an honest identity status to the outcome so the UI can
+     *  warn. Null = validation unavailable (tests/legacy wiring). */
+    private val identityProbe: (suspend (providerId: String, serviceId: String?) -> PricingIdentityStatus)? = null
 ) {
+
+    /** STAGE 2B (WS-D) — the honest registry-check verdict for a pricing
+     *  entry's identity. PROVIDER_AND_SERVICE_FOUND means the referenced
+     *  identities exist; anything else is surfaced to the operator, never
+     *  silently swallowed. */
+    enum class PricingIdentityStatus {
+        PROVIDER_AND_SERVICE_FOUND,
+        PROVIDER_FOUND_SERVICE_UNKNOWN,
+        PROVIDER_UNKNOWN,
+        /** No probe wired — honesty means saying validation did not run. */
+        VALIDATION_UNAVAILABLE
+    }
 
     /** A verified unit-price configuration entered by the operator. */
     data class UserPricingRequest(
@@ -65,14 +85,32 @@ class PricingManagementService(
         val effectiveFromEpochMs: Long? = null,
         val effectiveUntilEpochMs: Long? = null,
         /** Free-form operator note embedded in the provenance (audit trail). */
-        val sourceNote: String? = null
+        val sourceNote: String? = null,
+        /** STAGE 2B (WS-D) — optional EVIDENCE REFERENCE: the URL / document /
+         *  artifact the operator verified the price against (e.g. the
+         *  provider's published price sheet). Recorded in the provenance
+         *  chain — user-ATTESTED accuracy evidence, explicitly distinct
+         *  from independent verification (which only a future verified
+         *  pipeline may set; nothing here ever promotes USER_CONFIG to
+         *  VERIFIED). */
+        val evidenceReference: String? = null
     )
 
     sealed class RegisterOutcome {
         /** New pricing evidence recorded (+ mirrored into the catalog). */
         data class Registered(
             val entryId: String,
-            val catalogSync: PricingCatalogService.SyncResult
+            val catalogSync: PricingCatalogService.SyncResult?,
+            /** STAGE 2B (WS-C) — when the pricing entry was persisted but
+             *  the catalog mirror failed, the failure is reported honestly
+             *  (never swallowed): catalogSync is null and the reason is
+             *  carried. Recovery: [resyncPricingCatalog] (idempotent) or
+             *  any later successful save (the mirror processes every
+             *  unrepresented entry). */
+            val catalogSyncFailure: String? = null,
+            /** STAGE 2B (WS-D) — the identity check verdict (honest warning
+             *  surface; never a silent "valid"). */
+            val identityStatus: PricingIdentityStatus = PricingIdentityStatus.VALIDATION_UNAVAILABLE
         ) : RegisterOutcome()
 
         /** An identical entry already covers `now` — verified no-op. */
@@ -143,7 +181,7 @@ class PricingManagementService(
             return RegisterOutcome.Unchanged(existingEntryId = current.id)
         }
 
-        val entryId = userEntryId(providerId, serviceId, modelId, effectiveFrom)
+        val entryId = userEntryId(providerId, serviceId, modelId, effectiveFrom, request, currency)
         val entry = PricingEntry(
             id = entryId,
             scope = scope,
@@ -157,20 +195,50 @@ class PricingManagementService(
             pricingVersion = "user-$effectiveFrom",
             effectiveFromEpochMs = effectiveFrom,
             effectiveToEpochMs = effectiveUntil,
-            provenance = if (request.sourceNote.isNullOrBlank()) {
-                PROVENANCE_USER_CONFIG
-            } else {
-                "$PROVENANCE_USER_CONFIG:${request.sourceNote.trim()}"
-            }
+            provenance = userProvenance(request.sourceNote, request.evidenceReference)
         )
         pricingRepository.upsertPricing(entry)
+
+        // ---- STAGE 2B (WS-D): the honest identity check (after the write,
+        //      never a silent validity — the outcome carries the verdict
+        //      and the UI warns when the referenced identities are unknown).
+        val identityStatus = identityProbe?.let { probe ->
+            runCatching { probe(providerId, serviceId) }.getOrDefault(
+                PricingIdentityStatus.VALIDATION_UNAVAILABLE
+            )
+        } ?: PricingIdentityStatus.VALIDATION_UNAVAILABLE
 
         // ---- Mirror into the versioned catalog (the SAME idempotent pass
         //      the runtime uses; the new row lands as the next version of
         //      its pricing profile — append-only, reproducible history).
-        val sync = pricingCatalog.syncFromLegacyEntries()
-        return RegisterOutcome.Registered(entryId = entryId, catalogSync = sync)
+        //      STAGE 2B (WS-C): a mirror failure after the entry was
+        //      persisted is PARTIAL FAILURE — reported honestly, never
+        //      swallowed: the entry stands, the catalog catch-up has a
+        //      defined recovery ([resyncPricingCatalog] / the next save /
+        //      ensureSyncedAndResolve on read).
+        val sync = runCatching { pricingCatalog.syncFromLegacyEntries() }
+        return sync.fold(
+            onSuccess = { RegisterOutcome.Registered(entryId = entryId, catalogSync = it, identityStatus = identityStatus) },
+            onFailure = { failure ->
+                RegisterOutcome.Registered(
+                    entryId = entryId,
+                    catalogSync = null,
+                    catalogSyncFailure = failure.message ?: failure.javaClass.simpleName,
+                    identityStatus = identityStatus
+                )
+            }
+        )
     }
+
+    /**
+     * STAGE 2B (WS-C) — the catalog-mirror RECOVERY path: re-runs the
+     * idempotent sync so a catalog left stale by a partial failure
+     * (pricing entry persisted, mirror failed) catches up with every
+     * unrepresented entry. Historical resolveAt results stay stable —
+     * the mirror only APPENDS missing versions, never rewrites one.
+     */
+    suspend fun resyncPricingCatalog(): PricingCatalogService.SyncResult =
+        pricingCatalog.syncFromLegacyEntries()
 
     /** All configured/discovered pricing evidence (the management list). */
     suspend fun listPricing(): List<PricingEntry> = pricingRepository.allPricing()
@@ -210,12 +278,64 @@ class PricingManagementService(
             ?: entry.cachedInputPricePerMillion?.currency
             ?: ""
 
+    /**
+     * STAGE 2B — the USER_CONFIG provenance grammar (append-only audit
+     * chain, stable prefix for every existing consumer):
+     *
+     *   USER_CONFIG
+     *   USER_CONFIG:<note>
+     *   USER_CONFIG:<note>|ref=<evidence reference>
+     *   USER_CONFIG|ref=<evidence reference>
+     *
+     * The `ref` segment is the operator's EVIDENCE REFERENCE (WS-D): the
+     * URL/document the price was attested against. USER_CONFIG + ref is
+     * user-ATTESTED accuracy — explicitly NOT independent verification.
+     */
+    private fun userProvenance(sourceNote: String?, evidenceReference: String?): String {
+        val note = sourceNote?.trim()?.takeIf { it.isNotBlank() }
+        val ref = evidenceReference?.trim()?.takeIf { it.isNotBlank() }
+        return buildString {
+            append(PROVENANCE_USER_CONFIG)
+            if (note != null) append(":").append(note)
+            if (ref != null) append("|ref=").append(ref)
+        }
+    }
+
+    /**
+     * STAGE 2B (WS-C) — collision-resistant entry identity: the legacy
+     * id derived identity fields + effectiveFrom ONLY, so two materially
+     * different writes under the SAME injected clock tick collided and
+     * the second silently REPLACED the first (@Upsert). The id now
+     * carries a SHA-256 digest of the FULL material content (prices,
+     * currency, billing class, window, provenance) — materially different
+     * evidence can never collide, while an identical re-save reproduces
+     * the same id (verified no-op by the pre-check, so the upsert never
+     * even runs). The pricing history stays append-only.
+     */
     private fun userEntryId(
         providerId: String,
         serviceId: String?,
         modelId: String?,
-        effectiveFrom: Long
-    ): String = "price-user:$providerId:${serviceId ?: "-"}:${modelId ?: "-"}:$effectiveFrom"
+        effectiveFrom: Long,
+        request: UserPricingRequest,
+        currency: String
+    ): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(
+                buildString {
+                    append(request.inputPriceMicroPerMillion?.toString() ?: "-").append('|')
+                    append(request.outputPriceMicroPerMillion?.toString() ?: "-").append('|')
+                    append(request.cachedInputPriceMicroPerMillion?.toString() ?: "-").append('|')
+                    append(currency).append('|')
+                    append(request.billingClass.name).append('|')
+                    append(request.effectiveUntilEpochMs?.toString() ?: "-").append('|')
+                    append(userProvenance(request.sourceNote, request.evidenceReference))
+                }.toByteArray(Charsets.UTF_8)
+            )
+            .joinToString("") { "%02x".format(it) }
+            .take(16)
+        return "price-user:$providerId:${serviceId ?: "-"}:${modelId ?: "-"}:$effectiveFrom:$digest"
+    }
 
     companion object {
         /** The provenance stamp of operator-entered pricing evidence. */

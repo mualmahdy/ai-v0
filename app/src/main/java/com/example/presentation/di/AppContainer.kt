@@ -96,6 +96,7 @@ import com.example.presentation.viewmodel.MainViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
 import java.io.File
@@ -945,7 +946,14 @@ class AppContainer(context: Context) {
      * costs with no surviving hold (I-3 promise + I-11 overage).
      */
     val budgetLedgerService: com.example.application.budget.BudgetLedgerService by lazy {
-        com.example.application.budget.BudgetLedgerService(database = database)
+        com.example.application.budget.BudgetLedgerService(
+            database = database,
+            // STAGE 2B (WS-A): the ONE budget-currency conversion authority
+            // for no-hold actuals (the gate converts estimates; the
+            // settlement service converts surviving-hold actuals) — same
+            // CurrencyConversionService, same windowed-rule discipline.
+            fx = currencyConversionService
+        )
     }
 
     /**
@@ -1799,7 +1807,26 @@ class AppContainer(context: Context) {
     val pricingManagementService: com.example.application.budget.PricingManagementService by lazy {
         com.example.application.budget.PricingManagementService(
             pricingRepository = economicPersistence,
-            pricingCatalog = pricingCatalogService
+            pricingCatalog = pricingCatalogService,
+            // STAGE 2B (WS-D): the identity probe against the REAL provider
+            // registry — a pricing entry referencing an unknown provider or
+            // service is honestly flagged (warning, never silent validity;
+            // the write stays possible for pre-registration).
+            identityProbe = { providerId, serviceId ->
+                val provider = database.providerDao().getById(providerId)
+                if (provider == null) {
+                    com.example.application.budget.PricingManagementService.PricingIdentityStatus.PROVIDER_UNKNOWN
+                } else if (serviceId == null) {
+                    com.example.application.budget.PricingManagementService.PricingIdentityStatus.PROVIDER_AND_SERVICE_FOUND
+                } else {
+                    val config = database.serviceConfigurationDao().getLatestByServiceId(serviceId)
+                    if (config == null) {
+                        com.example.application.budget.PricingManagementService.PricingIdentityStatus.PROVIDER_FOUND_SERVICE_UNKNOWN
+                    } else {
+                        com.example.application.budget.PricingManagementService.PricingIdentityStatus.PROVIDER_AND_SERVICE_FOUND
+                    }
+                }
+            }
         )
     }
 
@@ -2144,6 +2171,11 @@ class AppContainer(context: Context) {
             runCatching {
                 budgetLedgerService.boundLegacyHolds()
                 budgetLedgerService.expireHolds()
+                // STAGE 2B (WS-B): stored-status convergence for ENDED,
+                // fully-settled periods (bookkeeping only — the DERIVED
+                // dashboard lifecycle is already honest; periods with
+                // outstanding holds are left OPEN by design).
+                budgetLedgerService.closeEligiblePeriods()
             }.onFailure { recordBootstrapDegradation("HOLD_EXPIRY_SWEEP_FAILED", it) }
             // ----------------------------------------------------------------------
             // EGRESS ENFORCEMENT WIRING (report gap: sandbox network-egress
@@ -2885,7 +2917,14 @@ class BudgetViewModelFactory(
                 legacyEconomics = appContainer.economicGovernanceService,
                 activeWorkspaceId = {
                     appContainer.workspaceRuntimeService.awaitActiveWorkspaceId()
-                }
+                },
+                // STAGE 2B (WS-E): the active workspace as a REAL stream —
+                // authority and the workspace-scoped projections switch with
+                // the workspace; in-flight reads of the previous workspace
+                // are discarded; expired reservations stop counting via the
+                // service's refresh-signal re-binding.
+                activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace
+                    .map { it?.id }
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
