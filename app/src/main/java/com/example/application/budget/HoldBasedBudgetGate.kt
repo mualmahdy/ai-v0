@@ -28,6 +28,14 @@ import com.example.domain.core.budget.EconomicGateDecision
  * never zero); the actual cost lands at settlement. Recorded as
  * interpretation I-3 in the stage register.
  *
+ * STAGE 2 TRANSITION SEMANTICS — expired accounting period: a scope whose
+ * modern policy EXISTS but whose accounting period has ENDED owns that
+ * scope: the verdict is an honest DENY ("configure a new period"), NEVER a
+ * silent fallback to the stale legacy budget_allocations row. A workspace
+ * that was explicitly moved to the modern accounting path cannot
+ * accidentally resurrect its legacy spending authority by letting its
+ * period lapse (accepted transition behavior, BudgetPolicyManagementService).
+ *
  * Overage mapping is FAIL-CLOSED: an unrecognized overage policy DENIES.
  * SOFT_LIMIT warns and proceeds WITHOUT a hold (the "holds never exceed
  * the limit" invariant is absolute — reservation protection belongs to
@@ -70,6 +78,14 @@ class HoldBasedBudgetGate(
         rateLimitStatus: com.example.domain.core.budget.RateLimitStatus?
     ): EconomicAuthorizationResult? {
         val now = clock()
+        // Stage 2 transition semantics: a scope whose modern policy EXISTS
+        // but whose accounting period has ENDED still OWNS that scope — the
+        // request must NOT silently fall back to a stale legacy allocation
+        // (the workspace was explicitly moved to the modern path). Remember
+        // the first such scope; if no other scope produces a modern verdict,
+        // return an honest DENY telling the operator to configure a new
+        // period. Never a legacy fallback after an explicit transition.
+        var expiredPeriodScope: Pair<String, String?>? = null
         for (entry in scopeOrder) {
             val scopeId = if (entry.isGlobal) {
                 entry.fixedScopeId // APPLICATION catch-all: platform-null canonical
@@ -85,7 +101,16 @@ class HoldBasedBudgetGate(
             val pdmScopeType = entry.pdmScopeType
                 ?: mapToPdmScopeType(entry.platformType)
                 ?: continue
-            val active = ledger.activeBudgetForScope(pdmScopeType, scopeId, now) ?: continue
+            val policy = ledger.activePolicyForScopeIgnoringPeriod(pdmScopeType, scopeId, now)
+                ?: continue
+            val period = ledger.activePeriodForPolicy(policy.budgetPolicyId, now)
+            if (period == null) {
+                // Modern policy exists, no period covers `now` — record and
+                // keep probing the remaining (more specific) scopes.
+                if (expiredPeriodScope == null) expiredPeriodScope = pdmScopeType to scopeId
+                continue
+            }
+            val active = BudgetLedgerService.ActiveBudget(policy, period)
 
             val estimatedMicro = estimate.expectedCost?.amountMicro
             if (estimatedMicro == null || estimatedMicro <= 0) {
@@ -149,6 +174,22 @@ class HoldBasedBudgetGate(
                 BudgetLedgerService.HoldReservation.NoActivePolicy ->
                     null // raced away between peek and reserve — fall back to legacy
             }
+        }
+        // No scope produced a modern verdict. If a modern policy exists whose
+        // period has ended, that expired authority OWNS the request: an
+        // honest DENY, never a silent fallback to the stale legacy
+        // allocation (Stage 2 transition semantics — see the class doc).
+        expiredPeriodScope?.let { (type, id) ->
+            return EconomicAuthorizationResult(
+                decision = EconomicGateDecision.DENIED,
+                reason = "HOLD-BASED BUDGET: سياسة محاسبية نشطة للنطاق $type:$id انتهت فترتها المحاسبية — " +
+                    "لا سلطة إنفاق سارية. راجع شاشة الميزانية لفتح فترة محاسبية جديدة؛ " +
+                    "لا يُسمح بارتداد صامت إلى التخصيص القديم (legacy) بعد الانتقال للمسار المحاسبي.",
+                evaluatedScopes = evaluatedScopes,
+                rateLimitStatus = rateLimitStatus,
+                estimate = estimate,
+                appliedPolicy = null
+            )
         }
         return null
     }

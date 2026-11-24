@@ -2,6 +2,7 @@ package com.example.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.application.budget.BudgetPolicyManagementService
 import com.example.application.budget.EconomicGovernanceService
 import com.example.application.governed.HumanApprovalGate
 import com.example.application.radar.CapabilityRadarService
@@ -73,6 +74,13 @@ class GovernanceViewModel(
     private val networkMonitorProvider: NetworkMonitor? = null,
     private val telemetryPort: TelemetryPort? = null,
     /**
+     * STAGE 2 — the modern accounting policy authority projection
+     * (read-only): the governance budget card reports WHICH budget governs
+     * the workspace (modern policy vs legacy allocation) so the legacy
+     * allocation editor is never mistaken for the accounting core.
+     */
+    private val budgetPolicyManagement: BudgetPolicyManagementService? = null,
+    /**
      * GAP-02 (Design Closure 2026, ADR-2): the EXPLICIT local principal —
      * approvals/grants resolve with a durable device-local user id instead
      * of the anonymous "user" constant.
@@ -125,7 +133,13 @@ class GovernanceViewModel(
         /** The feature's own transient diagnostic channel (local banner). */
         val diagnosticBanner: String? = null,
         /** The feature's own honest error channel (global snackbar). */
-        val errorMessage: String? = null
+        val errorMessage: String? = null,
+        /**
+         * STAGE 2 — which budget ACTUALLY governs the workspace (modern
+         * accounting policy vs legacy allocation vs none). Null = the
+         * projection is not wired (older construction sites).
+         */
+        val modernBudgetAuthority: BudgetPolicyManagementService.WorkspaceBudgetAuthority? = null
     )
 
     private val _state = MutableStateFlow(GovernanceUiState())
@@ -268,6 +282,20 @@ class GovernanceViewModel(
             }.onFailure { failure ->
                 _state.update {
                     it.copy(diagnosticBanner = "تعذر قياس صحة طبقة القياس: ${failure.localizedMessage}")
+                }
+            }
+            // STAGE 2 — the modern-authority projection (READ-ONLY: the
+            // refresh never creates or mutates a policy; only the Budget
+            // screen's explicit editor writes).
+            runCatching {
+                val management = budgetPolicyManagement ?: return@launch
+                val authority = management.workspaceAuthority(wsId)
+                _state.update { it.copy(modernBudgetAuthority = authority) }
+            }.onFailure { failure ->
+                _state.update {
+                    it.copy(
+                        diagnosticBanner = "تعذر تحديث سلطة الميزانية: ${failure.localizedMessage}"
+                    )
                 }
             }
         }

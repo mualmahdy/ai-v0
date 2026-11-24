@@ -1771,6 +1771,38 @@ class AppContainer(context: Context) {
         com.example.application.usecases.ManageWorkspaceBudgetUseCase(economicGovernanceService)
     }
 
+    /**
+     * STAGE 2 (economic governance activation) — the modern accounting
+     * budget policy MANAGEMENT surface: first policy + first period on
+     * explicit user configuration, immutable new policy versions on edit,
+     * new accounting periods on rollover, verified no-ops on repeated
+     * identical writes. Writes go through budgetLedgerService (the ONE
+     * accounting engine); the legacy budget_allocations path is untouched
+     * and stays authoritative for workspaces that never configure a modern
+     * policy.
+     */
+    val budgetPolicyManagementService: com.example.application.budget.BudgetPolicyManagementService by lazy {
+        com.example.application.budget.BudgetPolicyManagementService(
+            database = database,
+            ledger = budgetLedgerService,
+            allocationRepository = economicPersistence
+        )
+    }
+
+    /**
+     * STAGE 2 — the verified pricing MANAGEMENT surface: user-entered unit
+     * prices recorded as USER_CONFIG evidence through the existing pricing
+     * domain (pricing_entries) and mirrored into the versioned catalog
+     * (PricingCatalogService — reproducible historical resolution). No
+     * parallel pricing authority; UNKNOWN stays UNKNOWN.
+     */
+    val pricingManagementService: com.example.application.budget.PricingManagementService by lazy {
+        com.example.application.budget.PricingManagementService(
+            pricingRepository = economicPersistence,
+            pricingCatalog = pricingCatalogService
+        )
+    }
+
     // ========================================================================
     // Phase 5 — P0/P1 Intelligence Layer (audit remediation)
     // ========================================================================
@@ -2779,6 +2811,7 @@ class GovernanceViewModelFactory(
                 manageWorkspaceBudgetUseCase = appContainer.manageWorkspaceBudgetUseCase,
                 networkMonitorProvider = appContainer.networkMonitor,
                 telemetryPort = appContainer.telemetryPort,
+                budgetPolicyManagement = appContainer.budgetPolicyManagementService,
                 localPrincipalId = appContainer.localPrincipalId,
                 studioSignals = studioSignalBus
             ) as T
@@ -2844,7 +2877,15 @@ class BudgetViewModelFactory(
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(com.example.presentation.viewmodel.BudgetViewModel::class.java)) {
             return com.example.presentation.viewmodel.BudgetViewModel(
-                dashboardService = appContainer.budgetDashboardService
+                dashboardService = appContainer.budgetDashboardService,
+                // STAGE 2 — the authoring + management surfaces (the Budget
+                // screen is the authoritative modern budget management UI).
+                policyManagement = appContainer.budgetPolicyManagementService,
+                pricingManagement = appContainer.pricingManagementService,
+                legacyEconomics = appContainer.economicGovernanceService,
+                activeWorkspaceId = {
+                    appContainer.workspaceRuntimeService.awaitActiveWorkspaceId()
+                }
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

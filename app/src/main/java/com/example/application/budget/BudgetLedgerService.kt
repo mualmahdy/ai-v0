@@ -704,6 +704,31 @@ class BudgetLedgerService(
     }
 
     /**
+     * Stage 2 — the latest ACTIVE policy for a scope REGARDLESS of period
+     * coverage: the authority probe behind the expired-period transition
+     * semantics (a modern policy that exists but whose period has ended
+     * still OWNS the scope; see HoldBasedBudgetGate). Null = no modern
+     * policy at all for this scope.
+     */
+    suspend fun activePolicyForScopeIgnoringPeriod(
+        scopeType: String,
+        platformObjectId: String?,
+        nowEpochMs: Long = clock()
+    ): BudgetPolicyEntity? {
+        val descriptor = findDescriptor(scopeType, platformObjectId) ?: return null
+        return database.budgetPolicyDao()
+            .latestEffectiveForScope(descriptor.scopeId, STATUS_ACTIVE, nowEpochMs)
+    }
+
+    /** Stage 2 — the OPEN period of [policyId] covering [nowEpochMs]
+     *  (companion probe of [activePolicyForScopeIgnoringPeriod]). */
+    suspend fun activePeriodForPolicy(
+        policyId: String,
+        nowEpochMs: Long = clock()
+    ): BudgetPeriodEntity? =
+        database.budgetPeriodDao().activePeriodForPolicy(policyId, nowEpochMs)
+
+    /**
      * Stage-4 (I-39): resolve the canonical scope id for a (type, object)
      * pair WITHOUT creating anything — the BudgetActualsFeed bridge needs
      * it to look up entitlements for the same scope the policy ride on.

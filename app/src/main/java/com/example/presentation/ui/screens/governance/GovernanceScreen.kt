@@ -215,11 +215,42 @@ fun GovernanceScreen(
                             }
                         }
                     }
+                    // STAGE 2 — which budget ACTUALLY governs the workspace
+                    // right now (the modern accounting policy vs this legacy
+                    // allocation). Honest compatibility note: this card's
+                    // numbers are the LEGACY projection.
+                    when (state.modernBudgetAuthority?.kind) {
+                        com.example.application.budget.BudgetPolicyManagementService.WorkspaceBudgetAuthority.AuthorityKind.MODERN_ACCOUNTING -> {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "تخضع هذه المساحة لسياسة محاسبية حديثة " +
+                                    "«${state.modernBudgetAuthority?.modernPolicy?.budgetName}» " +
+                                    "(إصدار ${state.modernBudgetAuthority?.modernPolicy?.policyVersion}) — " +
+                                    "تُدار من شاشة الميزانية. الأرقام أعلاه هي إسقاط التخصيص القديم (legacy).",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.testTag("governance_modern_authority_note")
+                            )
+                        }
+                        com.example.application.budget.BudgetPolicyManagementService.WorkspaceBudgetAuthority.AuthorityKind.MODERN_PERIOD_ENDED -> {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "انتهت الفترة المحاسبية للسياسة الحديثة — الإنفاق مرفوض بأمان حتى فتح فترة جديدة من شاشة الميزانية، بلا ارتداد صامت إلى التخصيص القديم.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.testTag("governance_modern_authority_note")
+                            )
+                        }
+                        else -> Unit
+                    }
                 }
             }
         }
 
-        // Budget allocation editor
+        // Budget allocation editor — STAGE 2: honestly labeled as the LEGACY
+        // allocation path. It keeps working (compatibility contract: legacy
+        // workspaces keep the legacy authorization behavior), and the modern
+        // accounting policy is configured from the Budget screen instead.
         item {
             Card(
                 modifier = Modifier
@@ -227,34 +258,40 @@ fun GovernanceScreen(
                     .padding(horizontal = 16.dp),
                 shape = RoundedCornerShape(14.dp)
             ) {
-                Row(
-                    modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = budgetInput,
-                        onValueChange = { budgetInput = it },
-                        label = { Text("سقف الميزانية (USD)") },
-                        placeholder = { Text("مثال: 5.00") },
-                        singleLine = true,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("budget_allocation_input")
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "محرّر التخصيص القديم (legacy) — لا ينشئ فترة محاسبية حديثة",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Button(
-                        onClick = { viewModel.setWorkspaceBudgetAllocationUsd(budgetInput.toDoubleOrNull() ?: 0.0) },
-                        enabled = budgetInput.isNotBlank() && !state.isSavingBudgetAllocation,
-                        modifier = Modifier.testTag("btn_save_budget_allocation")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (state.isSavingBudgetAllocation) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onPrimary
-                            )
-                        } else {
-                            Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                        OutlinedTextField(
+                            value = budgetInput,
+                            onValueChange = { budgetInput = it },
+                            label = { Text("سقف الميزانية (USD)") },
+                            placeholder = { Text("مثال: 5.00") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("budget_allocation_input")
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Button(
+                            onClick = { viewModel.setWorkspaceBudgetAllocationUsd(budgetInput.toDoubleOrNull() ?: 0.0) },
+                            enabled = budgetInput.isNotBlank() && !state.isSavingBudgetAllocation,
+                            modifier = Modifier.testTag("btn_save_budget_allocation")
+                        ) {
+                            if (state.isSavingBudgetAllocation) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                            } else {
+                                Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
                         }
                     }
                 }
