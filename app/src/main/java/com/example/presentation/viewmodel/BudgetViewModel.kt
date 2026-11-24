@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.application.budget.BudgetDashboardService
 import com.example.application.budget.BudgetPolicyManagementService
+import com.example.application.budget.FxRateInput
+import com.example.application.budget.FxRuleManagementService
 import com.example.application.budget.MoneyInput
 import com.example.application.budget.PricingManagementService
 import com.example.application.budget.BudgetLedgerService
@@ -86,7 +88,10 @@ class BudgetViewModel(
     /** STAGE 2B (WS-E) — the active workspace as a REAL stream
      *  (production wiring: WorkspaceRuntimeService.activeWorkspace). When
      *  present, the feature observes workspace changes live. */
-    private val activeWorkspace: Flow<String?>? = null
+    private val activeWorkspace: Flow<String?>? = null,
+    /** STAGE 2C — the FX-rule operational management surface (optional;
+     *  null = the FX section is not wired in this build). */
+    private val fxRuleManagement: FxRuleManagementService? = null
 ) : ViewModel() {
 
     data class BudgetUiState(
@@ -114,7 +119,12 @@ class BudgetViewModel(
         val inputError: String? = null,
         /** STAGE 2B (WS-E) — the workspace id the period feed is scoped to
          *  (null in legacy observatory mode = unscoped feed). */
-        val periodsWorkspaceId: String? = null
+        val periodsWorkspaceId: String? = null,
+        /** STAGE 2C — every registered FX rule with its derived
+         *  applicability state (live; empty when the surface is absent). */
+        val fxRules: List<FxRuleManagementService.FxRuleView> = emptyList(),
+        /** STAGE 2C — FX rule registration in flight. */
+        val isSavingFxRule: Boolean = false
     )
 
     private val _state = MutableStateFlow(BudgetUiState())
@@ -213,7 +223,8 @@ class BudgetViewModel(
                                 it.copy(
                                     authority = projection.authority,
                                     authorityWorkspaceId = projection.workspaceId,
-                                    pricingEntries = projection.pricingEntries
+                                    pricingEntries = projection.pricingEntries,
+                                    fxRules = projection.fxRules
                                 )
                             }
                         }
@@ -260,7 +271,8 @@ class BudgetViewModel(
                         it.copy(
                             authority = projection.authority,
                             authorityWorkspaceId = projection.workspaceId,
-                            pricingEntries = projection.pricingEntries
+                            pricingEntries = projection.pricingEntries,
+                            fxRules = projection.fxRules
                         )
                     }
                 }
@@ -271,7 +283,8 @@ class BudgetViewModel(
     private data class ManagementProjection(
         val workspaceId: String?,
         val authority: BudgetPolicyManagementService.WorkspaceBudgetAuthority?,
-        val pricingEntries: List<PricingEntry>
+        val pricingEntries: List<PricingEntry>,
+        val fxRules: List<FxRuleManagementService.FxRuleView> = emptyList()
     )
 
     private fun authorityAndPricingFor(wsId: String?): Flow<ManagementProjection> = flow {
@@ -308,7 +321,22 @@ class BudgetViewModel(
                     }
                 }
         }
-        return ManagementProjection(wsId, authority, pricing)
+        // STAGE 2C — the registered FX rules (pure read; the applicability
+        // state is derived against the injectable clock).
+        var fxRules: List<FxRuleManagementService.FxRuleView> = emptyList()
+        val fxManagement = fxRuleManagement
+        if (fxManagement != null) {
+            runCatching { fxManagement.listRules(nowEpochMs()) }
+                .onSuccess { fxRules = it }
+                .onFailure { failure ->
+                    if (failure !is kotlinx.coroutines.CancellationException) {
+                        _state.update {
+                            it.copy(errorMessage = "تعذر تحميل قواعد تحويل العملات: ${failure.localizedMessage}")
+                        }
+                    }
+                }
+        }
+        return ManagementProjection(wsId, authority, pricing, fxRules)
     }
 
     /**
@@ -535,6 +563,115 @@ class BudgetViewModel(
                         it.copy(errorMessage = "تعذّرت إعادة المزامنة: ${failure.localizedMessage}")
                     }
                 }
+        }
+    }
+
+    /**
+     * STAGE 2C — register an immutable FX rule through the management
+     * surface. Raw editor STRINGS validated BEFORE any write (WS-F
+     * discipline): currencies via [MoneyInput.parseCurrency], the rate via
+     * [FxRateInput.parse] (exact decimal, strictly positive), the effective
+     * window as epoch-ms TEXT (blank "from" = now; blank "until" =
+     * open-ended; from must precede until). Invalid input is a VISIBLE
+     * error; a conflicting duplicate / rejected registration is surfaced
+     * honestly — never a silent overwrite of a used rule.
+     */
+    fun registerFxRule(
+        fromCurrencyText: String,
+        toCurrencyText: String,
+        rateText: String,
+        effectiveFromText: String,
+        effectiveUntilText: String,
+        sourceAuthorityText: String
+    ) {
+        val management = fxRuleManagement
+        if (management == null) {
+            _state.update { it.copy(errorMessage = "إدارة قواعد التحويل غير متاحة في هذا البناء.") }
+            return
+        }
+        val from = MoneyInput.parseCurrency(fromCurrencyText)
+        if (from == null) {
+            _state.update { it.copy(inputError = "عملة المصدر غير صالحة — ثلاثة أحرف لاتينية (مثال: USD)") }
+            return
+        }
+        val to = MoneyInput.parseCurrency(toCurrencyText)
+        if (to == null) {
+            _state.update { it.copy(inputError = "عملة الهدف غير صالحة — ثلاثة أحرف لاتينية (مثال: EUR)") }
+            return
+        }
+        if (from == to) {
+            _state.update { it.copy(inputError = "قاعدة التحويل يجب أن تغيّر العملة (المصدر ≠ الهدف)") }
+            return
+        }
+        val rate = when (val parsed = FxRateInput.parse(rateText)) {
+            is FxRateInput.Parsed.Rate -> parsed.ratePrecise
+            is FxRateInput.Parsed.Invalid -> {
+                _state.update { it.copy(inputError = parsed.reason) }
+                return
+            }
+        }
+        val now = nowEpochMs()
+        // Blank "from" = now; blank "until" = open-ended. Non-blank text must
+        // be a valid epoch-ms value (never silently coerced).
+        val effectiveFrom: Long
+        if (effectiveFromText.isBlank()) {
+            effectiveFrom = now
+        } else {
+            val parsed = effectiveFromText.trim().toLongOrNull()
+            if (parsed == null) {
+                _state.update { it.copy(inputError = "بداية السريان غير صالحة — أدخل زمن Unix بالميلي ثانية أو اتركه فارغاً للبدء الآن") }
+                return
+            }
+            effectiveFrom = parsed
+        }
+        var effectiveUntil: Long? = null
+        if (effectiveUntilText.isNotBlank()) {
+            val parsed = effectiveUntilText.trim().toLongOrNull()
+            if (parsed == null) {
+                _state.update { it.copy(inputError = "نهاية السريان غير صالحة — أدخل زمن Unix بالميلي ثانية أو اتركه فارغاً (مفتوح)") }
+                return
+            }
+            effectiveUntil = parsed
+        }
+        if (effectiveUntil != null && effectiveFrom >= effectiveUntil) {
+            _state.update { it.copy(inputError = "نافذة السريان غير صالحة — البداية يجب أن تسبق النهاية") }
+            return
+        }
+        val authority = sourceAuthorityText.trim().ifBlank { "operator" }
+        _state.update { it.copy(isSavingFxRule = true, managementMessage = null, inputError = null) }
+        viewModelScope.launch {
+            runCatching {
+                management.registerRule(
+                    fromCurrency = from,
+                    toCurrency = to,
+                    ratePrecise = rate,
+                    effectiveFromEpochMs = effectiveFrom,
+                    effectiveUntilEpochMs = effectiveUntil,
+                    sourceAuthority = authority
+                )
+            }.onSuccess { outcome ->
+                _state.update {
+                    it.copy(
+                        isSavingFxRule = false,
+                        managementMessage = when (outcome) {
+                            is FxRuleManagementService.RegisterOutcome.Registered ->
+                                "سُجّلت قاعدة تحويل جديدة (${outcome.ruleId}) — دليل مُسجّل تشغيلياً، غير مُتحقق منه بشكل مستقل."
+                            is FxRuleManagementService.RegisterOutcome.Replayed ->
+                                "لا تغيير — قاعدة مطابقة مسجّلة فعلاً (${outcome.ruleId})."
+                            is FxRuleManagementService.RegisterOutcome.Rejected ->
+                                "رُفض التسجيل: ${outcome.reason}"
+                        }
+                    )
+                }
+                refreshManagementState()
+            }.onFailure { failure ->
+                _state.update {
+                    it.copy(
+                        isSavingFxRule = false,
+                        errorMessage = "تعذر تسجيل قاعدة التحويل: ${failure.localizedMessage}"
+                    )
+                }
+            }
         }
     }
 

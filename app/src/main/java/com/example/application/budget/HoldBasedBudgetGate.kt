@@ -227,6 +227,27 @@ class HoldBasedBudgetGate(
                         appliedPolicy = null
                     )
 
+                is BudgetLedgerService.HoldReservation.ExpiredReplay ->
+                    // STAGE 2C (DEBT-2): the replay of an authorization whose
+                    // original hold EXPIRED carries NO spending authority —
+                    // availability was lazily reclaimed and the reservation is
+                    // NOT renewed, NOT re-created under the same idempotency
+                    // identity. The honest verdict is an explicit DENY naming
+                    // the attempt-increment contract: a genuine redispatch
+                    // MUST carry a new attempt identity (a durable resume
+                    // already increments it), which authorizes fresh.
+                    EconomicAuthorizationResult(
+                        decision = EconomicGateDecision.DENIED,
+                        reason = "HOLD-BASED BUDGET (DEBT-2): الحجز الأصلي (hold=${reservation.holdId}) " +
+                            "للمحاولة نفسها (${request.executionId}, step=${request.stepIndex}, " +
+                            "attempt=${request.attempt}) انتهت مدته — لا سلطة إنفاق متبقية ولا يُجدَّد الحجز " +
+                            "تحت الهوية نفسها. أعد الإرسال بهوية محاولة جديدة (attempt+1) للحجز من جديد.",
+                        evaluatedScopes = evaluatedScopes,
+                        rateLimitStatus = rateLimitStatus,
+                        estimate = estimate,
+                        appliedPolicy = null
+                    )
+
                 is BudgetLedgerService.HoldReservation.Denied ->
                     mapOverage(reservation, active, pdmScopeType, scopeId, estimate, evaluatedScopes, rateLimitStatus)
 

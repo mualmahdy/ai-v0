@@ -988,7 +988,10 @@ class AgentOrchestrator(
                 effectiveAutonomyPolicy = effectiveAutonomyPolicy ?: currentTask.constraints.autonomyPolicy,
                 hasKnowledgeCorpus = hasKnowledgeCorpus,
                 budgetActuals = budgetActualsFeed?.featuresFor(
-                    workspaceObjectId = currentTask.input.parameters["workspaceId"]?.toString(),
+                    // STAGE 3A (DEBT-4): the feed reads the PINNED workspace
+                    // (the loop's canonical identity), not a task-supplied
+                    // parameter that may disagree with the pinned scope.
+                    workspaceObjectId = workspaceId,
                     agentObjectId = currentTask.assignedAgentId.value,
                     taskObjectId = currentTask.id.value
                 ) ?: emptyMap(),
@@ -1440,11 +1443,15 @@ class AgentOrchestrator(
                 else -> {
                     // Proceed (fresh intent, ungated action, or honestly
                     // ledger-less mode) — then record the outcome.
-                    // Stage 1A: dispatch is STARTING — from here on, a
-                    // cancellation can no longer prove the provider call
-                    // never happened (conservative: the reservation stays,
-                    // bounded by the TTL).
-                    inFlightStep.dispatchStarted = true
+                    // STAGE 3A (DEBT-3): dispatch is no longer inferred from
+                    // a method-entry flag set BEFORE executeAction (which
+                    // still does resource resolution, offline/circuit-breaker
+                    // checks and pre-dispatch authorization before any
+                    // provider call). The execution layer itself reports the
+                    // provider-boundary crossing through the dispatch probe —
+                    // a cancellation landing anywhere BEFORE that boundary is
+                    // PROVEN undispatched and releases the reservation;
+                    // from the boundary on, accounting stays conservative.
                     execResult = executionService.executeAction(
                         action = chosenAction,
                         context = decisionContext,
@@ -1456,7 +1463,14 @@ class AgentOrchestrator(
                         // decide-time gate used: the pre-dispatch LLM gate
                         // REPLAYS the decide-time hold, never duplicates it.
                         stepIndex = stepIndex,
-                        attempt = context.attempt
+                        attempt = context.attempt,
+                        // STAGE 3A (DEBT-3) — the authoritative provider-
+                        // boundary probe: flips the in-flight tracker to
+                        // PROVIDER_CALL_STARTED exactly when the provider
+                        // invocation begins (never at method entry).
+                        dispatchProbe = { state ->
+                            inFlightStep.onDispatchState(state)
+                        }
                     )
                     if (isGatedAction) {
                         // GAP-13 (Design Closure 2026): an outcome-write
@@ -1519,19 +1533,27 @@ class AgentOrchestrator(
                 chosenAction.type in decisionService.ECONOMICALLY_GATED_ACTION_TYPES ||
                     chosenAction.type == DecisionActionType.RETRY
             if (attribution != null || isBillableStep) {
+                // STAGE 3A (DEBT-3) — the authoritative dispatch-state
+                // contract, derived from what the execution layer PROVED
+                // (never a generic method-entry flag):
+                //   NOT_DISPATCHED       — the provider call provably never
+                //                          started (idempotent intent replay
+                //                          or a pre-boundary rejection);
+                //   PROVIDER_CALL_STARTED — the boundary was crossed and the
+                //                          step is (was) in flight;
+                //   COMPLETED            — a provider response was received;
+                //   OUTCOME_UNKNOWN      — invocation began but completion
+                //                          could not be established (timeout,
+                //                          cancellation after start, lost
+                //                          stream) — conservative accounting.
                 val dispatchState = when {
                     // The idempotency ledger replayed a COMPLETED intent —
                     // the provider was definitely NOT called this attempt.
                     gate is IntentGate.AlreadyCompleted ->
                         com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED
-                    // The execution layer proved the provider call was entered.
-                    stepResult.providerDispatched ->
-                        com.example.domain.core.budget.UsageDispatchState.DISPATCHED
-                    // Every pre-dispatch rejection/failure path reports
-                    // providerDispatched = false honestly (the flag defaults
-                    // to false and is set only immediately before the call).
-                    else ->
-                        com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED
+                    // The execution layer's authoritative derivation
+                    // (providerDispatched/providerCallCompleted booleans).
+                    else -> stepResult.dispatchState
                 }
                 val record = runCatching {
                     economicGovernanceService?.accountUsageSuspend(
@@ -1868,11 +1890,19 @@ class AgentOrchestrator(
     private val ESTIMATED_STEP_TOKENS = 4096
 
     /**
-     * Stage 1A — the loop's live view of the CURRENT billable step, shared
-     * with executeTaskStream's cancellation handler so a cancellation proven
-     * to land BEFORE dispatch releases that step's reservation honestly,
-     * while a cancellation during/after dispatch keeps it conservative
-     * (UNKNOWN cost, reclaimed by the hold's bounded TTL).
+     * Stage 1A / STAGE 3A (DEBT-3) — the loop's live view of the CURRENT
+     * billable step, shared with executeTaskStream's cancellation handler.
+     * The dispatch state is the AUTHORITATIVE contract
+     * ([com.example.domain.core.budget.UsageDispatchState]): it starts
+     * NOT_DISPATCHED when the step is armed and flips to
+     * PROVIDER_CALL_STARTED only when the EXECUTION layer reports the
+     * provider-boundary crossing through the dispatch probe (never at
+     * executeAction method entry — resource resolution, offline and
+     * circuit-breaker checks and pre-dispatch authorization all run before
+     * the boundary). A cancellation proven to land while the state is still
+     * NOT_DISPATCHED releases the step's reservation honestly; once the
+     * boundary is crossed the reservation stays conservative (UNKNOWN cost,
+     * reclaimed by the bounded TTL).
      */
     private class InFlightStep(
         @Volatile var executionId: String? = null,
@@ -1881,9 +1911,9 @@ class AgentOrchestrator(
         @Volatile var taskId: String? = null,
         @Volatile var workspaceId: String? = null,
         @Volatile var agentId: String? = null,
-        /** True once executeAction was entered (conservative from there on:
-         *  the provider call may have started — never released as "unsent"). */
-        @Volatile var dispatchStarted: Boolean = false
+        /** The authoritative live dispatch state of the current step. */
+        @Volatile var dispatchState: com.example.domain.core.budget.UsageDispatchState =
+            com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED
     ) {
         fun resetForStep(
             executionId: String,
@@ -1899,14 +1929,28 @@ class AgentOrchestrator(
             this.taskId = taskId
             this.workspaceId = workspaceId
             this.agentId = agentId
-            this.dispatchStarted = false
+            this.dispatchState = com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED
+        }
+
+        /** The execution layer's provider-boundary / completion reports. */
+        fun onDispatchState(state: com.example.domain.core.budget.UsageDispatchState) {
+            // Monotonic refinement: once the boundary is crossed the state
+            // never regresses to NOT_DISPATCHED within the same step (a late
+            // or racing report may not un-cross the boundary).
+            if (this.dispatchState == com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED ||
+                state != com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED
+            ) {
+                this.dispatchState = state
+            }
         }
     }
 
     /**
-     * Stage 1A (lifecycle arm D) — best-effort release of the current step's
-     * reservations when it is PROVEN the provider call never started (the
-     * in-flight tracker was never marked dispatched). Called from the
+     * Stage 1A (lifecycle arm D) / STAGE 3A (DEBT-3) — best-effort release
+     * of the current step's reservations when it is PROVEN the provider call
+     * never started (the authoritative dispatch state is still
+     * NOT_DISPATCHED — reported by the execution layer at the provider
+     * boundary, never inferred from a method-entry flag). Called from the
      * pre-dispatch governance breaks and the cancellation handler. Pure
      * bookkeeping: idempotent, no fabricated ledger entry, an honest no-op
      * when no hold exists (legacy workspaces / unpriced steps).
@@ -1915,9 +1959,10 @@ class AgentOrchestrator(
         val governance = economicGovernanceService ?: return
         val execId = inFlightStep.executionId ?: return
         val stepIdx = inFlightStep.stepIndex ?: return
-        // A step whose dispatch WAS started must never be released as
-        // "unsent" — its cost is UNKNOWN, and the bounded TTL reclaims it.
-        if (inFlightStep.dispatchStarted) return
+        // A step whose provider boundary WAS crossed must never be released
+        // as "unsent" — its cost is UNKNOWN (or known-but-unreported), and
+        // the bounded TTL reclaims it conservatively.
+        if (inFlightStep.dispatchState != com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED) return
         runCatching {
             governance.releaseUndispatchedStepHold(
                 UsageAccountingInput(

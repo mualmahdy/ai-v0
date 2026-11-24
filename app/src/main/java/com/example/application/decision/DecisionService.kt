@@ -264,7 +264,19 @@ class DecisionService(
             effectiveAutonomyPolicy = effectiveAutonomyPolicy,
             // GAP-07 — corpus flag for CHAT grounding candidacy.
             hasKnowledgeCorpus = hasKnowledgeCorpus,
-            budgetActuals = budgetActuals
+            budgetActuals = budgetActuals,
+            // STAGE 3A (DEBT-5 production-path harness): the canonical
+            // execution identity MUST reach the returned context — the
+            // parameters existed but were never forwarded, so the REAL
+            // orchestrator path always decided under the LEGACY
+            // `pre_{taskId}_{step}` identity while the pre-dispatch LLM gate
+            // reserved under the canonical (executionId, stepIndex, attempt)
+            // grammar: TWO reservations for ONE billable step, the decide
+            // one left to expire as a zombie. The focused suites never saw
+            // this because they built the authorization requests directly;
+            // the production-path harness drives the real context path.
+            executionId = executionId,
+            executionAttempt = executionAttempt
         )
     }
 
@@ -892,7 +904,49 @@ class DecisionService(
         if (action.type !in ECONOMICALLY_GATED_ACTION_TYPES) return action
 
         val record = action.decisionRecord
-        val workspaceId = context.task.input.parameters["workspaceId"]?.toString()
+        // STAGE 3A (DEBT-4) — ONE canonical workspace identity for BOTH
+        // economic gates of this billable step: the PINNED ExecutionScope's
+        // workspace (the orchestrator pins it for the whole loop; decide()
+        // runs inside it). The task-supplied parameter is not an alternative
+        // authority: absent -> the pinned scope governs alone; CONFLICTING ->
+        // an explicit integrity error (REPLAN with WORKSPACE_IDENTITY_
+        // CONFLICT), never a silent fallback to either value and never an
+        // unattributed re-read. Legacy callers without a pinned scope (no
+        // ExecutionScope in the coroutine context) keep the pre-3A source
+        // (the task parameter) verbatim.
+        val pinnedScope = kotlin.coroutines.coroutineContext[
+            com.example.domain.core.execution.ExecutionScope.Key
+        ]
+        val pinnedWorkspaceId = com.example.domain.core.execution.WorkspaceIdentity
+            .pinnedWorkspaceIdOrNull(pinnedScope)
+        val taskSuppliedWorkspaceId = context.task.input.parameters["workspaceId"]?.toString()
+        val workspaceId = if (pinnedScope == null) {
+            taskSuppliedWorkspaceId
+        } else {
+            when (
+                val resolution = com.example.domain.core.execution.WorkspaceIdentity
+                    .resolve(pinnedWorkspaceId, taskSuppliedWorkspaceId)
+            ) {
+                is com.example.domain.core.execution.WorkspaceIdentity.Resolution.Canonical ->
+                    resolution.workspaceId
+                is com.example.domain.core.execution.WorkspaceIdentity.Resolution.Conflict -> {
+                    val detail = "WORKSPACE_IDENTITY_CONFLICT: معامل المهمة يذكر مساحة عمل " +
+                        "'${resolution.taskSuppliedWorkspaceId}' بينما نطاق التنفيذ المثبَّت هو " +
+                        "'${resolution.pinnedWorkspaceId ?: "غير منسوب"}' — بوابة الميزانية ترفض " +
+                        "خطوة تُقيَّم على ميزانيتين مختلفتين في مرحلتين."
+                    return DecisionAction(
+                        type = DecisionActionType.REPLAN,
+                        targetId = "workspace_identity_conflict",
+                        payload = mapOf(
+                            "reason" to "WORKSPACE_IDENTITY_CONFLICT",
+                            "detail" to detail,
+                            "pinnedWorkspaceId" to (resolution.pinnedWorkspaceId ?: ""),
+                            "taskSuppliedWorkspaceId" to resolution.taskSuppliedWorkspaceId
+                        )
+                    )
+                }
+            }
+        }
         // Stage 1A — the canonical billable-operation identity. When the
         // orchestrator supplies the execution identity, the decide-time
         // hold is keyed by (executionId, stepIndex, attempt): the SAME

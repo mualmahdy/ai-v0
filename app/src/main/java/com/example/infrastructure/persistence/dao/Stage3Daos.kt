@@ -28,6 +28,18 @@ interface CurrencyConversionRuleDao {
     suspend fun byId(ruleId: String): CurrencyConversionRuleEntity?
 
     /**
+     * STAGE 2C (FX-rule operational management) — every registered rule,
+     * newest effective window first (the operator-facing list; a pure read,
+     * no schema change). Rules are IMMUTABLE: this surface never exposes an
+     * edit or delete — corrections are NEW rules with NEW windows.
+     */
+    @Query(
+        "SELECT * FROM currency_conversion_rule " +
+            "ORDER BY effective_from_epoch_ms DESC, currency_conversion_rule_id"
+    )
+    suspend fun allRules(): List<CurrencyConversionRuleEntity>
+
+    /**
      * The rule covering [atEpochMs] for a pair. Multiple covering windows
      * are a writer discipline violation; the ORDER BY keeps the pick
      * deterministic even if data drifts in (the pricing-version pattern).

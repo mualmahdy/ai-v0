@@ -1004,6 +1004,15 @@ class AppContainer(context: Context) {
         com.example.application.budget.CurrencyConversionService(database = database)
     }
 
+    /** STAGE 2C — the FX-rule operational management surface (view +
+     *  immutable registration over the same conversion authority). */
+    val fxRuleManagementService: com.example.application.budget.FxRuleManagementService by lazy {
+        com.example.application.budget.FxRuleManagementService(
+            database = database,
+            fx = currencyConversionService
+        )
+    }
+
     /**
      * v26 — STAGE 3 provider billing import (roadmap Phase 3): the
      * programmatic landing surface for invoice data — immutable records,
@@ -2924,7 +2933,10 @@ class BudgetViewModelFactory(
                 // are discarded; expired reservations stop counting via the
                 // service's refresh-signal re-binding.
                 activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace
-                    .map { it?.id }
+                    .map { it?.id },
+                // STAGE 2C — the FX-rule operational management surface
+                // (view registered rules + immutable registration).
+                fxRuleManagement = appContainer.fxRuleManagementService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

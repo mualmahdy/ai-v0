@@ -60,7 +60,19 @@ class SearchIntelligenceService(
      * service uses only `searchProvider` and decomposes the query
      * across multiple sub-queries against it.
      */
-    private val additionalProviders: Map<String, SearchProviderPort> = emptyMap()
+    private val additionalProviders: Map<String, SearchProviderPort> = emptyMap(),
+    /**
+     * 2B-11 (deterministic recency): the time source for recency scoring.
+     * Production uses the system clock; tests inject a FIXED clock so the
+     * ranking of a fixed fixture is identical on every calendar date (the
+     * pre-fix test fixture hardcoded "2026-09-05" against wall-clock
+     * `ZonedDateTime.now()`, so the expected winner ROVED with the calendar
+     * and the suite failed identically on every code version from the
+     * modeled crossover date 2026-11-18 onward). One reference instant is
+     * captured per ranking pass ([rank]) so a result set is never scored
+     * against two different "now"s.
+     */
+    private val clock: java.time.Clock = java.time.Clock.systemDefaultZone()
 ) {
 
     /**
@@ -294,11 +306,16 @@ class SearchIntelligenceService(
         weight: Float
     ): RankedSearchItem {
         val relevance = (item.score ?: 0.5f) * weight
+        // 2B-11: the per-item pre-score reads the SAME injectable clock; the
+        // AUTHORITATIVE recency is recomputed in rank() against a single
+        // per-pass reference instant (these values are pre-ranking hints —
+        // rank() overwrites them deterministically).
+        val preRankingNow = java.time.ZonedDateTime.now(clock)
         return RankedSearchItem(
             item = item,
             relevanceScore = relevance.coerceIn(0f, 1f),
             authorityScore = computeAuthorityScore(item.url),
-            recencyScore = computeRecencyScore(item.publishedDate),
+            recencyScore = computeRecencyScore(item.publishedDate, preRankingNow),
             evidenceScore = 0f, // computed in rank()
             finalScore = 0f,    // computed in rank()
             sourceProviderId = providerId,
@@ -330,11 +347,29 @@ class SearchIntelligenceService(
     }
 
     /**
-     * Recency score — 1.0 if published in the last 7 days, decaying
-     * exponentially with a 30-day half-life. Null dates (unknown
-     * publication date) get a neutral 0.5.
+     * Recency score — the ACTUAL formula (reconciled with the
+     * implementation, 2B-11: the previous doc claimed a "1.0 for the last
+     * 7 days" plateau the code never had):
+     *
+     *   score = 0.5 ^ (ageDays / 30.0)
+     *
+     * i.e. an exponential decay with a 30-DAY HALF-LIFE measured against a
+     * SINGLE reference instant captured once per ranking pass ([rank] —
+     * never a per-item wall-clock read). Boundary behavior, all explicit
+     * and tested:
+     *   - age == 0 (published at the reference instant)   -> 1.0
+     *   - age  < 0 (future-dated item)                    -> clamped to 1.0
+     *     (a future date is never "more recent than now" scoring above 1)
+     *   - historical dates                                 -> decays toward 0
+     *     as age grows (never exactly fabricated 0 unless rounding says so)
+     *   - null / blank date (unknown publication)          -> neutral 0.5
+     *   - unparsable date string (any format in the parser
+     *     list fails, incl. the epoch-ms sentinel)         -> neutral 0.5
      */
-    private fun computeRecencyScore(publishedDate: String?): Float {
+    private fun computeRecencyScore(
+        publishedDate: String?,
+        referenceNow: java.time.ZonedDateTime
+    ): Float {
         if (publishedDate.isNullOrBlank()) return 0.5f
         return try {
             // Audit 2026 fix: the previous parser list used ISO_INSTANT with
@@ -351,7 +386,10 @@ class SearchIntelligenceService(
                 try {
                     val parsed = p(publishedDate.trim())
                     if (parsed.year >= 1970) { // guard: epoch sentinel for bad ms parsing
-                        val ageDays = java.time.Duration.between(parsed, java.time.ZonedDateTime.now()).toDays()
+                        // 2B-11: age is measured against the INJECTED reference
+                        // instant — never the wall clock — so the score of a
+                        // fixed fixture is a pure function of (fixture, clock).
+                        val ageDays = java.time.Duration.between(parsed, referenceNow).toDays()
                         val score = Math.pow(0.5, ageDays.toDouble() / 30.0).toFloat()
                         return score.coerceIn(0f, 1f)
                     }
@@ -410,6 +448,12 @@ class SearchIntelligenceService(
             else -> WeightSet(relevance = 0.4f, authority = 0.3f, recency = 0.15f, evidence = 0.15f)
         }
 
+        // 2B-11 (deterministic, single reference instant): ONE "now" is
+        // captured for the WHOLE ranking pass — every item in the result set
+        // is scored against the same instant, and a fixed clock makes the
+        // pass a pure function of its inputs (repeatable on any calendar
+        // date, never a mid-pass wall-clock tick).
+        val referenceNow = java.time.ZonedDateTime.now(clock)
         return items.map { item ->
             // Audit 2026 fix: authority/recency are RECOMPUTED from the source
             // item's url/publishedDate inside rank() — previously the values
@@ -418,7 +462,7 @@ class SearchIntelligenceService(
             // For pipeline-produced items this is idempotent (same URL/date →
             // same scores).
             val authority = computeAuthorityScore(item.item.url)
-            val recency = computeRecencyScore(item.item.publishedDate)
+            val recency = computeRecencyScore(item.item.publishedDate, referenceNow)
 
             // Evidence score = harmonic mean of the three dimensions — if
             // any one is very low, evidence drops sharply. This is what we

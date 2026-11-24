@@ -90,12 +90,124 @@ class SearchIntelligenceServiceTest {
 
     @Test
     fun `rank for TEMPORAL intent weights recency highest`() {
-        val service = SearchIntelligenceService(StubProvider())
-        val recent = makeRanked("news", 0.3f, "https://news.example.com/today", "Today News", publishedDate = "2026-09-05T10:00:00Z")
+        // 2B-11: the fixture is RELATIVE to an INJECTED fixed instant — the
+        // ranking is a pure function of (fixture, clock) and no longer roves
+        // with the wall-clock calendar (the pre-fix fixture hardcoded
+        // "2026-09-05", whose modeled crossover was 2026-11-18).
+        val fixedNow = java.time.ZonedDateTime.parse(
+            "2026-11-25T00:00:00Z",
+            java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME
+        )
+        val service = SearchIntelligenceService(
+            StubProvider(),
+            clock = java.time.Clock.fixed(fixedNow.toInstant(), fixedNow.zone)
+        )
+        val recent = makeRanked(
+            "news", 0.3f, "https://news.example.com/today", "Today News",
+            publishedDate = fixedNow.minusDays(1)
+                .format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+        )
         val old = makeRanked("docs", 0.9f, "https://docs.example.com/x", "Old Doc", publishedDate = "2024-01-01T00:00:00Z")
         val ranked = service.rank(listOf(recent, old), SearchIntent.TEMPORAL)
         // Recent wins despite lower relevance because recency weight is 0.5 for TEMPORAL.
         assertEquals("https://news.example.com/today", ranked.first().item.url)
+    }
+
+    // ------------------------------------------------------------------
+    // 2B-11 — deterministic recency: the ranking of a fixed fixture is a
+    // pure function of the INJECTED clock, and every documented boundary
+    // behavior of computeRecencyScore is explicit and tested.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `recency ranking is identical at two different wall-clock dates - fixtures relative to the injected clock`() {
+        // The SAME relative fixture (published 1 day before "now"), ranked
+        // under two FIXED clocks 100 days apart, produces IDENTICAL scores —
+        // repeating the ranking on any calendar date gives the same answer.
+        fun rankedAt(clockNow: java.time.ZonedDateTime): List<com.example.domain.core.search.intelligence.RankedSearchItem> {
+            val service = SearchIntelligenceService(
+                StubProvider(),
+                clock = java.time.Clock.fixed(clockNow.toInstant(), clockNow.zone)
+            )
+            val recent = makeRanked(
+                "news", 0.3f, "https://news.example.com/today", "Today News",
+                publishedDate = clockNow.minusDays(1)
+                    .format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+            )
+            val old = makeRanked(
+                "docs", 0.9f, "https://docs.example.com/x", "Old Doc",
+                publishedDate = clockNow.minusYears(3)
+                    .format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+            )
+            return service.rank(listOf(recent, old), SearchIntent.TEMPORAL)
+        }
+        val first = rankedAt(java.time.ZonedDateTime.parse("2026-01-01T00:00:00Z", java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME))
+        val second = rankedAt(java.time.ZonedDateTime.parse("2026-12-25T00:00:00Z", java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME))
+        assertEquals(first.map { it.item.url }, second.map { it.item.url })
+        assertEquals(first.map { it.recencyScore }, second.map { it.recencyScore })
+        assertEquals(first.map { it.finalScore }, second.map { it.finalScore })
+        assertEquals("https://news.example.com/today", first.first().item.url)
+    }
+
+    @Test
+    fun `recency of a null published date is the neutral 0_5`() {
+        val fixedNow = java.time.ZonedDateTime.parse("2026-11-25T00:00:00Z", java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+        val service = SearchIntelligenceService(StubProvider(), clock = java.time.Clock.fixed(fixedNow.toInstant(), fixedNow.zone))
+        val ranked = service.rank(
+            listOf(makeRanked("a", 0.5f, "https://example.com/a", "A", publishedDate = null)),
+            SearchIntent.TEMPORAL
+        )
+        assertEquals(0.5f, ranked.first().recencyScore, 0.0001f)
+    }
+
+    @Test
+    fun `recency of a malformed date is the neutral 0_5`() {
+        val fixedNow = java.time.ZonedDateTime.parse("2026-11-25T00:00:00Z", java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+        val service = SearchIntelligenceService(StubProvider(), clock = java.time.Clock.fixed(fixedNow.toInstant(), fixedNow.zone))
+        val ranked = service.rank(
+            listOf(makeRanked("a", 0.5f, "https://example.com/a", "A", publishedDate = "definitely-not-a-date")),
+            SearchIntent.TEMPORAL
+        )
+        assertEquals(0.5f, ranked.first().recencyScore, 0.0001f)
+    }
+
+    @Test
+    fun `recency of a future-dated item is clamped to 1_0 - never above 1`() {
+        val fixedNow = java.time.ZonedDateTime.parse("2026-11-25T00:00:00Z", java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+        val service = SearchIntelligenceService(StubProvider(), clock = java.time.Clock.fixed(fixedNow.toInstant(), fixedNow.zone))
+        val ranked = service.rank(
+            listOf(makeRanked(
+                "a", 0.5f, "https://example.com/a", "A",
+                publishedDate = fixedNow.plusDays(30).format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+            )),
+            SearchIntent.TEMPORAL
+        )
+        assertEquals(1.0f, ranked.first().recencyScore, 0.0001f)
+    }
+
+    @Test
+    fun `recency of a historical date decays with the 30-day half-life`() {
+        val fixedNow = java.time.ZonedDateTime.parse("2026-11-25T00:00:00Z", java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+        val service = SearchIntelligenceService(StubProvider(), clock = java.time.Clock.fixed(fixedNow.toInstant(), fixedNow.zone))
+        // Exactly one half-life: 30 days old -> 0.5^1 = 0.5.
+        val halfLife = service.rank(
+            listOf(makeRanked(
+                "a", 0.5f, "https://example.com/a", "A",
+                publishedDate = fixedNow.minusDays(30).format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+            )),
+            SearchIntent.TEMPORAL
+        )
+        assertEquals(0.5f, halfLife.first().recencyScore, 0.01f)
+        // Far history (10 years): decayed to (nearly) zero, never negative,
+        // never fabricated above the neutral value.
+        val ancient = service.rank(
+            listOf(makeRanked(
+                "b", 0.5f, "https://example.com/b", "B",
+                publishedDate = fixedNow.minusYears(10).format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+            )),
+            SearchIntent.TEMPORAL
+        )
+        assertTrue(ancient.first().recencyScore in 0f..0.01f)
     }
 
     @Test

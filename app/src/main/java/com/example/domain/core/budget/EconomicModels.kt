@@ -360,19 +360,54 @@ data class EconomicAuthorizationResult(
 )
 
 /**
- * Stage 1A — what the execution layer PROVED about the provider dispatch of
- * the billable operation this accounting input belongs to. The settlement
- * lifecycle decision depends on it: a missing usage report is NOT evidence
- * of zero cost (UNKNOWN is never zero), but a proven-never-dispatched
- * operation can never have incurred a charge and its reservation is
- * released idempotently.
+ * Stage 1A / STAGE 3A (DEBT-3) — what the execution layer PROVED about the
+ * provider dispatch of the billable operation this accounting input belongs
+ * to. The settlement lifecycle decision depends on it: a missing usage
+ * report is NOT evidence of zero cost (UNKNOWN is never zero), but a
+ * proven-never-dispatched operation can never have incurred a charge and
+ * its reservation is released idempotently.
+ *
+ * STAGE 3A (DEBT-3) refined the coarse Stage-1A contract into the
+ * AUTHORITATIVE four-state granularity. The lifecycle mapping is preserved
+ * exactly: ONLY [NOT_DISPATCHED] releases a reservation (arm D); every
+ * state that crossed the provider boundary keeps conservative accounting
+ * (settle on a usage report, keep under the bounded TTL without one).
  */
 enum class UsageDispatchState {
-    /** The provider call was entered — cost may be anything, including unknown. */
-    DISPATCHED,
     /** Proven from execution state that the provider call never started
-     *  (idempotent intent replay, pre-dispatch rejection/failure). */
+     *  (idempotent intent replay, pre-dispatch rejection/failure, or a
+     *  cancellation that landed before the provider boundary). */
     NOT_DISPATCHED,
+
+    /**
+     * STAGE 3A (DEBT-3) — the provider boundary was CROSSED (the invocation
+     * began) and completion has not been established from the live
+     * execution's point of view. Reported at the boundary itself; a terminal
+     * observation ([COMPLETED]/[OUTCOME_UNKNOWN]) may follow.
+     */
+    PROVIDER_CALL_STARTED,
+
+    /**
+     * STAGE 3A (DEBT-3) — a provider RESPONSE was received (success or a
+     * provider-reported failure). Cost is still governed by the usage
+     * report: with a report the actual settles; without one the cost is
+     * UNKNOWN and the reservation is kept conservatively.
+     */
+    COMPLETED,
+
+    /**
+     * STAGE 3A (DEBT-3) — the invocation began but completion could NOT be
+     * established (timeout, cancellation after the boundary started, or a
+     * lost/failed stream). Conservative accounting: never released as
+     * "unsent", kept under the bounded TTL.
+     */
+    OUTCOME_UNKNOWN,
+
+    /** Stage 1A legacy value — the provider call was entered (coarse:
+     *  completion not established here). Kept for every pre-3A caller;
+     *  treated like [OUTCOME_UNKNOWN]. */
+    DISPATCHED,
+
     /** No proof either way — treated conservatively (like DISPATCHED). */
     UNKNOWN
 }

@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachMoney
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CurrencyExchange
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockClock
 import androidx.compose.material.icons.filled.Payments
@@ -251,6 +252,35 @@ fun BudgetScreen(
         } else {
             items(state.pricingEntries, key = { it.id }) { entry ->
                 PricingEntryCard(entry = entry)
+            }
+        }
+
+        // ---------- STAGE 2C: FX rule management ----------
+        item {
+            SectionTitle(text = "إدارة قواعد تحويل العملات (FX) — (${state.fxRules.size})")
+        }
+        item {
+            FxManagementCard(
+                state = state,
+                onRegister = { from, to, rate, fromEpoch, untilEpoch, authority ->
+                    viewModel.registerFxRule(from, to, rate, fromEpoch, untilEpoch, authority)
+                }
+            )
+        }
+        if (state.fxRules.isEmpty()) {
+            item {
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier.testTag("fx_empty_state")
+                ) {
+                    HonestEmptyCard(
+                        text = "لا قواعد تحويل مسجّلة — التحويل بين العملات المختلفة يُرفض بأمانة " +
+                            "(لا يُفترض 1:1 أبداً)؛ سجّل قاعدة موثّقة لتمكين التحويل."
+                    )
+                }
+            }
+        } else {
+            items(state.fxRules, key = { it.ruleId }) { rule ->
+                FxRuleCard(rule = rule)
             }
         }
 
@@ -810,6 +840,230 @@ private fun PricingEntryCard(entry: com.example.domain.core.budget.PricingEntry)
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 28.dp)
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// STAGE 2C — FX rule management (registered operator evidence, never
+// independently verified exchange rates; rules are IMMUTABLE — a correction
+// is a NEW rule with a NEW window)
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun FxManagementCard(
+    state: com.example.presentation.viewmodel.BudgetViewModel.BudgetUiState,
+    onRegister: (String, String, String, String, String, String) -> Unit
+) {
+    var fromInput by remember { mutableStateOf("") }
+    var toInput by remember { mutableStateOf("") }
+    var rateInput by remember { mutableStateOf("") }
+    var fromEpochInput by remember { mutableStateOf("") }
+    var untilEpochInput by remember { mutableStateOf("") }
+    var authorityInput by remember { mutableStateOf("") }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .testTag("fx_management_card"),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = "تسجيل قاعدة تحويل عملات (دليل تشغيلي)",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "المعدل يعني وحدات العملة الهدف لكل وحدة من عملة المصدر " +
+                    "(TARGET_UNITS_PER_SOURCE_UNIT) — القاعدة اتجاهية ولا تُستخدم عكسياً. " +
+                    "هذا تسجيل دليل تشغيلي يدوي وليس سعر صرف مُتحققاً بشكل مستقل، " +
+                    "والقواعد غير قابلة للتعديل بعد التسجيل: التصحيح قاعدة جديدة بنافذة سارية موثّقة. " +
+                    "بدون قاعدة سارية لا يُفترض 1:1 أبداً — التحويل يُرفض بأمانة.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("fx_form_honesty_note")
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = fromInput,
+                    onValueChange = { fromInput = it },
+                    label = { Text("من عملة") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("fx_form_from")
+                )
+                OutlinedTextField(
+                    value = toInput,
+                    onValueChange = { toInput = it },
+                    label = { Text("إلى عملة") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("fx_form_to")
+                )
+                OutlinedTextField(
+                    value = rateInput,
+                    onValueChange = { rateInput = it },
+                    label = { Text("المعدل") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("fx_form_rate")
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = fromEpochInput,
+                    onValueChange = { fromEpochInput = it },
+                    label = { Text("يبدأ (Unix ms — فارغ = الآن)") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("fx_form_from_epoch")
+                )
+                OutlinedTextField(
+                    value = untilEpochInput,
+                    onValueChange = { untilEpochInput = it },
+                    label = { Text("ينتهي (فارغ = مفتوح)") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("fx_form_until_epoch")
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = authorityInput,
+                onValueChange = { authorityInput = it },
+                label = { Text("مصدر الدليل (مثال: operator أو رابط نشرة رسمية)") },
+                placeholder = { Text("operator") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("fx_form_authority")
+            )
+            state.inputError?.let { error ->
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag("fx_form_validation")
+                )
+            }
+            state.managementMessage?.let { message ->
+                if (message.contains("قاعدة تحويل")) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.testTag("fx_form_message")
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Button(
+                onClick = {
+                    onRegister(
+                        fromInput.trim(),
+                        toInput.trim(),
+                        rateInput,
+                        fromEpochInput.trim(),
+                        untilEpochInput.trim(),
+                        authorityInput.trim()
+                    )
+                },
+                enabled = fromInput.isNotBlank() &&
+                    toInput.isNotBlank() &&
+                    rateInput.isNotBlank() &&
+                    !state.isSavingFxRule,
+                modifier = Modifier.testTag("fx_form_save")
+            ) {
+                if (state.isSavingFxRule) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                } else {
+                    Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("تسجيل القاعدة")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FxRuleCard(rule: com.example.application.budget.FxRuleManagementService.FxRuleView) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .testTag("fx_rule_${rule.ruleId}"),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        )
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(12.dp)
+        ) {
+            Icon(
+                Icons.Default.CurrencyExchange,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "${rule.fromCurrency} ← ${rule.toCurrency} • ${rule.ratePrecise}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "سارية من ${formatDate(rule.effectiveFromEpochMs)}" +
+                        (rule.effectiveUntilEpochMs?.let { " حتى ${formatDate(it)}" } ?: " (مفتوحة)"),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "الدليل: ${rule.sourceAuthority} • ${rule.rateDirection} • ${rule.roundingPolicy}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = when (rule.applicability) {
+                    com.example.application.budget.FxRuleManagementService.RuleApplicability.ACTIVE_NOW,
+                    com.example.application.budget.FxRuleManagementService.RuleApplicability.OPEN_ENDED_ACTIVE ->
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                    else -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                }
+            ) {
+                Text(
+                    text = when (rule.applicability) {
+                        com.example.application.budget.FxRuleManagementService.RuleApplicability.ACTIVE_NOW -> "سارية الآن"
+                        com.example.application.budget.FxRuleManagementService.RuleApplicability.OPEN_ENDED_ACTIVE -> "سارية (مفتوحة)"
+                        com.example.application.budget.FxRuleManagementService.RuleApplicability.NOT_YET_EFFECTIVE -> "لم تبدأ بعد"
+                        com.example.application.budget.FxRuleManagementService.RuleApplicability.EXPIRED -> "منتهية"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .padding(horizontal = 6.dp, vertical = 1.dp)
+                        .testTag("fx_rule_applicability")
+                )
+            }
+        }
     }
 }
 

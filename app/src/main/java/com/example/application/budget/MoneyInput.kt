@@ -110,3 +110,62 @@ object MoneyInput {
         }
     }
 }
+
+/**
+ * ============================================================================
+ * FxRateInput — STAGE 2C (FX-rule operational management): rate input
+ * integrity
+ * ============================================================================
+ * The exact-decimal parser for an operator-entered FX rate
+ * (TARGET_UNITS_PER_SOURCE_UNIT). Same discipline as [MoneyInput] — NaN /
+ * ±Infinity / '+'-prefix / commas / non-numeric are rejected with explicit
+ * reasons — but a rate is NOT a money amount:
+ *  - it must be STRICTLY POSITIVE (zero and negative rates are never
+ *    "clamped" — a wrong-sign rate would silently invert conversions);
+ *  - the supported precision is 12 fractional digits (rates like
+ *    0.000063900123 are legitimate; the ledger stores the exact decimal
+ *    TEXT and computes with BigDecimal, so no micro-scale truncation);
+ *  - the supported magnitude is 0 < rate <= 10^12 (enormous but finite —
+ *    beyond any real currency pair while keeping the BigDecimal math sane).
+ */
+object FxRateInput {
+
+    /** Accepted decimal precision of an entered rate. */
+    const val MAX_DECIMAL_PLACES = 12
+
+    /** Supported magnitude ceiling (whole units per source unit). */
+    const val MAX_RATE = 1_000_000_000_000L
+
+    sealed class Parsed {
+        /** The exact rate as normalized decimal TEXT (never a binary float). */
+        data class Rate(val ratePrecise: String) : Parsed()
+        data class Invalid(val reason: String) : Parsed()
+    }
+
+    fun parse(text: String): Parsed {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return Parsed.Invalid("أدخل معدل التحويل")
+        if (trimmed.startsWith("+")) return Parsed.Invalid("لا يُقبل محرف \"+\" — أدخل الرقم كما هو")
+        if (trimmed.equals("NaN", ignoreCase = true) ||
+            trimmed.equals("Infinity", ignoreCase = true) ||
+            trimmed.equals("-Infinity", ignoreCase = true)
+        ) {
+            return Parsed.Invalid("قيمة غير رقمية (NaN/Infinity) — أدخل رقماً منتهياً")
+        }
+        if (trimmed.any { it == ',' }) return Parsed.Invalid("استخدم النقطة (.) كفاصل عشري")
+        val value = try {
+            java.math.BigDecimal(trimmed)
+        } catch (_: NumberFormatException) {
+            return Parsed.Invalid("صيغة رقمية غير صالحة")
+        }
+        if (value.signum() <= 0) return Parsed.Invalid("المعدل يجب أن يكون موجباً تماماً — الصفر والسالب ليسا معدل تحويل")
+        val decimals = if (value.scale() > 0) value.scale() else 0
+        if (decimals > MAX_DECIMAL_PLACES) {
+            return Parsed.Invalid("دقة عشرية أكثر من $MAX_DECIMAL_PLACES خانة")
+        }
+        if (value > java.math.BigDecimal(MAX_RATE)) {
+            return Parsed.Invalid("المعدل خارج النطاق المدعوم (الحد الأقصى $MAX_RATE)")
+        }
+        return Parsed.Rate(value.stripTrailingZeros().toPlainString())
+    }
+}

@@ -68,6 +68,24 @@ class BudgetLedgerService(
             val replayed: Boolean
         ) : HoldReservation()
 
+        /**
+         * STAGE 2C (DEBT-2) — the replay of an authorization whose ORIGINAL
+         * hold has EXPIRED. The original reservation is returned for
+         * reference ONLY: it no longer suppresses availability (lazy expiry
+         * reclaimed it) and it is NOT fresh spending authority. A result of
+         * this type can NEVER be interpreted as a new active reservation —
+         * the caller must re-dispatch with a NEW attempt identity (the
+         * attempt-increment contract) or explicitly re-authorize. Never
+         * renewed, never re-created under the same idempotency identity.
+         */
+        data class ExpiredReplay(
+            val holdId: String,
+            val periodId: String,
+            val holdAmountMicroUnits: Long,
+            /** The original hold's expiry instant (null = legacy unbounded). */
+            val expiredAtEpochMs: Long?
+        ) : HoldReservation()
+
         /** Insufficient available balance; no hold was created. */
         data class Denied(
             val requiredMicroUnits: Long,
@@ -315,18 +333,36 @@ class BudgetLedgerService(
                     ?: return@withTransaction HoldReservation.NoActivePolicy
 
                 // Idempotent replay: the same key returns the ORIGINAL
-                // outcome, never a second hold.
+                // outcome, never a second hold. STAGE 2C (DEBT-2): an
+                // EXPIRED original is distinguished from a valid active
+                // reservation — TRUE-expiry validation (status OR timestamp,
+                // the DEBT-1 semantics) so the result is sweep-invariant:
+                // before and after markExpired re-stamps the row, the caller
+                // receives the SAME explicit ExpiredReplay verdict and can
+                // never mistake it for fresh spending authority.
                 database.budgetHoldDao().byIdempotencyKey(active.period.budgetPeriodId, idempotencyKey)
                     ?.let { existing ->
-                        return@withTransaction HoldReservation.Reserved(
-                            holdId = existing.holdId,
-                            periodId = existing.budgetPeriodId,
-                            holdAmountMicroUnits = existing.holdAmountMicroUnits,
-                            availableAfterMicroUnits = availableForPeriod(
-                                active.period.budgetPeriodId, nowEpochMs
-                            ).availableMicroUnits,
-                            replayed = true
-                        )
+                        return@withTransaction if (
+                            existing.status == HOLD_EXPIRED ||
+                            (existing.expiresAtEpochMs != null && existing.expiresAtEpochMs <= nowEpochMs)
+                        ) {
+                            HoldReservation.ExpiredReplay(
+                                holdId = existing.holdId,
+                                periodId = existing.budgetPeriodId,
+                                holdAmountMicroUnits = existing.holdAmountMicroUnits,
+                                expiredAtEpochMs = existing.expiresAtEpochMs
+                            )
+                        } else {
+                            HoldReservation.Reserved(
+                                holdId = existing.holdId,
+                                periodId = existing.budgetPeriodId,
+                                holdAmountMicroUnits = existing.holdAmountMicroUnits,
+                                availableAfterMicroUnits = availableForPeriod(
+                                    active.period.budgetPeriodId, nowEpochMs
+                                ).availableMicroUnits,
+                                replayed = true
+                            )
+                        }
                     }
 
                 val available = availableForPeriod(active.period.budgetPeriodId, nowEpochMs)
@@ -1046,16 +1082,20 @@ class BudgetLedgerService(
         ).also { database.scopeDescriptorDao().insert(it) }
     }
 
-    private fun replayHold(
+    private suspend fun replayHold(
         scopeType: String,
         platformObjectId: String?,
         idempotencyKey: String,
         nowEpochMs: Long
-    ): HoldReservation.Reserved? {
+    ): HoldReservation? {
         // Best-effort synchronous replay lookup — called only on the UNIQUE
         // race path where another writer already committed the same key.
         // (Room suspend DAOs cannot run on this blocking catch path, so we
         // resolve via a blocking query on the same database handle.)
+        // STAGE 2C (DEBT-2): the race path applies the SAME expired-replay
+        // distinction as the transactional replay — a concurrent duplicate
+        // whose original hold expired gets the explicit ExpiredReplay
+        // verdict, never a fake "Reserved".
         val descriptor = kotlinx.coroutines.runBlocking { findDescriptor(scopeType, platformObjectId) }
             ?: return null
         val active = kotlinx.coroutines.runBlocking { resolveActiveBudget(scopeType, platformObjectId, nowEpochMs) }
@@ -1063,6 +1103,16 @@ class BudgetLedgerService(
         val existing = kotlinx.coroutines.runBlocking {
             database.budgetHoldDao().byIdempotencyKey(active.period.budgetPeriodId, idempotencyKey)
         } ?: return null
+        if (existing.status == HOLD_EXPIRED ||
+            (existing.expiresAtEpochMs != null && existing.expiresAtEpochMs <= nowEpochMs)
+        ) {
+            return HoldReservation.ExpiredReplay(
+                holdId = existing.holdId,
+                periodId = existing.budgetPeriodId,
+                holdAmountMicroUnits = existing.holdAmountMicroUnits,
+                expiredAtEpochMs = existing.expiresAtEpochMs
+            )
+        }
         val available = kotlinx.coroutines.runBlocking {
             availableForPeriod(active.period.budgetPeriodId, nowEpochMs)
         }

@@ -59,8 +59,37 @@ data class ExecutionResult(
      * (UNKNOWN is never zero). Default false = honestly not dispatched
      * (every pre-dispatch rejection path).
      */
-    val providerDispatched: Boolean = false
-)
+    val providerDispatched: Boolean = false,
+    /**
+     * STAGE 3A (DEBT-3) — true when a provider RESPONSE was received for
+     * this step (a completed stream, a generate() outcome, a child
+     * execution's answer — success OR provider-reported failure). Together
+     * with [providerDispatched] it derives the authoritative
+     * [dispatchState]; false after a started-but-unresolved invocation
+     * (timeout, cancellation, lost stream).
+     */
+    val providerCallCompleted: Boolean = false
+) {
+    /**
+     * STAGE 3A (DEBT-3) — the AUTHORITATIVE dispatch state, DERIVED from
+     * the two proof booleans so it can never disagree with them:
+     *
+     *   NOT_DISPATCHED  — the provider call provably never started;
+     *   COMPLETED       — the boundary was crossed AND a response arrived;
+     *   OUTCOME_UNKNOWN — the boundary was crossed but completion could not
+     *                     be established (timeout / cancellation / lost
+     *                     stream) — conservative accounting.
+     *
+     * (PROVIDER_CALL_STARTED is the LIVE in-flight observation reported
+     * through the dispatch probe; a returned result is always terminal.)
+     */
+    val dispatchState: com.example.domain.core.budget.UsageDispatchState
+        get() = when {
+            !providerDispatched -> com.example.domain.core.budget.UsageDispatchState.NOT_DISPATCHED
+            providerCallCompleted -> com.example.domain.core.budget.UsageDispatchState.COMPLETED
+            else -> com.example.domain.core.budget.UsageDispatchState.OUTCOME_UNKNOWN
+        }
+}
 
 /**
  * GOVERNANCE PHASE — attributed token usage of one executed action.
@@ -84,13 +113,22 @@ private fun Int.ifPositiveOr(fallback: Int): Int = if (this > 0) this else fallb
 
 /**
  * Stage 1A — marks a result whose provider call was ENTERED (search /
- * RAG-embedding / delegation child execution). The hold-lifecycle decision
- * reads [ExecutionResult.providerDispatched]: a step proven never dispatched
- * releases its reservation; a dispatched step without a usable usage report
- * keeps it under the bounded-expiry policy (UNKNOWN is never zero).
+ * RAG-embedding / delegation child execution) but whose completion could
+ * not be established from the result alone (OUTCOME_UNKNOWN — the
+ * conservative terminal state). The hold-lifecycle decision reads
+ * [ExecutionResult.dispatchState].
  */
 private fun dispatched(result: ExecutionResult): ExecutionResult =
     result.copy(providerDispatched = true)
+
+/**
+ * STAGE 3A (DEBT-3) — marks a result whose provider call was entered AND a
+ * provider response was received (COMPLETED). Used at every provider
+ * boundary that conclusively resolves: a returned search outcome, an
+ * assembled RAG context, a finished child execution.
+ */
+private fun dispatchedCompleted(result: ExecutionResult): ExecutionResult =
+    result.copy(providerDispatched = true, providerCallCompleted = true)
 
 /**
  * ============================================================================
@@ -709,22 +747,34 @@ class ExecutionService(
          * Null keeps the legacy per-execution grammar.
          */
         stepIndex: Int? = null,
-        attempt: Int? = null
+        attempt: Int? = null,
+        /**
+         * STAGE 3A (DEBT-3) — the authoritative provider-boundary probe.
+         * Invoked with PROVIDER_CALL_STARTED exactly when a provider
+         * invocation begins (never at method entry — resource resolution,
+         * offline/circuit-breaker checks and pre-dispatch authorization all
+         * run first), and with the terminal COMPLETED / OUTCOME_UNKNOWN
+         * observation when the invocation resolves. The orchestrator's
+         * in-flight tracker consumes it so a cancellation landing BEFORE
+         * the boundary releases the step's reservation, and one landing
+         * after keeps accounting conservative.
+         */
+        dispatchProbe: ((com.example.domain.core.budget.UsageDispatchState) -> Unit)? = null
     ): ExecutionResult {
         val startTime = System.currentTimeMillis()
 
         return when (action.type) {
             DecisionActionType.SELECT_MODEL, DecisionActionType.EXECUTE_STEP -> {
-                executeLlmStep(action, context, agent, conversationHistory, executionId, startTime, onEvent, stepIndex, attempt)
+                executeLlmStep(action, context, agent, conversationHistory, executionId, startTime, onEvent, stepIndex, attempt, dispatchProbe)
             }
             DecisionActionType.SEARCH -> {
-                executeSearch(action, context, startTime, onEvent, executionId)
+                executeSearch(action, context, startTime, onEvent, executionId, dispatchProbe)
             }
             DecisionActionType.RETRIEVE_MEMORY -> {
                 executeMemoryRetrieval(action, context, startTime, onEvent, executionId)
             }
             DecisionActionType.RETRIEVE_KNOWLEDGE -> {
-                executeKnowledgeRetrieval(action, context, startTime, onEvent, executionId)
+                executeKnowledgeRetrieval(action, context, startTime, onEvent, executionId, dispatchProbe)
             }
             DecisionActionType.EXECUTE_TOOL, DecisionActionType.SELECT_TOOL -> {
                 executeTool(action, context, agent, startTime, onEvent, executionId)
@@ -742,7 +792,7 @@ class ExecutionService(
                 executePlanAction(action, context, startTime, onEvent, executionId)
             }
             DecisionActionType.RETRY -> {
-                executeRetryAction(action, context, agent, conversationHistory, executionId, startTime, onEvent, stepIndex, attempt)
+                executeRetryAction(action, context, agent, conversationHistory, executionId, startTime, onEvent, stepIndex, attempt, dispatchProbe)
             }
             DecisionActionType.ASK_USER -> {
                 val reason = action.payload["reason"] ?: "مطلوب تفاعل المستخدم."
@@ -791,7 +841,7 @@ class ExecutionService(
                     // resolved, a child task is created under the parent's budget,
                     // executed through the orchestrator, and its real outcome is
                     // propagated back to the parent loop.
-                    executeDelegation(action, context, agent, conversationHistory, executionId, startTime, onEvent)
+                    executeDelegation(action, context, agent, conversationHistory, executionId, startTime, onEvent, dispatchProbe)
                 }
             }
             else -> {
@@ -844,7 +894,8 @@ class ExecutionService(
         startTime: Long,
         onEvent: suspend (ExecutionEvent) -> Unit,
         stepIndex: Int? = null,
-        attempt: Int? = null
+        attempt: Int? = null,
+        dispatchProbe: ((com.example.domain.core.budget.UsageDispatchState) -> Unit)? = null
     ): ExecutionResult {
         // Per Phase 4: DecisionRecord is REQUIRED. No silent fallback.
         val (decisionRecord, rejection) = requireDecisionRecord(action, executionId, startTime, onEvent)
@@ -943,9 +994,52 @@ class ExecutionService(
         val gateAttributionResourceId = decisionRecord.selectedResourceId.value
         val economicGovernance = this.economicGovernance
         if (economicGovernance != null) {
+            // STAGE 3A (DEBT-4) — the SAME canonical workspace identity the
+            // decide-time gate used: the PINNED ExecutionScope's workspace.
+            // A task-supplied parameter that CONFLICTS with the pinned scope
+            // is an explicit integrity error — the step is rejected BEFORE
+            // the provider is invoked (never a silent fallback to either
+            // value, never an unattributed re-read, never one billable step
+            // evaluated against two workspace budgets).
+            val pinnedScope = kotlinx.coroutines.currentCoroutineContext()[
+                com.example.domain.core.execution.ExecutionScope.Key
+            ]
+            val pinnedWorkspaceId = com.example.domain.core.execution.WorkspaceIdentity
+                .pinnedWorkspaceIdOrNull(pinnedScope)
+            val taskSuppliedWorkspaceId = context.task.input.parameters["workspaceId"]?.toString()
+            val gateWorkspaceId = if (pinnedScope == null) {
+                currentWorkspaceId()
+            } else {
+                when (
+                    val resolution = com.example.domain.core.execution.WorkspaceIdentity
+                        .resolve(pinnedWorkspaceId, taskSuppliedWorkspaceId)
+                ) {
+                    is com.example.domain.core.execution.WorkspaceIdentity.Resolution.Canonical ->
+                        resolution.workspaceId
+                    is com.example.domain.core.execution.WorkspaceIdentity.Resolution.Conflict -> {
+                        val conflictMsg = "WORKSPACE_IDENTITY_CONFLICT: معامل المهمة يذكر مساحة عمل " +
+                            "'${resolution.taskSuppliedWorkspaceId}' بينما نطاق التنفيذ المثبَّت هو " +
+                            "'${resolution.pinnedWorkspaceId ?: "غير منسوب"}' — رُفضت خطوة النموذج قبل " +
+                            "استدعاء المزوّد (لا تُقيَّم خطوة واحدة على ميزانيتين مختلفتين)."
+                        onEvent(
+                            ExecutionEvent.Error(
+                                executionId = executionId,
+                                failureCode = "WORKSPACE_IDENTITY_CONFLICT",
+                                message = conflictMsg,
+                                isFatal = false
+                            )
+                        )
+                        return ExecutionResult(
+                            isSuccess = false,
+                            errorDescription = "WORKSPACE_IDENTITY_CONFLICT: $conflictMsg",
+                            latencyMs = System.currentTimeMillis() - startTime
+                        )
+                    }
+                }
+            }
             val gateRequest = com.example.domain.core.budget.EconomicAuthorizationRequest(
                 executionId = executionId,
-                workspaceId = currentWorkspaceId(),
+                workspaceId = gateWorkspaceId,
                 agentId = agent.identity.id.value,
                 taskId = context.task.id.value,
                 providerId = gateAttributionProviderId,
@@ -1116,9 +1210,15 @@ class ExecutionService(
         var errorMessage: String? = null
         // Stage 1A — set immediately before the provider call is ENTERED;
         // every earlier exit (record required, adapter resolution, offline
-        // policy, circuit-open, economic-gate denial) honestly reports a
-        // NOT-dispatched step so its reservation is released.
+        // policy, circuit-open, economic-gate denial, workspace-identity
+        // conflict) honestly reports a NOT-dispatched step so its reservation
+        // is released.
         var providerDispatched = false
+        // STAGE 3A (DEBT-3) — flipped when the provider interaction
+        // CONCLUSIVELY resolved (the stream completed and every follow-up
+        // round returned). An exception, a timeout or a cancellation skips
+        // it: OUTCOME_UNKNOWN (started, completion not established).
+        var providerCallCompleted = false
 
         // FIX F-7 (delegation loop): tool results are fed back to the model for a
         // final synthesis round (bounded to MAX_TOOL_ROUNDS so a tool-requesting
@@ -1138,6 +1238,12 @@ class ExecutionService(
 
         try {
             providerDispatched = true
+            // STAGE 3A (DEBT-3) — THE provider boundary: reported exactly
+            // here, never at method entry (resource resolution, offline /
+            // circuit-breaker checks and pre-dispatch authorization all ran
+            // above). From this instant a cancellation can no longer prove
+            // the call never happened — accounting turns conservative.
+            dispatchProbe?.invoke(com.example.domain.core.budget.UsageDispatchState.PROVIDER_CALL_STARTED)
             provider.stream(request, executionId).collect { event ->
                 when (event) {
                     is ExecutionEvent.ContentChunk -> {
@@ -1376,6 +1482,12 @@ class ExecutionService(
                 // Tool results have been consumed by the synthesis round.
                 toolResultMessages.clear()
             }
+            // STAGE 3A (DEBT-3): the whole provider interaction (stream +
+            // optional generate() fallback + tool rounds) resolved — a
+            // provider response was received (COMPLETED), even when the
+            // business outcome is a provider-reported error (isSuccess may
+            // be false — that is still a RESPONSE, not an unknown outcome).
+            providerCallCompleted = true
         } catch (e: kotlinx.coroutines.CancellationException) {
             // GAP-10 (Design Closure 2026): cancellation is CONTROL FLOW, not
             // a step failure. Swallowing it here (the previous bare
@@ -1405,6 +1517,20 @@ class ExecutionService(
             }
         }
 
+        // STAGE 3A (DEBT-3): the terminal dispatch observation for the live
+        // tracker (COMPLETED when the interaction resolved, OUTCOME_UNKNOWN
+        // when it began but could not be established — timeout/cancel/lost
+        // stream).
+        if (providerDispatched) {
+            dispatchProbe?.invoke(
+                if (providerCallCompleted) {
+                    com.example.domain.core.budget.UsageDispatchState.COMPLETED
+                } else {
+                    com.example.domain.core.budget.UsageDispatchState.OUTCOME_UNKNOWN
+                }
+            )
+        }
+
         return ExecutionResult(
             isSuccess = isSuccess,
             outputText = textAccumulator.toString(),
@@ -1422,6 +1548,7 @@ class ExecutionService(
             // reports attribution only when tokens were actually seen —
             // zero tokens on a failure is UNKNOWN (never fabricated zero).
             providerDispatched = providerDispatched,
+            providerCallCompleted = providerCallCompleted,
             usageDetail = if (
                 providerDispatched &&
                 (isSuccess || totalTokens > 0 || promptTokens > 0 || completionTokens > 0)
@@ -1446,7 +1573,8 @@ class ExecutionService(
         context: DecisionContext,
         startTime: Long,
         onEvent: suspend (ExecutionEvent) -> Unit,
-        executionId: String
+        executionId: String,
+        dispatchProbe: ((com.example.domain.core.budget.UsageDispatchState) -> Unit)? = null
     ): ExecutionResult {
         if (context.networkPolicy == NetworkPolicy.OFFLINE) {
             return ExecutionResult(
@@ -1525,6 +1653,9 @@ class ExecutionService(
             // GAP-13 (Design Closure 2026): the intelligent-search fallback is
             // EMITTED, never silent — the plain path runs, and the feed sees
             // exactly what was degraded and why.
+            // STAGE 3A (DEBT-3): the intelligent path is a provider
+            // invocation — the boundary is reported before it starts.
+            dispatchProbe?.invoke(com.example.domain.core.budget.UsageDispatchState.PROVIDER_CALL_STARTED)
             val intelligentResult = try {
                 intelligenceHook(query, searchProvider)
             } catch (intelligence: Exception) {
@@ -1548,7 +1679,7 @@ class ExecutionService(
                 val formattedItems = rankedItems.map { ranked ->
                     "[${ranked.item.title}] (${ranked.item.url}) [درجة=${"%.2f".format(ranked.finalScore)}]"
                 }
-                return dispatched(ExecutionResult(
+                return dispatchedCompleted(ExecutionResult(
                     isSuccess = true,
                     outputText = "تم استرجاع ${rankedItems.size} نتيجة عبر مسار البحث الذكي " +
                         "(${intelligentResult.decomposition.subQueries.size} استعلام فرعي، ${intelligentResult.citations.size} استشهاد).",
@@ -1566,7 +1697,13 @@ class ExecutionService(
         // Plain single-query path (honest fallback when the intelligence
         // layer is unavailable or returned nothing). Stage 1A: every outcome
         // below PROVES the search provider was called (dispatched).
-        return dispatched(when (val outcome = searchProvider.search(SearchQuery(query = query))) {
+        // STAGE 3A (DEBT-3): the boundary is reported before the call; the
+        // terminal state distinguishes a returned outcome (Success/Degraded
+        // are provider RESPONSES → COMPLETED) from an unresolved invocation
+        // (Error → OUTCOME_UNKNOWN, conservative).
+        dispatchProbe?.invoke(com.example.domain.core.budget.UsageDispatchState.PROVIDER_CALL_STARTED)
+        val searchOutcome = searchProvider.search(SearchQuery(query = query))
+        val plainResult = when (val outcome = searchOutcome) {
             is Outcome.Success -> {
                 val items = outcome.value.items
                 val formattedItems = items.map { "[${it.title}] (${it.url}): ${it.snippet}" }
@@ -1618,7 +1755,17 @@ class ExecutionService(
                     latencyMs = System.currentTimeMillis() - startTime
                 )
             }
-        })
+        }
+        // STAGE 3A (DEBT-3): Success/Degraded are provider RESPONSES
+        // (COMPLETED); Error could not establish completion
+        // (OUTCOME_UNKNOWN — conservative, never released as "unsent").
+        return if (searchOutcome is Outcome.Error) {
+            dispatchProbe?.invoke(com.example.domain.core.budget.UsageDispatchState.OUTCOME_UNKNOWN)
+            dispatched(plainResult)
+        } else {
+            dispatchProbe?.invoke(com.example.domain.core.budget.UsageDispatchState.COMPLETED)
+            dispatchedCompleted(plainResult)
+        }
     }
 
     /**
@@ -1635,13 +1782,17 @@ class ExecutionService(
         context: DecisionContext,
         startTime: Long,
         onEvent: suspend (ExecutionEvent) -> Unit,
-        executionId: String
+        executionId: String,
+        dispatchProbe: ((com.example.domain.core.budget.UsageDispatchState) -> Unit)? = null
     ): ExecutionResult {
         val query = action.payload["query"] ?: context.task.input.rawPrompt
 
         // GAP-13 (Design Closure 2026): a RAG pipeline failure or empty
         // retrieval is EMITTED before falling back to the memory path —
         // previously the fallback was invisible.
+        // STAGE 3A (DEBT-3): the RAG pipeline invokes the (billable)
+        // embedding provider — the boundary is reported before it starts.
+        dispatchProbe?.invoke(com.example.domain.core.budget.UsageDispatchState.PROVIDER_CALL_STARTED)
         val ragContext = try {
             ragRetrievalProvider?.invoke(query, 4)
         } catch (rag: Exception) {
@@ -1670,7 +1821,10 @@ class ExecutionService(
         if (ragContext != null && ragContext.retrievedChunks.isNotEmpty()) {
             // Stage 1A: the RAG pipeline called the (billable) embedding
             // provider — the step was dispatched.
-            return dispatched(ExecutionResult(
+            // STAGE 3A (DEBT-3): chunks came back — the embedding provider
+            // responded (COMPLETED).
+            dispatchProbe?.invoke(com.example.domain.core.budget.UsageDispatchState.COMPLETED)
+            return dispatchedCompleted(ExecutionResult(
                 isSuccess = true,
                 outputText = "تم استرجاع ${ragContext.retrievedChunks.size} مقطع معرفي من قاعدة المعرفة " +
                     "(الوضع: ${ragContext.retrievedChunks.firstOrNull()?.retrievalMode?.name ?: "—"}).",
@@ -2240,7 +2394,8 @@ class ExecutionService(
         startTime: Long,
         onEvent: suspend (ExecutionEvent) -> Unit,
         stepIndex: Int? = null,
-        attempt: Int? = null
+        attempt: Int? = null,
+        dispatchProbe: ((com.example.domain.core.budget.UsageDispatchState) -> Unit)? = null
     ): ExecutionResult {
         delay(300L) // Exponential backoff
         return executeLlmStep(
@@ -2252,7 +2407,8 @@ class ExecutionService(
             startTime = startTime,
             onEvent = onEvent,
             stepIndex = stepIndex,
-            attempt = attempt
+            attempt = attempt,
+            dispatchProbe = dispatchProbe
         )
     }
 
@@ -2289,7 +2445,8 @@ class ExecutionService(
         conversationHistory: List<LlmMessage>,
         executionId: String,
         startTime: Long,
-        onEvent: suspend (ExecutionEvent) -> Unit
+        onEvent: suspend (ExecutionEvent) -> Unit,
+        dispatchProbe: ((com.example.domain.core.budget.UsageDispatchState) -> Unit)? = null
     ): ExecutionResult {
         val targetAgentId = action.targetId
             ?: action.payload["agentId"]?.toString()
@@ -2398,11 +2555,17 @@ class ExecutionService(
             )
         )
 
-        // Stage 1A: from this point on the delegation machinery actually
-        // launched the child execution — the step was dispatched (the
-        // parent's delegate-step reservation stays protected until bounded
-        // expiry; the child's own holds settle under the child identity).
-        return dispatched(
+        // Stage 1A / STAGE 3A (DEBT-3): from this point on the delegation
+        // machinery actually launches the child execution — the provider
+        // boundary. The boundary is reported through the dispatch probe
+        // (never inferred from method entry); the terminal state
+        // distinguishes a RETURNED child outcome (COMPLETED) from a child
+        // timeout / launch failure (OUTCOME_UNKNOWN — the parent's
+        // delegate-step reservation stays protected until bounded expiry;
+        // the child's own holds settle under the child identity).
+        dispatchProbe?.invoke(com.example.domain.core.budget.UsageDispatchState.PROVIDER_CALL_STARTED)
+        var childResponded = false
+        val childResult =
             try {
                 // The child executes with structured concurrency: cancelling the
                 // parent's coroutine cancels the child at the next suspension point.
@@ -2417,6 +2580,7 @@ class ExecutionService(
                         latencyMs = System.currentTimeMillis() - startTime
                     )
                     else -> {
+                        childResponded = true
                         val isFailure = childOutcome is Outcome.Error
                         val childText = when (childOutcome) {
                             is Outcome.Success -> childOutcome.value
@@ -2449,7 +2613,15 @@ class ExecutionService(
                     latencyMs = System.currentTimeMillis() - startTime
                 )
             }
-        )
+        // STAGE 3A (DEBT-3): the terminal observation — a returned child
+        // outcome is COMPLETED (even a child-reported failure is a
+        // RESPONSE); timeout / launch failure is OUTCOME_UNKNOWN.
+        if (childResponded) {
+            dispatchProbe?.invoke(com.example.domain.core.budget.UsageDispatchState.COMPLETED)
+            return dispatchedCompleted(childResult)
+        }
+        dispatchProbe?.invoke(com.example.domain.core.budget.UsageDispatchState.OUTCOME_UNKNOWN)
+        return dispatched(childResult)
     }
 
     /**
