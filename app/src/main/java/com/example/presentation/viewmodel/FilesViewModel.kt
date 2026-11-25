@@ -87,7 +87,18 @@ class FilesViewModel(
         val errorMessage: String? = null,
         val diagnosticBanner: String? = null,
         /** STAGE 7: honest in-flight flag for the phone-storage import. */
-        val isImportingFromDevice: Boolean = false
+        val isImportingFromDevice: Boolean = false,
+        /**
+         * FIW Stage 2 — the TYPE-AWARE open: what the opened file actually
+         * is (null = nothing open). Textual kinds open the editor; images
+         * carry decoded bytes; PDF/binary open the honest unpreviewable
+         * state with export/share actions (never a UTF-8 garbage render).
+         */
+        val selectedFileKind: com.example.domain.core.storage.FileKindResolver.Kind? = null,
+        /** The opened image's real bytes (null unless an image is open). */
+        val selectedImageBytes: ByteArray? = null,
+        /** FIW Stage 2: the current directory's search query (filename filter). */
+        val searchQuery: String = ""
     )
 
     private val _state = MutableStateFlow(FilesUiState())
@@ -193,12 +204,93 @@ class FilesViewModel(
         refreshFiles()
     }
 
+    /**
+     * FIW Stage 2: the ACTIVE project id for the screen's share/export
+     * helpers (the same resolution every governed operation here uses).
+     */
+    fun currentProjectId(): Long? =
+        activeWorkspace.value?.activeProjectId?.takeIf { it > 0L }
+
+    /**
+     * FIW Stage 2: the current directory's search query — a FILENAME filter
+     * over the CURRENT listing (the honest scope: this directory, not a
+     * claim of project-wide content search). Blank = show all entries.
+     */
+    fun setSearchQuery(query: String) {
+        _state.update { it.copy(searchQuery = query) }
+    }
+
+    /** The listing filtered by the current search query (filename contains). */
+    fun filteredFiles(): List<WorkspaceFileEntry> {
+        val query = state.value.searchQuery.trim()
+        if (query.isEmpty()) return state.value.files
+        return state.value.files.filter {
+            it.relativePath.substringAfterLast('/').contains(query, ignoreCase = true)
+        }
+    }
+
     /** Opens a file into the editor (loads its current content). */
     fun openFile(relativePath: String) {
         if (relativePath.isBlank()) return
         val projectId = projectIdOrInform() ?: return
+        // FIW Stage 2: the TYPE-AWARE open — the resolver decides how this
+        // file may be read (text editor / image bytes / honest binary
+        // state). readText() is NO LONGER the universal reader (it silently
+        // lossy-decoded images and PDFs into garbage "text").
+        val resolution = com.example.domain.core.storage.FileKindResolver.resolve(relativePath)
+        if (!resolution.isTextual) {
+            if (resolution.kind == com.example.domain.core.storage.FileKindResolver.Kind.IMAGE) {
+                viewModelScope.launch {
+                    _state.update {
+                        it.copy(
+                            isFileLoading = true,
+                            selectedFilePath = relativePath,
+                            selectedFileKind = resolution.kind,
+                            selectedFileContent = null,
+                            selectedImageBytes = null
+                        )
+                    }
+                    when (val outcome = manageWorkspaceFilesUseCase.readProjectFileBytes(projectId, relativePath)) {
+                        is Outcome.Success -> _state.update {
+                            it.copy(selectedImageBytes = outcome.value, isFileLoading = false)
+                        }
+                        is Outcome.Degraded -> _state.update {
+                            it.copy(
+                                selectedImageBytes = outcome.partialValue,
+                                isFileLoading = false,
+                                diagnosticBanner = outcome.diagnosticMessage
+                            )
+                        }
+                        is Outcome.Error -> _state.update {
+                            it.copy(errorMessage = outcome.diagnosticMessage, isFileLoading = false)
+                        }
+                    }
+                }
+            } else {
+                // PDF / BINARY / UNKNOWN: the honest unpreviewable state —
+                // the UI offers export/share (real actions), never a fake
+                // text render.
+                _state.update {
+                    it.copy(
+                        selectedFilePath = relativePath,
+                        selectedFileKind = resolution.kind,
+                        selectedFileContent = null,
+                        selectedImageBytes = null,
+                        isFileLoading = false
+                    )
+                }
+            }
+            return
+        }
         viewModelScope.launch {
-            _state.update { it.copy(isFileLoading = true, selectedFilePath = relativePath) }
+            _state.update {
+                it.copy(
+                    isFileLoading = true,
+                    selectedFilePath = relativePath,
+                    selectedFileKind = resolution.kind,
+                    selectedImageBytes = null
+                )
+            }
             when (val outcome = manageWorkspaceFilesUseCase.readProjectFile(projectId, relativePath)) {
                 is Outcome.Success -> _state.update {
                     it.copy(selectedFileContent = outcome.value, isFileLoading = false)
@@ -214,11 +306,123 @@ class FilesViewModel(
     }
 
     /**
+     * FIW Stage 2: RENAME/move — a byte-exact move on the storage layer
+     * (the same op the coding toolchain's rename_file uses post-fix). The
+     * [newName] is resolved against the file's CURRENT directory (a bare
+     * rename, not a teleport); a "folder/name" form moves within the tree.
+     */
+    fun renameFile(fromPath: String, newName: String) {
+        val clean = newName.trim()
+        if (clean.isBlank() || clean.contains("..") || clean.startsWith("/")) {
+            _state.update { it.copy(errorMessage = "اسم غير صالح لإعادة التسمية.") }
+            return
+        }
+        val projectId = projectIdOrInform() ?: return
+        val directory = fromPath.substringBeforeLast('/', "")
+        val toPath = if (directory.isBlank()) clean else "$directory/$clean"
+        viewModelScope.launch {
+            when (val outcome = manageWorkspaceFilesUseCase.moveProjectFile(projectId, fromPath, toPath)) {
+                is Outcome.Success -> {
+                    _state.update {
+                        it.copy(
+                            diagnosticBanner = "أُعيدت تسمية الملف إلى $toPath.",
+                            selectedFilePath = null,
+                            selectedFileContent = null,
+                            selectedFileKind = null,
+                            selectedImageBytes = null
+                        )
+                    }
+                    refreshFiles()
+                }
+                is Outcome.Error -> _state.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                is Outcome.Degraded -> {
+                    _state.update { it.copy(diagnosticBanner = outcome.diagnosticMessage) }
+                    refreshFiles()
+                }
+            }
+        }
+    }
+
+    /**
+     * FIW Stage 2: COPY — a byte-exact copy under a new name in the SAME
+     * directory ("name.ext" → "name (نسخة).ext").
+     */
+    fun copyFile(fromPath: String) {
+        val projectId = projectIdOrInform() ?: return
+        val name = fromPath.substringAfterLast('/')
+        val directory = fromPath.substringBeforeLast('/', "")
+        val dot = name.lastIndexOf('.')
+        val base = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
+        var target = "$base (نسخة)$ext"
+        var attempt = 2
+        // A bounded de-duplication walk (name, name2, name3…) over the
+        // CURRENT listing — honest "destination exists" surfacing beyond it.
+        val existing = state.value.files.map { it.relativePath.substringAfterLast('/') }.toSet()
+        while (target in existing && attempt < 100) {
+            target = "$base (نسخة $attempt)$ext"
+            attempt++
+        }
+        val toPath = if (directory.isBlank()) target else "$directory/$target"
+        viewModelScope.launch {
+            when (val outcome = manageWorkspaceFilesUseCase.copyProjectFile(projectId, fromPath, toPath)) {
+                is Outcome.Success -> {
+                    _state.update { it.copy(diagnosticBanner = "أُنشئت نسخة: $toPath.") }
+                    refreshFiles()
+                }
+                is Outcome.Error -> _state.update { it.copy(errorMessage = outcome.diagnosticMessage) }
+                is Outcome.Degraded -> {
+                    _state.update { it.copy(diagnosticBanner = outcome.diagnosticMessage) }
+                    refreshFiles()
+                }
+            }
+        }
+    }
+
+    /**
+     * FIW Stage 2: SINGLE-FILE EXPORT — reads the REAL bytes (any type) and
+     * hands them to the screen's SAF CreateDocument flow. Never depends on
+     * exporting the whole project.
+     */
+    fun exportFile(
+        relativePath: String,
+        onReady: (fileName: String, mimeType: String, bytes: ByteArray) -> Unit,
+        onUnavailable: (reason: String) -> Unit
+    ) {
+        val projectId = projectIdOrInform() ?: run {
+            onUnavailable("لا يوجد مشروع نشط — لا يمكن تحديد نطاق التصدير.")
+            return
+        }
+        viewModelScope.launch {
+            when (val outcome = manageWorkspaceFilesUseCase.readProjectFileBytes(projectId, relativePath)) {
+                is Outcome.Success -> onReady(
+                    relativePath.substringAfterLast('/'),
+                    com.example.domain.core.storage.FileKindResolver.resolve(relativePath).mimeType,
+                    outcome.value
+                )
+                is Outcome.Degraded -> onReady(
+                    relativePath.substringAfterLast('/'),
+                    com.example.domain.core.storage.FileKindResolver.resolve(relativePath).mimeType,
+                    outcome.partialValue ?: ByteArray(0)
+                )
+                is Outcome.Error -> onUnavailable(outcome.diagnosticMessage)
+            }
+        }
+    }
+
+    /**
      * FIX P0-5 (audit c03919d, carried over): proper editor close — clears
      * the editor state directly instead of attempting to read an empty path.
      */
     fun closeFileEditor() {
-        _state.update { it.copy(selectedFilePath = null, selectedFileContent = null) }
+        _state.update {
+            it.copy(
+                selectedFilePath = null,
+                selectedFileContent = null,
+                selectedFileKind = null,
+                selectedImageBytes = null
+            )
+        }
     }
 
     /** Saves the editor content (governed write, then re-list + re-read). */

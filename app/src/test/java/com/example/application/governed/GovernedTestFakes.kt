@@ -1,6 +1,7 @@
 package com.example.application.governed
 
 import com.example.domain.core.Outcome
+import com.example.domain.core.map
 import com.example.domain.core.storage.StorageFailure
 import com.example.domain.core.storage.WorkspaceFileEntry
 import com.example.domain.core.security.governance.PrincipalType
@@ -74,6 +75,42 @@ class FakeWorkspaceStorage : WorkspaceStoragePort {
 
     override suspend fun fileExists(projectId: Long, relativePath: String): Boolean =
         files.containsKey(key(projectId, relativePath))
+
+    // FIW Stage 2: the new port arms over the same in-memory map.
+    override suspend fun readFileBytes(projectId: Long, relativePath: String): Outcome<ByteArray, StorageFailure> =
+        readFile(projectId, relativePath).map { it.toByteArray(Charsets.UTF_8) }
+
+    override suspend fun moveFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure> =
+        mutex.withLock {
+            val fromKey = key(projectId, fromPath)
+            val toKey = key(projectId, toPath)
+            when {
+                !files.containsKey(fromKey) -> Outcome.Error(StorageFailure.FileNotFound(fromPath))
+                files.containsKey(toKey) -> Outcome.Error(
+                    StorageFailure.AccessDenied(toPath, "الوجهة موجودة بالفعل — رُفض النقل.")
+                )
+                else -> {
+                    files[toKey] = files.remove(fromKey)!!
+                    Outcome.Success(Unit)
+                }
+            }
+        }
+
+    override suspend fun copyFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure> =
+        mutex.withLock {
+            val fromKey = key(projectId, fromPath)
+            val toKey = key(projectId, toPath)
+            when {
+                !files.containsKey(fromKey) -> Outcome.Error(StorageFailure.FileNotFound(fromPath))
+                files.containsKey(toKey) -> Outcome.Error(
+                    StorageFailure.AccessDenied(toPath, "الوجهة موجودة بالفعل — رُفض النسخ.")
+                )
+                else -> {
+                    files[toKey] = files[fromKey]!!
+                    Outcome.Success(Unit)
+                }
+            }
+        }
 
     fun seed(projectId: Long, relativePath: String, content: String) {
         files[key(projectId, relativePath)] = content
@@ -352,6 +389,46 @@ class FakeNavigableWorkspaceStorage : WorkspaceStoragePort {
 
     override suspend fun fileExists(projectId: Long, relativePath: String): Boolean =
         files.containsKey(key(projectId, relativePath))
+
+    // FIW Stage 2: the new port arms (same in-memory semantics).
+    override suspend fun readFileBytes(projectId: Long, relativePath: String): Outcome<ByteArray, StorageFailure> =
+        readFile(projectId, relativePath).map { it.toByteArray(Charsets.UTF_8) }
+
+    override suspend fun moveFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure> {
+        if (fromPath.contains("..") || toPath.contains("..")) {
+            return Outcome.Error(StorageFailure.AccessDenied(fromPath, "خارج نطاق المشروع."))
+        }
+        val fromKey = key(projectId, fromPath)
+        val toKey = key(projectId, toPath)
+        return when {
+            !files.containsKey(fromKey) -> Outcome.Error(StorageFailure.FileNotFound(fromPath))
+            files.containsKey(toKey) -> Outcome.Error(
+                StorageFailure.AccessDenied(toPath, "الوجهة موجودة بالفعل — رُفض النقل.")
+            )
+            else -> {
+                files[toKey] = files.remove(fromKey)!!
+                Outcome.Success(Unit)
+            }
+        }
+    }
+
+    override suspend fun copyFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure> {
+        if (fromPath.contains("..") || toPath.contains("..")) {
+            return Outcome.Error(StorageFailure.AccessDenied(fromPath, "خارج نطاق المشروع."))
+        }
+        val fromKey = key(projectId, fromPath)
+        val toKey = key(projectId, toPath)
+        return when {
+            !files.containsKey(fromKey) -> Outcome.Error(StorageFailure.FileNotFound(fromPath))
+            files.containsKey(toKey) -> Outcome.Error(
+                StorageFailure.AccessDenied(toPath, "الوجهة موجودة بالفعل — رُفض النسخ.")
+            )
+            else -> {
+                files[toKey] = files[fromKey]!!
+                Outcome.Success(Unit)
+            }
+        }
+    }
 
     fun seed(projectId: Long, relativePath: String, content: String) {
         files[key(projectId, relativePath)] = content

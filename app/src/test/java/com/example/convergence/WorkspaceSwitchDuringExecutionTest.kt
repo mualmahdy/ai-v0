@@ -91,6 +91,22 @@ class WorkspaceSwitchDuringExecutionTest {
         override suspend fun deleteFile(projectId: Long, relativePath: String): Outcome<Unit, StorageFailure> =
             Outcome.Success(Unit)
         override suspend fun fileExists(projectId: Long, relativePath: String): Boolean = true
+
+        // FIW Stage 2: the new port arms (scope-capturing stubs).
+        override suspend fun readFileBytes(projectId: Long, relativePath: String): Outcome<ByteArray, StorageFailure> {
+            readProjects.add(projectId)
+            return Outcome.Success("content".toByteArray())
+        }
+
+        override suspend fun moveFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure> {
+            writtenProjects.add(projectId)
+            return Outcome.Success(Unit)
+        }
+
+        override suspend fun copyFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure> {
+            writtenProjects.add(projectId)
+            return Outcome.Success(Unit)
+        }
     }
 
     @Test

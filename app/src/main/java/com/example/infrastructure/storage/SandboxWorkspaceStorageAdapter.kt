@@ -139,6 +139,128 @@ class SandboxWorkspaceStorageAdapter(
         }
     }
 
+    // FIW Stage 2: one containment-checked file resolution (shared by the
+    // binary read / move / copy arms — the same boundary check readFile
+    // applies, never repeated inline).
+    private fun resolveContainedFile(projectId: Long, relativePath: String): Pair<File, File>? {
+        val projectDir = getProjectDir(projectId)
+        val targetFile = File(projectDir, relativePath)
+        if (!isContainedInProject(targetFile.canonicalPath, projectDir)) return null
+        return projectDir to targetFile
+    }
+
+    override suspend fun readFileBytes(projectId: Long, relativePath: String): Outcome<ByteArray, StorageFailure> = withContext(Dispatchers.IO) {
+        try {
+            val resolved = resolveContainedFile(projectId, relativePath)
+                ?: return@withContext Outcome.Error(
+                    StorageFailure.AccessDenied(relativePath, "تم حظر محاولة الوصول خارج نطاق مساحة العمل.")
+                )
+            val (projectDir, targetFile) = resolved
+            if (!targetFile.exists() || !targetFile.isFile) {
+                return@withContext Outcome.Error(StorageFailure.FileNotFound(relativePath))
+            }
+            Outcome.Success(targetFile.readBytes())
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
+            Outcome.Error(
+                StorageFailure.ReadWriteError(relativePath, "فشل قراءة الملف (بايتات): ${e.localizedMessage}")
+            )
+        }
+    }
+
+    override suspend fun moveFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure> = withContext(Dispatchers.IO) {
+        try {
+            val source = resolveContainedFile(projectId, fromPath)
+                ?: return@withContext Outcome.Error(
+                    StorageFailure.AccessDenied(fromPath, "محاولة نقل من خارج مساحة العمل.")
+                )
+            val destination = resolveContainedFile(projectId, toPath)
+                ?: return@withContext Outcome.Error(
+                    StorageFailure.AccessDenied(toPath, "محاولة نقل إلى خارج مساحة العمل.")
+                )
+            val (_, sourceFile) = source
+            val (_, destinationFile) = destination
+            if (!sourceFile.exists()) {
+                return@withContext Outcome.Error(StorageFailure.FileNotFound(fromPath))
+            }
+            if (destinationFile.exists()) {
+                return@withContext Outcome.Error(
+                    StorageFailure.AccessDenied(toPath, "الوجهة موجودة بالفعل — رُفض النقل بدل الكتابة فوقها.")
+                )
+            }
+            destinationFile.parentFile?.let { if (!it.exists()) it.mkdirs() }
+            // Byte-exact move: renameTo first (atomic on the same volume);
+            // the stream copy fallback preserves EVERY byte (the old
+            // readText→writeText path in the toolchain corrupted binaries).
+            val renamed = sourceFile.renameTo(destinationFile)
+            if (renamed) {
+                Outcome.Success(Unit)
+            } else {
+                val copied = runCatching {
+                    sourceFile.inputStream().use { input ->
+                        destinationFile.outputStream().use { output -> input.copyTo(output) }
+                    }
+                }.isSuccess
+                if (!copied) {
+                    destinationFile.delete()
+                    return@withContext Outcome.Error(
+                        StorageFailure.ReadWriteError(fromPath, "فشل نقل $fromPath إلى $toPath")
+                    )
+                }
+                if (!sourceFile.delete()) {
+                    // The copy landed; the stale source is an honest degraded
+                    // state — surfaced, never silently ignored.
+                    return@withContext Outcome.Error(
+                        StorageFailure.ReadWriteError(fromPath, "تم النقل لكن تعذر حذف المصدر $fromPath — تحقق يدوي.")
+                    )
+                }
+                Outcome.Success(Unit)
+            }
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
+            Outcome.Error(
+                StorageFailure.ReadWriteError(fromPath, "فشل النقل: ${e.localizedMessage}")
+            )
+        }
+    }
+
+    override suspend fun copyFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure> = withContext(Dispatchers.IO) {
+        try {
+            val source = resolveContainedFile(projectId, fromPath)
+                ?: return@withContext Outcome.Error(
+                    StorageFailure.AccessDenied(fromPath, "محاولة نسخ من خارج مساحة العمل.")
+                )
+            val destination = resolveContainedFile(projectId, toPath)
+                ?: return@withContext Outcome.Error(
+                    StorageFailure.AccessDenied(toPath, "محاولة نسخ إلى خارج مساحة العمل.")
+                )
+            val (_, sourceFile) = source
+            val (_, destinationFile) = destination
+            if (!sourceFile.exists() || !sourceFile.isFile) {
+                return@withContext Outcome.Error(StorageFailure.FileNotFound(fromPath))
+            }
+            if (destinationFile.exists()) {
+                return@withContext Outcome.Error(
+                    StorageFailure.AccessDenied(toPath, "الوجهة موجودة بالفعل — رُفض النسخ بدل الكتابة فوقها.")
+                )
+            }
+            destinationFile.parentFile?.let { if (!it.exists()) it.mkdirs() }
+            val copied = runCatching {
+                sourceFile.inputStream().use { input ->
+                    destinationFile.outputStream().use { output -> input.copyTo(output) }
+                }
+            }.isSuccess
+            if (copied) Outcome.Success(Unit) else Outcome.Error(
+                StorageFailure.ReadWriteError(fromPath, "فشل نسخ $fromPath إلى $toPath")
+            )
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
+            Outcome.Error(
+                StorageFailure.ReadWriteError(fromPath, "فشل النسخ: ${e.localizedMessage}")
+            )
+        }
+    }
+
     override suspend fun deleteFile(projectId: Long, relativePath: String): Outcome<Unit, StorageFailure> = withContext(Dispatchers.IO) {
         try {
             val projectDir = getProjectDir(projectId)

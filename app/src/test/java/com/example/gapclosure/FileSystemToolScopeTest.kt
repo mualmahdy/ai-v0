@@ -51,6 +51,22 @@ class FileSystemToolScopeTest {
         }
 
         override suspend fun fileExists(projectId: Long, relativePath: String): Boolean = true
+
+        // FIW Stage 2: the new port arms (capture the same scope facts).
+        override suspend fun readFileBytes(projectId: Long, relativePath: String): Outcome<ByteArray, StorageFailure> {
+            readProjects.add(projectId)
+            return Outcome.Success("content-of-$relativePath".toByteArray())
+        }
+
+        override suspend fun moveFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure> {
+            writtenProjects.add(projectId)
+            return Outcome.Success(Unit)
+        }
+
+        override suspend fun copyFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure> {
+            writtenProjects.add(projectId)
+            return Outcome.Success(Unit)
+        }
     }
 
     @Test

@@ -298,34 +298,19 @@ class CodingToolchainService(
                 )
             )
         }
-        val content = when (val r = workspaceStorage.readFile(projectId, fromPath)) {
-            is Outcome.Success -> r.value
-            is Outcome.Error -> return Outcome.Error(mapStorageFailure(r.failure, fromPath))
-            is Outcome.Degraded -> r.partialValue ?: return Outcome.Error(
-                ToolFailure.InternalExecutionError("تعذر قراءة المصدر قبل النقل.")
-            )
-        }
-        val write = when (val r = workspaceStorage.writeFile(projectId, toPath, content)) {
-            is Outcome.Success -> r
-            is Outcome.Degraded -> r
-            is Outcome.Error -> return Outcome.Error(mapStorageFailure(r.failure, toPath))
-        }
-        val delete = workspaceStorage.deleteFile(projectId, fromPath)
-        return when {
-            delete is Outcome.Error -> Outcome.Degraded(
-                partialValue = ToolOutput("تم النقل إلى $toPath لكن حذف المصدر فشل — تحقق يدوي مطلوب."),
+        // FIW Stage 2 (the binary-corruption fix): the rename is a BYTE-EXACT
+        // move on the storage layer (renameTo with a stream-copy fallback).
+        // The previous readText→writeText→delete round trip silently
+        // corrupted every binary file (an image artifact "renamed" through
+        // this tool arrived as UTF-8-replacement garbage).
+        return when (val r = workspaceStorage.moveFile(projectId, fromPath, toPath)) {
+            is Outcome.Success -> Outcome.Success(ToolOutput(content = "تم النقل من $fromPath إلى $toPath."))
+            is Outcome.Error -> Outcome.Error(mapStorageFailure(r.failure, toPath))
+            is Outcome.Degraded -> Outcome.Degraded(
+                partialValue = ToolOutput("تم النقل إلى $toPath مع تحذير: ${r.diagnosticMessage}"),
                 reason = com.example.domain.core.DegradedReason.UNKNOWN_DEGRADATION,
-                diagnosticMessage = (delete as Outcome.Error<StorageFailure>).failure.toString()
+                diagnosticMessage = r.diagnosticMessage
             )
-            else -> Outcome.Success(ToolOutput(content = "تم النقل من $fromPath إلى $toPath."))
-        }.let { outcome ->
-            if (write is Outcome.Degraded && outcome is Outcome.Success) {
-                Outcome.Degraded(
-                    partialValue = outcome.value,
-                    reason = write.reason,
-                    diagnosticMessage = write.diagnosticMessage
-                )
-            } else outcome
         }
     }
 

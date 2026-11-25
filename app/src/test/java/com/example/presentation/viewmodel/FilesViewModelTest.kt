@@ -457,4 +457,173 @@ class FilesViewModelTest {
                 .value.none { it.relativePath.startsWith("attachments/folder_1") }
         )
     }
+
+    // ------------------------------------------------------------------
+    // FIW Stage 2 — type-aware open, rename, copy (the honest file manager)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `FIW - opening an IMAGE loads bytes and kind, never a text decode`() {
+        bindProject(5L)
+        storage.seed(5L, "attachments/photo.png", "not-really-png-but-bytes")
+        viewModel.refreshFiles()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        viewModel.openFile("attachments/photo.png")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertEquals(
+            "the image kind is resolved (byte path, not readText)",
+            com.example.domain.core.storage.FileKindResolver.Kind.IMAGE,
+            state.selectedFileKind
+        )
+        assertNotNull("the image bytes are loaded", state.selectedImageBytes)
+        assertNull("no text content is fabricated for an image", state.selectedFileContent)
+    }
+
+    @Test
+    fun `FIW - opening a BINARY file is the honest unpreviewable state, never decoded text`() {
+        bindProject(5L)
+        storage.seed(5L, "generated/report.pdf", "%PDF-1.4 binary-ish")
+        viewModel.refreshFiles()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        viewModel.openFile("generated/report.pdf")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertEquals(
+            "the PDF kind is resolved",
+            com.example.domain.core.storage.FileKindResolver.Kind.PDF,
+            state.selectedFileKind
+        )
+        assertNull("no content: PDFs are never rendered as text", state.selectedFileContent)
+        assertNull("no image bytes", state.selectedImageBytes)
+    }
+
+    @Test
+    fun `FIW - opening an UNKNOWN-extension file is treated as binary (conservative)`() {
+        bindProject(5L)
+        storage.seed(5L, "uploads/mystery.dat", "whatever")
+        viewModel.refreshFiles()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        viewModel.openFile("uploads/mystery.dat")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(
+            com.example.domain.core.storage.FileKindResolver.Kind.BINARY,
+            viewModel.state.value.selectedFileKind
+        )
+        assertNull(viewModel.state.value.selectedFileContent)
+    }
+
+    @Test
+    fun `FIW - textual files still open the editor`() {
+        bindProject(5L)
+        storage.seed(5L, "generated/note.md", "# عنوان")
+        viewModel.refreshFiles()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        viewModel.openFile("generated/note.md")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertEquals(com.example.domain.core.storage.FileKindResolver.Kind.MARKDOWN, state.selectedFileKind)
+        assertEquals("# عنوان", state.selectedFileContent)
+    }
+
+    @Test
+    fun `FIW - rename is a byte-exact move within the same directory`() {
+        bindProject(5L)
+        storage.seed(5L, "generated/old-name.md", "المحتوى")
+        viewModel.refreshFiles()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        viewModel.renameFile("generated/old-name.md", "new-name.md")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertTrue(
+            "the rename lands honestly",
+            state.diagnosticBanner?.contains("generated/new-name.md") == true
+        )
+        assertTrue(
+            "the listing reflects the move",
+            state.files.any { it.relativePath == "generated/new-name.md" }
+        )
+        assertTrue(
+            "the source is gone",
+            state.files.none { it.relativePath == "generated/old-name.md" }
+        )
+    }
+
+    @Test
+    fun `FIW - rename to an EXISTING destination is rejected, never an overwrite`() {
+        bindProject(5L)
+        storage.seed(5L, "generated/a.md", "أ")
+        storage.seed(5L, "generated/b.md", "ب")
+        viewModel.refreshFiles()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        viewModel.renameFile("generated/a.md", "b.md")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        // The destination-exists error surfaces honestly; both files intact.
+        assertNotNull("an honest error surfaced", viewModel.state.value.errorMessage)
+        assertEquals("ب", kotlinx.coroutines.runBlocking { (storage.readFile(5L, "generated/b.md") as com.example.domain.core.Outcome.Success).value })
+    }
+
+    @Test
+    fun `FIW - copy creates a deduplicated sibling and keeps the source`() {
+        bindProject(5L)
+        storage.seed(5L, "generated/notes.md", "النص")
+        viewModel.refreshFiles()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        viewModel.copyFile("generated/notes.md")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertTrue(
+            "the copy landed",
+            state.files.any { it.relativePath == "generated/notes (نسخة).md" }
+        )
+        assertTrue(
+            "the source survives",
+            state.files.any { it.relativePath == "generated/notes.md" }
+        )
+    }
+
+    @Test
+    fun `FIW - search filters by filename within the CURRENT directory listing`() {
+        bindProject(5L)
+        storage.seed(5L, "attachments/alpha.txt", "أ")
+        storage.seed(5L, "attachments/beta.txt", "ب")
+        viewModel.refreshFiles()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        viewModel.setSearchQuery("alpha")
+        val filtered = viewModel.filteredFiles()
+        assertTrue("the match is found", filtered.any { it.relativePath.endsWith("alpha.txt") })
+        assertTrue("non-matches are excluded", filtered.none { it.relativePath.endsWith("beta.txt") })
+    }
+
+    @Test
+    fun `FIW - export reads the REAL bytes of any type`() {
+        bindProject(5L)
+        storage.seed(5L, "generated/بيانات.bin", "BYTES")
+        var exported: ByteArray? = null
+        var unavailable: String? = null
+        viewModel.exportFile(
+            "generated/بيانات.bin",
+            onReady = { _, mime, bytes -> exported = bytes; assertTrue(mime.isNotEmpty()) },
+            onUnavailable = { unavailable = it }
+        )
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertNull("no unavailability", unavailable)
+        assertEquals("BYTES", exported?.toString(Charsets.UTF_8))
+    }
 }

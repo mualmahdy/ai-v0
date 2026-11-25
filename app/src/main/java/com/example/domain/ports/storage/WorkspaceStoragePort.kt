@@ -26,9 +26,32 @@ interface WorkspaceStoragePort {
     suspend fun readFile(projectId: Long, relativePath: String): Outcome<String, StorageFailure>
 
     /**
+     * FIW Stage 2 — type-aware binary read: the file's REAL bytes.
+     * `readFile` decodes UTF-8 (a lossy corruption for images/PDF/binary);
+     * this is the honest reader for every non-textual consumer (previews,
+     * exports, byte-exact moves). Same containment contract as readFile.
+     */
+    suspend fun readFileBytes(projectId: Long, relativePath: String): Outcome<ByteArray, StorageFailure>
+
+    /**
      * Writes or overwrites file content.
      */
     suspend fun writeFile(projectId: Long, relativePath: String, content: String): Outcome<Unit, StorageFailure>
+
+    /**
+     * FIW Stage 2 — byte-exact MOVE/rename inside the project sandbox
+     * (never a read-text→write→delete round trip, which silently corrupted
+     * binary files). The destination must not exist (explicit rejection
+     * instead of an overwrite).
+     */
+    suspend fun moveFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure>
+
+    /**
+     * FIW Stage 2 — byte-exact COPY inside the project sandbox. The
+     * destination must not exist (explicit rejection instead of an
+     * overwrite).
+     */
+    suspend fun copyFile(projectId: Long, fromPath: String, toPath: String): Outcome<Unit, StorageFailure>
 
     /**
      * Lists all files under the given project directory.

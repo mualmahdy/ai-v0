@@ -1,5 +1,6 @@
 package com.example.presentation.ui.screens.files
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,13 +20,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -46,6 +53,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -93,6 +102,50 @@ fun FilesScreen(
     var deleteFileTarget by rememberSaveable { mutableStateOf<String?>(null) }
     var sortOrder by rememberSaveable { mutableStateOf(FileSort.NAME) }
     val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
+
+    // FIW Stage 2 — the single-file export/share surface state.
+    val filesContext = androidx.compose.ui.platform.LocalContext.current
+    var pendingFileExport by remember { mutableStateOf<PendingFileExport?>(null) }
+    var renameTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    val fileExportMime = pendingFileExport?.mime ?: "application/octet-stream"
+    val fileExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(fileExportMime)
+    ) { uri ->
+        val pending = pendingFileExport
+        if (uri != null && pending != null) {
+            val written = com.example.presentation.ui.components.SandboxFileExchange
+                .writeToSafTarget(filesContext, uri, pending.bytes)
+            if (!written) {
+                android.util.Log.e("FilesScreen", "SAF write failed for ${pending.fileName}")
+            }
+        }
+        pendingFileExport = null
+    }
+    LaunchedEffect(pendingFileExport) {
+        pendingFileExport?.let { fileExportLauncher.launch(it.fileName) }
+    }
+
+    // FIW Stage 2 — share a sandbox file as a REAL stream (FileProvider,
+    // containment-checked inside the helper).
+    fun shareCurrentFile(relativePath: String, mimeType: String) {
+        val projectId = filesViewModel.currentProjectId()
+        if (projectId == null) {
+            android.util.Log.e("FilesScreen", "share: no active project")
+            return
+        }
+        val intent = com.example.presentation.ui.components.SandboxFileExchange.buildShareIntent(
+            context = filesContext,
+            projectId = projectId,
+            relativePath = relativePath,
+            mimeType = mimeType,
+            title = relativePath.substringAfterLast('/')
+        )
+        if (intent == null) {
+            android.util.Log.e("FilesScreen", "share: file unresolved: $relativePath")
+            return
+        }
+        filesContext.startActivity(android.content.Intent.createChooser(intent, "مشاركة الملف"))
+    }
 
     // STAGE 7 — UPLOAD FROM PHONE STORAGE: the SAF picker (the platform
     // boundary). Resolved uris go through the governed transfer pipeline
@@ -180,6 +233,117 @@ fun FilesScreen(
                 },
                 onDismiss = { deleteFileTarget = null }
             )
+        }
+        return
+    }
+
+    // ------------------------------------------------------------------
+    // FIW Stage 2 — the TYPE-AWARE viewers. An image opens its REAL bytes
+    // (never a text decode); a PDF/binary opens the HONEST unpreviewable
+    // state. Both carry the real export/share actions — an unsupported
+    // preview is never a dead end.
+    // ------------------------------------------------------------------
+    if (state.selectedFilePath != null && state.selectedFileKind != null) {
+        val openPath = state.selectedFilePath ?: ""
+        val resolution = com.example.domain.core.storage.FileKindResolver.resolve(openPath)
+        androidx.compose.material3.Scaffold(
+            modifier = modifier.testTag("file_viewer_${resolution.kind.name.lowercase()}"),
+            snackbarHost = { androidx.compose.material3.SnackbarHost(snackbarHostState) }
+        ) { innerPadding ->
+            Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+                SectionHeader(
+                    icon = if (resolution.kind == com.example.domain.core.storage.FileKindResolver.Kind.IMAGE)
+                        Icons.Default.Image else Icons.Default.Description,
+                    title = openPath.substringAfterLast('/'),
+                    subtitle = "${resolution.mimeType} • ${formatSize(state.selectedImageBytes?.size?.toLong() ?: state.files.firstOrNull { it.relativePath == openPath }?.sizeBytes ?: 0L)}",
+                    trailing = {
+                        IconButton(
+                            onClick = {
+                                filesViewModel.exportFile(
+                                    openPath,
+                                    onReady = { name, mime, bytes ->
+                                        pendingFileExport = PendingFileExport(name, mime, bytes)
+                                    },
+                                    onUnavailable = { reason ->
+                                        filesViewModel.reportDevicePickerUnavailable()
+                                        android.util.Log.e("FilesScreen", "export failed: $reason")
+                                    }
+                                )
+                            },
+                            modifier = Modifier.testTag("btn_export_opened_file")
+                        ) {
+                            Icon(Icons.Default.SaveAlt, contentDescription = "تصدير إلى الجهاز")
+                        }
+                        IconButton(
+                            onClick = { shareCurrentFile(openPath, resolution.mimeType) },
+                            modifier = Modifier.testTag("btn_share_opened_file")
+                        ) {
+                            Icon(Icons.Default.Share, contentDescription = "مشاركة الملف")
+                        }
+                        IconButton(
+                            onClick = filesViewModel::closeFileEditor,
+                            modifier = Modifier.testTag("btn_close_viewer")
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "إغلاق")
+                        }
+                    }
+                )
+                when (resolution.kind) {
+                    com.example.domain.core.storage.FileKindResolver.Kind.IMAGE -> {
+                        val bytes = state.selectedImageBytes
+                        if (bytes == null) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                                horizontalArrangement = Arrangement.Center
+                            ) { androidx.compose.material3.CircularProgressIndicator() }
+                        } else {
+                            val bitmap = remember(bytes) {
+                                android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            }
+                            if (bitmap == null) {
+                                // Honest decode failure (corrupt/unsupported image):
+                                Text(
+                                    text = "تعذّر فك ترميز الصورة — الملف ليس صورة صالحة قابلة للعرض. يمكنك تصديره أو مشاركته كما هو.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(16.dp).testTag("image_decode_failed")
+                                )
+                            } else {
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = openPath.substringAfterLast('/'),
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(8.dp)
+                                        .testTag("image_preview"),
+                                    contentScale = ContentScale.Fit
+                                )
+                            }
+                        }
+                    }
+                    else -> {
+                        // PDF / BINARY / UNKNOWN — the honest state.
+                        Column(modifier = Modifier.padding(16.dp).testTag("binary_unpreviewable")) {
+                            Text(
+                                text = when (resolution.kind) {
+                                    com.example.domain.core.storage.FileKindResolver.Kind.PDF ->
+                                        "ملفات PDF لا تُعاين داخل التطبيق في هذا الإصدار."
+                                    else ->
+                                        "هذا الملف ثنائي (non-text) — لا يُفتح كمحرر نصوص لأن ذلك يُفسد محتواه."
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "يمكنك تصديره إلى الجهاز بصيغته الأصلية (بايت ببايت) أو مشاركته كملف حقيقي — الزران في الأعلى.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
         }
         return
     }
@@ -379,10 +543,34 @@ fun FilesScreen(
                             )
                         }
                         items(plainFiles, key = { it.relativePath }) { file ->
+                            // FIW Stage 2: file rows carry the REAL manager
+                            // actions — rename (byte-exact move), copy,
+                            // export-to-device, share — plus the honest
+                            // size/type/date metadata.
                             FileRow(
                                 entry = file,
                                 onOpen = { filesViewModel.openFile(file.relativePath) },
-                                onDelete = { deleteFileTarget = file.relativePath }
+                                onDelete = { deleteFileTarget = file.relativePath },
+                                onRename = { renameTarget = file.relativePath },
+                                onCopy = { filesViewModel.copyFile(file.relativePath) },
+                                onExport = {
+                                    filesViewModel.exportFile(
+                                        file.relativePath,
+                                        onReady = { name, mime, bytes ->
+                                            pendingFileExport = PendingFileExport(name, mime, bytes)
+                                        },
+                                        onUnavailable = { reason ->
+                                            android.util.Log.e("FilesScreen", "export failed: $reason")
+                                        }
+                                    )
+                                },
+                                onShare = {
+                                    shareCurrentFile(
+                                        file.relativePath,
+                                        com.example.domain.core.storage.FileKindResolver
+                                            .resolve(file.relativePath).mimeType
+                                    )
+                                }
                             )
                         }
                     }
@@ -398,6 +586,43 @@ fun FilesScreen(
                 createFileOpen = false
             },
             onDismiss = { createFileOpen = false }
+        )
+    }
+
+    // FIW Stage 2 — the RENAME dialog (prefilled with the current name;
+    // the confirm rides the byte-exact move on the storage layer).
+    renameTarget?.let { target ->
+        var draftName by rememberSaveable(target) {
+            mutableStateOf(target.substringAfterLast('/'))
+        }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("إعادة تسمية الملف") },
+            text = {
+                OutlinedTextField(
+                    value = draftName,
+                    onValueChange = { if (it.length <= 120) draftName = it },
+                    singleLine = true,
+                    label = { Text("الاسم الجديد") },
+                    supportingText = { Text("يمكن تضمين مجلد فرعي للنقل داخل الشجرة — مثل generated/اسم-جديد.md") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("rename_file_field")
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = {
+                        filesViewModel.renameFile(target, draftName)
+                        renameTarget = null
+                    },
+                    enabled = draftName.isNotBlank(),
+                    modifier = Modifier.testTag("rename_file_confirm")
+                ) { Text("إعادة التسمية") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { renameTarget = null }) { Text("إلغاء") }
+            }
         )
     }
 
@@ -568,8 +793,15 @@ private fun ImportMenu(
 private fun FileRow(
     entry: WorkspaceFileEntry,
     onOpen: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onRename: () -> Unit = {},
+    onCopy: () -> Unit = {},
+    onExport: () -> Unit = {},
+    onShare: () -> Unit = {}
 ) {
+    val kind = remember(entry.relativePath) {
+        com.example.domain.core.storage.FileKindResolver.resolve(entry.relativePath)
+    }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -580,65 +812,108 @@ private fun FileRow(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
         )
     ) {
-        Row(
-            modifier = Modifier.padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Surface(
-                shape = CircleShape,
-                color = if (entry.isDirectory) MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
-                else MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-            ) {
-                Icon(
-                    imageVector = if (entry.isDirectory) Icons.Default.Folder else Icons.Default.Description,
-                    contentDescription = null,
-                    tint = if (entry.isDirectory) MaterialTheme.colorScheme.secondary
-                    else MaterialTheme.colorScheme.primary,
-                    modifier = Modifier
-                        .padding(7.dp)
-                        .size(18.dp)
-                )
-            }
-            Spacer(modifier = Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = entry.relativePath.substringAfterLast('/'),
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1
-                )
-                Text(
-                    text = entry.relativePath,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1
-                )
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                if (!entry.isDirectory) {
-                    Text(
-                        text = formatSize(entry.sizeBytes),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                // STAGE 7 (user round 4): the delete action is offered for
-                // DIRECTORIES too — the governed delete is recursive and the
-                // confirm dialog says exactly that (never a dead-looking
-                // folder row that cannot be removed).
-                IconButton(
-                    onClick = onDelete,
-                    modifier = Modifier
-                        .size(28.dp)
-                        .testTag("btn_delete_file_${entry.relativePath}")
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = CircleShape,
+                    color = if (entry.isDirectory) MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
+                    else MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
                 ) {
                     Icon(
-                        Icons.Default.Delete,
-                        contentDescription = if (entry.isDirectory) "حذف المجلد" else "حذف",
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(15.dp)
+                        imageVector = if (entry.isDirectory) Icons.Default.Folder else Icons.Default.Description,
+                        contentDescription = null,
+                        tint = if (entry.isDirectory) MaterialTheme.colorScheme.secondary
+                        else MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .padding(7.dp)
+                            .size(18.dp)
                     )
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = entry.relativePath.substringAfterLast('/'),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = entry.relativePath,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    if (!entry.isDirectory) {
+                        // FIW Stage 2: the honest size + TYPE + date metadata.
+                        Text(
+                            text = "${kind.extension.ifBlank { "؟" }} • ${formatSize(entry.sizeBytes)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (entry.lastModifiedMs > 0L) {
+                            Text(
+                                text = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm", java.util.Locale.US)
+                                    .format(java.util.Date(entry.lastModifiedMs)),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .testTag("btn_delete_file_${entry.relativePath}")
+                    ) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = if (entry.isDirectory) "حذف المجلد" else "حذف",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                }
+            }
+            // FIW Stage 2: the REAL manager actions — rename (byte-exact
+            // move), copy, export-to-device, share. Files only (a folder
+            // rename/move is a governance question of its own — recorded).
+            if (!entry.isDirectory) {
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    androidx.compose.material3.TextButton(
+                        onClick = onRename,
+                        modifier = Modifier.testTag("btn_rename_file_${entry.relativePath}")
+                    ) {
+                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text("إعادة تسمية", style = MaterialTheme.typography.labelSmall)
+                    }
+                    androidx.compose.material3.TextButton(
+                        onClick = onCopy,
+                        modifier = Modifier.testTag("btn_copy_file_${entry.relativePath}")
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text("نسخ", style = MaterialTheme.typography.labelSmall)
+                    }
+                    androidx.compose.material3.TextButton(
+                        onClick = onExport,
+                        modifier = Modifier.testTag("btn_export_file_${entry.relativePath}")
+                    ) {
+                        Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text("تصدير", style = MaterialTheme.typography.labelSmall)
+                    }
+                    androidx.compose.material3.TextButton(
+                        onClick = onShare,
+                        modifier = Modifier.testTag("btn_share_file_${entry.relativePath}")
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text("مشاركة", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }
@@ -774,3 +1049,13 @@ private fun formatSize(bytes: Long): String = when {
     bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
     else -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
 }
+
+/**
+ * FIW Stage 2: one pending save-to-device request from the Files screen
+ * (single-file export) — the CreateDocument launcher's payload.
+ */
+private data class PendingFileExport(
+    val fileName: String,
+    val mime: String,
+    val bytes: ByteArray
+)
