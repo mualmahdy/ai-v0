@@ -67,6 +67,23 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- FIW Stage 1/2 — sharing REAL sandbox files (artifacts,
+             attachments, workspace files): a content URI through the
+             standard FileProvider over filesDir/workspaces/ ONLY (see
+             @xml/file_paths — no cache, no external roots). The sandbox
+             path is containment-validated by the caller before it is
+             handed here; the provider itself exposes nothing outside the
+             workspaces subtree. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

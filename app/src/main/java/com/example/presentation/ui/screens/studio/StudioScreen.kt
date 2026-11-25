@@ -4,8 +4,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
 import com.example.presentation.state.CapabilityKind
 import com.example.presentation.ui.navigation.navWidthClassForWidthDp
 import com.example.presentation.viewmodel.ChatCapabilitiesViewModel
@@ -121,6 +123,84 @@ fun StudioScreen(
     // callback (Compose locals are composable-context-only).
     val shareContext = androidx.compose.ui.platform.LocalContext.current
 
+    // ------------------------------------------------------------------
+    // FIW Stage 1/2 — the ONE device-save surface (SAF CreateDocument):
+    // a REAL file save for artifacts, attachments and session exports
+    // (byte-exact, no storage permission, honest failure feedback). The
+    // launcher is keyed by the pending export's MIME so the picker filters
+    // by the real type.
+    // ------------------------------------------------------------------
+    var pendingDeviceExport by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf<PendingDeviceExport?>(null)
+    }
+    val exportMime = pendingDeviceExport?.mime ?: "application/octet-stream"
+    val deviceExportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument(exportMime)
+    ) { uri ->
+        val pending = pendingDeviceExport
+        if (uri != null && pending != null) {
+            val written = com.example.presentation.ui.components.SandboxFileExchange
+                .writeToSafTarget(shareContext, uri, pending.bytes)
+            if (!written) {
+                studioViewModel.reportArtifactExchangeUnavailable(
+                    "تعذّرت كتابة الملف في الموقع المختار — تحقق من مساحة التخزين وحاول مجدداً."
+                )
+            }
+        }
+        pendingDeviceExport = null
+    }
+    androidx.compose.runtime.LaunchedEffect(pendingDeviceExport) {
+        pendingDeviceExport?.let { deviceExportLauncher.launch(it.fileName) }
+    }
+
+    // ------------------------------------------------------------------
+    // FIW Stage 1 — the UNIFIED session export flow: pick-format dialog →
+    // the ONE export service → SAF save (primary) / share sheet (secondary).
+    // ------------------------------------------------------------------
+    var sessionExportFormatTarget by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf<String?>(null)
+    }
+    fun runSessionExport(
+        sessionId: String,
+        format: com.example.application.transfer.SessionExportService.Format
+    ) {
+        sessionsViewModel.exportSession(
+            sessionId,
+            format,
+            onReady = { _, fileName, mimeType, content ->
+                pendingDeviceExport = PendingDeviceExport(fileName, mimeType, content.toByteArray())
+            },
+            onUnavailable = { sessionsViewModel.reportExportUnavailable() }
+        )
+    }
+    // FIW Stage 1 — the session-package IMPORT (SAF OpenDocument pick).
+    val sessionImportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            val text = runCatching {
+                shareContext.contentResolver.openInputStream(uri)?.use { stream ->
+                    stream.readBytes().toString(Charsets.UTF_8)
+                }
+            }.getOrNull()
+            if (text == null) {
+                sessionsViewModel.reportExportUnavailable()
+            } else {
+                sessionsViewModel.importSessionPackage(
+                    text,
+                    onImported = { title, turns, payloads ->
+                        studioViewModel.reportArtifactExchangeUnavailable(
+                            "استُوردت الجلسة «$title» ($turns دوراً، $payloads مخرجاً مُستعاداً) — تجدها في متصفح الجلسات."
+                        )
+                    },
+                    onRejected = { reason ->
+                        studioViewModel.reportArtifactExchangeUnavailable("رُفض استيراد الحزمة: $reason")
+                    }
+                )
+            }
+        }
+    }
+
     ChatWorkspace(
         state = studioState,
         shellAutonomyPolicy = state.autonomyPolicy,
@@ -143,24 +223,12 @@ fun StudioScreen(
             sessionsViewModel.renameSession(sessionId, title)
         },
         onExportSession = { sessionId ->
-            // FRONTIER EXPORT: the durable transcript leaves through the
-            // platform share sheet (ACTION_SEND, plain Markdown text — no
-            // storage permission, no file provider, honest content).
-            val context = shareContext
-            sessionsViewModel.exportSession(
-                sessionId,
-                onReady = { title, markdown ->
-                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                        type = "text/markdown"
-                        putExtra(android.content.Intent.EXTRA_SUBJECT, title)
-                        putExtra(android.content.Intent.EXTRA_TEXT, markdown)
-                    }
-                    context.startActivity(
-                        android.content.Intent.createChooser(send, "مشاركة الجلسة")
-                    )
-                },
-                onUnavailable = { sessionsViewModel.reportExportUnavailable() }
-            )
+            // FIW Stage 1 — UNIFIED EXPORT: the pick-format dialog → the ONE
+            // export service → SAF save-to-device (CreateDocument) with the
+            // platform share sheet as the secondary route. The previous
+            // Markdown-only ACTION_SEND path bypassed the canonical service
+            // (the audit's "two implementations" finding).
+            sessionExportFormatTarget = sessionId
         },
         capabilityState = capabilityState,
         widthClass = widthClass,
@@ -284,9 +352,54 @@ fun StudioScreen(
         // ARTIFACT CANVAS (§10): the conversation's artifact cards open the
         // scope-aware preview surface (pane at expanded width, sheet below).
         onOpenArtifact = studioViewModel::openArtifact,
-        // CLOSURE §8: the message action routes through the ViewModel's
-        // REAL artifact pipeline (versioned, project-scoped).
-        onSaveAsArtifact = studioViewModel::saveEntryAsArtifact,
+        // CLOSURE §8 + FIW Stage 1: the message action opens the naming
+        // dialog; the confirm rides the REAL versioned-artifact pipeline
+        // (linked to the producing turn, card rendered in the timeline).
+        onRequestResultSave = studioViewModel::requestResultSave,
+        onConfirmResultSave = { studioViewModel.confirmResultSave(it) },
+        onDismissResultSave = studioViewModel::dismissResultSaveDialog,
+        // FIW Stage 1: the attachment OPEN cycle — the chips open the shared
+        // canvas (real artifact row → preview/edit/version/export/share).
+        onOpenAttachment = studioViewModel::openChatAttachment,
+        // FIW Stage 1: the artifact EXPORT cycle — SAF save-to-device with
+        // the REAL bytes read through the scope-aware service.
+        onExportActiveArtifact = {
+            studioViewModel.exportActiveArtifact(
+                onReady = { name, mime, bytes ->
+                    pendingDeviceExport = PendingDeviceExport(name, mime, bytes)
+                },
+                onUnavailable = studioViewModel::reportArtifactExchangeUnavailable
+            )
+        },
+        // FIW Stage 1: the artifact SHARE cycle — a REAL file stream through
+        // the FileProvider (containment-checked inside the helper).
+        onShareActiveArtifact = {
+            val activeArtifact = studioState.activeArtifact
+            val projectId = projectsState.currentProject?.id
+            if (activeArtifact == null || projectId == null) {
+                studioViewModel.reportArtifactExchangeUnavailable(
+                    "لا يوجد مخرج مفتوح للمشاركة، أو لا يوجد مشروع نشط يحدد نطاق الملف."
+                )
+            } else {
+                val shareIntent = com.example.presentation.ui.components.SandboxFileExchange
+                    .buildShareIntent(
+                        context = shareContext,
+                        projectId = projectId,
+                        relativePath = activeArtifact.storageUri,
+                        mimeType = activeArtifact.mimeType,
+                        title = activeArtifact.name
+                    )
+                if (shareIntent == null) {
+                    studioViewModel.reportArtifactExchangeUnavailable(
+                        "تعذّر الوصول إلى ملف المخرج داخل مساحة المشروع — ربما حُذف أو تغيّر نطاقه."
+                    )
+                } else {
+                    shareContext.startActivity(
+                        android.content.Intent.createChooser(shareIntent, "مشاركة المخرج")
+                    )
+                }
+            }
+        },
         // CLOSURE §8: the artifact canvas's full version lifecycle.
         onLoadArtifactVersions = studioViewModel::loadArtifactVersions,
         onSaveArtifactVersion = { studioViewModel.saveArtifactCanvasVersion(it) },
@@ -302,6 +415,117 @@ fun StudioScreen(
         onPickLaunchFailed = { reason ->
             chatCapabilitiesViewModel.reportPickLaunchFailure(reason)
         },
+        // FIW Stage 1: session-package import entry (pane + sheet).
+        onImportSessionPackage = {
+            sessionImportLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream"))
+        },
         modifier = modifier
     )
+
+    // ------------------------------------------------------------------
+    // FIW Stage 1 — the export FORMAT PICKER: one honest dialog offering
+    // the real capabilities (TXT/Markdown/JSON transcript + the importable
+    // package + the platform share route). No format is offered that the
+    // service cannot render.
+    // ------------------------------------------------------------------
+    sessionExportFormatTarget?.let { targetSessionId ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { sessionExportFormatTarget = null },
+            title = { androidx.compose.material3.Text("تصدير الجلسة") },
+            text = {
+                androidx.compose.foundation.layout.Column {
+                    androidx.compose.material3.Text(
+                        text = "اختر صيغة التصدير — سيُحفظ الملف على الجهاز عبر منتقي النظام.",
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            sessionExportFormatTarget = null
+                            runSessionExport(targetSessionId, com.example.application.transfer.SessionExportService.Format.TXT)
+                        },
+                        modifier = Modifier.testTag("export_format_txt")
+                    ) { androidx.compose.material3.Text("نص عادي (TXT)") }
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            sessionExportFormatTarget = null
+                            runSessionExport(targetSessionId, com.example.application.transfer.SessionExportService.Format.MARKDOWN)
+                        },
+                        modifier = Modifier.testTag("export_format_md")
+                    ) { androidx.compose.material3.Text("Markdown — نص منسّق مع المرفقات والمصادر") }
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            sessionExportFormatTarget = null
+                            runSessionExport(targetSessionId, com.example.application.transfer.SessionExportService.Format.JSON)
+                        },
+                        modifier = Modifier.testTag("export_format_json")
+                    ) { androidx.compose.material3.Text("JSON — التمثيل القانوني الكامل") }
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            sessionExportFormatTarget = null
+                            sessionsViewModel.exportSessionPackage(
+                                targetSessionId,
+                                onReady = { _, fileName, content, skipped ->
+                                    pendingDeviceExport = PendingDeviceExport(
+                                        fileName, "application/json", content.toByteArray()
+                                    )
+                                    if (skipped.isNotEmpty()) {
+                                        studioViewModel.reportArtifactExchangeUnavailable(
+                                            "الحزمة لا تتضمن محتوى ${skipped.size} مخرجاً (تجاوز حدود الحجم) — سيُصدَّر باقياهها."
+                                        )
+                                    }
+                                },
+                                onUnavailable = { reason ->
+                                    studioViewModel.reportArtifactExchangeUnavailable(reason)
+                                }
+                            )
+                        },
+                        modifier = Modifier.testTag("export_format_package")
+                    ) { androidx.compose.material3.Text("حزمة قابلة للاستيراد — تشمل المخرجات ومرفقاتها") }
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            sessionExportFormatTarget = null
+                            // The secondary route: the platform share sheet with
+                            // the SAME canonical Markdown the service renders.
+                            val context = shareContext
+                            sessionsViewModel.exportSession(
+                                targetSessionId,
+                                com.example.application.transfer.SessionExportService.Format.MARKDOWN,
+                                onReady = { title, _, _, markdown ->
+                                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                        type = "text/markdown"
+                                        putExtra(android.content.Intent.EXTRA_SUBJECT, title)
+                                        putExtra(android.content.Intent.EXTRA_TEXT, markdown)
+                                    }
+                                    context.startActivity(
+                                        android.content.Intent.createChooser(send, "مشاركة الجلسة")
+                                    )
+                                },
+                                onUnavailable = { sessionsViewModel.reportExportUnavailable() }
+                            )
+                        },
+                        modifier = Modifier.testTag("export_format_share")
+                    ) { androidx.compose.material3.Text("مشاركة كنص عبر تطبيقات الجهاز") }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                androidx.compose.material3.TextButton(
+                    onClick = { sessionExportFormatTarget = null }
+                ) { androidx.compose.material3.Text("إلغاء") }
+            }
+        )
+    }
 }
+
+/**
+ * FIW Stage 1/2: one pending save-to-device request (artifact export,
+ * attachment export, session export) — the CreateDocument launcher's
+ * payload. The bytes are the REAL file content read through the
+ * scope-aware services BEFORE the picker opened.
+ */
+private data class PendingDeviceExport(
+    val fileName: String,
+    val mime: String,
+    val bytes: ByteArray
+)

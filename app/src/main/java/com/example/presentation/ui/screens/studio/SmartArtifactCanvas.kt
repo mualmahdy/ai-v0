@@ -32,6 +32,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.SaveAlt
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -80,7 +82,14 @@ internal fun SmartArtifactCanvas(
     /** CLOSURE §8: persists edited content as the NEXT version. */
     onSaveVersion: (String) -> Unit = {},
     /** CLOSURE §8: rolls the artifact back to an older version. */
-    onRollbackVersion: (Int) -> Unit = {}
+    onRollbackVersion: (Int) -> Unit = {},
+    /**
+     * FIW Stage 1: export-to-device (SAF CreateDocument — a REAL file save,
+     * byte-exact for every artifact type). The screen owns the launcher.
+     */
+    onExport: () -> Unit = {},
+    /** FIW Stage 1: share as a REAL stream (FileProvider content uri). */
+    onShare: () -> Unit = {}
 ) {
     val clipboard = LocalClipboardManager.current
     // CLOSURE §8: the editable edit surface (content + save-as-new-version).
@@ -155,6 +164,22 @@ internal fun SmartArtifactCanvas(
                         modifier = Modifier.testTag("artifact_versions")
                     ) {
                         Icon(Icons.Default.History, contentDescription = "سجل نسخ الأثر")
+                    }
+                    // FIW Stage 1: the export cycle — a REAL save-to-device
+                    // through SAF (byte-exact, works for binary artifacts too).
+                    IconButton(
+                        onClick = onExport,
+                        modifier = Modifier.testTag("artifact_export")
+                    ) {
+                        Icon(Icons.Default.SaveAlt, contentDescription = "تصدير الأثر إلى الجهاز")
+                    }
+                    // FIW Stage 1: the share cycle — a REAL file stream through
+                    // the FileProvider (never a text-only fake for binaries).
+                    IconButton(
+                        onClick = onShare,
+                        modifier = Modifier.testTag("artifact_share")
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = "مشاركة الأثر كملف")
                     }
                     IconButton(
                         onClick = onClose,

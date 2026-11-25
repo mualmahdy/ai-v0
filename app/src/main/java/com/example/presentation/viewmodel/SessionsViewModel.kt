@@ -54,7 +54,14 @@ class SessionsViewModel(
     private val conversationSessionService: ConversationSessionService,
     private val activeWorkspace: StateFlow<Workspace?>,
     /** CLOSURE P0-1: the app-wide operation registry (nullable = test seam). */
-    private val operationRegistry: OperationRegistry? = null
+    private val operationRegistry: OperationRegistry? = null,
+    /**
+     * FIW Stage 1: the UNIFIED export/import authority (canonical TXT/MD/JSON
+     * renders + the importable session package). Null (legacy tests) ⇒ the
+     * export falls back to the local transcript renderer — honestly degraded,
+     * never a silent second implementation in production.
+     */
+    private val sessionExportService: com.example.application.transfer.SessionExportService? = null
 ) : ViewModel() {
 
     /** The sessions feature's own slice of UI state (was 3 fields of UiState). */
@@ -127,37 +134,146 @@ class SessionsViewModel(
     }
 
     /**
-     * FRONTIER EXPORT: loads the durable session WITH its turns and hands
-     * the rendered Markdown transcript to [onReady]. A session that cannot
-     * be loaded (deleted mid-tap, workspace mismatch) fires [onUnavailable]
-     * honestly — never an empty fabricated transcript.
+     * FRONTIER EXPORT (FIW Stage 1 — UNIFIED): renders the durable session
+     * through the ONE export service (canonical representation with
+     * attachments/sources/artifacts, redacted, audited). [format] picks the
+     * presentation; the package format returns the package JSON.
+     * A session that cannot be loaded (deleted mid-tap, workspace mismatch)
+     * fires [onUnavailable] honestly — never an empty fabricated transcript.
      */
     fun exportSession(
         sessionId: String,
-        onReady: (title: String, markdown: String) -> Unit,
+        format: com.example.application.transfer.SessionExportService.Format,
+        onReady: (title: String, fileName: String, mimeType: String, content: String) -> Unit,
         onUnavailable: () -> Unit = {}
     ) {
         viewModelScope.launch {
-            // GAP-14: project-private sessions export ONLY under their own
-            // active project — the same scoping the browser list shows.
-            val activeProjectId = activeWorkspace.value?.activeProjectId?.takeIf { it > 0L }
-            val loaded = runCatching {
-                conversationSessionService.getSessionWithTurns(
-                    ConversationSessionId(sessionId),
-                    expectedProjectId = activeProjectId
-                )
-            }.getOrNull()
-            if (loaded == null) {
-                onUnavailable()
-            } else {
+            val pinnedWorkspaceId = activeWorkspace.value?.id
+            val service = sessionExportService
+            if (pinnedWorkspaceId == null || service == null) {
+                // Honest degraded fallback (legacy tests only in production
+                // this never happens — the container wires the service).
+                val activeProjectId = activeWorkspace.value?.activeProjectId?.takeIf { it > 0L }
+                val loaded = runCatching {
+                    conversationSessionService.getSessionWithTurns(
+                        ConversationSessionId(sessionId),
+                        expectedProjectId = activeProjectId
+                    )
+                }.getOrNull()
+                if (loaded == null || format != com.example.application.transfer.SessionExportService.Format.MARKDOWN) {
+                    onUnavailable()
+                } else {
+                    onReady(
+                        loaded.session.title,
+                        "${sanitizeFileName(loaded.session.title)}.md",
+                        "text/markdown",
+                        com.example.presentation.state.SessionTranscriptExporter
+                            .toTranscriptMarkdown(loaded.session, loaded.turns)
+                    )
+                }
+                return@launch
+            }
+            when (format) {
+                com.example.application.transfer.SessionExportService.Format.TXT ->
+                    service.exportSession(pinnedWorkspaceId, sessionId, format)
+                com.example.application.transfer.SessionExportService.Format.MARKDOWN ->
+                    service.exportSession(pinnedWorkspaceId, sessionId, format)
+                com.example.application.transfer.SessionExportService.Format.JSON ->
+                    service.exportSession(pinnedWorkspaceId, sessionId, format)
+            }?.let { content ->
+                val title = _state.value.sessions
+                    .firstOrNull { it.id.value == sessionId }?.title ?: "session"
+                val ext = when (format) {
+                    com.example.application.transfer.SessionExportService.Format.TXT -> "txt"
+                    com.example.application.transfer.SessionExportService.Format.MARKDOWN -> "md"
+                    com.example.application.transfer.SessionExportService.Format.JSON -> "json"
+                }
                 onReady(
-                    loaded.session.title,
-                    com.example.presentation.state.SessionTranscriptExporter
-                        .toTranscriptMarkdown(loaded.session, loaded.turns)
+                    title,
+                    "${sanitizeFileName(title)}.$ext",
+                    when (format) {
+                        com.example.application.transfer.SessionExportService.Format.TXT -> "text/plain"
+                        com.example.application.transfer.SessionExportService.Format.MARKDOWN -> "text/markdown"
+                        com.example.application.transfer.SessionExportService.Format.JSON -> "application/json"
+                    },
+                    content
                 )
+            } ?: onUnavailable()
+        }
+    }
+
+    /**
+     * FIW Stage 1: builds the IMPORTABLE session package (canonical +
+     * artifact payloads, size-capped) — the export side of the round-trip.
+     */
+    fun exportSessionPackage(
+        sessionId: String,
+        onReady: (title: String, fileName: String, content: String, skipped: List<String>) -> Unit,
+        onUnavailable: (reason: String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val pinnedWorkspaceId = activeWorkspace.value?.id
+            val service = sessionExportService
+            if (pinnedWorkspaceId == null || service == null) {
+                onUnavailable("خدمة تصدير الجلسات غير مهيأة في هذا السياق.")
+                return@launch
+            }
+            when (val outcome = service.buildSessionPackage(pinnedWorkspaceId, sessionId)) {
+                is com.example.application.transfer.SessionExportService.PackageBuild.Built -> {
+                    val title = _state.value.sessions
+                        .firstOrNull { it.id.value == sessionId }?.title ?: "session"
+                    onReady(
+                        title,
+                        "${sanitizeFileName(title)}.aiv0session.json",
+                        outcome.packageJson.toString(2),
+                        outcome.skippedPayloads
+                    )
+                }
+                is com.example.application.transfer.SessionExportService.PackageBuild.Unavailable ->
+                    onUnavailable(outcome.reason)
             }
         }
     }
+
+    /**
+     * FIW Stage 1: imports a session package (the file's text, read by the
+     * screen's SAF launcher) as a NEW session in the active workspace/project.
+     */
+    fun importSessionPackage(
+        packageText: String,
+        onImported: (newSessionTitle: String, turnCount: Int, payloadsRestored: Int) -> Unit,
+        onRejected: (reason: String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val pinnedWorkspaceId = activeWorkspace.value?.id
+            val projectId = activeWorkspace.value?.activeProjectId?.takeIf { it > 0L }
+            val service = sessionExportService
+            if (pinnedWorkspaceId == null || service == null) {
+                onRejected("خدمة استيراد الجلسات غير مهيأة في هذا السياق.")
+                return@launch
+            }
+            val packageJson = runCatching { org.json.JSONObject(packageText) }.getOrNull()
+            if (packageJson == null) {
+                onRejected("الملف ليس JSON صالحاً — تعذّر قراءة الحزمة.")
+                return@launch
+            }
+            when (
+                val outcome = service.importSessionPackage(pinnedWorkspaceId, projectId, packageJson)
+            ) {
+                is com.example.application.transfer.SessionExportService.ImportOutcome.Imported -> {
+                    val title = _state.value.sessions
+                        .firstOrNull { it.id.value == outcome.newSessionId }?.title
+                        ?: "الجلسة المستوردة"
+                    onImported(title, outcome.turnCount, outcome.payloadsRestored)
+                }
+                is com.example.application.transfer.SessionExportService.ImportOutcome.Rejected ->
+                    onRejected(outcome.reason)
+            }
+        }
+    }
+
+    private fun sanitizeFileName(title: String): String =
+        title.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "session" }.take(60)
 
     /** FRONTIER EXPORT: honest feedback when a session can no longer load. */
     fun reportExportUnavailable() {

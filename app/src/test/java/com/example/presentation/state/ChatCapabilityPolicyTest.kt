@@ -105,13 +105,14 @@ class ChatCapabilityPolicyTest {
             }
     }
 
-    /** UI POLISH §3: capabilities with NO runtime execution path in this version. */
+    /** UI POLISH §3: capabilities with NO runtime execution path in this version.
+     *  (FIW Stage 1: RESULT_TO_ARTIFACT LEFT this set — the save-result
+     *  action is wired now; its availability follows the project scope.) */
     private val VERSION_LEVEL_UNAVAILABLE_KEYS = setOf(
         ChatCapabilityKey.IMAGE_GENERATION,
         ChatCapabilityKey.SPEECH,
         ChatCapabilityKey.CAMERA,
-        ChatCapabilityKey.SCREEN_SHARE,
-        ChatCapabilityKey.RESULT_TO_ARTIFACT
+        ChatCapabilityKey.SCREEN_SHARE
     )
 
     // ------------------------------------------------------------------
@@ -360,12 +361,24 @@ class ChatCapabilityPolicyTest {
     }
 
     @Test
-    fun `result-to-artifact is honestly unavailable - attachments register artifacts but results do not`() {
-        val resolved = ChatCapabilityPolicy.resolve(facts { copy(activeProjectId = 7L) })
-        val item = resolved.first { it.key == ChatCapabilityKey.RESULT_TO_ARTIFACT }
-        assertEquals(ChatCapabilityStatus.UNAVAILABLE, item.status)
-        assertEquals(ChatCapabilityReasons.RESULT_TO_ARTIFACT, item.reason)
-        assertFalse(ChatCapabilityPolicy.isClickable(item))
+    fun `result-to-artifact follows the project scope - wired and available with an active project`() {
+        // FIW Stage 1: the save-result-as-artifact path IS wired (naming
+        // dialog → versioned project artifact linked to the turn → the
+        // card renders and survives reopen). The availability now tells the
+        // truth about the implementation — AVAILABLE under an active project.
+        val withProject = ChatCapabilityPolicy.resolve(facts { copy(activeProjectId = 7L) })
+        val available = withProject.first { it.key == ChatCapabilityKey.RESULT_TO_ARTIFACT }
+        assertEquals(ChatCapabilityStatus.AVAILABLE, available.status)
+        assertNull("no reason when available", available.reason)
+        assertTrue("clickable when available", ChatCapabilityPolicy.isClickable(available))
+
+        // Without an active project the honest blocker is SCOPE (outputs are
+        // project-scoped) — the same gate attachments obey.
+        val withoutProject = ChatCapabilityPolicy.resolve(facts { copy(activeProjectId = null) })
+        val unavailable = withoutProject.first { it.key == ChatCapabilityKey.RESULT_TO_ARTIFACT }
+        assertEquals(ChatCapabilityStatus.UNAVAILABLE, unavailable.status)
+        assertEquals(ChatCapabilityReasons.RESULT_TO_ARTIFACT, unavailable.reason)
+        assertFalse(ChatCapabilityPolicy.isClickable(unavailable))
     }
 
     @Test

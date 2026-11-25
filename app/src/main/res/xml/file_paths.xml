@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FIW Stage 1/2 — the share surface for project-sandbox files.
+  The app's project sandboxes live under filesDir/workspaces/proj_<id>/…
+  (SandboxProjectFileStore). Sharing a REAL file stream (artifacts,
+  attachments, workspace exports) requires a content URI — this provider
+  exposes exactly the workspaces subtree and NOTHING else (no cache, no
+  external roots, no arbitrary paths).
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <files-path
+        name="workspaces"
+        path="workspaces/" />
+</paths>

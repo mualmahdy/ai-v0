@@ -23,6 +23,7 @@ import com.example.domain.core.session.TurnAttachment
 import com.example.domain.core.session.TurnSourceRef
 import com.example.domain.core.task.AutonomyPolicy
 import com.example.presentation.state.ApprovalBlockState
+import com.example.presentation.state.ChatArtifactRef
 import com.example.presentation.state.ChatEntry
 import com.example.presentation.state.ExecutionLifecycleProjection
 import com.example.presentation.state.ExecutionPhase
@@ -244,10 +245,23 @@ class StudioViewModel(
         val diagnosticBanner: String? = null,
         val currentTokensConsumed: Int = 0,
         val sessionTotalTokens: Int = 0,
-        val remainingBudget: Int = 30000,
+        // FIW Stage 3 (honest unknown): the PRE-EVENT default is the
+        // REMAINING_UNKNOWN sentinel — the old fabricated 30000 baseline
+        // showed the user a budget nobody had measured (the adapters were
+        // fixed to stop fabricating; the initial UI state still did).
+        val remainingBudget: Int = -1,
         val networkPolicy: NetworkPolicy = NetworkPolicy.HYBRID,
         /** ARTIFACT CANVAS (§10): the artifact opened in the preview surface. */
         val activeArtifact: com.example.presentation.state.ChatArtifactRef? = null,
+        /**
+         * FIW Stage 1: the assistant entry awaiting a save-as-artifact NAME
+         * (the naming dialog's target; null = dialog closed). The capability
+         * hub's «حفظ النتيجة كأثر» and the message's «حفظ كمخرج» action both
+         * land here — one flow, one name, one durable linkage.
+         */
+        val resultSaveTargetEntryId: String? = null,
+        /** The dialog's prefilled name suggestion (an honest default, editable). */
+        val resultSaveSuggestedName: String? = null,
         /** ARTIFACT CANVAS (§10): the previewed text content (null until read). */
         val artifactContent: String? = null,
         /** ARTIFACT CANVAS (§10): true while the scope-aware read is in flight. */
@@ -411,6 +425,102 @@ class StudioViewModel(
         }
     }
 
+    /** FIW Stage 1: surfaces an export/share failure honestly (never silent). */
+    fun reportArtifactExchangeUnavailable(reason: String) {
+        _state.update { it.copy(errorMessage = reason) }
+    }
+
+    /**
+     * FIW Stage 1 — the attachment OPEN cycle (the chip was display-only):
+     * a tap resolves the attachment's REAL artifact row (accurate
+     * mime/size/name) and opens the shared artifact canvas. Textual
+     * artifacts preview/edit/version; binary ones get the canvas's honest
+     * "no textual preview" state — plus the export/share actions the
+     * canvas now carries. An attachment with NO registered artifact row
+     * (legacy/imported before the registration path) opens a synthetic
+     * reference with the honest reason — never a fabricated preview.
+     */
+    fun openChatAttachment(attachment: com.example.presentation.state.ChatEntryAttachment) {
+        val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
+        val projectId = workspaceRuntimeService.activeProjectIdOrNull()
+        val accessorScope = workspaceId?.let { ws ->
+            projectId?.let { ResourceScope.Project(ws, it) } ?: ResourceScope.Workspace(ws)
+        }
+        val fallbackRef = com.example.presentation.state.ChatArtifactRef(
+            artifactId = attachment.artifactId ?: attachment.id,
+            name = attachment.name,
+            type = "FILE",
+            mimeType = attachment.mimeType,
+            sizeBytes = attachment.sizeBytes,
+            storageUri = attachment.storageUri
+        )
+        val service = artifactService
+        if (service == null || accessorScope == null || attachment.artifactId == null) {
+            openArtifact(fallbackRef)
+            if (attachment.artifactId == null) {
+                _state.update {
+                    it.copy(
+                        artifactError = "هذا المرفق لا يملك سجل أثر مرتبطاً في المشروع — " +
+                            "يمكن تصديره أو مشاركته من أزرار التصدير أدناه."
+                    )
+                }
+            }
+            return
+        }
+        viewModelScope.launch {
+            val resolved = runCatching {
+                service.descriptor(accessorScope, attachment.artifactId!!)
+            }.getOrNull()
+            openArtifact(resolved?.toChatArtifactRef() ?: fallbackRef)
+            if (resolved == null) {
+                _state.update {
+                    it.copy(
+                        artifactError = "تعذر العثور على سجل هذا المرفق ضمن النطاق الحالي — " +
+                            "ربما حُذف من المشروع. يمكن محاولة التصدير من مسار الملفات."
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * FIW Stage 1 — the artifact EXPORT cycle: reads the ACTIVE artifact's
+     * real bytes (any type — the SAF write is byte-exact) and hands them to
+     * the caller's CreateDocument flow. Honest unavailability on read
+     * failure (scope loss, missing row/file) — never empty bytes.
+     */
+    fun exportActiveArtifact(
+        onReady: (name: String, mimeType: String, bytes: ByteArray) -> Unit,
+        onUnavailable: (reason: String) -> Unit
+    ) {
+        val artifact = _state.value.activeArtifact
+        val service = artifactService
+        val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull()
+        val projectId = workspaceRuntimeService.activeProjectIdOrNull()
+        if (artifact == null || service == null) {
+            onUnavailable("لا يوجد أثر مفتوح للتصدير.")
+            return
+        }
+        val accessorScope = workspaceId?.let { ws ->
+            projectId?.let { ResourceScope.Project(ws, it) } ?: ResourceScope.Workspace(ws)
+        }
+        if (accessorScope == null) {
+            onUnavailable("لا مساحة عمل نشطة — لا يمكن تحديد نطاق التصدير.")
+            return
+        }
+        viewModelScope.launch {
+            val bytes = runCatching {
+                service.readContent(accessorScope, artifact.artifactId)
+            }.getOrNull()
+            if (bytes == null) {
+                onUnavailable("تعذر قراءة محتوى الأثر ضمن النطاق الحالي (ربما حُذف أو فُقد نطاقه).")
+            } else {
+                val exportName = artifact.name.substringAfterLast('/')
+                onReady(exportName, artifact.mimeType, bytes)
+            }
+        }
+    }
+
     /**
      * ARTIFACT CANVAS (§10): opens ONE artifact through the REAL
      * scope-aware artifact service. The accessor scope is captured from the
@@ -503,8 +613,19 @@ class StudioViewModel(
      * RESULT → ARTIFACT: persists one assistant entry's text as a REAL,
      * versioned, project-scoped artifact (v1) — the entry can then be
      * previewed/edited/versioned through the artifact canvas.
+     *
+     * FIW Stage 1 (Functional Integration & Workflow Closure) — three
+     * closure gaps fixed here:
+     *   1. the user may NAME the output ([customName]); the previous
+     *      auto-timestamp name was the only option;
+     *   2. the save now records the PRODUCING TURN (DB v29 `turnId`) —
+     *      the association survives a session reopen (it used to be a
+     *      one-shot banner that evaporated);
+     *   3. on success the entry gains its artifact CARD in the timeline
+     *      (the renderer already existed — nothing ever fed it on this
+     *      path) and the MIME follows the name's real file type.
      */
-    fun saveEntryAsArtifact(entryId: String) {
+    fun saveEntryAsArtifact(entryId: String, customName: String? = null) {
         val service = artifactService ?: return
         val workspaceId = workspaceRuntimeService.activeWorkspaceIdOrNull() ?: run {
             _state.update { it.copy(errorMessage = "لا مساحة عمل نشطة لحفظ النتيجة كمخرج.") }
@@ -521,9 +642,18 @@ class StudioViewModel(
             _state.update { it.copy(errorMessage = "لا يوجد نص لحفظه كمخرج في هذه الرسالة.") }
             return
         }
+        // FIW Stage 1: the durable producing-turn linkage (assistant entry
+        // ids are "a_<turnId>"; anything else is a runtime-only entry with
+        // no durable turn — the linkage stays honestly null).
+        val turnId = entry.id.takeIf { it.startsWith("a_") }?.removePrefix("a_")
+        val name = customName?.trim()?.takeIf { it.isNotEmpty() } ?: defaultResultArtifactName()
         viewModelScope.launch {
-            val name = "نتيجة " + java.text.SimpleDateFormat("yyyyMMdd_HHmm", java.util.Locale.US)
-                .format(java.util.Date())
+            // FIW Stage 1: the MIME follows the chosen name's REAL file type
+            // (a "script.py" output is text/x-python, not markdown); a name
+            // with no recognizable extension stays text/markdown (the honest
+            // default for conversational results).
+            val resolution = com.example.domain.core.storage.FileKindResolver.resolve(name)
+            val mime = if (resolution.extension.isEmpty()) "text/markdown" else resolution.mimeType
             val descriptor = runCatching {
                 service.saveAssistantResultAsArtifact(
                     workspaceId = workspaceId,
@@ -532,17 +662,65 @@ class StudioViewModel(
                     executionId = null,
                     name = name,
                     content = text.toByteArray(),
-                    createdBy = "user"
+                    mimeType = mime,
+                    createdBy = "user",
+                    turnId = turnId
                 )
             }.getOrNull()
             if (descriptor == null) {
                 _state.update { it.copy(errorMessage = "تعذر حفظ النتيجة كمخرج.") }
             } else {
-                _state.update {
-                    it.copy(diagnosticBanner = "حُفظت النتيجة كمخرج «${descriptor.name}» (النسخة 1) داخل المشروع.")
+                val ref = descriptor.toChatArtifactRef()
+                _state.update { state ->
+                    state.copy(
+                        timeline = state.timeline.map { existing ->
+                            if (existing.id == entryId && existing is ChatEntry.Assistant &&
+                                existing.artifacts.none { it.artifactId == ref.artifactId }
+                            ) existing.copy(artifacts = existing.artifacts + ref) else existing
+                        },
+                        diagnosticBanner = "حُفظت النتيجة كمخرج «${descriptor.name}» (النسخة 1) — ظهرت بطاقته في المحادثة، ويمكن فتحه لاحقاً من المشروع.",
+                        resultSaveTargetEntryId = null,
+                        resultSaveSuggestedName = null
+                    )
                 }
             }
         }
+    }
+
+    /** The auto name for a result save (the dialog's prefilled suggestion). */
+    fun defaultResultArtifactName(): String =
+        "نتيجة " + java.text.SimpleDateFormat("yyyyMMdd_HHmm", java.util.Locale.US)
+            .format(java.util.Date())
+
+    /**
+     * FIW Stage 1: opens the save-result dialog for [entryId] (null = the
+     * conversation's LATEST successful assistant result — the capability
+     * hub's «حفظ النتيجة كأثر» entry). Honest no-op feedback when the
+     * conversation has no saveable result yet.
+     */
+    fun requestResultSave(entryId: String?) {
+        val target = entryId ?: _state.value.timeline
+            .lastOrNull { it is ChatEntry.Assistant && it.isSuccessful }?.id
+        if (target == null) {
+            _state.update {
+                it.copy(errorMessage = "لا توجد نتيجة محادثة لحفظها بعد — أرسل سؤالاً أولاً.")
+            }
+            return
+        }
+        _state.update {
+            it.copy(resultSaveTargetEntryId = target, resultSaveSuggestedName = defaultResultArtifactName())
+        }
+    }
+
+    /** Dismisses the save-result dialog without saving anything. */
+    fun dismissResultSaveDialog() {
+        _state.update { it.copy(resultSaveTargetEntryId = null, resultSaveSuggestedName = null) }
+    }
+
+    /** Confirms the dialog: saves under the user's (or suggested) name. */
+    fun confirmResultSave(name: String?) {
+        val target = _state.value.resultSaveTargetEntryId ?: return
+        saveEntryAsArtifact(target, name)
     }
 
     /** Loads the ACTIVE artifact's version history (the versions sheet). */
@@ -909,6 +1087,19 @@ class StudioViewModel(
                     expectedProjectId = activeProjectId
                 ) ?: return@launch
                 detachRunningExecution(banner = null)
+                // FIW Stage 1 (DB v29): the session's saved outputs, loaded
+                // BEFORE the state write (the join is suspend; the update
+                // lambda is not). Turn-keyed for the assistant-entry cards.
+                val artifactsByTurn = artifactService
+                    ?.takeIf { workspaceId != null }
+                    ?.let { service ->
+                        runCatching {
+                            service.forSession(workspaceId!!, loaded.session.id.value)
+                        }.getOrDefault(emptyList())
+                    }
+                    ?.filter { it.turnId != null }
+                    ?.groupBy { it.turnId!! }
+                    ?: emptyMap()
                 // CHAT FINAL CLOSURE (approval durable-state invariant): the
                 // reopened conversation's approval blocks register their OWN
                 // durable mirror location — a decision the user makes while
@@ -949,7 +1140,8 @@ class StudioViewModel(
                                 modelResourceId = turn.modelResourceId
                             )
                         },
-                        timeline = rebuildTimeline(loaded.turns, loaded.timelineEvents),
+                        timeline = rebuildTimeline(loaded.turns, loaded.timelineEvents)
+                            .withRestoredArtifacts(artifactsByTurn),
                         executionLog = emptyList(),
                         streamText = "",
                         reasoningText = "",
@@ -962,6 +1154,40 @@ class StudioViewModel(
             }
         }
     }
+
+    /**
+     * FIW Stage 1 (DB v29): re-attaches the session's saved-output cards to
+     * their producing assistant entries — the durable half of the
+     * result→artifact cycle. A save that happened BEFORE this fix carries no
+     * turnId and honestly renders no card (the artifact is still reachable
+     * through the Files screen's generated/ tree and the project's
+     * artifacts — nothing is lost, only the per-message card is absent).
+     */
+    private fun List<ChatEntry>.withRestoredArtifacts(
+        artifactsByTurn: Map<String, List<com.example.domain.core.artifact.ArtifactDescriptor>>
+    ): List<ChatEntry> {
+        if (artifactsByTurn.isEmpty()) return this
+        return map { entry ->
+            if (entry is ChatEntry.Assistant && entry.id.startsWith("a_")) {
+                val refs = artifactsByTurn[entry.id.removePrefix("a_")]
+                    .orEmpty()
+                    .map { it.toChatArtifactRef() }
+                    .filter { ref -> entry.artifacts.none { it.artifactId == ref.artifactId } }
+                if (refs.isEmpty()) entry else entry.copy(artifacts = entry.artifacts + refs)
+            } else entry
+        }
+    }
+
+    /** FIW Stage 1: descriptor → the conversation card reference. */
+    private fun com.example.domain.core.artifact.ArtifactDescriptor.toChatArtifactRef() =
+        ChatArtifactRef(
+            artifactId = id,
+            name = name,
+            type = type.name,
+            mimeType = mimeType,
+            sizeBytes = sizeBytes,
+            storageUri = storageUri
+        )
 
     /**
      * FUNCTIONAL CLOSURE (§9/§11): rebuilds the reopened timeline by

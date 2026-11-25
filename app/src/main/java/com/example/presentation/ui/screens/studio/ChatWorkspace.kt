@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Search
@@ -107,6 +108,8 @@ fun ChatWorkspace(
     /** FRONTIER: rename/export reach the REAL services through the screen. */
     onRenameSession: (String, String) -> Unit = { _, _ -> },
     onExportSession: (String) -> Unit = {},
+    /** FIW Stage 1: session-package import (SAF pick → the unified service). */
+    onImportSessionPackage: () -> Unit = {},
     /** Task-2: the capability layer's state (menu facts + drafts + mirrors). */
     capabilityState: ChatCapabilitiesViewModel.ChatCapabilitiesUiState,
     /** Task-2 §19: the adaptive width class (COMPACT / MEDIUM / EXPANDED). */
@@ -157,8 +160,22 @@ fun ChatWorkspace(
     /** ---- ARTIFACT CANVAS (§10) wiring ---- */
     /** Opens a conversation artifact in the scope-aware preview surface. */
     onOpenArtifact: (com.example.presentation.state.ChatArtifactRef) -> Unit = {},
-    /** CLOSURE §8: persist an assistant entry as a versioned artifact. */
-    onSaveAsArtifact: (String) -> Unit = {},
+    /**
+     * CLOSURE §8 + FIW Stage 1: request the save-result flow for an entry
+     * (null = the conversation's latest result — the capability hub entry).
+     * Opens the naming dialog; the confirm lands in [onConfirmResultSave].
+     */
+    onRequestResultSave: (String?) -> Unit = {},
+    /** FIW Stage 1: confirms the naming dialog (null name = the suggestion). */
+    onConfirmResultSave: (String?) -> Unit = {},
+    /** FIW Stage 1: dismisses the naming dialog without saving. */
+    onDismissResultSave: () -> Unit = {},
+    /** FIW Stage 1: opens a conversation ATTACHMENT in the shared canvas. */
+    onOpenAttachment: (com.example.presentation.state.ChatEntryAttachment) -> Unit = {},
+    /** FIW Stage 1: export the ACTIVE canvas artifact to the device (SAF). */
+    onExportActiveArtifact: () -> Unit = {},
+    /** FIW Stage 1: share the ACTIVE canvas artifact as a real file stream. */
+    onShareActiveArtifact: () -> Unit = {},
     /** CLOSURE §8: the artifact canvas's version lifecycle surface. */
     onLoadArtifactVersions: () -> Unit = {},
     onSaveArtifactVersion: (String) -> Unit = {},
@@ -301,6 +318,7 @@ fun ChatWorkspace(
                 onRenameRequest = { renameSessionTarget = it },
                 onExportRequest = onExportSession,
                 onNewSession = onNewSession,
+                onImportRequest = onImportSessionPackage,
                 modifier = Modifier
                     .width(panePolicy.sessionsPaneWidthDp.coerceAtLeast(1).dp)
                     .fillMaxHeight()
@@ -376,9 +394,11 @@ fun ChatWorkspace(
                 // scope-aware preview through the ViewModel — never a local
                 // read, never a fabricated render.
                 onOpenArtifact = onOpenArtifact,
-                // CLOSURE §8: Result → Artifact — the message action persists
-                // the entry's text as a versioned project artifact.
-                onSaveAsArtifact = onSaveAsArtifact,
+                // CLOSURE §8 + FIW Stage 1: Result → Artifact — the message
+                // action opens the NAMING dialog (request), the confirm
+                // persists a versioned project artifact linked to the turn.
+                onSaveAsArtifact = { onRequestResultSave(it) },
+                onOpenAttachment = onOpenAttachment,
                 modifier = Modifier.weight(1f)
             )
 
@@ -495,6 +515,8 @@ fun ChatWorkspace(
                 onLoadVersions = onLoadArtifactVersions,
                 onSaveVersion = onSaveArtifactVersion,
                 onRollbackVersion = onRollbackArtifactVersion,
+                onExport = onExportActiveArtifact,
+                onShare = onShareActiveArtifact,
                 modifier = Modifier
                     .width(panePolicy.artifactPaneWidthDp.coerceAtLeast(1).dp)
                     .fillMaxHeight()
@@ -521,6 +543,8 @@ fun ChatWorkspace(
                 onLoadVersions = onLoadArtifactVersions,
                 onSaveVersion = onSaveArtifactVersion,
                 onRollbackVersion = onRollbackArtifactVersion,
+                onExport = onExportActiveArtifact,
+                onShare = onShareActiveArtifact,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = 720.dp)
@@ -588,6 +612,10 @@ fun ChatWorkspace(
                 onNewSession()
                 onSessionBrowserOpen(false)
             },
+            onImportRequest = {
+                onSessionBrowserOpen(false)
+                onImportSessionPackage()
+            },
             onDismiss = { onSessionBrowserOpen(false) }
         )
     }
@@ -630,8 +658,10 @@ fun ChatWorkspace(
                     ChatCapabilityKey.IMAGE_GENERATION,
                     ChatCapabilityKey.SPEECH,
                     ChatCapabilityKey.CAMERA,
-                    ChatCapabilityKey.SCREEN_SHARE,
-                    ChatCapabilityKey.RESULT_TO_ARTIFACT -> Unit
+                    ChatCapabilityKey.SCREEN_SHARE -> Unit
+                    // FIW Stage 1: the save-result entry is WIRED — it opens
+                    // the naming dialog for the conversation's latest result.
+                    ChatCapabilityKey.RESULT_TO_ARTIFACT -> onRequestResultSave(null)
                 }
             }
         )
@@ -777,6 +807,53 @@ fun ChatWorkspace(
         )
     }
 
+    // FIW Stage 1 — the save-result naming dialog: the user NAMES the
+    // output (prefilled with the honest timestamp suggestion); the confirm
+    // rides the REAL versioned-artifact pipeline and the entry gains its
+    // card. The dialog is driven by the ViewModel state (survives rotation).
+    state.resultSaveTargetEntryId?.let {
+        var draftName by rememberSaveable(it) {
+            mutableStateOf(state.resultSaveSuggestedName ?: "")
+        }
+        AlertDialog(
+            onDismissRequest = onDismissResultSave,
+            title = { Text("حفظ النتيجة كمخرج") },
+            text = {
+                Column {
+                    Text(
+                        text = "سيُحفظ نص هذه النتيجة كمخرج دائم داخل المشروع " +
+                            "(نسخة أولى قابلة للتحرير والتراجع)، وستظهر بطاقته في المحادثة.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = draftName,
+                        onValueChange = { if (it.length <= 120) draftName = it },
+                        singleLine = true,
+                        label = { Text("اسم المخرج") },
+                        supportingText = {
+                            Text("يمكنك استخدام امتداد مثل ‎.md‎ أو ‎.py‎ — يُحدد نوع الملف تلقائياً")
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("result_save_name_field")
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { onConfirmResultSave(draftName) },
+                    enabled = draftName.isNotBlank(),
+                    modifier = Modifier.testTag("result_save_confirm")
+                ) { Text("حفظ") }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissResultSave) { Text("إلغاء") }
+            }
+        )
+    }
+
     // FRONTIER RENAME: the honest inline rename dialog — pre-filled with
     // the CURRENT title (the user edits what exists, never retypes it).
     renameSessionTarget?.let { targetId ->
@@ -882,6 +959,8 @@ private fun ChatSessionsPane(
     onRenameRequest: (String) -> Unit,
     onExportRequest: (String) -> Unit,
     onNewSession: () -> Unit,
+    /** FIW Stage 1: session-package import entry (SAF OpenDocument). */
+    onImportRequest: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -896,6 +975,15 @@ private fun ChatSessionsPane(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f)
                 )
+                // FIW Stage 1: the session-package IMPORT entry — a real
+                // SAF pick of a .aiv0session.json (never a hidden path).
+                IconButton(onClick = onImportRequest, modifier = Modifier.testTag("pane_btn_import_session")) {
+                    Icon(
+                        Icons.Default.FileDownload,
+                        contentDescription = "استيراد حزمة جلسة",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 IconButton(onClick = onNewSession, modifier = Modifier.testTag("pane_btn_new_session")) {
                     Icon(
                         Icons.Default.PlayArrow,
@@ -952,7 +1040,9 @@ private fun SessionBrowserSheet(
     onRenameRequest: (String) -> Unit,
     onExportRequest: (String) -> Unit,
     onNewSession: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /** FIW Stage 1: session-package import entry (SAF OpenDocument). */
+    onImportRequest: () -> Unit = {}
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("session_browser_sheet")) {
         Column(
@@ -963,6 +1053,22 @@ private fun SessionBrowserSheet(
         ) {
             Text("جلسات المحادثة الدائمة", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(8.dp))
+            // FIW Stage 1: the session-package IMPORT entry (SAF pick).
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                androidx.compose.material3.TextButton(
+                    onClick = onImportRequest,
+                    modifier = Modifier.testTag("sheet_btn_import_session")
+                ) {
+                    Icon(
+                        Icons.Default.FileDownload,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("استيراد حزمة جلسة")
+                }
+            }
             SessionSearchField(
                 query = searchQuery,
                 onQueryChange = onSearchQueryChange,

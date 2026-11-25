@@ -134,7 +134,12 @@ fun ConversationTimeline(
      * ARTIFACT CANVAS (§10): opens a conversation artifact card in the
      * scope-aware preview surface (pane at expanded width, sheet below).
      */
-    onOpenArtifact: (ChatArtifactRef) -> Unit = {}
+    onOpenArtifact: (ChatArtifactRef) -> Unit = {},
+    /**
+     * FIW Stage 1: opens a conversation ATTACHMENT (the user-message
+     * chips — display-only until now) in the same shared canvas.
+     */
+    onOpenAttachment: (com.example.presentation.state.ChatEntryAttachment) -> Unit = {}
 ) {
     val listState = androidx.compose.runtime.saveable.rememberSaveable(conversationKey, saver = androidx.compose.foundation.lazy.LazyListState.Saver) { androidx.compose.foundation.lazy.LazyListState() }
     val clipboard = LocalClipboardManager.current
@@ -280,7 +285,8 @@ fun ConversationTimeline(
                         onRetryAfterApproval = onRetryAfterApproval,
                         onGrantAlways = onGrantAlways,
                         onOpenArtifact = onOpenArtifact,
-            onSaveAsArtifact = onSaveAsArtifact
+            onSaveAsArtifact = onSaveAsArtifact,
+                        onOpenAttachment = onOpenAttachment
         )
                 }
 
@@ -310,7 +316,8 @@ fun ConversationTimeline(
                         // HOTFIX R2 (consistency): entries after the live block
                         // keep their full action set — the save-as-artifact
                         // action was silently dropped for them.
-                        onSaveAsArtifact = onSaveAsArtifact
+                        onSaveAsArtifact = onSaveAsArtifact,
+                        onOpenAttachment = onOpenAttachment
                     )
                 }
             }
@@ -373,13 +380,15 @@ private fun RenderTimelineEntry(
     onRetryAfterApproval: (String) -> Unit,
     onGrantAlways: (String) -> Unit,
     onOpenArtifact: (ChatArtifactRef) -> Unit,
-    onSaveAsArtifact: (String) -> Unit = {}
+    onSaveAsArtifact: (String) -> Unit = {},
+    onOpenAttachment: (com.example.presentation.state.ChatEntryAttachment) -> Unit = {}
 ) {
     when (entry) {
         is ChatEntry.User -> UserMessage(
             entry = entry,
             onCopy = { onCopy(entry.text) },
-            onEdit = { onEdit(entry.text) }
+            onEdit = { onEdit(entry.text) },
+            onOpenAttachment = onOpenAttachment
         )
 
         is ChatEntry.Assistant -> AssistantMessage(
@@ -415,7 +424,8 @@ private fun RenderTimelineEntry(
 private fun UserMessage(
     entry: ChatEntry.User,
     onCopy: () -> Unit,
-    onEdit: () -> Unit
+    onEdit: () -> Unit,
+    onOpenAttachment: (com.example.presentation.state.ChatEntryAttachment) -> Unit = {}
 ) {
     Column(
         modifier = Modifier
@@ -452,7 +462,15 @@ private fun UserMessage(
                             items(entry.attachments, key = { it.id }) { attachment ->
                                 Surface(
                                     shape = RoundedCornerShape(8.dp),
-                                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f)
+                                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                                    // FIW Stage 1: the attachment chip OPENS its
+                                    // file — the shared artifact canvas (preview
+                                    // for text, honest unpreviewable state for
+                                    // binaries, export/share for everything). A
+                                    // chip that only shows a name was the audit
+                                    // finding; a tap now goes somewhere REAL.
+                                    onClick = { onOpenAttachment(attachment) },
+                                    modifier = Modifier.testTag("attachment_chip_${attachment.id}")
                                 ) {
                                     Row(
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),

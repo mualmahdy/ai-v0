@@ -112,8 +112,9 @@ object ChatCapabilityTemplates {
  *    registered validator/execution path (ResourceValidation's own comment:
  *    "validation fails explicitly rather than pretending").
  *  - CAMERA / SCREEN_SHARE: no capture/projection path exists at all.
- *  - RESULT_TO_ARTIFACT: no chat-side save-result-as-artifact action is
- *    wired (attachments DO register artifacts; results do not).
+ *  - RESULT_TO_ARTIFACT: the chat-side save-result-as-artifact action IS
+ *    wired (FIW Stage 1 closed the gap between the existing save path and
+ *    this row); it requires an ACTIVE PROJECT (outputs are project-scoped).
  */
 object ChatCapabilityReasons {
     const val IMAGE_GENERATION =
@@ -124,8 +125,11 @@ object ChatCapabilityReasons {
         "غير متاح في هذا الإصدار — لا يوجد مسار للكاميرا"
     const val SCREEN_SHARE =
         "غير متاح في هذا الإصدار — لا يوجد مسار لمشاركة الشاشة"
+    // FIW Stage 1: the save path IS wired now — the only honest blocker is
+    // scope (outputs are project-scoped, so an unbound workspace cannot
+    // save). The old "غير مربوط بعد" text contradicted the real action.
     const val RESULT_TO_ARTIFACT =
-        "غير متاح في هذا الإصدار — حفظ نتائج المحادثة كآثار غير مربوط بعد"
+        "يتطلب مشروعاً نشطاً — المخرجات ذات نطاق مشروع داخل مساحة العمل"
     const val NO_ACTIVE_LLM =
         "غير متاح حالياً — لا يوجد ذكاء نشط في مساحة العمل؛ اربط مزوّد LLM أولاً"
 }
@@ -487,11 +491,18 @@ object ChatCapabilityPolicy {
             category = ChatCapabilityCategory.CREATION,
             title = "حفظ النتيجة كأثر",
             subtitle = "تحويل إجابة أو نتيجة إلى أثر دائم قابل للتصفح",
-            // §3: attachments DO register artifacts (the real import path);
-            // a chat-side save-RESULT-as-artifact action is not wired yet —
-            // honest disabled row, never hidden.
-            status = ChatCapabilityStatus.UNAVAILABLE,
-            reason = ChatCapabilityReasons.RESULT_TO_ARTIFACT
+            // FIW Stage 1: the save-result path is WIRED (naming dialog →
+            // versioned project artifact → conversation card → survives
+            // reopen). The one real condition is the project scope — the
+            // same one attachments obey. The row's availability now tells
+            // the truth about the implementation (it used to claim the
+            // action was not wired at all).
+            status = if (facts.activeProjectId != null) {
+                ChatCapabilityStatus.AVAILABLE
+            } else {
+                ChatCapabilityStatus.UNAVAILABLE
+            },
+            reason = if (facts.activeProjectId == null) ChatCapabilityReasons.RESULT_TO_ARTIFACT else null
         )
     )
 
