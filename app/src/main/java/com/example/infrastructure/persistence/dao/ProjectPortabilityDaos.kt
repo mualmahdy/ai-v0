@@ -56,6 +56,18 @@ interface ArtifactDao {
     @Query("DELETE FROM artifacts WHERE id = :id")
     suspend fun deleteById(id: String)
 
+    /**
+     * FIW Stage 1 (v29): the session-restore join — every artifact produced
+     * inside one WORKSPACE-AUTHORIZED session (another workspace's session
+     * artifact is NOT FOUND). Ordered oldest-first so the assistant-entry
+     * attachment mirrors render chronologically.
+     */
+    @Query(
+        "SELECT * FROM artifacts WHERE sessionId = :sessionId " +
+                "AND workspaceId = :workspaceId ORDER BY createdAtEpochMs ASC"
+    )
+    suspend fun forSessionTurns(workspaceId: String, sessionId: String): List<ArtifactEntity>
+
     @Query("DELETE FROM artifacts WHERE projectId = :projectId")
     suspend fun deleteForProject(projectId: Long)
 

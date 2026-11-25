@@ -458,7 +458,10 @@ abstract class AppDatabase : RoomDatabase() {
         // projection + the full G01 scope dimensions + the G05
         // whole-version-freeze trigger — 4 additive tables, 10 named
         // indices, 4 triggers.
-        const val SCHEMA_VERSION = 28
+        // v29 (FIW Stage 1 — result→artifact linkage): one additive nullable
+        // column `artifacts.turnId` + the (sessionId, turnId) index. Purely
+        // additive; no column is touched, no trigger added, no data rewrite.
+        const val SCHEMA_VERSION = 29
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -2256,6 +2259,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v29 (FIW Stage 1 — Functional Integration & Workflow Closure):
+         * the result→artifact linkage column. `artifacts.turnId` records the
+         * conversation turn that produced a saved output, so a reopened
+         * session can re-render its artifact cards on the exact assistant
+         * message (the session-restore join). Purely additive: nullable
+         * column + one covering index; existing rows decode as turnId = NULL
+         * (honest "not produced by a chat turn").
+         */
+        private val MIGRATION_28_TO_29: Migration = object : Migration(28, 29) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE artifacts ADD COLUMN turnId TEXT")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_artifacts_sessionId_turnId` " +
+                        "ON `artifacts` (`sessionId`, `turnId`)"
+                )
+            }
+        }
+
         private val ALL_MIGRATIONS: Array<Migration> = arrayOf(
             // FIX R-3: complete the chain from the earliest shipped schema (v1)
             // so upgrades never crash with "migration not found".
@@ -2286,6 +2308,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_25_TO_26,
             MIGRATION_26_TO_27,
             MIGRATION_27_TO_28,
+            MIGRATION_28_TO_29,
         )
 
         fun getInstance(context: Context): AppDatabase {

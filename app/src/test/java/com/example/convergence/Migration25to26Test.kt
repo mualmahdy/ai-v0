@@ -93,14 +93,14 @@ class Migration25to26Test {
 
         val context = ApplicationProvider.getApplicationContext<Context>()
         val room = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(migration("MIGRATION_25_TO_26"), migration("MIGRATION_26_TO_27"), migration("MIGRATION_27_TO_28")) // v28: the entity set moved on — all steps run (the 22to23 precedent)
+            .addMigrations(migration("MIGRATION_25_TO_26"), migration("MIGRATION_26_TO_27"), migration("MIGRATION_27_TO_28"), migration("MIGRATION_28_TO_29")) // v29: the entity set moved on — all steps run (the 22to23 precedent)
             .allowMainThreadQueries()
             .build()
         try {
             val db = room.openHelper.writableDatabase // open -> migrate -> Room validates
 
             db.query("PRAGMA user_version").use { c ->
-                assertTrue(c.moveToFirst()); assertEquals(28, c.getInt(0))
+                assertTrue(c.moveToFirst()); assertEquals(29, c.getInt(0))
             }
 
             // ---- 7 Stage-3 tables ----

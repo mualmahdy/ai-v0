@@ -54,6 +54,8 @@ data class ArtifactDescriptor(
     val securityClassification: SecurityClassification = SecurityClassification.UNCLASSIFIED,
     val indexingState: ArtifactIndexingState = ArtifactIndexingState.NOT_INDEXED,
     val ownerId: String? = null,
+    /** FIW Stage 1 (v29): the producing conversation turn, when the artifact was saved from a chat result. */
+    val turnId: String? = null,
     val createdAtEpochMs: Long = 0L,
     val updatedAtEpochMs: Long = 0L,
     val metadataJson: String = "{}"

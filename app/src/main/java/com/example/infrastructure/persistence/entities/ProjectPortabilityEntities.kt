@@ -27,7 +27,10 @@ import androidx.room.PrimaryKey
         Index("projectId"),
         Index("type"),
         Index("createdAtEpochMs"),
-        Index(value = ["workspaceId", "projectId"])
+        Index(value = ["workspaceId", "projectId"]),
+        // FIW Stage 1 (DB v29): the session-restore join (artifacts → their
+        // producing turns inside one workspace-authorized session).
+        Index(value = ["sessionId", "turnId"])
     ]
 )
 data class ArtifactEntity(
@@ -39,6 +42,15 @@ data class ArtifactEntity(
     val taskId: String? = null,
     val executionId: String? = null,
     val workflowId: String? = null,
+    /**
+     * FIW Stage 1 (DB v29): the conversation turn that PRODUCED this
+     * artifact (result→artifact linkage). Nullable — artifacts from other
+     * paths (file registration, imports) carry no turn. This is what lets
+     * a REOPENED session re-render its saved-output cards on the exact
+     * assistant message that created them (previously the save was a
+     * one-shot banner: the association evaporated on reopen).
+     */
+    val turnId: String? = null,
     /** ArtifactType.name */
     val type: String,
     val name: String,

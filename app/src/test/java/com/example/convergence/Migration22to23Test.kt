@@ -344,7 +344,7 @@ class Migration22to23Test {
 
     @Test
     fun `schema version is 24 and both new steps are registered continuously`() {
-        assertEquals(28, AppDatabase.SCHEMA_VERSION) // v28: Stage-5 derived-state projection + G05 whole-version freeze
+        assertEquals(29, AppDatabase.SCHEMA_VERSION) // v29: FIW Stage-1 result→artifact linkage (turnId) — the chain grew again
         val allField = AppDatabase::class.java.getDeclaredField("ALL_MIGRATIONS")
         allField.isAccessible = true
         val migrations = allField.get(null) as Array<androidx.room.migration.Migration>

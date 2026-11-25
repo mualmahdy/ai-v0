@@ -180,6 +180,25 @@ class ArtifactService(
         }.getOrNull()
     }
 
+    /**
+     * FIW Stage 1: the SCOPE-AUTHORIZED descriptor for one artifact (the
+     * conversation's attachment-open path resolves the row's REAL metadata —
+     * mime/size/name — instead of trusting the chip's possibly-stale copy).
+     * A foreign-scope row is indistinguishable from nonexistent.
+     */
+    suspend fun descriptor(
+        accessorScope: ResourceScope,
+        artifactId: String
+    ): ArtifactDescriptor? = withContext(Dispatchers.IO) {
+        val artifact = artifactDao.byId(artifactId) ?: return@withContext null
+        val resourceScope = artifactScope(artifact) ?: return@withContext null
+        if (!ScopeRules.canAccess(accessorScope, resourceScope)) {
+            audit(AuditActions.FILE_READ, "ARTIFACT", artifactId, artifact.workspaceId, artifact.projectId, AuditResult.DENIED)
+            return@withContext null
+        }
+        artifact.toDescriptor()
+    }
+
     /** Copy an artifact's content to another project (§8: explicit copy, never implicit). */
     suspend fun copyContentToProject(
         accessorScope: ResourceScope,
@@ -267,7 +286,14 @@ class ArtifactService(
         name: String,
         content: ByteArray,
         mimeType: String = "text/markdown",
-        createdBy: String? = null
+        createdBy: String? = null,
+        /**
+         * FIW Stage 1 (DB v29): the producing turn id. The save path from a
+         * chat message passes the turn's id so the reopened session can
+         * re-render the artifact card on the exact assistant entry (the
+         * session-restore join). Null = not chat-produced (legacy callers).
+         */
+        turnId: String? = null
     ): ArtifactDescriptor = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         val safeName = name.replace(Regex("[\\/:*?\"<>|]"), "_").ifBlank { "artifact_$now" }
@@ -280,6 +306,7 @@ class ArtifactService(
             projectId = projectId,
             sessionId = sessionId,
             executionId = executionId,
+            turnId = turnId,
             type = ArtifactType.GENERATED_ARTIFACT.name,
             name = safeName,
             mimeType = mimeType,
@@ -308,6 +335,19 @@ class ArtifactService(
         )
         audit(AuditActions.FILE_REGISTERED, "ARTIFACT", entity.id, workspaceId, projectId, AuditResult.SUCCESS)
         entity.toDescriptor()
+    }
+
+    /**
+     * FIW Stage 1 (v29): every artifact produced inside one
+     * WORKSPACE-AUTHORIZED session — the session-restore join's read side.
+     * The caller (which already verified the session's workspace/project)
+     * re-attaches the descriptors to their producing turns.
+     */
+    suspend fun forSession(
+        workspaceId: String,
+        sessionId: String
+    ): List<ArtifactDescriptor> = withContext(Dispatchers.IO) {
+        artifactDao.forSessionTurns(workspaceId, sessionId).map { it.toDescriptor() }
     }
 
     /**
@@ -422,15 +462,11 @@ class ArtifactService(
         else -> ResourceScope.Application
     }
 
-    private fun guessMime(name: String): String = when {
-        name.endsWith(".md", true) -> "text/markdown"
-        name.endsWith(".txt", true) -> "text/plain"
-        name.endsWith(".json", true) -> "application/json"
-        name.endsWith(".png", true) -> "image/png"
-        name.endsWith(".jpg", true) || name.endsWith(".jpeg", true) -> "image/jpeg"
-        name.endsWith(".csv", true) -> "text/csv"
-        else -> "application/octet-stream"
-    }
+    private fun guessMime(name: String): String =
+        // FIW Stage 1: the shared type resolver is the ONE source (the old
+        // five-extension map silently defaulted everything else to
+        // octet-stream — a saved .kt result exported as "binary").
+        com.example.domain.core.storage.FileKindResolver.resolve(name).mimeType
 
     private fun sha256(bytes: ByteArray): String =
         java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
@@ -468,6 +504,7 @@ class ArtifactService(
         securityClassification = runCatching { SecurityClassification.valueOf(securityClassification) }.getOrDefault(SecurityClassification.UNCLASSIFIED),
         indexingState = runCatching { ArtifactIndexingState.valueOf(indexingState) }.getOrDefault(ArtifactIndexingState.NOT_INDEXED),
         ownerId = ownerId,
+        turnId = turnId,
         createdAtEpochMs = createdAtEpochMs,
         updatedAtEpochMs = updatedAtEpochMs,
         metadataJson = metadataJson

@@ -243,7 +243,7 @@ class MigrationChainValidationTest {
             // FUNCTIONAL CLOSURE Phase 1 §9).
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(28, c.getInt(0))
+                assertEquals(29, c.getInt(0))
             }
 
             // STAGE 2 (v25): the pricing/metering/itemized-cost group exists
@@ -355,6 +355,22 @@ class MigrationChainValidationTest {
             ).use { c ->
                 assertTrue(c.moveToFirst())
                 assertEquals("the four Stage-5 triggers (incl. the G05 freeze)", 4, c.getInt(0))
+            }
+
+            // FIW Stage 1 (v29 — the result→artifact linkage): the additive
+            // column and its covering index exist after the full chain.
+            db.query("PRAGMA table_info(artifacts)").use { c ->
+                var found = false
+                while (c.moveToNext()) {
+                    if (c.getString(c.getColumnIndexOrThrow("name")) == "turnId") found = true
+                }
+                assertTrue("the v29 turnId column exists after the full chain", found)
+            }
+            db.query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='index_artifacts_sessionId_turnId'"
+            ).use { c ->
+                assertTrue(c.moveToFirst())
+                assertEquals("the v29 (sessionId, turnId) covering index", 1, c.getInt(0))
             }
 
             // G10 cumulative integrity: the migrated database passes
@@ -493,7 +509,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(28, c.getInt(0))
+                assertEquals(29, c.getInt(0))
             }
             // Validation accepted → identity hash written.
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
@@ -541,7 +557,7 @@ class MigrationChainValidationTest {
         try {
             db.query("PRAGMA user_version").use { c ->
                 assertTrue(c.moveToFirst())
-                assertEquals(28, c.getInt(0))
+                assertEquals(29, c.getInt(0))
             }
             db.query("SELECT identity_hash FROM room_master_table").use { c ->
                 assertTrue(c.moveToFirst())
