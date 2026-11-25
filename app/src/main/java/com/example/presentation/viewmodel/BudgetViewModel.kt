@@ -10,6 +10,7 @@ import com.example.application.budget.MoneyInput
 import com.example.application.budget.PricingManagementService
 import com.example.application.budget.BudgetLedgerService
 import com.example.application.budget.EconomicGovernanceService
+import com.example.application.budget.EntitlementManagementService
 import com.example.domain.core.budget.BillingClass
 import com.example.domain.core.budget.PriceResolution
 import com.example.domain.core.budget.PricingEntry
@@ -91,7 +92,14 @@ class BudgetViewModel(
     private val activeWorkspace: Flow<String?>? = null,
     /** STAGE 2C — the FX-rule operational management surface (optional;
      *  null = the FX section is not wired in this build). */
-    private val fxRuleManagement: FxRuleManagementService? = null
+    private val fxRuleManagement: FxRuleManagementService? = null,
+    /**
+     * FIW Stage 3 — the entitlements management surface (optional; null =
+     * the الاستحقاقات section reports its honest absence instead of
+     * pretending). The accruals ENGINE exists since Stage 3 of the
+     * economic-governance roadmap; this is its first UI consumer.
+     */
+    private val entitlementManagement: EntitlementManagementService? = null
 ) : ViewModel() {
 
     data class BudgetUiState(
@@ -124,7 +132,11 @@ class BudgetViewModel(
          *  applicability state (live; empty when the surface is absent). */
         val fxRules: List<FxRuleManagementService.FxRuleView> = emptyList(),
         /** STAGE 2C — FX rule registration in flight. */
-        val isSavingFxRule: Boolean = false
+        val isSavingFxRule: Boolean = false,
+        /** FIW Stage 3 — every recorded entitlement, derived state included. */
+        val entitlements: List<EntitlementManagementService.EntitlementView> = emptyList(),
+        /** FIW Stage 3 — entitlement registration in flight. */
+        val isSavingEntitlement: Boolean = false
     )
 
     private val _state = MutableStateFlow(BudgetUiState())
@@ -332,6 +344,22 @@ class BudgetViewModel(
                     if (failure !is kotlinx.coroutines.CancellationException) {
                         _state.update {
                             it.copy(errorMessage = "تعذر تحميل قواعد تحويل العملات: ${failure.localizedMessage}")
+                        }
+                    }
+                }
+        }
+        // FIW Stage 3 — the recorded entitlements (workspace-INDEPENDENT
+        // records; the derived state loads with the same projection).
+        val entitlementManagementService = entitlementManagement
+        if (entitlementManagementService != null) {
+            runCatching { entitlementManagementService.listEntitlements() }
+                .onSuccess { views ->
+                    _state.update { it.copy(entitlements = views) }
+                }
+                .onFailure { failure ->
+                    if (failure !is kotlinx.coroutines.CancellationException) {
+                        _state.update {
+                            it.copy(errorMessage = "تعذر تحميل الاستحقاقات: ${failure.localizedMessage}")
                         }
                     }
                 }
@@ -669,6 +697,125 @@ class BudgetViewModel(
                     it.copy(
                         isSavingFxRule = false,
                         errorMessage = "تعذر تسجيل قاعدة التحويل: ${failure.localizedMessage}"
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * FIW Stage 3 — the entitlement REGISTRATION action (the engine's own
+     * shape validation; honest field-level errors; verification stays
+     * UNKNOWN — a user-registered record is not provider evidence).
+     */
+    fun registerEntitlement(
+        providerIdText: String,
+        scopeIdText: String,
+        entitlementType: String,
+        valueKind: String,
+        quantityLimitText: String,
+        unitText: String,
+        monetaryLimitText: String,
+        currencyText: String,
+        creditLimitText: String,
+        creditUnitText: String,
+        startsAtText: String,
+        expiresAtText: String,
+        resetPolicyText: String
+    ) {
+        val management = entitlementManagement
+        if (management == null) {
+            _state.update { it.copy(errorMessage = "إدارة الاستحقاقات غير متاحة في هذا البناء.") }
+            return
+        }
+        if (providerIdText.isBlank() || scopeIdText.isBlank()) {
+            _state.update { it.copy(inputError = "معرّف المزود ونطاق التطبيق (معرّف النموذج/العرض) حقلان إلزاميان.") }
+            return
+        }
+        // Value-shape fields are parsed to their typed forms EXACTLY (no
+        // silent coercion): quantity/credit = decimal strings, monetary =
+        // micro-units via the SAME MoneyInput parser the budget editor uses.
+        val quantity = quantityLimitText.trim().takeIf { it.isNotEmpty() }
+        if (quantity != null && quantity.toBigDecimalOrNull() == null) {
+            _state.update { it.copy(inputError = "حد الكمية غير صالح — أدخل رقماً عشرياً دقيقاً (مثال: 1000000).") }
+            return
+        }
+        val credit = creditLimitText.trim().takeIf { it.isNotEmpty() }
+        if (credit != null && credit.toBigDecimalOrNull() == null) {
+            _state.update { it.copy(inputError = "حد الرصيد غير صالح — أدخل رقماً عشرياً دقيقاً.") }
+            return
+        }
+        var monetaryMicro: Long? = null
+        if (monetaryLimitText.isNotBlank()) {
+            when (val parsed = MoneyInput.parseMicroUnits(monetaryLimitText)) {
+                is MoneyInput.Parsed.Micro -> monetaryMicro = parsed.microUnits
+                is MoneyInput.Parsed.Invalid -> {
+                    _state.update { it.copy(inputError = "الحد المالي غير صالح: ${parsed.reason}") }
+                    return
+                }
+            }
+        }
+        val currency = currencyText.trim().takeIf { it.isNotEmpty() }
+        if (currency != null && MoneyInput.parseCurrency(currency) == null) {
+            _state.update { it.copy(inputError = "العملة غير صالحة — ثلاثة أحرف لاتينية (مثال: USD).") }
+            return
+        }
+        val startsAt = startsAtText.trim().takeIf { it.isNotEmpty() }?.let {
+            it.toLongOrNull() ?: run {
+                _state.update { it.copy(inputError = "بداية السريان غير صالحة — زمن Unix بالميلي ثانية أو فارغ.") }
+                return
+            }
+        }
+        val expiresAt = expiresAtText.trim().takeIf { it.isNotEmpty() }?.let {
+            it.toLongOrNull() ?: run {
+                _state.update { it.copy(inputError = "نهاية السريان غير صالحة — زمن Unix بالميلي ثانية أو فارغ.") }
+                return
+            }
+        }
+        if (startsAt != null && expiresAt != null && startsAt >= expiresAt) {
+            _state.update { it.copy(inputError = "نافذة السريان غير صالحة — البداية يجب أن تسبق النهاية.") }
+            return
+        }
+        viewModelScope.launch {
+            _state.update { it.copy(isSavingEntitlement = true, managementMessage = null, inputError = null) }
+            runCatching {
+                management.registerEntitlement(
+                    com.example.application.budget.EntitlementManagementService.RegistrationSpec(
+                        providerId = providerIdText.trim(),
+                        applicabilityScopeId = scopeIdText.trim(),
+                        entitlementType = entitlementType,
+                        valueKind = valueKind,
+                        quantityLimitPrecise = quantity,
+                        unitId = unitText.trim().takeIf { it.isNotEmpty() },
+                        monetaryLimitMicroUnits = monetaryMicro,
+                        currency = currency,
+                        creditLimitPrecise = credit,
+                        creditUnitId = creditUnitText.trim().takeIf { it.isNotEmpty() },
+                        startsAtEpochMs = startsAt,
+                        expiresAtEpochMs = expiresAt,
+                        resetPolicy = resetPolicyText.trim().takeIf { it.isNotEmpty() }
+                    )
+                )
+            }.onSuccess { outcome ->
+                _state.update {
+                    it.copy(
+                        isSavingEntitlement = false,
+                        managementMessage = when (outcome) {
+                            is com.example.application.budget.EntitlementManagementService.RegistrationOutcome.Registered ->
+                                "سُجّل الاستحقاق (${outcome.entitlementId.take(18)}…) — حالة التحقق: غير معروف (إدخال تشغيلي، ليس دليلاً من المزود)."
+                            is com.example.application.budget.EntitlementManagementService.RegistrationOutcome.Replayed ->
+                                "لا تغيير — استحقاق مطابق مسجّل فعلاً."
+                            is com.example.application.budget.EntitlementManagementService.RegistrationOutcome.Rejected ->
+                                "رُفض التسجيل: ${outcome.reason}"
+                        }
+                    )
+                }
+                refreshManagementState()
+            }.onFailure { failure ->
+                _state.update {
+                    it.copy(
+                        isSavingEntitlement = false,
+                        errorMessage = "تعذر تسجيل الاستحقاق: ${failure.localizedMessage}"
                     )
                 }
             }

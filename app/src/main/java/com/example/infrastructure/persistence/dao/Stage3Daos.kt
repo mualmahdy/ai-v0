@@ -161,6 +161,14 @@ interface EntitlementRecordDao {
     suspend fun byId(entitlementId: String): EntitlementRecordEntity?
 
     /**
+     * FIW Stage 3 (the entitlements management surface): every recorded
+     * entitlement, newest first — the read side of the Budget screen's
+     * الاستحقاقات section (read-only projection + registration form).
+     */
+    @Query("SELECT * FROM entitlement_record ORDER BY created_at_epoch_ms DESC LIMIT :limit")
+    suspend fun listAll(limit: Int = 200): List<EntitlementRecordEntity>
+
+    /**
      * Stage-4 (I-39, the BudgetActualsFeed bridge): the ACTIVE monetary
      * credits whose applicability scope is exactly [scopeId] and whose
      * validity window covers [nowEpochMs]. Only MONETARY_CREDIT rows —

@@ -27,10 +27,13 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -46,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.domain.core.budget.PricingEntry
@@ -281,6 +285,38 @@ fun BudgetScreen(
         } else {
             items(state.fxRules, key = { it.ruleId }) { rule ->
                 FxRuleCard(rule = rule)
+            }
+        }
+
+        // ---------- FIW Stage 3: entitlements management ----------
+        item {
+            SectionTitle(text = "الاستحقاقات (الحصص والتجارب والأرصدة) — (${state.entitlements.size})")
+        }
+        item {
+            EntitlementRegistrationCard(
+                state = state,
+                onRegister = { providerId, scopeId, type, valueKind, quantity, unit, monetary, currency, credit, creditUnit, startsAt, expiresAt, resetPolicy ->
+                    viewModel.registerEntitlement(
+                        providerId, scopeId, type, valueKind, quantity, unit,
+                        monetary, currency, credit, creditUnit, startsAt, expiresAt, resetPolicy
+                    )
+                }
+            )
+        }
+        if (state.entitlements.isEmpty()) {
+            item {
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier.testTag("entitlements_empty_state")
+                ) {
+                    HonestEmptyCard(
+                        text = "لا استحقاقات مسجّلة — سجّل حصصك المجانية أو تجاربك أو أرصدتك " +
+                            "لتتبّع استهلاكها المتبقي بأمانة (كل إدخال يُوثّق بحالة تحقق «غير معروف»)."
+                    )
+                }
+            }
+        } else {
+            items(state.entitlements, key = { it.entitlementId }) { entitlement ->
+                EntitlementCard(entitlement = entitlement)
             }
         }
 
@@ -1458,6 +1494,315 @@ private fun ProviderCostCard(row: com.example.infrastructure.persistence.dao.Pro
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FIW Stage 3 — the entitlements management surface (view + registration)
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun EntitlementRegistrationCard(
+    state: com.example.presentation.viewmodel.BudgetViewModel.BudgetUiState,
+    onRegister: (
+        providerId: String, scopeId: String, type: String, valueKind: String,
+        quantity: String, unit: String, monetary: String, currency: String,
+        credit: String, creditUnit: String, startsAt: String, expiresAt: String,
+        resetPolicy: String
+    ) -> Unit
+) {
+    var providerInput by remember { mutableStateOf("") }
+    var scopeInput by remember { mutableStateOf("") }
+    var typeInput by remember {
+        mutableStateOf(com.example.application.budget.EntitlementManagementService.ENTITLEMENT_TYPES.first().first)
+    }
+    var valueKindInput by remember {
+        mutableStateOf(com.example.application.budget.EntitlementManagementService.VALUE_KINDS.first())
+    }
+    var quantityInput by remember { mutableStateOf("") }
+    var unitInput by remember { mutableStateOf("") }
+    var monetaryInput by remember { mutableStateOf("") }
+    var currencyInput by remember { mutableStateOf("") }
+    var creditInput by remember { mutableStateOf("") }
+    var creditUnitInput by remember { mutableStateOf("") }
+    var startsAtInput by remember { mutableStateOf("") }
+    var expiresAtInput by remember { mutableStateOf("") }
+    var resetPolicyInput by remember { mutableStateOf("") }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .testTag("entitlement_registration_card"),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = "تسجيل استحقاق (حصة/تجربة/رصيد)",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "هذا تسجيل تشغيلي يدوي لحالة التحقق «غير معروف» — ليس دليلاً من المزود. " +
+                    "الاستهلاك الفعلي يُحتسب من سجلات الاستخدام المسجلة فقط؛ المتبقي المعروض هو " +
+                    "الحد ناقص كل الاستهلاك المسجّل (الحد المحافظ). لا يُستهلك شيء تلقائياً من مجرد التسجيل.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("entitlement_form_honesty_note")
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = providerInput,
+                    onValueChange = { providerInput = it },
+                    label = { Text("معرّف المزود *") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f).testTag("entitlement_provider_input")
+                )
+                OutlinedTextField(
+                    value = scopeInput,
+                    onValueChange = { scopeInput = it },
+                    label = { Text("نطاق التطبيق (معرّف النموذج) *") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f).testTag("entitlement_scope_input")
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                EntitlementTypeDropdown(
+                    selected = typeInput,
+                    onSelect = { typeInput = it }
+                )
+                EntitlementValueKindDropdown(
+                    selected = valueKindInput,
+                    onSelect = { valueKindInput = it }
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            // The value fields follow the chosen shape (the engine's
+            // exactly-one-of contract guides the form).
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = quantityInput,
+                    onValueChange = { quantityInput = it },
+                    label = { Text("حد الكمية (QUANTITY_LIMIT)") },
+                    singleLine = true,
+                    enabled = valueKindInput == com.example.application.budget.EntitlementService.VALUE_QUANTITY_LIMIT,
+                    modifier = Modifier.weight(1f).testTag("entitlement_quantity_input")
+                )
+                OutlinedTextField(
+                    value = unitInput,
+                    onValueChange = { unitInput = it },
+                    label = { Text("الوحدة (مثال: tokens)") },
+                    singleLine = true,
+                    enabled = valueKindInput == com.example.application.budget.EntitlementService.VALUE_QUANTITY_LIMIT,
+                    modifier = Modifier.weight(1f).testTag("entitlement_unit_input")
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = monetaryInput,
+                    onValueChange = { monetaryInput = it },
+                    label = { Text("الحد المالي (MONETARY_CREDIT)") },
+                    singleLine = true,
+                    enabled = valueKindInput == com.example.application.budget.EntitlementService.VALUE_MONETARY_CREDIT,
+                    modifier = Modifier.weight(1f).testTag("entitlement_monetary_input")
+                )
+                OutlinedTextField(
+                    value = currencyInput,
+                    onValueChange = { currencyInput = it },
+                    label = { Text("العملة (USD)") },
+                    singleLine = true,
+                    enabled = valueKindInput == com.example.application.budget.EntitlementService.VALUE_MONETARY_CREDIT,
+                    modifier = Modifier.weight(1f).testTag("entitlement_currency_input")
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = creditInput,
+                    onValueChange = { creditInput = it },
+                    label = { Text("حد الرصيد (PROVIDER_CREDIT)") },
+                    singleLine = true,
+                    enabled = valueKindInput == com.example.application.budget.EntitlementService.VALUE_PROVIDER_CREDIT,
+                    modifier = Modifier.weight(1f).testTag("entitlement_credit_input")
+                )
+                OutlinedTextField(
+                    value = creditUnitInput,
+                    onValueChange = { creditUnitInput = it },
+                    label = { Text("وحدة الرصيد") },
+                    singleLine = true,
+                    enabled = valueKindInput == com.example.application.budget.EntitlementService.VALUE_PROVIDER_CREDIT,
+                    modifier = Modifier.weight(1f).testTag("entitlement_credit_unit_input")
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = startsAtInput,
+                    onValueChange = { startsAtInput = it },
+                    label = { Text("بداية السريان (Unix ms)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f).testTag("entitlement_starts_input")
+                )
+                OutlinedTextField(
+                    value = expiresAtInput,
+                    onValueChange = { expiresAtInput = it },
+                    label = { Text("الانتهاء (Unix ms — فارغ = مفتوح)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f).testTag("entitlement_expires_input")
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = resetPolicyInput,
+                onValueChange = { resetPolicyInput = it },
+                label = { Text("سياسة إعادة التعيين (مثال: MONTHLY/DAILY — توثيقية)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("entitlement_reset_input")
+            )
+            state.inputError?.let { error ->
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = error,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag("entitlement_input_error")
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Button(
+                onClick = {
+                    onRegister(
+                        providerInput, scopeInput, typeInput, valueKindInput,
+                        quantityInput, unitInput, monetaryInput, currencyInput,
+                        creditInput, creditUnitInput, startsAtInput, expiresAtInput,
+                        resetPolicyInput
+                    )
+                },
+                enabled = !state.isSavingEntitlement && providerInput.isNotBlank() && scopeInput.isNotBlank(),
+                modifier = Modifier.testTag("entitlement_register_button")
+            ) {
+                Text(if (state.isSavingEntitlement) "جارٍ التسجيل…" else "تسجيل الاستحقاق")
+            }
+        }
+    }
+}
+
+@Composable
+private fun EntitlementTypeDropdown(selected: String, onSelect: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val types = com.example.application.budget.EntitlementManagementService.ENTITLEMENT_TYPES
+    val label = types.firstOrNull { it.first == selected }?.second ?: selected
+    OutlinedButton(onClick = { expanded = true }, modifier = Modifier.testTag("entitlement_type_dropdown")) {
+        Text("النوع: $label")
+    }
+    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        types.forEach { (value, name) ->
+            DropdownMenuItem(
+                text = { Text(name) },
+                onClick = {
+                    onSelect(value)
+                    expanded = false
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun EntitlementValueKindDropdown(selected: String, onSelect: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val kinds = com.example.application.budget.EntitlementManagementService.VALUE_KINDS
+    OutlinedButton(onClick = { expanded = true }, modifier = Modifier.testTag("entitlement_valuekind_dropdown")) {
+        Text("شكل القيمة: $selected")
+    }
+    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        kinds.forEach { value ->
+            DropdownMenuItem(
+                text = { Text(value) },
+                onClick = {
+                    onSelect(value)
+                    expanded = false
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun EntitlementCard(
+    entitlement: com.example.application.budget.EntitlementManagementService.EntitlementView
+) {
+    val types = com.example.application.budget.EntitlementManagementService.ENTITLEMENT_TYPES
+    val typeLabel = types.firstOrNull { it.first == entitlement.entitlementType }?.second
+        ?: entitlement.entitlementType
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .testTag("entitlement_card_${entitlement.entitlementId}"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (entitlement.isWindowActive) {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            } else {
+                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f)
+            }
+        )
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "$typeLabel • ${entitlement.providerId}",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "النطاق: ${entitlement.applicabilityScopeId}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
+                }
+                Text(
+                    text = if (entitlement.isWindowActive) "ساري" else "خارج النافذة",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (entitlement.isWindowActive) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.error
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = buildString {
+                    append("المتبقي: ${entitlement.remainingLabel}")
+                    append("  •  الاستهلاك المسجّل: ${entitlement.consumptionCount}")
+                },
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                text = buildString {
+                    append("شكل القيمة: ${entitlement.valueKind}")
+                    entitlement.resetPolicy?.let { append("  •  إعادة التعيين: $it") }
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            // The honest verification line — a user-registered record is
+            // NEVER provider evidence.
+            Text(
+                text = "التحقق: ${if (entitlement.verificationStatus == "VERIFIED") "مُتحقق" else "غير معروف (إدخال تشغيلي)"}" +
+                    if (!entitlement.isWindowActive) " — انتهت نافذة السريان" else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (entitlement.isWindowActive) MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.error,
+                modifier = Modifier.testTag("entitlement_verification_line")
             )
         }
     }

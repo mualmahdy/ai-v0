@@ -337,6 +337,16 @@ private fun ModelPickerList(
                         append(if (record.isLocal) "محلي" else "سحابي")
                         append(" • ")
                         append(record.providerId)
+                        // FIW Stage 3 (honest economics): the offering/access
+                        // identity when known, and the honest pricing state —
+                        // UNKNOWN stays UNKNOWN with a pointer to the surface
+                        // where a VERIFIED price can be registered. Never a
+                        // fabricated "free" or invented number.
+                        record.metadata["offeringId"]?.let { offering ->
+                            append(" • العرض: ")
+                            append(offering)
+                        }
+                        append(" • السعر: غير مسجل — يمكن تسجيله مُتحقَّقاً من شاشة الميزانية")
                     },
                     selected = record.resourceId.value == selectedResourceId,
                     onClick = { onSelect(record.resourceId.value, label) },

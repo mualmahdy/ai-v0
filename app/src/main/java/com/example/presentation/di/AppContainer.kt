@@ -392,14 +392,17 @@ class AppContainer(context: Context) {
         com.example.application.operation.OperationRegistry()
     }
 
-    /** §14 — session transcript export (canonical → TXT/MD/JSON). */
+    /** §14 — session transcript export (canonical → TXT/MD/JSON + package). */
     val sessionExportService: com.example.application.transfer.SessionExportService by lazy {
         // GAP-24 (Design Closure 2026, ADR-8): the audit trail is now WIRED —
         // previously this service was constructed without it, so every
         // SESSION_EXPORTED audit event silently never landed in audit_events.
+        // FIW Stage 1: the artifact pipeline rides along (payload read on
+        // package export, payload restore on package import).
         com.example.application.transfer.SessionExportService(
             database = database,
-            auditTrail = auditTrailService
+            auditTrail = auditTrailService,
+            artifactService = artifactService
         )
     }
 
@@ -1010,6 +1013,17 @@ class AppContainer(context: Context) {
         com.example.application.budget.FxRuleManagementService(
             database = database,
             fx = currencyConversionService
+        )
+    }
+
+    /**
+     * FIW Stage 3 — the entitlements management surface (the accruals
+     * engine's first UI consumer: view + validated registration).
+     */
+    val entitlementManagementService: com.example.application.budget.EntitlementManagementService by lazy {
+        com.example.application.budget.EntitlementManagementService(
+            database = database,
+            entitlements = entitlementService
         )
     }
 
@@ -2770,7 +2784,10 @@ class SessionsViewModelFactory(
                 activeWorkspace = appContainer.workspaceRuntimeService.activeWorkspace,
                 // CLOSURE P0-1: the app-wide operation registry (session
                 // mutations register their lifecycle here).
-                operationRegistry = appContainer.operationRegistry
+                operationRegistry = appContainer.operationRegistry,
+                // FIW Stage 1: the ONE export/import authority (unified with
+                // the service the UI previously bypassed).
+                sessionExportService = appContainer.sessionExportService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
@@ -2936,7 +2953,10 @@ class BudgetViewModelFactory(
                     .map { it?.id },
                 // STAGE 2C — the FX-rule operational management surface
                 // (view registered rules + immutable registration).
-                fxRuleManagement = appContainer.fxRuleManagementService
+                fxRuleManagement = appContainer.fxRuleManagementService,
+                // FIW Stage 3 — the entitlements management surface
+                // (view recorded entitlements + validated registration).
+                entitlementManagement = appContainer.entitlementManagementService
             ) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")

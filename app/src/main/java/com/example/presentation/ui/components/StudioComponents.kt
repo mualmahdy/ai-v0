@@ -156,7 +156,16 @@ fun TokenBudgetGauge(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "المتبقي: $remainingBudget توكن",
+                        // FIW Stage 3 (honest unknown): the REMAINING_UNKNOWN
+                        // sentinel (-1) renders as UNKNOWN — never a
+                        // fabricated number, never "-1 توكن" (the old
+                        // fabricated 30000 baseline is gone from the initial
+                        // state too).
+                        text = if (remainingBudget < 0) {
+                            "المتبقي: غير معروف بعد"
+                        } else {
+                            "المتبقي: $remainingBudget توكن"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
