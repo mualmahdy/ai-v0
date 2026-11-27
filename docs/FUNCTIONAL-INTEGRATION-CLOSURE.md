@@ -98,3 +98,32 @@
 6. **الربط**: النتائج تظهر في مركز التنفيذ (D-FIW-8) وتُخزَّن مخرجاتها في مسار المخرجات المرتبط بالمشروع/الجلسة.
 
 حالة `run_code`/`run_tests` الحالية صادقة: رفض صريح («يتطلب عزلاً حقيقياً على مستوى العملية») — لا محاكاة ولا نجاح زائف.
+
+---
+
+## H. حالة النشر وتعليمات الاستئناف (بند §16 من أمر التنفيذ)
+
+**حالة المستودع المحلي**: فرع `main` يتقدم على `origin/main` (c726231) بستة Commits منطقية مُتحقَّقة:
+
+```
+64a401e chore(db): export Room schema v29 baseline (FIW Stage 1)
+943e104 feat(artifacts): Stage 1 data layer — the durable result→artifact turn linkage (DB v29) + the unified session export/import service
+005faf5 feat(chat): Stage 1 UI — the closed conversation cycle: result→artifact cards, openable attachments, unified export with SAF save + package import
+95380f7 feat(files): Stage 2 — type-aware file management: honest binary handling, byte-exact rename/move/copy, single-file export
+19990ca feat(budget): Stage 3 — the entitlements management surface + honest economic display
+96e50a0 docs(governance): FIW closure records — debt register reconciliation + the central technical-debt register + the closure report
+```
+
+**لماذا لم يُدفع مباشرة**: بيئة التنفيذ لا تملك بيانات اعتماد دفع إلى GitHub (الدفع عبر واجهة الإضافة يتطلب تمرير محتوى الملفات كاملاً — 1.9 ميغابايت — بما لا يضمن الدقة البايتية للشيفرة المُختبرة). رفضنا المخاطرة بفساد شيفرة مُتحقَّقة.
+
+**طريقة النشر (نقرة واحدة من جهاز يملك صلاحية الدفع)**:
+1. من داخل مستودع العمل المحلي: `git push origin main`
+2. أو من الحزمة الكاملة المستقلة `ai-v0-fiw-closure-full.bundle`:
+   ```
+   git clone ai-v0-fiw-closure-full.bundle ai-v0-fiw
+   cd ai-v0-fiw && git remote add origin https://github.com/mualmahdy/ai-v0.git
+   git push origin main
+   ```
+3. أو تطبيق سلسلة الرقائق `fiw-patches/0001..0006.patch` فوق c726231 ثم الدفع.
+
+**ما يجب أن يظل صحيحاً بعد الدفع**: `./gradlew assembleDebug` ناجح، والجناح الكامل `testDebugUnitTest` أخضر (1661 اختباراً؛ عائلتا المهلات الموثقتان تحت الحمل تظلان خضراوين معزولتين).
